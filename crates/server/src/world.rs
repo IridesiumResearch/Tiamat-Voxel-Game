@@ -833,9 +833,9 @@ impl World {
     /// Puts a chunk back on the arrival list.
     ///
     /// For a caller that drained the list and could not process everything this
-    /// tick — lighting caps how many chunks it relights per tick, and what it
-    /// does not reach has to come back rather than stay dark for as long as it
-    /// remains loaded.
+    /// tick — lighting relights arrivals on a clock, and what it does not
+    /// reach has to come back rather than stay dark for as long as it remains
+    /// loaded.
     pub fn defer_arrival(&mut self, domain: &str, pos: ChunkPos) {
         Self::space_of(&mut self.domains, domain).arrived.push(pos);
     }

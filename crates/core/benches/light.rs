@@ -9,8 +9,9 @@
 //! and a number in isolation says nothing. The two that matter:
 //!
 //! - **A full-chunk relight** happens when a chunk enters memory. The server
-//!   caps these at `RELIGHTS_PER_TICK` (32), so this figure times 32 is the
-//!   worst a tick can spend filling in newly loaded terrain.
+//!   spends at most `handle::RELIGHT_TIME_BUDGET` (8 ms) a tick on these, so
+//!   this figure says how many newly loaded chunks a tick can light — not
+//!   how long it spends, which the clock bounds whatever a chunk costs.
 //! - **An incremental relight** happens on every block a player changes.
 //!   Fifty players digging as fast as they can is fifty of these a tick, so
 //!   this figure times fifty is the steady-state cost of a busy server.

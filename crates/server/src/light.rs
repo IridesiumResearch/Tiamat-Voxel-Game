@@ -18,7 +18,7 @@
 //! sky with its neighbours resident — on the reference machine, down from
 //! **2.14 ms** before the terrain reads were cached (see `Lit::blocks`). Task
 //! 02b's spike said 30 µs, which was the number the tick's cap was sized on
-//! until this was written down; see `handle::RELIGHTS_PER_TICK`. Charter rule
+//! until this was written down; see `handle::RELIGHT_TIME_BUDGET`. Charter rule
 //! 18 wants the share of a 50 ms tick, and one relight is 2.9% of one.
 //!
 //! **Re-measure rather than trusting this line**: `tests::measure_chunk_loaded`
@@ -1052,8 +1052,9 @@ mod tests {
     /// on the relight path, and put the number in the module docs.
     ///
     /// The module docs quoted 1.38 ms from Task 10 and nothing re-measured it;
-    /// Task 02b's 30 µs went stale the same way and `RELIGHTS_PER_TICK` was
-    /// sized on it. This exists so the next number does not have to be
+    /// Task 02b's 30 µs went stale the same way and the relight cap was
+    /// sized on it — a count, until a terrain mod's caves made one relight
+    /// cost several times the reference world's and the count became a clock. This exists so the next number does not have to be
     /// archaeology.
     #[test]
     #[ignore = "measures rather than asserts; run by hand"]

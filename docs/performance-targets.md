@@ -152,11 +152,13 @@ this is where to look first.
 
 **Read these against how many happen per tick, not on their own:**
 
-- Newly loaded chunks are capped at `RELIGHTS_PER_TICK` (32), so the worst a
-  tick can spend filling in terrain is **32 × 0.233 ms ≈ 7.5 ms, 15% of the
-  budget**. That cap exists because a teleport or a fresh start can make
-  thousands of chunks resident at once; what a tick does not reach it takes on
-  the next one.
+- Newly loaded chunks are relit on a clock, `RELIGHT_TIME_BUDGET` (8 ms, 16%
+  of the budget), so the worst a tick can spend filling in terrain is bounded
+  whatever a chunk costs — and a chunk's cost varies by an order of magnitude
+  between open sky and cave-riddled rock, which is why this was a count of
+  chunks and is not any more. The bound exists because a teleport or a fresh
+  start can make thousands of chunks resident at once; what a tick does not
+  reach it takes on the next one.
 - Ordinary digging is free at any player count — 50 players digging flat out is
   0.006 ms a tick.
 - **Lamps are the expensive edit.** Fifty players breaking lamps as fast as

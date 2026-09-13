@@ -900,28 +900,59 @@ const SAVE_INTERVAL_TICKS: u64 = 40;
 /// already bounded.
 const SAVE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
-/// How many chunks may be relit from scratch in one tick.
+/// How long one tick may spend relighting chunks that arrived from scratch.
 ///
-/// The cap exists because a player teleporting or a server starting can make
+/// The bound exists because a player teleporting or a server starting can make
 /// thousands of chunks resident at once, and an unbounded pass would spend the
 /// whole tick on terrain nobody is looking at yet. What it does not reach this
 /// tick it reaches on the next.
 ///
-/// **Four, from a measurement rather than an estimate.** This was 32, on the
-/// strength of Task 02b's spike putting a full-chunk relight at about 30 µs.
-/// The real thing costs **1.47 ms** for the case that dominates a join — a
-/// chunk of air under open sky, with its neighbours resident — so the old
-/// number was not a cap on anything: 32 of them is 47 ms of a 50 ms tick.
-/// Four is 5.9 ms, 12% of the budget, which is a bound worth having.
+/// **Time, not a count, because a relight has no fixed cost.** This was a count
+/// of four, sized on a measured **1.47 ms** for the case that dominates a join —
+/// a chunk of air under open sky, with its neighbours resident — on the
+/// reference world: 5.9 ms, 12% of the tick, a bound worth having. Then a
+/// terrain mod shipped caves, and a full relight of a chunk riddled with them
+/// costs several times that: four of THOSE was **26 ms of light in a tick with
+/// every player standing still**, reported from the window. A count is a budget
+/// only while you know what one costs, which is the same lesson
+/// [`crate::transport::endpoint::SERVE_TIME_BUDGET`] records for serving, and
+/// the fix is the same: a clock, and a deadline to START by so the running
+/// average of this tick's relights says whether one more fits
+/// ([`another_relight_fits`]).
 ///
-/// Honest about what this did and did not fix: the macro benchmark's 22 ms
-/// ticks were **not** this. Setting the cap to 4 and back to 32 moves its p99
-/// by 12 µs, because the chunks a joining player waits on are relit by the
-/// request path rather than by this catch-up pass. What fixed the benchmark was
-/// not relighting a chunk that is already lit. This number matters for the case
-/// the benchmark does not cover — a teleport, or a mod making unexplored
-/// terrain resident — where nothing else bounds the work.
-const RELIGHTS_PER_TICK: usize = 4;
+/// Eight milliseconds is a sixth of the budget, the same share the save pass
+/// takes ([`SAVE_BUDGET`]). One chunk is always relit, however long it costs,
+/// or a slow enough machine would never light anything.
+///
+/// Honest about what this bounds and what it does not: the macro benchmark's
+/// 22 ms ticks were never this pass — the chunks a joining player waits on are
+/// relit by the request path and charged to serving, and what fixed the
+/// benchmark was not relighting a chunk that already had light. This bound
+/// matters for the cases the benchmark does not cover: a teleport, a mod
+/// making unexplored terrain resident, and a structure pass generating the
+/// neighbours of every chunk it serves.
+const RELIGHT_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Whether one more relight fits in the budget, judged by this tick's own
+/// average so far.
+///
+/// A deadline to start by rather than a wall to stop at: with `done` relights
+/// behind it costing `spent` between them, the next is expected to cost their
+/// average, and it is refused if that would carry the pass past `budget`.
+/// Stopping only once the budget was gone would overshoot by one relight,
+/// which on cave terrain is most of the budget again. The first relight always
+/// fits — nothing is known about the cost yet, and a budget that can refuse
+/// everything is a chunk that stays black.
+fn another_relight_fits(
+    spent: std::time::Duration,
+    done: u32,
+    budget: std::time::Duration,
+) -> bool {
+    if done == 0 {
+        return true;
+    }
+    spent + spent / done <= budget
+}
 
 /// How many resident chunks get random ticks in one tick of the simulation.
 ///
@@ -3698,12 +3729,17 @@ impl ServerHandle {
                             let mut lit = lighting.write().expect("lighting lock");
                             let light = lit.of(&domain);
                             let mut touched = std::collections::BTreeSet::new();
+                            let started = std::time::Instant::now();
                             let mut done = 0;
                             for pos in arrived {
                                 if light.holds(pos) {
                                     continue;
                                 }
-                                if done >= RELIGHTS_PER_TICK {
+                                if !another_relight_fits(
+                                    started.elapsed(),
+                                    done,
+                                    RELIGHT_TIME_BUDGET,
+                                ) {
                                     // Put the rest back, in order, for the next
                                     // tick. Dropping them would leave those
                                     // chunks black for as long as they stayed
@@ -5046,5 +5082,48 @@ impl Earshot {
             told += 1;
         }
         told
+    }
+}
+
+#[cfg(test)]
+mod relight_budget_tests {
+    use super::another_relight_fits;
+    use std::time::Duration;
+
+    #[test]
+    fn the_first_relight_always_fits_whatever_the_budget() {
+        // A budget that can refuse everything is a chunk that stays black.
+        assert!(another_relight_fits(Duration::ZERO, 0, Duration::ZERO));
+        assert!(another_relight_fits(
+            Duration::from_millis(40),
+            0,
+            Duration::from_millis(8)
+        ));
+    }
+
+    #[test]
+    fn the_next_relight_is_refused_when_its_expected_cost_would_overrun() {
+        // Two relights took 6 ms between them, so the next is expected to cost
+        // 3 ms: 6 + 3 = 9 is past an 8 ms budget, and it is refused. Stopping
+        // only once the budget was gone would have spent those 3 ms.
+        let budget = Duration::from_millis(8);
+        assert!(!another_relight_fits(Duration::from_millis(6), 2, budget));
+        // Four cheap ones at 1 ms each: 4 + 1 = 5 fits, and the pass goes on.
+        assert!(another_relight_fits(Duration::from_millis(4), 4, budget));
+        // Right on the line fits — the bound is the budget, not less than it.
+        assert!(another_relight_fits(Duration::from_millis(6), 3, budget));
+    }
+
+    #[test]
+    fn one_expensive_relight_stops_the_pass_where_a_count_would_not() {
+        // The case that made this a clock: a cave-riddled chunk at 6.5 ms.
+        // A count of four would have let three more through — 26 ms of a
+        // 50 ms tick, as reported. The clock refuses the second.
+        let budget = Duration::from_millis(8);
+        assert!(!another_relight_fits(
+            Duration::from_micros(6_500),
+            1,
+            budget
+        ));
     }
 }
