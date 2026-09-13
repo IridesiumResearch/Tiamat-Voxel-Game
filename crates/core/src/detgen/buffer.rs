@@ -70,6 +70,12 @@ pub struct Layer {
     pub material: MaterialId,
 }
 
+impl Layer {
+    /// The code that matches every block: for the body's own bands, laid
+    /// after the coded ones. `to` may be infinite.
+    pub const ANY: i32 = -1;
+}
+
 /// How much resolution a density fill gives the surface.
 ///
 /// Block resolution is the default and costs what it always did. The other two
@@ -1048,10 +1054,20 @@ impl ChunkBuffer {
             // the floor of the value plus a half, in integer arithmetic.
             super::floor_to_i32(codes[x + padded * (y + padded * z)] + 0.5)
         };
+        // **A layer with code [`Layer::ANY`] takes every block**, so the body
+        // itself — the soil to a depth and the stone below, to no depth at
+        // all — can be laid by this one evaluation, after the coded bands,
+        // and a generator need not evaluate the same terrain again for its
+        // body fill and again for its stone. Three evaluations a chunk were
+        // one, and the third of a chunk's cost that was.
         let pick = |code: i32, depth: f32| {
             layers
                 .iter()
-                .find(|layer| layer.code == code && layer.from <= depth && depth < layer.to)
+                .find(|layer| {
+                    (layer.code == code || layer.code == Layer::ANY)
+                        && layer.from <= depth
+                        && depth < layer.to
+                })
                 .map(|layer| layer.material)
         };
 
@@ -1440,7 +1456,13 @@ impl ChunkBuffer {
                 // from one chunk and no crown from the other — "the tops of
                 // trees cut off by chunks". Now neither places it there, and
                 // the higher surface gets it from every chunk it reaches.
-                let crossing = |i: usize| field[i] > 0.0 && field[i + 1] <= 0.0;
+                // A crossing needs the sample above it; the last sample has
+                // none and is no crossing (the chunk above sees it, and a
+                // structure it stands there starts past this one's height).
+                // Without the guard a surface at the very top of the scan
+                // read one past the buffer: "index out of bounds", the chunk
+                // air.
+                let crossing = |i: usize| i + 1 < samples && field[i] > 0.0 && field[i + 1] <= 0.0;
                 for i in (0..window).rev() {
                     if !crossing(i) {
                         continue;
@@ -2845,6 +2867,50 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_with_code_any_takes_every_block_after_the_coded_ones() {
+        let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
+        let ground = flat_ground();
+        let code =
+            super::super::density::Density::compile(vec![super::super::density::Op::Constant(0.0)])
+                .expect("compiles");
+        buffer
+            .fill_layers(
+                &ground,
+                &code,
+                7,
+                &[
+                    Layer {
+                        code: 3,
+                        from: 0.0,
+                        to: 2.0,
+                        material: DIRT,
+                    },
+                    Layer {
+                        code: Layer::ANY,
+                        from: 0.0,
+                        to: 2.5,
+                        material: MaterialId(9),
+                    },
+                    Layer {
+                        code: Layer::ANY,
+                        from: 2.5,
+                        to: f32::INFINITY,
+                        material: STONE,
+                    },
+                ],
+            )
+            .expect("fills");
+        // No block has code 3, so the top two blocks under the surface at
+        // y = 7 (depths 1 and 2, inside the band to 2.5) are the wildcard's
+        // first band and everything under them the second, to the floor.
+        assert_eq!(buffer.get_block(LocalBlock::new(4, 7, 4)), MaterialId(9));
+        assert_eq!(buffer.get_block(LocalBlock::new(4, 6, 4)), MaterialId(9));
+        assert_eq!(buffer.get_block(LocalBlock::new(4, 5, 4)), STONE);
+        assert_eq!(buffer.get_block(LocalBlock::new(4, 0, 4)), STONE);
+        assert_eq!(buffer.get_block(LocalBlock::new(4, 8, 4)), MaterialId::AIR);
+    }
+
+    #[test]
     fn scatter_stands_a_column_on_the_surface_it_finds() {
         let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
         buffer
@@ -3019,6 +3085,28 @@ mod tests {
                 STONE,
                 "y = {y}"
             );
+        }
+    }
+
+    #[test]
+    fn scatter_survives_a_surface_at_the_very_top_of_its_scan() {
+        // A column twenty-eight tall scans twenty-nine samples past its
+        // window; ground whose top block is exactly the last sample is a
+        // crossing with no sample above it, and read one past the buffer.
+        let column = tall_column(28);
+        let ground = {
+            use super::super::density::{Axis, Density, Op};
+            Density::compile(vec![
+                Op::Constant(44.0),
+                Op::Coordinate(Axis::Y),
+                Op::Subtract,
+            ])
+            .expect("compiles")
+        };
+        let buffer = stamped(ChunkPos::new(0, 0, 0), &ground, &column);
+        // Nothing of it lands in this chunk: the surface is above it.
+        for y in 0..CHUNK_BLOCKS {
+            assert_eq!(buffer.get_block(LocalBlock::new(3, y, 3)), STONE);
         }
     }
 

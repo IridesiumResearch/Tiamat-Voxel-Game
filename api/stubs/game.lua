@@ -183,6 +183,11 @@ function ChunkBuffer:fill_palette(density, bands, options) end
 ---@param code Tiamot.Density
 ---@param layers { code: integer, from: number?, to: number, material: integer }[]
 function ChunkBuffer:fill_layers(depth, code, layers) end
+--- A layer whose `code` is -1 takes EVERY block, and `to` may be `math.huge`:
+--- put the body's own bands last — the soil to its depth, the stone below to
+--- no depth — and the one evaluation lays the whole chunk, so the generator
+--- need not evaluate the same terrain for its body fill and again for its
+--- stone. Three evaluations a chunk were one.
 
 ---Stands a run of cells on every surface the buffer already holds: ground
 ---cover — grass, ferns, anything that grows UP from the ground.
@@ -741,6 +746,14 @@ function game.register_item(spec) end
 ---Registers a world generation callback.
 ---
 ---**Registration window only.**
+---
+---**Runs off the simulation thread, in a VM of its own.** The server loads the
+---mod set again on worker threads and calls this there — same mods, same fluid
+---ids, same maps, but no players, no entities, no edits and no `game.get_*`
+---world reads. `on_world_init` did not run in that VM (its maps did arrive), and
+---Lua state kept between calls is one worker's, not the world's. Write it as the
+---pure function of `pos` (which carries the seed) it was always meant to be. An
+---error here disables the mod in every VM at once. See `AGENTS.md` §5.
 ---@param callback fun(buf: Tiamot.ChunkBuffer, pos: Tiamot.ChunkPos)
 function game.register_on_generate(callback) end
 
