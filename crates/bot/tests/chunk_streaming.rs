@@ -304,7 +304,7 @@ fn a_mods_chunk_tint_reaches_the_client() {
          \x20   return 0.2, 0.8, 0.4\n\
          end)\n\
          game.register_on_generate(function(buf, pos)\n\
-         \x20   if pos.y < 0 then buf:fill(stone) end\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), stone)\n\
          end)\n",
     )
     .expect("script");
@@ -323,15 +323,23 @@ fn a_mods_chunk_tint_reaches_the_client() {
         materials: Vec::new(),
     })
     .expect("start");
+    // The whole neighbourhood, not the first chunk: the ground and the rock
+    // under it arrive in whatever order the workers finish, and a generator
+    // that faults on one of them turns the mod's tint white for every chunk
+    // after — which is how a fixture calling a method the buffer does not have
+    // passed on one machine and failed on another.
+    let expected = interest::chunks_around(BlockPos::new(0, 1, 0).chunk(), ViewDistance::MINIMUM);
     block_on(async {
         let mut alice = join(&server, "Alice").await;
-        let arrived = alice
-            .collect_chunks(1, Duration::from_secs(20))
-            .await
-            .expect("a chunk");
-        assert!(!arrived.is_empty(), "no chunk arrived");
+        let arrived = collect_until_quiet(&mut alice).await;
+        assert!(
+            arrived.len() >= expected.len() / 2,
+            "only {} of {} chunks arrived",
+            arrived.len(),
+            expected.len()
+        );
         let tints = alice.chunk_tints_received();
-        assert!(!tints.is_empty());
+        assert_eq!(tints.len(), arrived.len());
         for (pos, tint) in tints {
             assert_eq!(
                 tint,
