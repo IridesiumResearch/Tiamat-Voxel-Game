@@ -448,6 +448,13 @@ impl ChunkSource for Generator {
         self.generate_with_fluid(domain, pos, world_seed).0
     }
 
+    fn tint(&mut self, domain: &str, pos: ChunkPos, world_seed: u64) -> [u8; 3] {
+        match self {
+            Self::Mods(generator) => generator.tint(domain, pos, world_seed),
+            Self::Air(air) => air.tint(domain, pos, world_seed),
+        }
+    }
+
     fn generate_with_fluid(
         &mut self,
         domain: &str,

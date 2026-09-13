@@ -280,6 +280,70 @@ fn digging_into_sealed_rock_streams_what_lay_behind_it() {
     server.stop();
 }
 
+#[test]
+fn a_mods_chunk_tint_reaches_the_client() {
+    // **A seam that was installed only by tests.** `game.register_chunk_tint`
+    // shipped with a unit test on the VM and a screenshot test on the renderer,
+    // and every chunk a real server sent was white: the server's `Generator`
+    // forwarded every mod hook to the VM except `tint`, so the trait's default
+    // — white — answered for every mod on every server. This is the test that
+    // would have caught it: a mod that declares a colour, a real join, and the
+    // colour read off the wire.
+    let root = world_dir("tinted-mods");
+    let dir = root.join("tinted");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"tinted\"\nname = \"Tinted\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        "local stone = game.register_block{ id = \"stone\" }\n\
+         game.register_chunk_tint(function(pos)\n\
+         \x20   return 0.2, 0.8, 0.4\n\
+         end)\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   if pos.y < 0 then buf:fill(stone) end\n\
+         end)\n",
+    )
+    .expect("script");
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: world_dir("tinted"),
+        identity_path: None,
+        max_players: 8,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(root),
+        enabled_mods: None,
+        seed: Some(1),
+        rcon: None,
+        materials: Vec::new(),
+    })
+    .expect("start");
+    block_on(async {
+        let mut alice = join(&server, "Alice").await;
+        let arrived = alice
+            .collect_chunks(1, Duration::from_secs(20))
+            .await
+            .expect("a chunk");
+        assert!(!arrived.is_empty(), "no chunk arrived");
+        let tints = alice.chunk_tints_received();
+        assert!(!tints.is_empty());
+        for (pos, tint) in tints {
+            assert_eq!(
+                tint,
+                [51, 204, 102],
+                "the chunk at {pos:?} arrived {tint:?}, not the colour the mod declared"
+            );
+        }
+        alice.disconnect().await;
+    });
+    server.stop();
+}
+
 /// Collects chunks until two seconds pass with none arriving.
 async fn collect_until_quiet(bot: &mut Bot) -> Vec<ChunkPos> {
     let mut all = Vec::new();

@@ -582,6 +582,25 @@ impl Bot {
         Ok(chunks)
     }
 
+    /// Every chunk received so far with the colour the server sent for it, in
+    /// arrival order.
+    ///
+    /// The tint is the mod's `register_chunk_tint` answer, white when it has
+    /// none — and white was ALL any client ever received until 2026-09-13,
+    /// because the server's generator forwarded every hook but that one. A test
+    /// that can read the colour through the real endpoint is how that stays
+    /// caught.
+    #[must_use]
+    pub fn chunk_tints_received(&self) -> Vec<(tiamot_core::ChunkPos, [u8; 3])> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::ChunkData { pos, tint, .. } => Some((pos, tint)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every chunk received so far, in arrival order.
     #[must_use]
     pub fn chunks_received(&self) -> Vec<tiamot_core::ChunkPos> {
