@@ -7630,6 +7630,15 @@ fn compile_density(
         "y" => ops.push(Op::Coordinate(Axis::Y)),
         "z" => ops.push(Op::Coordinate(Axis::Z)),
         "noise" => ops.push(density_noise(spec)),
+        "contour" => {
+            // The distance to a 2D noise's zero contour, in blocks — the
+            // same stream, frequency and octaves as a noise node; no
+            // amplitude, since a distance has none. See `Op::Contour`.
+            let crate::detgen::Op::Noise { params, stream, .. } = density_noise(spec) else {
+                unreachable!("density_noise builds a noise op")
+            };
+            ops.push(crate::detgen::Op::Contour { params, stream });
+        }
         "map" => {
             let handle: mlua::AnyUserData = spec.get("map").map_err(|_| {
                 mlua::Error::external("a `map` node needs a `map` field holding a map")

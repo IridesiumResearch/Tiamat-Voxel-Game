@@ -215,6 +215,23 @@ pub enum Op {
         /// generated may reach the seed.
         stream: u64,
     },
+    /// The distance, in blocks, from the zero contour of a 2D noise field:
+    /// the noise sampled on the ground plane (y held at 0), so the contour
+    /// is a line across the ground and the field a vertical wall along it.
+    ///
+    /// **A crack needs a width, and a band about a contour has none.** The
+    /// set where `|noise| < w` is a line where the noise climbs steeply and a
+    /// pond where it lies flat — a fifth of the ground, at any `w` that made
+    /// the lines visible. What a crack wants is the distance to the line,
+    /// which is `|n| / |grad n|`: the gradient by central differences half a
+    /// block out, five samples of the ground plane per column and no more,
+    /// which is cheaper than one 3D octave. Capped at [`CONTOUR_FAR`].
+    Contour {
+        /// The fractal's shape, as a noise node's.
+        params: FractalParams,
+        /// Mixed into the world seed, as a noise node's.
+        stream: u64,
+    },
     /// Pop two, push the sum.
     Add,
     /// Pop two, push `first - second`.
@@ -624,6 +641,13 @@ impl Density {
                     amplitude,
                     stream,
                 } => stack.push(Self::noise_bounds(seed ^ stream, &axes, params, *amplitude)),
+                // A distance: never negative, never past the cap. Nothing
+                // tighter without evaluating it, and a crack is thin enough
+                // that a box's bound would rarely exclude it anyway.
+                Op::Contour { .. } => stack.push(Interval {
+                    low: 0.0,
+                    high: CONTOUR_FAR,
+                }),
                 Op::Map { map, range } => stack.push(Self::map_bounds(map, *range, &axes)),
                 Op::Absolute => {
                     let Some(value) = stack.pop() else {
@@ -749,6 +773,11 @@ impl Density {
                     }
                     height += 1;
                 }
+                Op::Contour { params, stream } => {
+                    let slot = &mut stack[height];
+                    contour_distance(seed ^ stream, region, params, slot)?;
+                    height += 1;
+                }
                 Op::Map { map, .. } => {
                     let slot = &mut stack[height];
                     fill_from_map(map, region, slot);
@@ -797,7 +826,11 @@ impl Op {
     /// How many values this consumes.
     const fn arity(&self) -> usize {
         match self {
-            Self::Constant(_) | Self::Coordinate(_) | Self::Noise { .. } | Self::Map { .. } => 0,
+            Self::Constant(_)
+            | Self::Coordinate(_)
+            | Self::Noise { .. }
+            | Self::Contour { .. }
+            | Self::Map { .. } => 0,
             Self::Absolute | Self::Clamp { .. } => 1,
             Self::Add
             | Self::Subtract
@@ -922,6 +955,95 @@ fn apply_binary(op: &Op, first: &mut [f32], second: &[f32]) {
     }
 }
 
+/// How far from a contour [`Op::Contour`] will say a point is, in blocks:
+/// the cap where the gradient is flat and the true distance is anybody's.
+pub const CONTOUR_FAR: f32 = 256.0;
+
+/// Evaluates [`Op::Contour`] over a region: the distance to the zero contour
+/// of the 2D noise, per column, broadcast down the region's y.
+///
+/// Five fills of the ground plane — the centre and half a block out each
+/// way along x and z — and a division: `|n| / |grad n|`, with the gradient
+/// by central differences. Deterministic for the reasons every fill is; the
+/// square root is one of the operations the determinism gate admits.
+fn contour_distance(
+    seed: u64,
+    region: &Region3d,
+    params: &FractalParams,
+    out: &mut [f32],
+) -> Result<(), DensityError> {
+    const HALF: f32 = 0.5;
+    let ground = Region3d {
+        origin_x: region.origin_x,
+        origin_y: 0.0,
+        origin_z: region.origin_z,
+        step: region.step,
+        width: region.width,
+        height: 1,
+        depth: region.depth,
+    };
+    let columns = ground.width * ground.depth;
+    let mut centre = vec![0.0_f32; columns];
+    let mut east = vec![0.0_f32; columns];
+    let mut west = vec![0.0_f32; columns];
+    let mut north = vec![0.0_f32; columns];
+    let mut south = vec![0.0_f32; columns];
+    fill_3d(seed, &ground, params, &mut centre)?;
+    fill_3d(
+        seed,
+        &Region3d {
+            origin_x: ground.origin_x + HALF,
+            ..ground
+        },
+        params,
+        &mut east,
+    )?;
+    fill_3d(
+        seed,
+        &Region3d {
+            origin_x: ground.origin_x - HALF,
+            ..ground
+        },
+        params,
+        &mut west,
+    )?;
+    fill_3d(
+        seed,
+        &Region3d {
+            origin_z: ground.origin_z + HALF,
+            ..ground
+        },
+        params,
+        &mut north,
+    )?;
+    fill_3d(
+        seed,
+        &Region3d {
+            origin_z: ground.origin_z - HALF,
+            ..ground
+        },
+        params,
+        &mut south,
+    )?;
+    for z in 0..region.depth {
+        for x in 0..region.width {
+            let column = x + region.width * z;
+            let slope_x = (east[column] - west[column]) / (2.0 * HALF);
+            let slope_z = (north[column] - south[column]) / (2.0 * HALF);
+            let slope = (slope_x * slope_x + slope_z * slope_z).sqrt();
+            let distance = if slope > f32::EPSILON {
+                (centre[column].abs() / slope).min(CONTOUR_FAR)
+            } else {
+                CONTOUR_FAR
+            };
+            for y in 0..region.height {
+                out[x + region.width * (y + region.height * z)] = distance;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +1058,66 @@ mod tests {
             height: 16,
             depth: 16,
         }
+    }
+
+    /// The contour distance is small where the noise crosses zero and grows
+    /// away from it: along a row of the ground, every sign change of the raw
+    /// noise sits within a block of a point the distance calls near, and the
+    /// point where the noise is largest is called far.
+    #[test]
+    fn contour_distance_is_small_at_the_zero_contour_and_grows_away_from_it() {
+        let params = FractalParams {
+            fractal: Fractal::Fbm,
+            octaves: 1,
+            frequency: 1.0 / 40.0,
+            lacunarity: 2.0,
+            gain: 0.5,
+        };
+        let raw = Density::compile(vec![Op::Noise {
+            params,
+            amplitude: 1.0,
+            stream: 5,
+        }])
+        .expect("compiles");
+        let contour = Density::compile(vec![Op::Contour { params, stream: 5 }]).expect("compiles");
+        let region = Region3d {
+            origin_x: 100.5,
+            origin_y: 0.0,
+            origin_z: 7.5,
+            step: 1.0,
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let mut values = vec![0.0; 256];
+        let mut distances = vec![0.0; 256];
+        raw.evaluate(3, &region, &mut values).expect("evaluates");
+        contour
+            .evaluate(3, &region, &mut distances)
+            .expect("evaluates");
+        let mut crossings = 0;
+        for i in 1..256 {
+            if (values[i - 1] > 0.0) != (values[i] > 0.0) {
+                crossings += 1;
+                let near = distances[i - 1].min(distances[i]);
+                assert!(near < 1.0, "a crossing at {i} is called {near} blocks away");
+            }
+        }
+        assert!(
+            crossings >= 3,
+            "a row of 256 blocks at a 40-block wavelength crosses zero more than {crossings} times"
+        );
+        let (peak, _) = values
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .expect("a row");
+        assert!(
+            distances[peak] > 2.0,
+            "the peak of the noise is {} blocks from a contour",
+            distances[peak]
+        );
+        assert!(distances.iter().all(|d| *d >= 0.0 && *d <= CONTOUR_FAR));
     }
 
     /// A field with hills in it, the shape a real generator uses: noise that

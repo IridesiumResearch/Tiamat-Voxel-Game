@@ -2350,6 +2350,18 @@ function Density:at(x, y, z, seed) end
 ---@return Tiamot.Density
 function game.density(spec) end
 
+---A `contour` node: `{ op = "contour", stream = "cracks", frequency = 1/80 }`
+---is the distance, in blocks, from the zero contour of that 2D noise — the
+---noise sampled on the ground plane, so the contour is a line across the
+---ground and the field a vertical wall along it. For cracks, gullies, roads,
+---anything that is a LINE with a width: `1 - contour / half_width` is
+---positive within `half_width` blocks of the line, everywhere along it,
+---where a band `|noise| < w` is a line only where the noise happens to climb
+---steeply and a pond where it lies flat. Same `stream`, `frequency`,
+---`octaves` as a `noise` node; no amplitude, since a distance has none.
+---Capped at 256 blocks. Costs five samples of the ground plane per column,
+---less than one 3D octave.
+
 ---A structure built once, from a list of blocks, for `buf:scatter` to stamp.
 ---
 ---Each block is `{dx, dy, dz, material, mask}`: an offset from the root in
