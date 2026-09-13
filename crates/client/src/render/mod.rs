@@ -2271,6 +2271,17 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.instances.slice(at..at + stride));
             pass.draw(0..4, 0..sprites.count);
         }
+        if any {
+            // **Put the chunks' instance array back**, as the figures and the
+            // props do. The glass and fluid draws after this set only slot 0
+            // and inherit slot 1 from the chunk loop, and what they inherited
+            // from here was one chunk's element: the first glass or fluid chunk
+            // with an instance index above zero then read past it, which wgpu
+            // refuses as fatal — "Instance 101 extends beyond limit 1 imposed
+            // by the buffer in slot 1", the whole client gone, the first time
+            // a world had grass and a pond in it at once.
+            pass.set_vertex_buffer(1, self.instances.slice(..));
+        }
     }
 
     /// Draws every visible chunk's foliage, WITH the opaque geometry.

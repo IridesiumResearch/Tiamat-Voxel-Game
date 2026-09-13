@@ -3047,6 +3047,95 @@ fn a_billboard_turns_to_face_the_camera_from_any_side() {
 }
 
 #[test]
+fn glass_beside_a_sprite_still_draws_from_its_own_chunk() {
+    // **The crash, from the window.** "Instance 101 extends beyond limit 1
+    // imposed by the buffer in slot 1", fatal, the client gone. The sprite
+    // draw binds ONE chunk's element of the shared instance array in slot 1,
+    // and the glass and fluid draws after it set only slot 0 and inherit slot
+    // 1 — so the first glass chunk with an instance index above zero read past
+    // the one element it had been left. It needs two chunks: with one, every
+    // index is zero and the slice is enough. Glass in both, a sprite in one,
+    // so whichever chunk is drawn second is the one that reads past the end.
+    let Some(gpu) = gpu() else { return };
+
+    const GRASS: MaterialId = MaterialId(2);
+    const GLASS: MaterialId = MaterialId(3);
+
+    let mut left = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+    left.set_subnode(BlockPos::new(15, 8, 8).subnode(1, 0, 1), GRASS)
+        .expect("in chunk");
+    left.set_block(BlockPos::new(14, 8, 11), BlockValue::Uniform(GLASS))
+        .expect("in chunk");
+    let mut right = Chunk::new(ChunkPos::new(1, 0, 0), MaterialId::AIR);
+    right
+        .set_block(BlockPos::new(17, 8, 11), BlockValue::Uniform(GLASS))
+        .expect("in chunk");
+
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    let atlas = Atlas::build(&[
+        None,
+        None,
+        Some(Image::solid(16, 16, [80, 200, 90, 255])),
+        Some(Image::solid(16, 16, [200, 220, 255, 90])),
+    ]);
+    renderer.set_atlas(&atlas);
+    let material = |id: MaterialId, name: &str, transparent: bool, billboard: bool| MaterialDef {
+        id: id.get(),
+        name: name.to_owned(),
+        step_sound: None,
+        texture: None,
+        placeable: true,
+        transparent,
+        cutout: false,
+        passable: false,
+        sway: false,
+        billboard,
+        billboard_cross: false,
+        tint: None,
+    };
+    renderer.set_tints(&[
+        material(GRASS, "grass", false, true),
+        material(GLASS, "glass", true, false),
+    ]);
+    upload_with(
+        &mut renderer,
+        &[left, right],
+        &client::mesher::Sight {
+            glass: [GLASS.get()].into_iter().collect(),
+            foliage: std::collections::BTreeSet::new(),
+            sprites: [GRASS.get()].into_iter().collect(),
+            crosses: std::collections::BTreeSet::new(),
+        },
+    );
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // From in front of the chunk seam, looking along +z with the sprite and
+    // both panes a few blocks ahead. The assertion is that this returns at
+    // all: a validation error is fatal.
+    let mut camera = Camera {
+        position: Position::from_world(16.0, 9.0, 3.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, 0.0);
+    let frame = target.capture(&mut renderer, &camera).expect("capture");
+    let mut green = 0u32;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if let Some(pixel) = frame.pixel(x, y)
+                && pixel[1] > pixel[0] + 20
+                && pixel[1] > pixel[2] + 20
+            {
+                green += 1;
+            }
+        }
+    }
+    assert!(
+        green > 0,
+        "the sprite was not in the frame, so nothing here was drawn"
+    );
+}
+
+#[test]
 fn a_biome_colour_blends_across_a_chunk_edge_instead_of_tiling_it() {
     // **Why this is not simply a colour per chunk.** A flat colour per chunk
     // draws the world as 16-block squares, which reads worse than the hard
