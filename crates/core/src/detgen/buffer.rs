@@ -1383,8 +1383,12 @@ impl ChunkBuffer {
         if surface_hi < surface_lo {
             return Ok(0);
         }
-        // One sample more than the window, for the air over its top block.
-        let samples = (surface_hi - surface_lo + 2) as usize;
+        // The column is evaluated `highest` blocks PAST the window, plus one
+        // for the air over the last: a candidate is a surface only if no other
+        // surface lies within the structure's height above it, and that has to
+        // be judged the same from every chunk — see below.
+        let window = (surface_hi - surface_lo + 1) as usize;
+        let samples = window + highest as usize + 1;
         let mut field = vec![0.0_f32; samples];
         let mut scratch = super::density::Scratch::default();
         let mut placed = 0;
@@ -1426,47 +1430,64 @@ impl ChunkBuffer {
                 scatter
                     .depth
                     .evaluate_with(seed, &region, &mut field, &mut scratch)?;
-                // The topmost surface in the window: solid, with air over it.
-                let surface = (0..samples - 1)
-                    .rev()
-                    .find(|&i| field[i] > 0.0 && field[i + 1] <= 0.0)
-                    .map(|i| surface_lo + i as i32);
-                let Some(surface) = surface else {
-                    continue;
-                };
-                if let Some(stand) = scatter.stand
-                    && stand.sample(seed, x as f32 + 0.5, surface as f32 + 0.5, z as f32 + 0.5)?
-                        <= 0.0
-                {
-                    continue;
-                }
-                let base = surface + 1 - scatter.sink;
-                let mut landed = false;
-                for block in schematic.blocks() {
-                    let at = crate::BlockPos::new(x + block.dx, base + block.dy, z + block.dz);
-                    if at.chunk() != self.pos {
+                // **A surface is a crossing with no other crossing within the
+                // structure's height above it**, and every crossing in the
+                // window that passes is stamped. Judged over the same column
+                // from every chunk (the evaluation reaches `highest` past the
+                // window), so the chunks agree: a ledge under an overhang,
+                // which the chunk below sees as the top of its window and the
+                // chunk above sees as ground under a higher surface, got a tree
+                // from one chunk and no crown from the other — "the tops of
+                // trees cut off by chunks". Now neither places it there, and
+                // the higher surface gets it from every chunk it reaches.
+                let crossing = |i: usize| field[i] > 0.0 && field[i + 1] <= 0.0;
+                for i in (0..window).rev() {
+                    if !crossing(i) {
                         continue;
                     }
-                    let local = at.local();
-                    if block.mask & FULL_MASK == FULL_MASK {
-                        self.set_block(local, block.material);
-                    } else {
-                        for bit in 0..SUBNODES_PER_BLOCK as u32 {
-                            if block.mask & (1 << bit) != 0 {
-                                self.set_subnode(
-                                    local,
-                                    bit % 3,
-                                    (bit / 3) % 3,
-                                    bit / 9,
-                                    block.material,
-                                );
+                    let shadowed = (i + 1..=i + highest as usize + 1).any(crossing);
+                    if shadowed {
+                        continue;
+                    }
+                    let surface = surface_lo + i as i32;
+                    if let Some(stand) = scatter.stand
+                        && stand.sample(
+                            seed,
+                            x as f32 + 0.5,
+                            surface as f32 + 0.5,
+                            z as f32 + 0.5,
+                        )? <= 0.0
+                    {
+                        continue;
+                    }
+                    let base = surface + 1 - scatter.sink;
+                    let mut landed = false;
+                    for block in schematic.blocks() {
+                        let at = crate::BlockPos::new(x + block.dx, base + block.dy, z + block.dz);
+                        if at.chunk() != self.pos {
+                            continue;
+                        }
+                        let local = at.local();
+                        if block.mask & FULL_MASK == FULL_MASK {
+                            self.set_block(local, block.material);
+                        } else {
+                            for bit in 0..SUBNODES_PER_BLOCK as u32 {
+                                if block.mask & (1 << bit) != 0 {
+                                    self.set_subnode(
+                                        local,
+                                        bit % 3,
+                                        (bit / 3) % 3,
+                                        bit / 9,
+                                        block.material,
+                                    );
+                                }
                             }
                         }
+                        landed = true;
                     }
-                    landed = true;
-                }
-                if landed {
-                    placed += 1;
+                    if landed {
+                        placed += 1;
+                    }
                 }
             }
         }
@@ -2872,6 +2893,133 @@ mod tests {
             }
         }
         assert_eq!(found, 1);
+    }
+
+    /// A column of stone `tall` blocks up from the root.
+    fn tall_column(tall: i32) -> Schematic {
+        Schematic::new(
+            (0..tall)
+                .map(|dy| StampBlock {
+                    dx: 0,
+                    dy,
+                    dz: 0,
+                    material: STONE,
+                    mask: FULL_MASK,
+                })
+                .collect(),
+        )
+    }
+
+    /// Ground below y = 12, and a slab from y = 20 to 24 over it where
+    /// `overhang` is set: max(12 - y, min(y - 20, 24 - y)).
+    fn ground_with(overhang: bool) -> super::super::density::Density {
+        use super::super::density::{Axis, Density, Op};
+        let mut ops = vec![Op::Constant(12.0), Op::Coordinate(Axis::Y), Op::Subtract];
+        if overhang {
+            ops.extend([
+                Op::Coordinate(Axis::Y),
+                Op::Constant(20.0),
+                Op::Subtract,
+                Op::Constant(24.0),
+                Op::Coordinate(Axis::Y),
+                Op::Subtract,
+                Op::Minimum,
+                Op::Maximum,
+            ]);
+        }
+        Density::compile(ops).expect("compiles")
+    }
+
+    fn stamped(
+        pos: ChunkPos,
+        ground: &super::super::density::Density,
+        column: &Schematic,
+    ) -> ChunkBuffer {
+        let mut buffer = ChunkBuffer::new(pos, MaterialId::AIR);
+        buffer.fill_density(ground, 5, STONE).expect("fills");
+        buffer
+            .scatter(
+                5,
+                &Scatter {
+                    depth: ground,
+                    stand: None,
+                    schematics: &[column],
+                    cell: 16,
+                    chance: 1.0,
+                    salt: 3,
+                    sink: 0,
+                },
+            )
+            .expect("scatters");
+        buffer
+    }
+
+    #[test]
+    fn scatter_stamps_one_structure_whole_across_three_stacked_chunks() {
+        let column = tall_column(28);
+        let ground = ground_with(false);
+        let chunks: Vec<ChunkBuffer> = (0..3)
+            .map(|cy| stamped(ChunkPos::new(0, cy, 0), &ground, &column))
+            .collect();
+        // Where the root landed in the bottom chunk...
+        let mut root = None;
+        for x in 0..CHUNK_BLOCKS {
+            for z in 0..CHUNK_BLOCKS {
+                if chunks[0].get_block(LocalBlock::new(x, 13, z)) == STONE {
+                    root = Some((x, z));
+                }
+            }
+        }
+        let (x, z) = root.expect("a column stands in the bottom chunk");
+        // ...the column is stone from y = 12 to 39 through all three chunks,
+        // and air above, in each chunk's own slice.
+        for y in 12..44 {
+            let chunk = &chunks[(y / 16) as usize];
+            let block = chunk.get_block(LocalBlock::new(x, (y % 16) as u32, z));
+            if y < 40 {
+                assert_eq!(block, STONE, "y = {y}: the column is cut");
+            } else {
+                assert_eq!(block, MaterialId::AIR, "y = {y}: the column runs on");
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_puts_nothing_under_an_overhang_and_everything_on_top_of_it() {
+        let column = tall_column(28);
+        let ground = ground_with(true);
+        let chunks: Vec<ChunkBuffer> = (0..4)
+            .map(|cy| stamped(ChunkPos::new(0, cy, 0), &ground, &column))
+            .collect();
+        // Nothing stands on the ground at y = 12 under the slab: the bottom
+        // chunk sees the slab as a surface within the column's height.
+        for x in 0..CHUNK_BLOCKS {
+            for z in 0..CHUNK_BLOCKS {
+                assert_eq!(
+                    chunks[0].get_block(LocalBlock::new(x, 13, z)),
+                    MaterialId::AIR
+                );
+            }
+        }
+        // The slab's top is y = 23; the column stands on it from y = 24 in
+        // the second chunk and runs to y = 51 in the fourth, whole.
+        let mut root = None;
+        for x in 0..CHUNK_BLOCKS {
+            for z in 0..CHUNK_BLOCKS {
+                if chunks[1].get_block(LocalBlock::new(x, 24 % 16, z)) == STONE {
+                    root = Some((x, z));
+                }
+            }
+        }
+        let (x, z) = root.expect("a column stands on the slab");
+        for y in 24..52 {
+            let chunk = &chunks[(y / 16) as usize];
+            assert_eq!(
+                chunk.get_block(LocalBlock::new(x, (y % 16) as u32, z)),
+                STONE,
+                "y = {y}"
+            );
+        }
     }
 
     #[test]
