@@ -152,6 +152,15 @@ this is where to look first.
 
 **Read these against how many happen per tick, not on their own:**
 
+- **Generating a chunk costs the tick nothing**, since 2026-09-13: it runs on
+  worker threads (`server::worldgen`, half the cores, one to four), each with
+  its own script VM, and the tick adopts, lights, encodes and sends what comes
+  back under `SERVE_TIME_BUDGET`. A terrain mod's chunk was measured at 50–100
+  ms — more than a whole tick — and no clock on the tick can bound a call it
+  cannot preempt; a thread that is not the tick can take as long as it likes.
+  What a chunk costs the MOD still matters: a worker is a core, and a 60 ms
+  chunk holds one for 60 ms.
+
 - Newly loaded chunks are relit on a clock, `RELIGHT_TIME_BUDGET` (8 ms, 16%
   of the budget), so the worst a tick can spend filling in terrain is bounded
   whatever a chunk costs — and a chunk's cost varies by an order of magnitude

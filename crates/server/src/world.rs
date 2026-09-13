@@ -119,6 +119,22 @@ pub trait ChunkSource {
         let _ = (domain, pos, world_seed);
         [u8::MAX; 3]
     }
+
+    /// Disables a mod here because it faulted somewhere else.
+    ///
+    /// The generation workers (`worldgen::Pool`) each run their own VM, and a
+    /// mod that errors in one of them is disabled there (charter rule 10). A
+    /// world whose chunks differ by which VM made them is not a world, so the
+    /// fault is carried back to the tick's VM through this. Defaulted to
+    /// nothing: a source with no mods has nothing to disable.
+    fn fault(&mut self, mod_id: &str) {
+        let _ = mod_id;
+    }
+
+    /// Which mods this source has disabled, for the workers to disable too.
+    fn faulted(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A generator that produces nothing but air.
@@ -452,6 +468,19 @@ impl ChunkSource for Generator {
         match self {
             Self::Mods(generator) => generator.tint(domain, pos, world_seed),
             Self::Air(air) => air.tint(domain, pos, world_seed),
+        }
+    }
+
+    fn fault(&mut self, mod_id: &str) {
+        if let Self::Mods(generator) = self {
+            generator.host_mut().vm_mut().mark_faulted(mod_id);
+        }
+    }
+
+    fn faulted(&self) -> Vec<String> {
+        match self {
+            Self::Mods(generator) => generator.host.disabled(),
+            Self::Air(_) => Vec::new(),
         }
     }
 
@@ -883,42 +912,125 @@ impl World {
         } = self;
         let seed = *seed;
         let space = Self::space_of(domains, domain);
-        if !space.cache.contains_key(&pos) {
-            let chunk = match db.load_chunk_in(domain, pos)? {
-                Some(chunk) => chunk,
-                None => {
-                    // Never visited. Generate it and mark it dirty so it is
-                    // written — see the module docs on why a generated chunk is
-                    // stored rather than regenerated later.
-                    let (generated, fluid) = source.generate_with_fluid(domain, pos, seed);
-                    if !space.dirty.contains(&pos) {
-                        space.dirty.push(pos);
-                    }
-                    // **Written here rather than handed to the caller.** A
-                    // chunk's fluid reaches the simulation by being loaded
-                    // (`handle.rs` asks `load_fluid` for every chunk that
-                    // arrives), so an ocean placed at generation only has to
-                    // land in the same row that path already reads. Nothing
-                    // downstream changes, and a generated sea survives a
-                    // restart for the same reason the terrain does.
-                    //
-                    // Empty layers are skipped: almost every chunk has one, and
-                    // a row saying "no fluid" is a row to read back for nothing.
-                    if !fluid.is_empty()
-                        && let Err(err) = db.save_chunk_fluid_in(domain, pos, &fluid)
-                    {
-                        tracing::error!(?pos, "could not store generated fluid: {err}");
-                    }
-                    generated
-                }
-            };
-            space.cache.insert(pos, chunk);
-            space.arrived.push(pos);
+        if space.cache.contains_key(&pos) {
+            return Ok(space.cache.get_mut(&pos).expect("checked just above"));
+        }
+        match db.load_chunk_in(domain, pos)? {
+            Some(chunk) => {
+                space.cache.insert(pos, chunk);
+                space.arrived.push(pos);
+            }
+            None => {
+                // Never visited. Generate it here, on the caller's thread; the
+                // streamer has the workers do this and hands the result to
+                // `adopt_generated`, which is the same thing from here.
+                let (generated, fluid) = source.generate_with_fluid(domain, pos, seed);
+                Self::adopt_into(db, space, domain, pos, generated, &fluid);
+            }
         }
         Ok(space
             .cache
             .get_mut(&pos)
             .expect("just inserted if it was absent"))
+    }
+
+    /// Takes in a chunk generated elsewhere, as [`World::chunk`] would have
+    /// generated it here.
+    ///
+    /// For the generation workers (`worldgen::Pool`): the chunk is made
+    /// resident, marked dirty so it is written, announced as arrived, and its
+    /// fluid stored — every step [`World::chunk`] takes for a chunk it
+    /// generates itself, from one place, so the two cannot drift.
+    ///
+    /// A chunk that is already resident is left alone: an edit may have landed
+    /// on it since the job went out, and the generated copy is the older truth.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::NoVoxels`] for a domain that holds no chunks.
+    pub fn adopt_generated(
+        &mut self,
+        domain: &str,
+        pos: ChunkPos,
+        chunk: Chunk,
+        fluid: &tiamot_core::fluid::FluidLayer,
+    ) -> Result<(), WorldError> {
+        if self.sparse.contains(domain) {
+            return Err(WorldError::NoVoxels {
+                domain: domain.to_owned(),
+            });
+        }
+        let Self { db, domains, .. } = self;
+        let space = Self::space_of(domains, domain);
+        if space.cache.contains_key(&pos) {
+            return Ok(());
+        }
+        Self::adopt_into(db, space, domain, pos, chunk, fluid);
+        Ok(())
+    }
+
+    /// The one place a freshly generated chunk enters the world.
+    fn adopt_into(
+        db: &WorldDb,
+        space: &mut Space,
+        domain: &str,
+        pos: ChunkPos,
+        chunk: Chunk,
+        fluid: &tiamot_core::fluid::FluidLayer,
+    ) {
+        // Mark it dirty so it is written — see the module docs on why a
+        // generated chunk is stored rather than regenerated later.
+        if !space.dirty.contains(&pos) {
+            space.dirty.push(pos);
+        }
+        // **Written here rather than handed to the caller.** A chunk's fluid
+        // reaches the simulation by being loaded (`handle.rs` asks `load_fluid`
+        // for every chunk that arrives), so an ocean placed at generation only
+        // has to land in the same row that path already reads. Nothing
+        // downstream changes, and a generated sea survives a restart for the
+        // same reason the terrain does.
+        //
+        // Empty layers are skipped: almost every chunk has one, and a row
+        // saying "no fluid" is a row to read back for nothing.
+        if !fluid.is_empty()
+            && let Err(err) = db.save_chunk_fluid_in(domain, pos, fluid)
+        {
+            tracing::error!(?pos, "could not store generated fluid: {err}");
+        }
+        space.cache.insert(pos, chunk);
+        space.arrived.push(pos);
+    }
+
+    /// Makes a chunk resident if the world already has it, and says whether it
+    /// did.
+    ///
+    /// Resident or stored, `true`; never visited, `false` and nothing
+    /// generated — which is the question the streamer asks before deciding
+    /// whether a request is answered from here or handed to a worker.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError`] if the database cannot be read, or the domain holds no
+    /// chunks.
+    pub fn load_stored(&mut self, domain: &str, pos: ChunkPos) -> Result<bool, WorldError> {
+        if self.sparse.contains(domain) {
+            return Err(WorldError::NoVoxels {
+                domain: domain.to_owned(),
+            });
+        }
+        let Self { db, domains, .. } = self;
+        let space = Self::space_of(domains, domain);
+        if space.cache.contains_key(&pos) {
+            return Ok(true);
+        }
+        match db.load_chunk_in(domain, pos)? {
+            Some(chunk) => {
+                space.cache.insert(pos, chunk);
+                space.arrived.push(pos);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// A chunk's LOD summary at one level, computed once and cached.
@@ -959,6 +1071,31 @@ impl World {
         pos: ChunkPos,
         source: &mut dyn ChunkSource,
     ) -> Result<Vec<u8>, WorldError> {
+        if let Some(stored) = self.summary_stored(domain, level, pos)? {
+            return Ok(stored);
+        }
+        let chunk = source.generate(domain, pos, self.seed);
+        let chain = Self::encode_chain(&chunk);
+        self.adopt_summaries(domain, level, pos, &chain)
+    }
+
+    /// The summary at one level if the world can answer it without generating:
+    /// cached, or computed from a chunk it holds or has stored.
+    ///
+    /// `None` is a chunk never visited — the streamer's cue to hand the
+    /// position to a worker rather than generate it here.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::NoSuchLevel`] for a level that does not exist,
+    /// [`WorldError::NoVoxels`] for a domain with no chunks, or a database
+    /// error.
+    pub fn summary_stored(
+        &mut self,
+        domain: &str,
+        level: u8,
+        pos: ChunkPos,
+    ) -> Result<Option<Vec<u8>>, WorldError> {
         if lod::cells_per_axis(level).is_none() {
             return Err(WorldError::NoSuchLevel { level });
         }
@@ -973,44 +1110,76 @@ impl World {
         // it was, and serving it would show a player a hole they had just
         // filled in. Recomputed, and deliberately not stored: the row it would
         // write is one the imminent save deletes.
-        let unsaved = self
-            .domains
-            .get(domain)
-            .is_some_and(|space| space.dirty.contains(&pos));
-        if !unsaved && let Some(cached) = self.db.load_summary(domain, level, pos)? {
+        if !self.is_dirty(domain, pos)
+            && let Some(cached) = self.db.load_summary(domain, level, pos)?
+        {
             self.served += 1;
-            return Ok(cached);
+            return Ok(Some(cached));
         }
-
         // Resident first: a chunk the simulation is already holding is the
         // authoritative one, and it may hold edits this tick that the database
         // has not been told about yet.
         let chain = match self.domains.get(domain).and_then(|s| s.cache.get(&pos)) {
-            Some(chunk) => lod::Summary::chain(chunk),
-            None => {
-                let chunk = match self.db.load_chunk_in(domain, pos)? {
-                    Some(chunk) => chunk,
-                    None => source.generate(domain, pos, self.seed),
-                };
-                lod::Summary::chain(&chunk)
-            }
+            Some(chunk) => Self::encode_chain(chunk),
+            None => match self.db.load_chunk_in(domain, pos)? {
+                Some(chunk) => Self::encode_chain(&chunk),
+                None => return Ok(None),
+            },
         };
-        self.computed += 1;
+        self.adopt_summaries(domain, level, pos, &chain).map(Some)
+    }
 
+    /// Keeps a summary chain computed elsewhere and answers one level of it.
+    ///
+    /// The other half of [`World::summary_stored`]: a worker generated the
+    /// chunk and encoded its chain, and this is what the tick does with it —
+    /// the same store-unless-dirty rule the on-tick path applies, from the same
+    /// place.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::NoSuchLevel`] if the chain has no entry at `level`, or a
+    /// database error storing it.
+    pub fn adopt_summaries(
+        &mut self,
+        domain: &str,
+        level: u8,
+        pos: ChunkPos,
+        chain: &[(u8, Vec<u8>)],
+    ) -> Result<Vec<u8>, WorldError> {
+        self.computed += 1;
         let keep: Vec<(u8, Vec<u8>)> = chain
             .iter()
-            .filter(|summary| summary.level() >= level)
-            .map(|summary| (summary.level(), lod::codec::encode(summary)))
+            .filter(|(at, _)| *at >= level)
+            .cloned()
             .collect();
         let wanted = keep
             .iter()
             .find(|(at, _)| *at == level)
             .map(|(_, bytes)| bytes.clone())
             .ok_or(WorldError::NoSuchLevel { level })?;
-        if !unsaved {
+        if !self.is_dirty(domain, pos) {
             self.db.save_summaries(domain, pos, &keep)?;
         }
         Ok(wanted)
+    }
+
+    /// Whether a chunk has edits the database has not seen.
+    fn is_dirty(&self, domain: &str, pos: ChunkPos) -> bool {
+        self.domains
+            .get(domain)
+            .is_some_and(|space| space.dirty.contains(&pos))
+    }
+
+    /// A chunk's summary chain, each level encoded as a client receives it.
+    ///
+    /// Pure, so the workers compute the same bytes off the tick.
+    #[must_use]
+    pub fn encode_chain(chunk: &Chunk) -> Vec<(u8, Vec<u8>)> {
+        lod::Summary::chain(chunk)
+            .iter()
+            .map(|summary| (summary.level(), lod::codec::encode(summary)))
+            .collect()
     }
 
     /// How many summaries this session has computed, and how many it has served

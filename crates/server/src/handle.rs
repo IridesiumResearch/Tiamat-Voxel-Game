@@ -610,25 +610,111 @@ struct ServeReport {
     lighting: Duration,
     /// Chunks answered as dark from their palette, with no relight at all.
     dark: usize,
+    /// Requests handed to the generation workers this tick.
+    to_workers: usize,
+    /// Chunks the workers handed back this tick, adopted and served.
+    from_workers: usize,
+    /// Requests still parked on a worker at the end of the tick.
+    waiting: usize,
 }
 
 impl ServeReport {
     /// Whether anything happened worth reporting.
     const fn is_idle(&self) -> bool {
-        self.chunks == 0 && self.summaries == 0 && self.deferred == 0
+        self.chunks == 0
+            && self.summaries == 0
+            && self.deferred == 0
+            && self.to_workers == 0
+            && self.from_workers == 0
     }
 
     /// The breakdown as one line, for a tick that has lost its budget.
     fn line(&self) -> String {
         format!(
-            "{} chunks, {} summaries, {} deferred; gen {:.1}ms, light {:.1}ms ({} dark for free)",
+            "{} chunks, {} summaries, {} deferred; gen {:.1}ms, light {:.1}ms ({} dark for free); \
+             {} to workers, {} back, {} waiting",
             self.chunks,
             self.summaries,
             self.deferred,
             self.generating.as_secs_f64() * 1000.0,
             self.lighting.as_secs_f64() * 1000.0,
             self.dark,
+            self.to_workers,
+            self.from_workers,
+            self.waiting,
         )
+    }
+}
+
+/// What the world knows about a requested chunk without generating it.
+enum Known {
+    /// Resident, or loaded from the database just now.
+    Here,
+    /// The summary asked for, from the cache or from a chunk the world has.
+    Summary(Vec<u8>),
+    /// Never generated: the workers' to make.
+    Never,
+}
+
+/// Requests waiting on the generation workers, and answers waiting on the tick.
+///
+/// A request whose chunk has never been generated is taken off the queue, its
+/// position handed to the workers, and the request kept here until the chunk
+/// comes back; the client counts it as in flight the whole time and asks for
+/// nothing twice. Answers that come back when the tick is out of budget wait
+/// here too, so a worker's chunk is never dropped and never served past the
+/// clock.
+#[derive(Default)]
+struct Parked {
+    /// Requests by the chunk they wait on.
+    requests: std::collections::BTreeMap<
+        (String, tiamot_core::ChunkPos),
+        Vec<crate::transport::endpoint::ChunkRequest>,
+    >,
+    /// Chunks the workers have finished that the tick has not yet served, in
+    /// the order they were asked for.
+    ///
+    /// **Asked-for order, not finished order.** Workers finish in the order
+    /// chunks cost — a chunk of sky in microseconds, the ground under a player
+    /// in whatever the mod takes — and a connection asks nearest-first for a
+    /// reason. Serving what has come back in the order it was asked keeps that
+    /// reason whenever both are ready, without holding a finished chunk for one
+    /// that is not.
+    ready: std::collections::BTreeMap<u64, crate::worldgen::Done>,
+}
+
+impl Parked {
+    /// Keeps a request until its chunk is generated.
+    fn park(&mut self, request: crate::transport::endpoint::ChunkRequest) {
+        self.requests
+            .entry((request.domain.clone(), request.pos))
+            .or_default()
+            .push(request);
+    }
+
+    /// Every request that was waiting on this chunk.
+    fn take(
+        &mut self,
+        domain: &str,
+        pos: tiamot_core::ChunkPos,
+    ) -> Vec<crate::transport::endpoint::ChunkRequest> {
+        self.requests
+            .remove(&(domain.to_owned(), pos))
+            .unwrap_or_default()
+    }
+
+    /// How many requests are waiting on a worker.
+    fn waiting(&self) -> usize {
+        self.requests.values().map(Vec::len).sum()
+    }
+
+    /// Takes back every parked request, for a pool that is no longer there to
+    /// answer them.
+    fn drain_requests(&mut self) -> Vec<crate::transport::endpoint::ChunkRequest> {
+        std::mem::take(&mut self.requests)
+            .into_values()
+            .flatten()
+            .collect()
     }
 }
 
@@ -659,6 +745,10 @@ impl ServeReport {
 /// ([`Shared::requeue_chunk_requests`]): the queue is the only record that
 /// those chunks were asked for, and the client counts them as in flight and
 /// will not ask twice.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the tick's state, threaded through rather than made global"
+)]
 fn serve_chunk_requests(
     shared: &Shared,
     world: &mut crate::world::World,
@@ -667,9 +757,95 @@ fn serve_chunk_requests(
     fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
     control: &Control,
     budget: Duration,
+    mut workers: Option<&mut crate::worldgen::Pool>,
+    parked: &mut Parked,
 ) -> ServeReport {
     let started = std::time::Instant::now();
     let mut report = ServeReport::default();
+    // **The workers first: what they have finished, and what they must know.**
+    // A pool that has died answers nothing it holds, so what was parked on it
+    // goes back on the queue and is generated here, as before there was one.
+    if let Some(pool) = workers.as_deref_mut() {
+        if pool.is_alive() {
+            pool.fault(source.faulted().iter().map(String::as_str));
+            parked
+                .ready
+                .extend(pool.finished().into_iter().map(|done| (done.job.seq, done)));
+        } else {
+            shared.requeue_chunk_requests(parked.drain_requests());
+            workers = None;
+        }
+    }
+    // Answers that came back are served under the same clock as requests:
+    // adopting a chunk is cheap, lighting and encoding it are not, and a
+    // worker's chunk is not a reason to overrun the tick.
+    while let Some((seq, done)) = parked.ready.pop_first() {
+        let done_count = u32::try_from(report.chunks + report.summaries).unwrap_or(u32::MAX);
+        let spent = started.elapsed();
+        let expected = if done_count == 0 {
+            Duration::ZERO
+        } else {
+            (report.generating + report.lighting) / done_count
+        };
+        if done_count > 0 && spent + expected >= budget + budget / 5 {
+            parked.ready.insert(seq, done);
+            break;
+        }
+        for mod_id in &done.faults {
+            source.fault(mod_id);
+        }
+        if let Some(pool) = workers.as_deref() {
+            pool.fault(done.faults.iter().map(String::as_str));
+        }
+        let requests = parked.take(&done.job.domain, done.job.pos);
+        let wanted_chunk = requests.iter().any(|request| request.level.is_none());
+        report.from_workers += 1;
+        if wanted_chunk {
+            // The chunk itself was asked for, so it becomes part of the world —
+            // resident, dirty, arrived — exactly as one generated here would.
+            let at = std::time::Instant::now();
+            if let Err(err) =
+                world.adopt_generated(&done.job.domain, done.job.pos, done.chunk, &done.fluid)
+            {
+                debug!(pos = ?done.job.pos, "could not adopt a generated chunk: {err}");
+            }
+            report.generating += at.elapsed();
+        }
+        for request in requests {
+            if let Some(level) = request.level {
+                let at = std::time::Instant::now();
+                let summary = world
+                    .adopt_summaries(&request.domain, level, request.pos, &done.summaries)
+                    .map_err(|err| {
+                        debug!(pos = ?request.pos, level, "could not summarise: {err}");
+                    })
+                    .ok();
+                report.generating += at.elapsed();
+                report.summaries += 1;
+                let _ =
+                    request
+                        .reply
+                        .send(summary.map(|blob| crate::transport::endpoint::Served {
+                            blob,
+                            tint: [u8::MAX; 3],
+                            sealed: false,
+                        }));
+            } else {
+                serve_one_chunk(
+                    shared,
+                    world,
+                    source,
+                    lighting,
+                    fluidics,
+                    control,
+                    request,
+                    Some(done.tint),
+                    &mut report,
+                );
+                report.chunks += 1;
+            }
+        }
+    }
     let mut queue = shared.take_chunk_requests().into_iter();
     loop {
         let Some(request) = queue.next() else { break };
@@ -706,6 +882,54 @@ fn serve_chunk_requests(
             shared.requeue_chunk_requests(rest);
             break;
         }
+        // **A chunk the world has never seen is the workers' to make.** Every
+        // other request is answered here: a resident or stored chunk costs a
+        // read and a relight, which the clock above already bounds. Only
+        // generation is unbounded — it is whatever the mod does — and only
+        // generation leaves the tick. See `worldgen`.
+        if let Some(pool) = workers.as_deref_mut() {
+            let at = std::time::Instant::now();
+            // What the world can say without generating: the chunk is here (or
+            // now is, loaded from the database), the summary is here, or the
+            // chunk has never existed. An error falls through to the paths
+            // below, which report it.
+            let known = match request.level {
+                None => world
+                    .load_stored(&request.domain, request.pos)
+                    .map(|stored| if stored { Known::Here } else { Known::Never }),
+                Some(level) => world
+                    .summary_stored(&request.domain, level, request.pos)
+                    .map(|summary| summary.map_or(Known::Never, Known::Summary)),
+            };
+            report.generating += at.elapsed();
+            if let Ok(Known::Summary(blob)) = known {
+                report.summaries += 1;
+                let _ = request.reply.send(Some(crate::transport::endpoint::Served {
+                    blob,
+                    tint: [u8::MAX; 3],
+                    sealed: false,
+                }));
+                continue;
+            }
+            if matches!(known, Ok(Known::Never)) {
+                if pool.is_generating(&request.domain, request.pos)
+                    || pool.submit(&request.domain, request.pos, world.seed())
+                {
+                    parked.park(request);
+                    report.to_workers += 1;
+                    continue;
+                }
+                // The pool is full. Everything left waits for the next pass,
+                // as it does when the clock runs out: a full pool is the same
+                // statement about this tick's capacity.
+                let rest: Vec<crate::transport::endpoint::ChunkRequest> =
+                    std::iter::once(request).chain(queue).collect();
+                report.deferred = rest.len();
+                shared.requeue_chunk_requests(rest);
+                break;
+            }
+            // Stored, resident, or an error the paths below report: served here.
+        }
         // A summary is answered and nothing else happens: no light, no fluid,
         // no residency. It is the shape of land a mile away, and everything
         // below this that travels with a chunk would be work done for a client
@@ -739,10 +963,12 @@ fn serve_chunk_requests(
             fluidics,
             control,
             request,
+            None,
             &mut report,
         );
         report.chunks += 1;
     }
+    report.waiting = parked.waiting() + parked.ready.len();
     report
 }
 
@@ -762,6 +988,7 @@ fn serve_one_chunk(
     fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
     control: &Control,
     request: crate::transport::endpoint::ChunkRequest,
+    tint: Option<[u8; 3]>,
     report: &mut ServeReport,
 ) {
     let at = std::time::Instant::now();
@@ -853,13 +1080,18 @@ fn serve_one_chunk(
     // estimate that omits the tint is over-eager by exactly one chunk's worth
     // of it. Bounded, then — not the unbounded overrun the clock exists to
     // prevent — but there is no reason for the estimate to be wrong.
-    let tint = if blob.is_some() {
-        let at = std::time::Instant::now();
-        let colour = source.tint(&request.domain, request.pos, world.seed());
-        report.generating += at.elapsed();
-        colour
-    } else {
-        [u8::MAX; 3]
+    //
+    // A worker that generated the chunk computed its tint too, in which case
+    // it arrives here and the script call is skipped.
+    let tint = match (tint, blob.is_some()) {
+        (Some(colour), true) => colour,
+        (None, true) => {
+            let at = std::time::Instant::now();
+            let colour = source.tint(&request.domain, request.pos, world.seed());
+            report.generating += at.elapsed();
+            colour
+        }
+        (_, false) => [u8::MAX; 3],
     };
 
     // A failed send means the connection went away between asking and being
@@ -1630,12 +1862,12 @@ impl ServerHandle {
         //
         // After the registry is built and before anything generates, which is
         // the only window where both are true.
+        let fluid_ids: Vec<(String, tiamot_core::fluid::FluidId)> = fluids
+            .iter()
+            .map(|(id, registered)| (registered.name.clone(), id))
+            .collect();
         if let Some(loaded) = host.as_mut() {
-            let ids: Vec<(String, tiamot_core::fluid::FluidId)> = fluids
-                .iter()
-                .map(|(id, registered)| (registered.name.clone(), id))
-                .collect();
-            loaded.vm_mut().set_fluid_ids(&ids);
+            loaded.vm_mut().set_fluid_ids(&fluid_ids);
         }
 
         // **The world pre-pass, and the maps it reads and writes.**
@@ -1688,6 +1920,38 @@ impl ServerHandle {
             }
         }
 
+        // **The generation workers**, built now that everything a generator may
+        // depend on exists: the mod set is frozen, the fluid ids are assigned
+        // and the world pre-pass has left its maps. Each worker loads its own
+        // VM from the same three, the way a restarted server would. See
+        // `worldgen` for why terrain leaves the tick and what a mod has to
+        // hold to for that to be sound.
+        //
+        // A pool that cannot start is logged and the tick generates as it
+        // always did. Slower, not wrong.
+        let workers = match (host.as_ref(), settings.mods_path.as_ref()) {
+            (Some(loaded), Some(mods_root)) if crate::worldgen::worker_count() > 0 => {
+                let spec = crate::worldgen::WorkerSpec {
+                    mods_root: mods_root.clone(),
+                    enabled: settings.enabled_mods.clone(),
+                    limits: VmLimits::default(),
+                    fluid_ids: fluid_ids.clone(),
+                    maps: world.all_maps().unwrap_or_else(|err| {
+                        error!("could not read this world's maps for the workers: {err}");
+                        Vec::new()
+                    }),
+                    blocks: loaded.vm().registered_blocks(),
+                };
+                match crate::worldgen::Pool::start(&spec, crate::worldgen::worker_count()) {
+                    Ok(pool) => Some(pool),
+                    Err(err) => {
+                        error!("terrain will generate on the tick: {err}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         // Which materials drink, keyed by world id for the same reason
         // emissions are — and with the SUCCESSOR resolved through the same
         // table, so `becomes = "damp_dirt"` names the same block on a world
@@ -2140,6 +2404,10 @@ impl ServerHandle {
                     let mut dialog_screens: Option<std::sync::Arc<Screens>> = None;
                     // Either the mods generate terrain, or there are no mods
                     // and the world is air. Both are legitimate.
+                    // The generation workers, if they started, and what is
+                    // waiting on them. Both live as long as the tick does.
+                    let mut workers = workers;
+                    let mut parked = Parked::default();
                     let mut source = match host {
                         Some(mut host) => {
                             // Point `game.get_light` at the world now that
@@ -2785,6 +3053,23 @@ impl ServerHandle {
                                         player: *uuid.as_bytes(),
                                         name,
                                     });
+                                    // **The ground under a new player, this
+                                    // tick.** Their connection asks for it too,
+                                    // and since the generation workers that
+                                    // answer arrives a tick later than it used
+                                    // to — a tick in which the body hovers on
+                                    // terrain read as solid, and a mod's
+                                    // `on_player_join` finds nothing under
+                                    // them. One chunk, generated here as a
+                                    // transfer's landing chunk is, and the join
+                                    // stands on something from its first tick.
+                                    let spawn = tiamot_core::domain::OVERWORLD;
+                                    if !world.is_sparse(spawn)
+                                        && let Err(err) =
+                                            world.chunk(spawn, shared.spawn.chunk(), &mut source)
+                                    {
+                                        warn!("could not load the chunk under a joining player: {err}");
+                                    }
                                 }
                             }
                             // A player who left takes their open dialogs with
@@ -3636,7 +3921,10 @@ impl ServerHandle {
                             &fluidics,
                             &control,
                             crate::transport::endpoint::SERVE_TIME_BUDGET,
+                            workers.as_mut(),
+                            &mut parked,
                         );
+                        control.note_generated_off_tick(served.from_workers);
 
                         phases.mark("serving");
                         // Light, once, after every edit this tick has landed.
@@ -4126,8 +4414,34 @@ impl ServerHandle {
                                 .map(str::to_owned)
                                 .collect();
                             for domain in wet {
+                            // **Land a mod poured into before it was loaded is
+                            // loaded now**, before the solver reads it as solid
+                            // and squeezes the pour out — see
+                            // `Fluidics::poured_into_unloaded`. Generated on
+                            // the tick if it must be, as an edit into unloaded
+                            // land already is: a mod that writes somewhere
+                            // loads it, whatever it writes.
+                            let poured = fluidics
+                                .read()
+                                .expect("fluid lock")
+                                .get(&domain)
+                                .map(crate::fluid::Fluidics::poured_into_unloaded)
+                                .unwrap_or_default();
+                            for pos in &poured {
+                                if !world.is_sparse(&domain)
+                                    && let Err(err) = world.chunk(&domain, *pos, &mut source)
+                                {
+                                    warn!(?pos, "could not load a chunk a mod poured into: {err}");
+                                }
+                            }
                             let mut ponds = fluidics.write().expect("fluid lock");
                             let fluid = ponds.of(&domain);
+                            for pos in poured {
+                                // Marked loaded with the pour kept: `chunk_loaded`
+                                // leaves the layer alone for an empty saved one,
+                                // and a chunk nobody had loaded has nothing saved.
+                                fluid.chunk_loaded(pos, tiamot_core::fluid::FluidLayer::empty());
+                            }
                             let changes = fluid.tick(
                                 &domain,
                                 &world,

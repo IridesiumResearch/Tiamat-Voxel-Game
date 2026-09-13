@@ -39,6 +39,7 @@ pub mod storage;
 pub mod trace;
 pub mod transport;
 pub mod world;
+pub mod worldgen;
 
 pub use cert::{CertError, ServerCert};
 pub use config::{Config, ConfigError};

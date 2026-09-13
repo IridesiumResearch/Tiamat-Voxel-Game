@@ -277,8 +277,34 @@ out of the terrain rather than having to be described.
 
 **Heightmaps still exist and are still right** when a heightmap is what you
 mean. `game.noise_heightmap` + `buf:fill_below_heightmap` is 52 us a chunk
-against 719 us for terrain-with-caves — fourteen times cheaper, and worldgen
-runs on the simulation tick.
+against 719 us for terrain-with-caves — fourteen times cheaper. Cheaper still
+matters even though generation no longer runs on the tick: a worker is a core,
+and a chunk that takes 60 ms is a core for 60 ms.
+
+**Your generator runs off the tick, in a VM of its own.** The server loads your
+mod set a second time on worker threads — same mods, same order, same fluid ids,
+same maps — and `on_generate` and `register_chunk_tint` run there, never on the
+simulation thread. This is what lets a chunk cost more than a tick without the
+tick paying for it, and it is why generation is a pure function of `pos` (which
+carries the seed), your density programs and your maps:
+
+- **Nothing from the tick is visible.** No players, no entities, no edits, no
+  `game.get_block` or `game.get_light` — the worker VM has no world to look at.
+  A generator that reads any of those was already producing terrain that
+  depended on who was standing where, which the determinism gate forbids.
+- **`on_world_init` did not run in the worker.** It ran once, in the world's
+  life, on the tick — and what it left behind is the maps, which the worker has.
+  State it stored in a Lua table is not there. Put what a generator needs in a
+  map or derive it from the seed.
+- **Lua state persists per worker, not per world.** A counter you keep between
+  `on_generate` calls counts one worker's chunks. Log it as such, or do not rely
+  on it; nothing a generator writes to a table reaches your mod on the tick.
+- **An error disables your mod everywhere.** A generator that errors in one
+  worker is disabled in every worker and on the tick (charter rule 10), so a
+  world is never terrain from one VM and air from another.
+
+The reference mods hold to all four without trying, because a generator that
+describes a field has no reason to reach for anything else.
 
 ### 6. Mods register named actions; the engine owns the keys
 

@@ -467,6 +467,29 @@ impl Fluidics {
         self.loaded.contains(&pos)
     }
 
+    /// Chunks holding fluid that was put there before the chunk was loaded.
+    ///
+    /// A mod's `game.set_fluid` lands wherever it says, loaded or not — the
+    /// fluid store has no world to ask — and Sub-Node Contract §4.2 makes the
+    /// solver read unloaded terrain as solid, so a pour into land the tick has
+    /// not loaded would be squeezed out of existence on the next fluid tick.
+    /// The tick asks this before the solver runs and loads those chunks first,
+    /// exactly as an edit into unloaded land loads it. Since the generation
+    /// workers, a chunk a player is standing beside can be a tick from
+    /// resident, which is how `lake`, said at the moment of joining, lost its
+    /// milk.
+    #[must_use]
+    pub fn poured_into_unloaded(&self) -> Vec<ChunkPos> {
+        // Through `dirty`, which is ordered and which every pour marks, rather
+        // than the layers' `HashMap`: charter rule 4 keeps hash order out of
+        // anything the tick acts on, and which chunk generates first is that.
+        self.dirty
+            .iter()
+            .filter(|pos| !self.loaded.contains(pos) && self.layers.contains_key(pos))
+            .copied()
+            .collect()
+    }
+
     /// Takes a chunk's fluid as it came out of the database.
     ///
     /// An empty layer is not stored: the map is for chunks that hold something,

@@ -388,6 +388,15 @@ expands.
 All worldgen randomness comes from engine-provided seeded noise and per-chunk RNG
 streams (charter rule 4). Sub-node detail does not change that.
 
+**Generation runs off the simulation thread** (`server::worldgen`, 2026-09-13).
+A pool of workers, each holding its own script VM over the same frozen mod set,
+generates chunks the tick has never seen; the tick adopts, lights, encodes and
+sends them. What that requires of a generator is exactly what charter rule 4
+already required — a pure function of seed and position, plus the maps the world
+pre-pass left — and the two VMs are held to bit-identical output by test. A mod
+disabled in any VM is disabled in all of them, so no world is terrain from one
+worker and air from another.
+
 **A palette fill is several fills, evaluated once.** `ChunkBuffer::fill_palette`
 maps a field's value through a sorted table of thresholds to a material, so
 strata by depth are one evaluation rather than one per material. Its sub-node
