@@ -844,19 +844,26 @@ game.register_on_tick(function()
         return
     end
     local at = game.get_block({ x = 2, y = 9, z = 2 })
-    if at == nil then
+    -- Nil until the chunk is resident, and air until the brick above has
+    -- landed: a chunk can be resident before this mod's own edit is applied
+    -- (the tick loads the ground under a joining player itself), and reading
+    -- the ground as the answer would decide on nothing.
+    if at == nil or at.material == 0 then
         return
     end
     said = true
     -- The whole claim: what `get_block` reports is comparable against what
     -- `get_block_id` hands out. A world id here reads as a different block.
+    -- The answer goes to a DIFFERENT block per run, so the second run's
+    -- reading is judged and not the first run's stored answer.
     if at.material == brick then
-        game.set_block({ x = 4, y = 9, z = 2 }, "second:agreed")
+        game.set_block({ x = ANSWER_X, y = 9, z = 2 }, "second:agreed")
     else
-        game.set_block({ x = 4, y = 9, z = 2 }, "second:disagreed")
+        game.set_block({ x = ANSWER_X, y = 9, z = 2 }, "second:disagreed")
     end
 end)
-"#,
+"#
+        .replace("ANSWER_X", if with_first { "4" } else { "5" }),
     )
     .expect("script");
     root
@@ -864,15 +871,20 @@ end)
 
 #[test]
 fn a_block_read_back_is_in_the_id_space_a_mod_speaks() {
-    // **Charter rule 8, and a defect that shipped for one day.** A chunk holds
+    // **Charter rule 8, and a defect that shipped twice.** A chunk on disk holds
     // WORLD ids — stable across sessions, which is what the database needs —
-    // and `game.get_block_id` hands out RUNTIME ids, which registration
-    // produces. In a world made and opened by the same mod set the two
-    // coincide, which is why the first test of `game.get_block` passed while
-    // it returned the wrong one.
+    // and a chunk in memory holds RUNTIME ids, because the codec translates on
+    // load and save; `game.get_block_id` hands out runtime ids too. In a world
+    // made and opened by the same mod set the two coincide, which is why the
+    // first `game.get_block` passed while returning the wrong space, and why
+    // the second — which translated a runtime id AGAIN, as though the chunk
+    // held world ids — passed as well: this test read the first run's stored
+    // answer before the second run's wrong one landed.
     //
     // So this makes them diverge: a world created with two mods and reopened
-    // with one, which shifts every id the removed mod was in front of.
+    // with one, which shifts every id the removed mod was in front of — and
+    // the answer is written to a different block per run, so the second run
+    // is judged on its own reading.
     let world = scratch("id-space-world");
 
     // First run: both mods, so `second:brick` gets a world id after the
@@ -924,11 +936,11 @@ fn a_block_read_back_is_in_the_id_space_a_mod_speaks() {
                 .map(|entry| entry.id)
                 .unwrap_or_else(|| panic!("the mod registers {name}"))
         };
-        bot.expect_block(BlockPos::new(4, 9, 2), id("second:agreed"), PATIENCE)
+        bot.expect_block(BlockPos::new(5, 9, 2), id("second:agreed"), PATIENCE)
             .await
             .expect(
                 "`game.get_block` reported a material a mod cannot compare against — \
-                 a world id where a runtime id was wanted",
+                 a runtime id translated as though it were a world id",
             );
     });
     server.stop();

@@ -200,29 +200,21 @@ impl sight::Access for Shared {
         let Some(view) = chunk.get_block(pos) else {
             return sight::Reading::Absent;
         };
-        // **In the id space a mod can compare against.** A chunk holds WORLD
-        // ids — stable across sessions, which is what the database needs — and
-        // `game.get_block_id` hands out RUNTIME ids, which is what registration
-        // produces. Charter rule 8 says those are different numbers, and
-        // handing a mod the wrong one is a comparison that works whenever the
-        // two happen to coincide and fails when they do not: a world opened
-        // with a different mod set from the one that made it.
+        // **In the id space a mod can compare against — which is the one the
+        // chunk already holds.** A chunk in memory holds RUNTIME ids: the codec
+        // translates to the world's own table on save and back on load
+        // (`persist::codec`), so what `get_block` reads is what
+        // `game.get_block_id` hands out, with no conversion here.
         //
-        // The same defect as the fluid-pour one this codebase already carries a
-        // note about, and it shipped in `game.get_block` for exactly one day.
-        //
-        // A material no mod registered has no runtime id, and comes back as
-        // `engine:unknown`'s — which is what charter rule 8 promises a
-        // preserved id reads as, rather than as air, which would invite a mod
-        // to build over it.
-        let runtime = |material: tiamot_core::MaterialId| {
-            if material.is_air() {
-                return material;
-            }
-            world
-                .runtime_material(material.0)
-                .unwrap_or(tiamot_core::MaterialId::UNKNOWN)
-        };
+        // There used to be one, and it was a defect: `runtime_material` maps a
+        // WORLD id to a runtime id, and applying it to a runtime id is a second
+        // translation through a table the value is not in. It coincides with
+        // the identity for as long as runtime and world ids happen to agree —
+        // every fresh world with its original mod set — and comes apart the
+        // moment a mod is removed: a brick read back as a filler nobody has
+        // loaded. `a_block_read_back_is_in_the_id_space_a_mod_speaks` is the
+        // test, and it passed for a day on a stored answer from the run before.
+        let runtime = |material: tiamot_core::MaterialId| material;
         match view {
             tiamot_core::BlockView::Uniform(material) => sight::Reading::Single {
                 material: runtime(material),

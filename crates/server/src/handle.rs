@@ -3316,19 +3316,15 @@ impl ServerHandle {
                             // The mods' veto, after the engine's own rules and
                             // before the player is charged — a refusal must not
                             // cost them anything.
-                            // **In the id space a mod can compare against.**
-                            // `material` here is a WORLD id — stable across
-                            // sessions, which is what the database needs — and
-                            // `game.get_block_id` hands out RUNTIME ids, which
-                            // is what registration produces. Charter rule 8 says
-                            // those are different numbers, and handing a mod the
-                            // wrong one is a comparison that works whenever the
-                            // two happen to coincide and fails when they do not.
-                            //
-                            // Reported from the window as milk that "sometimes
-                            // just doesn't pour, it places like a block".
-                            let as_registered =
-                                world.runtime_material(material.0).unwrap_or(material);
+                            // **In the id space a mod can compare against**, which
+                            // is the one the request arrived in: a client names
+                            // what it holds by the RUNTIME id of the material
+                            // table it was sent, and a chunk in memory holds the
+                            // same. This used to translate it again as though it
+                            // were a WORLD id — the codec's business, met only on
+                            // load and save — and a world with a mod removed
+                            // asked the mods to judge the wrong block.
+                            let as_registered = material;
                             let verdict = source.may_place(&tiamot_core::script::PlaceEvent {
                                 player: *request.actor.as_bytes(),
                                 block: plan.block,
@@ -3510,13 +3506,12 @@ impl ServerHandle {
                                     let Some(material) = world.material_at(tiamot_core::domain::OVERWORLD, pos) else {
                                         continue;
                                     };
-                                    // The world stores WORLD ids and a mod
-                                    // speaks RUNTIME ones (charter rule 8), so
-                                    // the set is compared — and the event
-                                    // carried — in the mod's own space.
-                                    let Some(material) = world.runtime_material(material.0) else {
-                                        continue;
-                                    };
+                                    // A resident chunk holds RUNTIME ids — the
+                                    // codec translates on load and save — which
+                                    // is the space a mod speaks and the set below
+                                    // is in. This used to translate again, as if
+                                    // the cell were a WORLD id, and a world with
+                                    // a mod removed offered the wrong blocks.
                                     if random_tick_materials.contains(&material) {
                                         random_ticks.push(
                                             tiamot_core::script::RandomTickEvent {
@@ -4255,16 +4250,14 @@ impl ServerHandle {
                                 // The first non-air cell names the block: a
                                 // mixed block has no single material, and the
                                 // occupancy below is what says so.
-                                let world_id = cells
+                                // Already a RUNTIME id: a chunk in memory holds
+                                // the ids a mod speaks, and the world's own
+                                // table is only ever met at the codec.
+                                let material = cells
                                     .iter()
                                     .find(|cell| !cell.is_air())
                                     .copied()
                                     .unwrap_or(tiamot_core::MaterialId::AIR);
-                                // World id to RUNTIME id: what a mod holds is
-                                // never what a chunk holds (charter rule 8).
-                                let material = world
-                                    .runtime_material(world_id.0)
-                                    .unwrap_or(tiamot_core::MaterialId::UNKNOWN);
                                 let mut occupancy = 0u32;
                                 for (index, cell) in cells.iter().enumerate() {
                                     if !cell.is_air() {
