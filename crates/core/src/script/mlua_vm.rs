@@ -7637,7 +7637,12 @@ fn compile_density(
             let crate::detgen::Op::Noise { params, stream, .. } = density_noise(spec) else {
                 unreachable!("density_noise builds a noise op")
             };
-            ops.push(crate::detgen::Op::Contour { params, stream });
+            let signed: bool = spec.get::<Option<bool>>("signed")?.unwrap_or(false);
+            ops.push(crate::detgen::Op::Contour {
+                params,
+                stream,
+                signed,
+            });
         }
         "map" => {
             let handle: mlua::AnyUserData = spec.get("map").map_err(|_| {

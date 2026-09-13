@@ -2360,7 +2360,10 @@ function game.density(spec) end
 ---steeply and a pond where it lies flat. Same `stream`, `frequency`,
 ---`octaves` as a `noise` node; no amplitude, since a distance has none.
 ---Capped at 256 blocks. Costs five samples of the ground plane per column,
----less than one 3D octave.
+---less than one 3D octave. With `signed = true` the distance is negative on
+---the noise's negative side: one field that says which side of the line a
+---point is on and how far — a coastline, land where it is positive and the
+---cliff rising over its first few blocks.
 
 ---A structure built once, from a list of blocks, for `buf:scatter` to stamp.
 ---

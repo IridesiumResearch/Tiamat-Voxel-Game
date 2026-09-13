@@ -231,6 +231,11 @@ pub enum Op {
         params: FractalParams,
         /// Mixed into the world seed, as a noise node's.
         stream: u64,
+        /// Negative on the noise's negative side, so one field says which
+        /// side of the line a point is on and how far: a coastline, with the
+        /// land where it is positive and the cliff rising over the first few
+        /// blocks of it. Unsigned, it is the distance alone.
+        signed: bool,
     },
     /// Pop two, push the sum.
     Add,
@@ -644,8 +649,8 @@ impl Density {
                 // A distance: never negative, never past the cap. Nothing
                 // tighter without evaluating it, and a crack is thin enough
                 // that a box's bound would rarely exclude it anyway.
-                Op::Contour { .. } => stack.push(Interval {
-                    low: 0.0,
+                Op::Contour { signed, .. } => stack.push(Interval {
+                    low: if *signed { -CONTOUR_FAR } else { 0.0 },
                     high: CONTOUR_FAR,
                 }),
                 Op::Map { map, range } => stack.push(Self::map_bounds(map, *range, &axes)),
@@ -773,9 +778,13 @@ impl Density {
                     }
                     height += 1;
                 }
-                Op::Contour { params, stream } => {
+                Op::Contour {
+                    params,
+                    stream,
+                    signed,
+                } => {
                     let slot = &mut stack[height];
-                    contour_distance(seed ^ stream, region, params, slot)?;
+                    contour_distance(seed ^ stream, region, params, *signed, slot)?;
                     height += 1;
                 }
                 Op::Map { map, .. } => {
@@ -970,6 +979,7 @@ fn contour_distance(
     seed: u64,
     region: &Region3d,
     params: &FractalParams,
+    signed: bool,
     out: &mut [f32],
 ) -> Result<(), DensityError> {
     const HALF: f32 = 0.5;
@@ -1036,6 +1046,11 @@ fn contour_distance(
             } else {
                 CONTOUR_FAR
             };
+            let distance = if signed && centre[column] < 0.0 {
+                -distance
+            } else {
+                distance
+            };
             for y in 0..region.height {
                 out[x + region.width * (y + region.height * z)] = distance;
             }
@@ -1079,7 +1094,12 @@ mod tests {
             stream: 5,
         }])
         .expect("compiles");
-        let contour = Density::compile(vec![Op::Contour { params, stream: 5 }]).expect("compiles");
+        let contour = Density::compile(vec![Op::Contour {
+            params,
+            stream: 5,
+            signed: false,
+        }])
+        .expect("compiles");
         let region = Region3d {
             origin_x: 100.5,
             origin_y: 0.0,
