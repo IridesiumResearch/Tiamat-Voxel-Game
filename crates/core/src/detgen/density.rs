@@ -64,8 +64,9 @@ use super::noise::{BufferSizeMismatch, Fractal, FractalParams, Region3d, fill_3d
 /// A bound rather than a limit anybody should meet: a hand-written field is a
 /// dozen nodes and this is two orders above that. It exists because the program
 /// arrives from a script and a runaway table should be refused with a message
-/// rather than allocated.
-pub const MAX_OPS: usize = 512;
+/// rather than allocated. (512 until the coast's code field — eighteen strata
+/// and four zones over a coastline read eight times — came to 658.)
+pub const MAX_OPS: usize = 1024;
 
 /// How many array buffers may be live at once.
 ///
@@ -124,12 +125,12 @@ impl Interval {
     /// Interval arithmetic in `f32` rounds to nearest, which can move an end
     /// the WRONG way by half an ulp per operation, and a bound that is too
     /// narrow by one ulp is still a bound that can put a hole in a world.
-    /// [`MAX_OPS`] caps the program at 512 operations, so `512 × 2⁻²³` relative
+    /// [`MAX_OPS`] caps the program at 1024 operations, so `1024 × 2⁻²³` relative
     /// covers the accumulation with room to spare; the absolute term covers an
     /// interval that straddles zero, where relative means nothing.
     fn widened(self) -> Self {
         let magnitude = self.low.abs().max(self.high.abs());
-        let margin = magnitude * 3.1e-5 + 1e-6;
+        let margin = magnitude * 6.2e-5 + 1e-6;
         Self {
             low: self.low - margin,
             high: self.high + margin,
