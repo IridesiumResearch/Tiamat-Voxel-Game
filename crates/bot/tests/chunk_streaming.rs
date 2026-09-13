@@ -161,17 +161,19 @@ fn rock_behind_rock_is_never_streamed_and_everything_above_it_is() {
     // cylinder — eight out, twelve up and down at the default view — and a
     // player standing on the ground asked for every chunk below their feet:
     // roughly 2,500 chunks of rock, each generated, relit, encoded and sent,
-    // none of them visible. The streamer now floods outward from the player
-    // and stops at a chunk that is one opaque, unlit material through and
-    // through (`Streamer::sealed`), so it sends the ground and one layer into
-    // it and nothing under that.
+    // none of them visible. A chunk that is one opaque, unlit material through
+    // and through (`Streamer::sealed`) now casts a shadow toward the player,
+    // and nothing in shadow is asked for: the ground arrives, one layer into
+    // it arrives, and the rock under that never does.
     //
     // Three assertions. Everything at or above ground arrives — sealing must
     // never withhold a chunk the player could see. Nothing arrives more than
-    // two layers below ground: the reference world's top row of ground sits on
-    // solid white, so the chunk holding that row is mixed and open, the one
-    // under it is sealed, and the flood stops there. And the total is less
-    // than the interest set, which is the saving, printed.
+    // three layers below ground: the reference world's top row of ground sits
+    // on solid white, so the chunk holding that row is mixed and open, the one
+    // under it is the sealed shell, and one under THAT may be asked for in the
+    // first passes before the shell has arrived and cast its shadow — the
+    // price of asking by distance instead of waiting on round trips. And the
+    // total is less than the interest set, which is the saving, printed.
     let view = ViewDistance {
         horizontal: 3,
         vertical: 5,
@@ -197,8 +199,17 @@ fn rock_behind_rock_is_never_streamed_and_everything_above_it_is() {
             .min()
             .expect("chunks arrived");
         assert!(
-            deepest >= spawn_chunk.y - 2,
-            "a chunk at y = {deepest} arrived, more than two layers into solid rock"
+            deepest >= spawn_chunk.y - 3,
+            "a chunk at y = {deepest} arrived, more than three layers into solid rock"
+        );
+        let wasted = arrived
+            .iter()
+            .filter(|pos| pos.y < spawn_chunk.y - 2)
+            .count();
+        assert!(
+            wasted <= 8,
+            "{wasted} chunks under the sealed shell arrived; one in-flight batch of \
+             first-pass waste is the most the shadow rule allows"
         );
         assert!(
             deepest < spawn_chunk.y,
@@ -235,13 +246,16 @@ fn digging_into_sealed_rock_streams_what_lay_behind_it() {
     block_on(async {
         let mut alice = join(&server, "Alice").await;
         let arrived = collect_until_quiet(&mut alice).await;
+        // The deepest chunk sent in the player's own column is the sealed
+        // shell as it stands — the first solid layer, or one under it if the
+        // first passes asked before it had arrived. Carve one block out of it,
+        // with a material that is not what it is made of.
         let deepest = arrived
             .iter()
+            .filter(|pos| pos.x == spawn_chunk.x && pos.z == spawn_chunk.z)
             .map(|pos| pos.y)
             .min()
-            .expect("chunks arrived");
-        // The deepest chunk sent is the sealed shell. Carve one block out of
-        // it, with a material that is not what it is made of.
+            .expect("the column under the player arrived");
         let sealed = ChunkPos::new(spawn_chunk.x, deepest, spawn_chunk.z);
         let below = ChunkPos::new(sealed.x, sealed.y - 1, sealed.z);
         assert!(

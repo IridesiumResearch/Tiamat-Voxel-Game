@@ -90,10 +90,19 @@ pub struct Streamer {
     /// Chunks the client holds that are one opaque, unlit material through and
     /// through: a wall nothing behind can be seen past. See [`Self::sealed`].
     sealed: BTreeSet<ChunkPos>,
-    /// Which positions in the detail radius can be seen from the centre, or
-    /// `None` when something has changed and it has to be walked again. See
-    /// [`Self::reachable`].
-    reachable: Option<BTreeSet<ChunkPos>>,
+    /// Positions found to be in shadow — behind sealed rock with no open way in
+    /// — so far as anything known could change it. A memo, not a fact: an open
+    /// chunk arriving or a sealed one being dug into drops the entries it could
+    /// have lifted ([`Self::lift_shadows`]); a move or a resize drops them all;
+    /// a sealed chunk arriving drops nothing, because a shadow only ever grows
+    /// from that. Kept rather than cleared on every delivery because at the
+    /// default view working it all out again costs **1.43 ms** per pass, and a
+    /// pass runs every tick for every connection with something in flight;
+    /// kept, a whole join's 345 passes cost 152 ms of streamer time, 0.44 ms a
+    /// pass, most of it the interest set's own ordering. Measured by
+    /// `tests::measure_a_pass_at_the_default_view`, release. See
+    /// [`Self::is_shadowed`].
+    shadowed: BTreeSet<ChunkPos>,
 }
 
 /// How many horizon positions one pass will look at before giving up.
@@ -120,7 +129,7 @@ impl Streamer {
             horizon_order: Vec::new(),
             horizon_cursor: 0,
             sealed: BTreeSet::new(),
-            reachable: None,
+            shadowed: BTreeSet::new(),
         };
         streamer.reorder_horizon();
         streamer
@@ -158,7 +167,7 @@ impl Streamer {
         }
         self.domain = domain.to_owned();
         self.centre = centre;
-        self.reachable = None;
+        self.shadowed.clear();
         self.reorder_horizon();
         // Abandoned rather than awaited. A reply carrying a chunk of the domain
         // this connection has just left would be decoded into the new one at
@@ -188,7 +197,7 @@ impl Streamer {
     /// Whether every chunk in range has been sent.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.in_flight.is_empty() && self.needed_now().is_empty()
+        self.in_flight.is_empty() && self.nothing_needed()
     }
 
     /// The radius this client is being streamed at.
@@ -212,7 +221,7 @@ impl Streamer {
             return Vec::new();
         }
         self.view = view;
-        self.reachable = None;
+        self.shadowed.clear();
         self.horizon = horizon_for(view);
         self.rings = Rings::new(u32::from(view.horizontal), Rings::MARGIN);
         self.reorder_horizon();
@@ -231,7 +240,7 @@ impl Streamer {
             return Vec::new();
         }
         self.centre = centre;
-        self.reachable = None;
+        self.shadowed.clear();
         self.reorder_horizon();
         // Requests for chunks that just left range are abandoned. Keeping them
         // would deliver a chunk the client was told to unload, and hold budget
@@ -271,73 +280,145 @@ impl Streamer {
             self.sealed.remove(pos);
         }
         if !departed.is_empty() {
-            self.reachable = None;
+            self.shadowed.clear();
         }
         departed.sort_unstable();
         departed.dedup();
         departed
     }
 
-    /// Up to `limit` chunks in range that are neither sent nor in flight,
-    /// nearest first.
-    ///
-    /// Does not mark them sent — the caller does that once the send succeeds,
-    /// so a failure leaves them to be retried.
-    #[must_use]
+    /// The next positions to request, nearest first, at most `limit` of them —
+    /// everything in range that is not already held or in flight and is not
+    /// in shadow behind sealed rock.
     pub fn next_needed(&mut self, limit: usize) -> Vec<ChunkPos> {
         if limit == 0 {
             return Vec::new();
         }
-        if self.reachable.is_none() {
-            self.reachable = Some(self.walk_reachable());
+        // **Nearest first, and only what is not in shadow.** The order is the
+        // plain streaming distance, as it was before sealing existed: the
+        // world fills in from the player outward, continuously, at whatever
+        // rate the in-flight budget allows. Sealing only REMOVES positions from
+        // that order — see `is_shadowed` — it never makes one wait for another.
+        // The first version of this walked a flood from the centre that could
+        // only expand through chunks already delivered, and that made the
+        // frontier advance one chunk per round trip: a player watched rings
+        // arrive one at a time, seven chunks out, and reported exactly that.
+        let mut needed = Vec::with_capacity(limit.min(64));
+        for pos in interest::chunks_around(self.centre, self.view) {
+            if self.sent.contains(&pos) || self.in_flight.contains(&pos) {
+                continue;
+            }
+            if self.shadowed.contains(&pos) {
+                continue;
+            }
+            if self.is_shadowed(pos) {
+                self.shadowed.insert(pos);
+                continue;
+            }
+            needed.push(pos);
+            if needed.len() == limit {
+                break;
+            }
         }
-        let reachable = self.reachable.as_ref().expect("just filled");
-        Self::needed_from(
-            &self.sent,
-            &self.in_flight,
-            reachable,
-            self.centre,
-            self.view,
-            limit,
-        )
+        needed
     }
 
-    /// The positions reachable now, without caching — for a `&self` question.
-    fn needed_now(&self) -> Vec<ChunkPos> {
-        let reachable = self
-            .reachable
-            .clone()
-            .unwrap_or_else(|| self.walk_reachable());
-        Self::needed_from(
-            &self.sent,
-            &self.in_flight,
-            &reachable,
-            self.centre,
-            self.view,
-            usize::MAX,
-        )
-    }
-
-    /// `next_needed`'s selection, as a function of its inputs.
-    fn needed_from(
-        sent: &BTreeSet<ChunkPos>,
-        in_flight: &BTreeSet<ChunkPos>,
-        reachable: &BTreeSet<ChunkPos>,
-        centre: ChunkPos,
-        view: ViewDistance,
-        limit: usize,
-    ) -> Vec<ChunkPos> {
-        interest::chunks_around(centre, view)
+    /// Whether nothing in range is left to ask for, without touching the memo.
+    fn nothing_needed(&self) -> bool {
+        !interest::chunks_around(self.centre, self.view)
             .into_iter()
-            .filter(|pos| {
-                !sent.contains(pos) && !in_flight.contains(pos) && reachable.contains(pos)
+            .any(|pos| {
+                !self.sent.contains(&pos)
+                    && !self.in_flight.contains(&pos)
+                    && !self.shadowed.contains(&pos)
+                    && !self.is_shadowed(pos)
             })
-            .take(limit)
-            .collect()
     }
 
-    /// Records that a delivered chunk is sealed: one opaque, unlit material
-    /// through and through.
+    /// Whether `pos` lies behind sealed rock with no open way in, so far as is
+    /// known — the one reason a position in range is not asked for.
+    ///
+    /// # The rule
+    ///
+    /// Walk from `pos` toward the centre, one chunk at a time along whichever
+    /// axis has furthest to go. The first chunk met that the client holds
+    /// decides: sealed, and `pos` is in its shadow; open, and there is a clear
+    /// line to it. Reaching the centre is a clear line too — the player is
+    /// standing in it. Chunks not yet held are walked through, because a chunk
+    /// nobody has seen yet is not evidence of anything.
+    ///
+    /// Before any of that: a face-neighbour the client holds and knows to be
+    /// open is a way in, whatever the ray says. That is how a cave under a
+    /// solid roof, entered from a shaft at its edge, is streamed chunk by chunk
+    /// along its length — and why this is not the rule "skip whatever is under
+    /// sealed rock", which would never send it.
+    ///
+    /// # What it costs, and what it saves
+    ///
+    /// Requests follow the streaming distance, so a chunk of rock can be asked
+    /// for before the chunk between it and the player has arrived and proved
+    /// sealed: about one layer of rock, in the columns nearest the player, in
+    /// the first passes of a join. After that the shadow is known and the rest
+    /// of the rock is never asked for. The flood this replaced wasted nothing
+    /// and advanced one chunk per round trip; this wastes a layer and lets the
+    /// world arrive by distance.
+    fn is_shadowed(&self, pos: ChunkPos) -> bool {
+        const FACES: [(i32, i32, i32); 6] = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ];
+        let open = |at: ChunkPos| self.sent.contains(&at) && !self.sealed.contains(&at);
+        if FACES.iter().any(|(dx, dy, dz)| {
+            open(ChunkPos::new(
+                pos.x.saturating_add(*dx),
+                pos.y.saturating_add(*dy),
+                pos.z.saturating_add(*dz),
+            ))
+        }) {
+            return false;
+        }
+        let mut at = pos;
+        loop {
+            at = Self::toward(at, self.centre);
+            if at == self.centre {
+                return false;
+            }
+            if self.sealed.contains(&at) {
+                return true;
+            }
+            if self.sent.contains(&at) {
+                return false;
+            }
+        }
+    }
+
+    /// One chunk from `at` toward `centre`, along the axis with furthest to go.
+    ///
+    /// Ties go to the vertical first, then x, then z — deterministic, so two
+    /// calls agree, and vertical first because rock is stacked in columns and a
+    /// ray that climbs early meets the sealed shell soonest.
+    fn toward(at: ChunkPos, centre: ChunkPos) -> ChunkPos {
+        let (dx, dy, dz) = (
+            i64::from(centre.x) - i64::from(at.x),
+            i64::from(centre.y) - i64::from(at.y),
+            i64::from(centre.z) - i64::from(at.z),
+        );
+        let (ax, ay, az) = (dx.abs(), dy.abs(), dz.abs());
+        if ay >= ax && ay >= az {
+            ChunkPos::new(at.x, at.y + dy.signum() as i32, at.z)
+        } else if ax >= az {
+            ChunkPos::new(at.x + dx.signum() as i32, at.y, at.z)
+        } else {
+            ChunkPos::new(at.x, at.y, at.z + dz.signum() as i32)
+        }
+    }
+
+    /// Records that a chunk reached the client and is sealed: one opaque,
+    /// unlit material through and through.
     ///
     /// # What this is for
     ///
@@ -351,11 +432,16 @@ impl Streamer {
     ///
     /// A sealed chunk is still SENT — its outer faces are what the player sees
     /// from the open side — but nothing is requested beyond it. What "beyond"
-    /// means is [`Self::reachable`].
-    pub fn sealed(&mut self, pos: ChunkPos) {
-        if self.sealed.insert(pos) {
-            self.reachable = None;
-        }
+    /// means is [`Self::is_shadowed`].
+    ///
+    /// Nothing is dropped from the shadow memo: a newly known wall can put
+    /// more in shadow, never less, and what it puts there is found on the next
+    /// pass. The open case is [`Self::delivered`].
+    pub fn delivered_sealed(&mut self, pos: ChunkPos) {
+        self.in_flight.remove(&pos);
+        self.summaries.remove(&pos);
+        self.sent.insert(pos);
+        self.sealed.insert(pos);
     }
 
     /// Records that a sealed chunk has been dug into: it is a wall no longer,
@@ -366,67 +452,37 @@ impl Streamer {
     /// hole, so whatever is behind it is what they will see next.
     pub fn unseal(&mut self, pos: ChunkPos) {
         if self.sealed.remove(&pos) {
-            self.reachable = None;
+            self.lift_shadows(pos);
         }
+    }
+
+    /// Drops from the shadow memo everything that `opened` — a chunk just
+    /// known to be open — could have brought out of shadow.
+    ///
+    /// A position's shadow is decided by its face-neighbours and by the chunks
+    /// on its walk toward the centre, and every step of that walk moves one
+    /// coordinate toward the centre — so the whole walk lies in the box
+    /// between the position and the centre. A chunk outside that box and not
+    /// touching the position cannot have changed the answer, and its entry
+    /// stays. On flat ground that is nearly all of them: a chunk of sky
+    /// arriving above the player is in no rock's box.
+    fn lift_shadows(&mut self, opened: ChunkPos) {
+        let centre = self.centre;
+        let between = |a: i32, b: i32, c: i32| (a.min(c)..=a.max(c)).contains(&b);
+        self.shadowed.retain(|pos| {
+            let touching =
+                (pos.x - opened.x).abs() + (pos.y - opened.y).abs() + (pos.z - opened.z).abs() == 1;
+            let on_the_way = between(pos.x, opened.x, centre.x)
+                && between(pos.y, opened.y, centre.y)
+                && between(pos.z, opened.z, centre.z);
+            !(touching || on_the_way)
+        });
     }
 
     /// How many held chunks are sealed.
     #[must_use]
     pub fn sealed_count(&self) -> usize {
         self.sealed.len()
-    }
-
-    /// The positions in the detail radius that could be seen from the centre.
-    ///
-    /// **A flood from the centre that stops at sealed chunks.** Every chunk the
-    /// flood touches is requestable. It expands only through chunks the client
-    /// already holds and knows to be open — anything else it touches is
-    /// requested but not expanded through, because a chunk not yet seen might
-    /// be a wall. So the world fills in a layer at a time, from the player
-    /// outward, through air and caves, and stops one chunk into the rock on
-    /// every side. The centre is expanded whatever it holds: the player is
-    /// standing in it.
-    ///
-    /// Cached until something changes what it depends on — the centre, the
-    /// radius, what is held, what is sealed — and cheap to rebuild: at most a
-    /// few thousand positions and six lookups each.
-    ///
-    /// This is deliberately reachability and not a rule like "skip a chunk
-    /// whose neighbour above is sealed". A cave under a solid roof is reached
-    /// from the side, and a rule about roofs would never send it: a hole in the
-    /// world exactly where the interesting terrain is.
-    fn walk_reachable(&self) -> BTreeSet<ChunkPos> {
-        {
-            let mut seen = BTreeSet::new();
-            let mut queue = std::collections::VecDeque::new();
-            seen.insert(self.centre);
-            queue.push_back(self.centre);
-            while let Some(at) = queue.pop_front() {
-                let open =
-                    at == self.centre || (self.sent.contains(&at) && !self.sealed.contains(&at));
-                if !open {
-                    continue;
-                }
-                for (dx, dy, dz) in [
-                    (1, 0, 0),
-                    (-1, 0, 0),
-                    (0, 1, 0),
-                    (0, -1, 0),
-                    (0, 0, 1),
-                    (0, 0, -1),
-                ] {
-                    let next = ChunkPos::new(
-                        at.x.saturating_add(dx),
-                        at.y.saturating_add(dy),
-                        at.z.saturating_add(dz),
-                    );
-                    if interest::contains(self.centre, self.view, next) && seen.insert(next) {
-                        queue.push_back(next);
-                    }
-                }
-            }
-            seen
-        }
     }
 
     /// How many more requests this connection may have outstanding.
@@ -459,9 +515,9 @@ impl Streamer {
         self.in_flight.remove(&pos);
         self.summaries.remove(&pos);
         if self.sent.insert(pos) {
-            // A newly held open chunk is somewhere the flood can now expand
-            // through; a sealed one is marked right after this and stops it.
-            self.reachable = None;
+            // A newly held open chunk may be a way into somewhere that was in
+            // shadow. A sealed one is [`Self::delivered_sealed`].
+            self.lift_shadows(pos);
         }
     }
 
@@ -741,10 +797,8 @@ mod tests {
     }
 
     /// Delivers everything needed, round after round, until nothing is —
-    /// what a connection does over successive passes. **The world arrives in
-    /// layers now**: a fresh streamer asks for the centre and its neighbours,
-    /// and for what lies beyond them only once those have arrived and are
-    /// known to be open, so one round is not the whole interest set.
+    /// what a connection does over successive passes. In an open world that
+    /// is one round; where sealing plays, a delivery can open the way to more.
     fn deliver_all(streamer: &mut Streamer) {
         loop {
             let needed = streamer.next_needed(usize::MAX);
@@ -760,17 +814,23 @@ mod tests {
     /// Delivers everything currently needed, sealing the positions `wall` says
     /// are rock, until nothing more is asked for. Returns every position sent.
     fn stream_all(streamer: &mut Streamer, wall: impl Fn(ChunkPos) -> bool) -> BTreeSet<ChunkPos> {
+        // **Eight at a time**, the in-flight cap one player gets. Delivering
+        // the whole cylinder in one round would ask for every chunk before any
+        // had arrived and proved sealed, which no real connection does; what
+        // sealing saves depends on the nearest rock arriving before the rock
+        // behind it is asked for, and eight a pass is what makes that so.
         let mut all = BTreeSet::new();
         loop {
-            let needed = streamer.next_needed(usize::MAX);
+            let needed = streamer.next_needed(8);
             if needed.is_empty() {
                 return all;
             }
             for pos in needed {
                 streamer.requested(pos);
-                streamer.delivered(pos);
                 if wall(pos) {
-                    streamer.sealed(pos);
+                    streamer.delivered_sealed(pos);
+                } else {
+                    streamer.delivered(pos);
                 }
                 all.insert(pos);
             }
@@ -780,8 +840,9 @@ mod tests {
     #[test]
     fn nothing_behind_a_sealed_chunk_is_ever_requested() {
         // **The reason sealing exists.** Solid rock from one chunk below the
-        // centre downward: the flood sends the first layer of rock — its top
-        // faces are the ground the player stands on — and nothing under it.
+        // centre downward: the first layer of rock is sent — its top faces are
+        // the ground the player stands on — and it casts a shadow over the
+        // rest, which is never asked for once it has arrived.
         // Without sealing, every position in the cylinder is sent, and at the
         // default view that is thousands of chunks of rock nobody can see.
         let mut streamer = tall_streamer();
@@ -791,10 +852,19 @@ mod tests {
             .map(|pos| pos.y)
             .min()
             .expect("something was sent");
-        assert_eq!(
-            deepest,
-            ORIGIN.y - 1,
-            "chunks were sent below the first layer of rock: {all:?}"
+        // The first layer of rock is the shell and is sent. One layer under it
+        // MAY be asked for in the columns nearest the player, before the shell
+        // above it has arrived and proved sealed — the price of asking by
+        // distance rather than waiting on round trips. Nothing deeper, ever.
+        assert!(
+            deepest >= ORIGIN.y - 2,
+            "chunks were sent more than one layer under the first layer of rock: {all:?}"
+        );
+        let wasted = all.iter().filter(|pos| pos.y < ORIGIN.y - 1).count();
+        assert!(
+            wasted <= 6,
+            "{wasted} chunks of rock under the shell were asked for; the shadow should be \
+             known after the first passes"
         );
         // And everything above ground in the cylinder WAS sent — sealing must
         // never hide a chunk the player could see.
@@ -824,14 +894,23 @@ mod tests {
         // player can fall into.
         let mut streamer = tall_streamer();
         let floor = ORIGIN.y - 1;
-        stream_all(&mut streamer, |pos| pos.y <= floor);
-        let below = ChunkPos::new(ORIGIN.x, floor - 1, ORIGIN.z);
+        let all = stream_all(&mut streamer, |pos| pos.y <= floor);
+        // The deepest rock sent in the player's own column is the shell as it
+        // stands — the floor, or one under it if the first passes asked before
+        // the floor had arrived. The chunk beneath THAT is what digging opens.
+        let shell_y = all
+            .iter()
+            .filter(|pos| pos.x == ORIGIN.x && pos.z == ORIGIN.z)
+            .map(|pos| pos.y)
+            .min()
+            .expect("the column under the player was sent");
+        let below = ChunkPos::new(ORIGIN.x, shell_y - 1, ORIGIN.z);
         assert!(
             !streamer.next_needed(usize::MAX).contains(&below),
-            "the chunk under the floor was requested before anything was dug"
+            "the chunk under the shell was requested before anything was dug"
         );
 
-        streamer.unseal(ChunkPos::new(ORIGIN.x, floor, ORIGIN.z));
+        streamer.unseal(ChunkPos::new(ORIGIN.x, shell_y, ORIGIN.z));
         let needed = streamer.next_needed(usize::MAX);
         assert!(
             needed.contains(&below),
@@ -839,7 +918,7 @@ mod tests {
         );
         // Only what is behind the hole: the rock two columns over stays sealed
         // and what is under IT stays unrequested.
-        let far_below = ChunkPos::new(ORIGIN.x + 2, floor - 1, ORIGIN.z);
+        let far_below = ChunkPos::new(ORIGIN.x + 2, floor - 2, ORIGIN.z);
         assert!(
             !needed.contains(&far_below),
             "a hole in one chunk reopened rock it does not touch"
@@ -850,8 +929,10 @@ mod tests {
     fn a_cave_under_a_roof_is_reached_from_the_side() {
         // The case that rules out "skip whatever is under sealed rock": a
         // pocket of open chunks under a sealed roof, joined to the surface by
-        // one open column at the edge. Reachability walks down the column and
-        // along the pocket; a rule about roofs would never send the pocket.
+        // one open column at the edge. The shaft is open, so the pocket chunk
+        // beside its foot has an open neighbour and is sent, and then the one
+        // beside THAT — the known-open-neighbour escape in `is_shadowed` walks
+        // the pocket; a rule about roofs would never send it.
         let mut streamer = tall_streamer();
         let floor = ORIGIN.y - 1;
         let shaft_x = ORIGIN.x + 1;
@@ -1048,29 +1129,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_streamer_asks_outward_from_the_centre_and_reaches_its_whole_set() {
-        // A fresh streamer used to ask for the whole interest set at once. It
-        // asks for the centre and its six neighbours now, and for the rest only
-        // as those arrive and prove open — streaming is a flood from the player
-        // that stops at rock (see `reachable`). In an open world the flood
-        // reaches everything, which is the property that says nothing visible
-        // is ever withheld.
+    fn a_fresh_streamer_needs_its_whole_interest_set() {
+        // Nothing is sealed yet, so nothing is in shadow, so everything in
+        // range is asked for — nearest first. Sealing only ever removes
+        // positions from this order; it never holds one back for another.
         let mut streamer = streamer();
-        let first = streamer.next_needed(usize::MAX);
-        assert_eq!(first[0], ORIGIN, "nearest first");
+        let needed = streamer.next_needed(usize::MAX);
         assert_eq!(
-            first.len(),
-            7,
-            "the first round is the centre and its six neighbours: {first:?}"
+            needed.len(),
+            interest::chunks_around(ORIGIN, ViewDistance::MINIMUM).len()
         );
+        assert_eq!(needed[0], ORIGIN, "nearest first");
         assert!(!streamer.is_complete());
-        deliver_all(&mut streamer);
-        assert_eq!(
-            streamer.sent_count(),
-            interest::chunks_around(ORIGIN, ViewDistance::MINIMUM).len(),
-            "an open world must fill the whole interest set"
-        );
-        assert!(streamer.is_complete());
     }
 
     #[test]
@@ -1343,9 +1413,8 @@ mod tests {
             !departed.contains(&far),
             "walking towards a chunk unloaded it"
         );
-        // In rounds: streaming is a flood from the player that stops at rock,
-        // so a chunk four out is asked for once the three between it and the
-        // new centre have arrived and proved open — not on the first pass.
+        // In rounds: a delivery can lift a shadow, so what is asked for after
+        // a move is not always settled in one pass.
         let mut asked = BTreeSet::new();
         loop {
             let round = streamer.next_needed(usize::MAX);
@@ -1521,5 +1590,88 @@ mod tests {
         assert!(!streamer.is_complete());
         streamer.completed(ORIGIN);
         assert!(streamer.is_complete());
+    }
+
+    #[test]
+    fn a_sealed_arrival_keeps_the_shadow_memo_and_an_open_one_lifts_only_its_own() {
+        // The memo is what keeps a pass cheap, so what it keeps and what it
+        // drops is the contract. Rock below a floor is shadowed; a chunk of sky
+        // arriving above the player is in no rock's box and drops nothing; a
+        // sealed chunk arriving drops nothing; digging into the floor drops
+        // exactly what lay in the box between the hole and the centre.
+        let mut streamer = tall_streamer();
+        let floor = ORIGIN.y - 1;
+        stream_all(&mut streamer, |pos| pos.y <= floor);
+        let shadowed_before = streamer.shadowed.len();
+        assert!(
+            shadowed_before > 0,
+            "nothing was memoised, so this measures nothing"
+        );
+
+        streamer.requested(ChunkPos::new(ORIGIN.x + 3, ORIGIN.y + 2, ORIGIN.z));
+        streamer.delivered(ChunkPos::new(ORIGIN.x + 3, ORIGIN.y + 2, ORIGIN.z));
+        assert_eq!(
+            streamer.shadowed.len(),
+            shadowed_before,
+            "sky lifted a shadow"
+        );
+
+        streamer.delivered_sealed(ChunkPos::new(ORIGIN.x + 3, floor - 3, ORIGIN.z));
+        assert_eq!(
+            streamer.shadowed.len(),
+            shadowed_before,
+            "a wall lifted a shadow"
+        );
+
+        // A hole one column over: what is under it is dropped, and rock on the
+        // far side of the player — whose walk toward the centre never comes
+        // near the hole — is kept. (A hole in the player's own column would
+        // drop every entry, because every walk ends in that column: the box
+        // test is a cheap over-approximation, and that case is rare.)
+        streamer.unseal(ChunkPos::new(ORIGIN.x + 1, floor, ORIGIN.z));
+        let under = ChunkPos::new(ORIGIN.x + 1, floor - 1, ORIGIN.z);
+        assert!(
+            !streamer.shadowed.contains(&under),
+            "the chunk under the hole is still memoised as shadowed"
+        );
+        let far = ChunkPos::new(ORIGIN.x - 1, floor - 3, ORIGIN.z);
+        assert!(
+            streamer.shadowed.contains(&far),
+            "rock on the far side of the player was dropped from the memo"
+        );
+    }
+
+    /// **Ignored: it measures rather than asserts.** Run by hand — `cargo test
+    /// -p server --release measure_a_pass -- --ignored --nocapture` — when
+    /// touching the shadow rule, and put the number in the memo's doc.
+    #[test]
+    #[ignore = "measures rather than asserts; run by hand"]
+    fn measure_a_pass_at_the_default_view() {
+        let centre = ChunkPos::new(0, 0, 0);
+        let mut streamer = Streamer::new("overworld", centre, ViewDistance::DEFAULT);
+        let join = std::time::Instant::now();
+        let sent = stream_all(&mut streamer, |pos| pos.y < centre.y);
+        println!(
+            "a whole join, eight a pass, {} passes: {:?} of streamer time",
+            sent.len().div_ceil(8),
+            join.elapsed()
+        );
+        let passes = 100u32;
+        let cold = std::time::Instant::now();
+        for _ in 0..passes {
+            streamer.shadowed.clear();
+            streamer.next_needed(8);
+        }
+        let cold = cold.elapsed() / passes;
+        let warm = std::time::Instant::now();
+        for _ in 0..passes {
+            streamer.next_needed(8);
+        }
+        let warm = warm.elapsed() / passes;
+        println!(
+            "a pass with the memo cleared: {cold:?}; with it kept: {warm:?}; {} of {} sent",
+            streamer.sent.len(),
+            interest::chunks_around(centre, ViewDistance::DEFAULT).len()
+        );
     }
 }

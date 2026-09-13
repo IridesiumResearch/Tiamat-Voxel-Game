@@ -2887,12 +2887,8 @@ async fn pump_chunks(
                 // straight from "requested" to "held" with no window in which
                 // it looks un-requested and gets asked for again.
                 match level {
-                    None => {
-                        streamer.delivered(pos);
-                        if sealed {
-                            streamer.sealed(pos);
-                        }
-                    }
+                    None if sealed => streamer.delivered_sealed(pos),
+                    None => streamer.delivered(pos),
                     Some(level) => streamer.summarised(pos, level),
                 }
             }
