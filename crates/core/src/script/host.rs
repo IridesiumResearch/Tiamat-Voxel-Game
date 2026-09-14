@@ -241,6 +241,21 @@ impl<V: ScriptVm> ModHost<V> {
         self.vm.chunk_tint(domain, world_seed, pos)
     }
 
+    /// The fog a mod gives one chunk's column, or `None` if none does.
+    ///
+    /// # Errors
+    ///
+    /// [`ScriptError`] if the callback faulted; the mod is disabled and the
+    /// chunk is served without fog.
+    pub fn chunk_fog(
+        &mut self,
+        domain: &str,
+        world_seed: u64,
+        pos: ChunkPos,
+    ) -> Result<Option<crate::proto::ChunkFog>, ScriptError> {
+        self.vm.chunk_fog(domain, world_seed, pos)
+    }
+
     /// The VM, for tests and diagnostics.
     pub fn vm_mut(&mut self) -> &mut V {
         &mut self.vm

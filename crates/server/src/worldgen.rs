@@ -119,6 +119,8 @@ pub struct Done {
     pub fluid: tiamot_core::fluid::FluidLayer,
     /// The mod's colour for this chunk, white if it has none.
     pub tint: [u8; 3],
+    /// The mod's fog for this chunk's column, if it gives one.
+    pub fog: Option<tiamot_core::proto::ChunkFog>,
     /// The summary chain, encoded, one entry per level.
     pub summaries: Vec<(u8, Vec<u8>)>,
     /// Mods this job faulted in the worker, for the tick to fault everywhere.
@@ -444,9 +446,13 @@ fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<
         let tint = host
             .chunk_tint(&job.domain, job.seed, job.pos)
             .unwrap_or([u8::MAX; 3]);
-        (chunk, fluid, tint)
+        let fog = host
+            .chunk_fog(&job.domain, job.seed, job.pos)
+            .ok()
+            .flatten();
+        (chunk, fluid, tint, fog)
     }));
-    let (chunk, fluid, tint) = match outcome {
+    let (chunk, fluid, tint, fog) = match outcome {
         Ok(generated) => generated,
         Err(_) => {
             error!(pos = ?job.pos, "generation panicked; the chunk is air");
@@ -454,6 +460,7 @@ fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<
                 Chunk::new(job.pos, MaterialId::AIR),
                 tiamot_core::fluid::FluidLayer::default(),
                 [u8::MAX; 3],
+                None,
             )
         }
     };
@@ -466,6 +473,7 @@ fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<
         chunk,
         fluid,
         tint,
+        fog,
         summaries,
         faults,
     }

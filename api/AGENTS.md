@@ -311,8 +311,9 @@ and a chunk that takes 60 ms is a core for 60 ms.
 
 **Your generator runs off the tick, in a VM of its own.** The server loads your
 mod set a second time on worker threads — same mods, same order, same fluid ids,
-same maps — and `on_generate` and `register_chunk_tint` run there, never on the
-simulation thread. This is what lets a chunk cost more than a tick without the
+same maps — and `on_generate`, `register_chunk_tint` and `register_chunk_fog`
+run there, never on the simulation thread. This is what lets a chunk cost more
+than a tick without the
 tick paying for it, and it is why generation is a pure function of `pos` (which
 carries the seed), your density programs and your maps:
 
@@ -503,6 +504,24 @@ Three things worth knowing before you design around it:
 One per mod. Two mods with an opinion about what colour a place is cannot be
 averaged into a third opinion either of them meant, so the first that answers,
 in load order, is the one that does.
+
+**Fog by place: `register_chunk_fog`, on the same terms.** The sky's keyframes
+set one distance fog for the whole world; a place's own fog — ground mist under
+a canopy, murk over a marsh — is a table per chunk column:
+
+```lua
+game.register_chunk_fog(function(pos)
+    if not rainforest(pos) then return nil end         -- clear air
+    return { r = 0.5, g = 0.6, b = 0.5, visibility = 18, top = 64 }
+end)
+```
+
+`visibility` is how many blocks a player sees into it (95% hidden there), the
+colour is its colour in daylight — the engine dims it at night — and `top` makes
+it ground fog that thins over a few blocks above that height. The engine blends
+columns, and a fog is visible from outside as well as inside, so return what the
+PLACE is and let the edges take care of themselves. It runs where the tint does,
+in the generation workers.
 
 ---
 

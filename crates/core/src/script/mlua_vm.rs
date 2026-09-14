@@ -125,6 +125,10 @@ const CHATTERS: &str = "tiamot.chatters";
 
 /// Mods that registered a `chunk_tint` callback.
 const CHUNK_TINTERS: &str = "tiamot.chunk_tinters";
+
+/// Registry key holding the mods that registered `register_chunk_fog`, in load
+/// order — the order that decides whose fog a place has.
+const CHUNK_FOGGERS: &str = "tiamot.chunk_foggers";
 /// What an `on_action` hook is called in errors.
 const HOOK_ACTION: &str = "on_action";
 const HOOK_DIALOG: &str = "on_dialog_event";
@@ -1035,6 +1039,103 @@ impl MluaVm {
         format!("tiamot.chunk_tint.{mod_id}")
     }
 
+    /// Where one mod's chunk-fog callback lives.
+    fn fog_key(mod_id: &str) -> String {
+        format!("tiamot.chunk_fog.{mod_id}")
+    }
+
+    /// Reads a fog out of a mod's answer table.
+    ///
+    /// `visibility` is required, because a fog with no thickness is not a fog
+    /// and guessing one would draw somebody's rainforest as either soup or
+    /// nothing. Colour channels clamp like a tint's; `top` floors to a block.
+    fn fog_of(table: &Table) -> Result<crate::proto::ChunkFog, String> {
+        let number = |name: &str| -> Result<Option<f32>, String> {
+            table
+                .get::<Option<f32>>(name)
+                .map_err(|_| format!("a fog's `{name}` is a number"))
+        };
+        let visibility = number("visibility")?
+            .filter(|value| !value.is_nan())
+            .ok_or("a fog needs a `visibility`: how many blocks a player sees into it")?;
+        let channel = |name: &str| number(name).map(|value| value.unwrap_or(1.0));
+        let colour = Self::tint_bytes((channel("r")?, channel("g")?, channel("b")?));
+        let top = number("top")?
+            .filter(|value| !value.is_nan())
+            .map(crate::detgen::floor_to_i32);
+        Ok(crate::proto::ChunkFog {
+            colour,
+            // At least one block: a fog nothing can be seen into is a wall
+            // drawn in the fog's colour, and a division by zero on the client.
+            visibility: visibility.clamp(1.0, f32::from(u16::MAX)) as u16,
+            top,
+        })
+    }
+
+    /// The first answer to a per-place callback — a chunk's tint or its fog —
+    /// with the mod that gave it.
+    ///
+    /// **The first mod that answers wins, in load order.** Two mods with an
+    /// opinion about what a place looks like cannot be averaged into a third
+    /// opinion either of them meant, and load order is already the resolution
+    /// for every other registry conflict. `None` when no mod registered one.
+    fn place_answer<R: mlua::FromLuaMulti>(
+        &mut self,
+        list: &str,
+        key: fn(&str) -> String,
+        context: &str,
+        domain: &str,
+        world_seed: u64,
+        pos: ChunkPos,
+    ) -> Result<Option<(String, R)>, ScriptError> {
+        let owners: Vec<String> = self
+            .lua
+            .named_registry_value::<Table>(list)
+            .map(|table| table.sequence_values::<String>().flatten().collect())
+            .unwrap_or_default();
+
+        for mod_id in owners {
+            if self.faulted.contains(&mod_id) {
+                continue;
+            }
+            let Ok(callback) = self
+                .lua
+                .named_registry_value::<mlua::Function>(&key(&mod_id))
+            else {
+                continue;
+            };
+
+            let position = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
+            for (name, value) in [("x", pos.x), ("y", pos.y), ("z", pos.z)] {
+                position
+                    .set(name, value)
+                    .map_err(|err| self.vm_error(&err))?;
+            }
+            position
+                .set("seed", world_seed)
+                .map_err(|err| self.vm_error(&err))?;
+            position
+                .set("domain", domain)
+                .map_err(|err| self.vm_error(&err))?;
+
+            self.arm_budget(self.limits.instructions_per_call)?;
+            let answer = callback.call::<R>(position);
+            self.disarm_budget();
+
+            return match answer {
+                Ok(answer) => Ok(Some((mod_id, answer))),
+                Err(err) => {
+                    // Charter rule 10: the mod is disabled and the world keeps
+                    // its looks rather than the tick dying over a paint job.
+                    let error = Self::classify(&err, &mod_id, context);
+                    self.faulted.insert(mod_id.clone());
+                    Err(error)
+                }
+            };
+        }
+        Ok(None)
+    }
+
     /// Where one DOMAIN's generator callback lives. See the free function of
     /// the same name, which is what `register_domain` writes through.
     fn domain_generator_key(domain: &str) -> String {
@@ -1747,56 +1848,49 @@ impl ScriptVm for MluaVm {
         world_seed: u64,
         pos: ChunkPos,
     ) -> Result<[u8; 3], ScriptError> {
-        let tinters: Vec<String> = self
-            .lua
-            .named_registry_value::<Table>(CHUNK_TINTERS)
-            .map(|table| table.sequence_values::<String>().flatten().collect())
-            .unwrap_or_default();
+        let answer = self.place_answer::<(f32, f32, f32)>(
+            CHUNK_TINTERS,
+            Self::tint_key,
+            "chunk_tint",
+            domain,
+            world_seed,
+            pos,
+        )?;
+        Ok(answer.map_or([u8::MAX; 3], |(_, colour)| Self::tint_bytes(colour)))
+    }
 
-        // **The first mod that answers wins, in load order.** Two mods with an
-        // opinion about what colour a place is cannot be averaged into a third
-        // opinion that either of them meant, and load order is already the
-        // resolution for every other registry conflict.
-        for mod_id in tinters {
-            if self.faulted.contains(&mod_id) {
-                continue;
+    fn chunk_fog(
+        &mut self,
+        domain: &str,
+        world_seed: u64,
+        pos: ChunkPos,
+    ) -> Result<Option<crate::proto::ChunkFog>, ScriptError> {
+        let Some((mod_id, answer)) = self.place_answer::<Option<Table>>(
+            CHUNK_FOGGERS,
+            Self::fog_key,
+            "chunk_fog",
+            domain,
+            world_seed,
+            pos,
+        )?
+        else {
+            return Ok(None);
+        };
+        // `nil` is an answer — "no fog here" — and a mod that answered it has
+        // spoken for the place, so the next mod is not asked.
+        let Some(table) = answer else {
+            return Ok(None);
+        };
+        Self::fog_of(&table).map(Some).map_err(|detail| {
+            // A malformed answer is the mod's bug, and charter rule 10's answer
+            // to a bug is the same whether Lua raised it or the engine found it.
+            self.faulted.insert(mod_id.clone());
+            ScriptError::Runtime {
+                mod_id,
+                context: "chunk_fog".to_owned(),
+                detail,
             }
-            let Ok(callback) = self
-                .lua
-                .named_registry_value::<mlua::Function>(&Self::tint_key(&mod_id))
-            else {
-                continue;
-            };
-
-            let position = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
-            for (name, value) in [("x", pos.x), ("y", pos.y), ("z", pos.z)] {
-                position
-                    .set(name, value)
-                    .map_err(|err| self.vm_error(&err))?;
-            }
-            position
-                .set("seed", world_seed)
-                .map_err(|err| self.vm_error(&err))?;
-            position
-                .set("domain", domain)
-                .map_err(|err| self.vm_error(&err))?;
-
-            self.arm_budget(self.limits.instructions_per_call)?;
-            let answer = callback.call::<(f32, f32, f32)>(position);
-            self.disarm_budget();
-
-            match answer {
-                Ok(colour) => return Ok(Self::tint_bytes(colour)),
-                Err(err) => {
-                    // Charter rule 10: the mod is disabled and the world keeps
-                    // its colour rather than the tick dying over a paint job.
-                    let error = Self::classify(&err, &mod_id, "chunk_tint");
-                    self.faulted.insert(mod_id.clone());
-                    return Err(error);
-                }
-            }
-        }
-        Ok([u8::MAX; 3])
+        })
     }
 
     fn generate_chunk(
@@ -3783,6 +3877,32 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("register_chunk_tint", register_chunk_tint)
+            .map_err(|err| self.vm_error(&err))?;
+
+        // A place's own fog, on the same terms as its colour.
+        let owner = mod_id.to_owned();
+        let key = Self::fog_key(mod_id);
+        let register_chunk_fog = self
+            .lua
+            .create_function(move |lua, callback: mlua::Function| {
+                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: registration is closed"
+                    )));
+                }
+                if lua.named_registry_value::<mlua::Function>(&key).is_ok() {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: one register_chunk_fog per mod"
+                    )));
+                }
+                lua.set_named_registry_value(&key, callback)?;
+                let foggers: Table = lua.named_registry_value(CHUNK_FOGGERS)?;
+                foggers.push(owner.clone())?;
+                Ok(())
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_chunk_fog", register_chunk_fog)
             .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
@@ -5969,6 +6089,7 @@ impl MluaVm {
             RANDOM_TICKS,
             RANDOM_TICK_OWNERS,
             CHUNK_TINTERS,
+            CHUNK_FOGGERS,
         ] {
             let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
             self.lua
@@ -8532,6 +8653,75 @@ mod tests {
                 "{spec} should say `{says}`: {detail}"
             );
         }
+    }
+
+    #[test]
+    fn a_mod_gives_a_place_its_own_fog_and_nil_means_none() {
+        // `game.register_chunk_fog`: a table is a fog, nil is clear air, and a
+        // table that is not a fog is the mod's bug — disabled under charter
+        // rule 10 rather than drawn as a guess. The pos is the same one the
+        // tint is asked with, so a mod picks its fog from the same biome field.
+        let mut host = vm();
+        load(
+            &mut host,
+            "forest",
+            "game.register_chunk_fog(function(pos)\n\
+             \x20   if pos.x == 0 then\n\
+             \x20       return { r = 0.4, g = 2.0, b = 0.3, visibility = 18, top = -3.5 }\n\
+             \x20   elseif pos.x == 1 then\n\
+             \x20       return { r = 0.5, visibility = 0 }\n\
+             \x20   elseif pos.x == 2 then\n\
+             \x20       return { r = 0.5 }\n\
+             \x20   end\n\
+             end)",
+        )
+        .expect("load");
+        let refused = load(
+            &mut host,
+            "forest",
+            "game.register_chunk_fog(function() end)",
+        );
+        assert!(refused.is_err(), "a second fog from one mod was accepted");
+        host.freeze().expect("freeze");
+
+        let at = |x| ChunkPos::new(x, 0, 0);
+        let mist = host
+            .chunk_fog(crate::domain::OVERWORLD, 7, at(0))
+            .expect("asked")
+            .expect("a fog");
+        assert_eq!(mist.colour, [102, 255, 76], "channels clamp like a tint's");
+        assert_eq!(mist.visibility, 18);
+        assert_eq!(mist.top, Some(-4), "a top floors to the block it is in");
+
+        let thin = host
+            .chunk_fog(crate::domain::OVERWORLD, 7, at(1))
+            .expect("asked")
+            .expect("a fog");
+        assert_eq!(
+            thin.visibility, 1,
+            "a fog nothing can be seen into is clamped to a block"
+        );
+        assert_eq!(thin.top, None);
+        assert_eq!(thin.colour[1], 255, "an unnamed channel is white");
+
+        assert_eq!(
+            host.chunk_fog(crate::domain::OVERWORLD, 7, at(5))
+                .expect("asked"),
+            None,
+            "nil is clear air"
+        );
+
+        let broken = host.chunk_fog(crate::domain::OVERWORLD, 7, at(2));
+        assert!(
+            matches!(&broken, Err(ScriptError::Runtime { detail, .. }) if detail.contains("visibility")),
+            "a fog with no visibility should fault and say what is missing: {broken:?}"
+        );
+        assert_eq!(
+            host.chunk_fog(crate::domain::OVERWORLD, 7, at(0))
+                .expect("asked"),
+            None,
+            "the faulted mod was asked again"
+        );
     }
 
     #[test]

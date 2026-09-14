@@ -830,6 +830,7 @@ fn serve_chunk_requests(
                         .send(summary.map(|blob| crate::transport::endpoint::Served {
                             blob,
                             tint: [u8::MAX; 3],
+                            fog: None,
                             sealed: false,
                         }));
             } else {
@@ -841,7 +842,7 @@ fn serve_chunk_requests(
                     fluidics,
                     control,
                     request,
-                    Some(done.tint),
+                    Some((done.tint, done.fog)),
                     &mut report,
                 );
                 report.chunks += 1;
@@ -909,6 +910,7 @@ fn serve_chunk_requests(
                 let _ = request.reply.send(Some(crate::transport::endpoint::Served {
                     blob,
                     tint: [u8::MAX; 3],
+                    fog: None,
                     sealed: false,
                 }));
                 continue;
@@ -953,6 +955,7 @@ fn serve_chunk_requests(
                 .send(summary.map(|blob| crate::transport::endpoint::Served {
                     blob,
                     tint: [u8::MAX; 3],
+                    fog: None,
                     sealed: false,
                 }));
             continue;
@@ -990,7 +993,7 @@ fn serve_one_chunk(
     fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
     control: &Control,
     request: crate::transport::endpoint::ChunkRequest,
-    tint: Option<[u8; 3]>,
+    looks: Option<([u8; 3], Option<tiamot_core::proto::ChunkFog>)>,
     report: &mut ServeReport,
 ) {
     let at = std::time::Instant::now();
@@ -1108,24 +1111,30 @@ fn serve_one_chunk(
     // of it. Bounded, then — not the unbounded overrun the clock exists to
     // prevent — but there is no reason for the estimate to be wrong.
     //
-    // A worker that generated the chunk computed its tint too, in which case
-    // it arrives here and the script call is skipped.
-    let tint = match (tint, blob.is_some()) {
-        (Some(colour), true) => colour,
+    // A worker that generated the chunk computed its tint and fog too, in
+    // which case they arrive here and the script calls are skipped.
+    let (tint, fog) = match (looks, blob.is_some()) {
+        (Some(looks), true) => looks,
         (None, true) => {
             let at = std::time::Instant::now();
             let colour = source.tint(&request.domain, request.pos, world.seed());
+            let fog = source.fog(&request.domain, request.pos, world.seed());
             report.generating += at.elapsed();
-            colour
+            (colour, fog)
         }
-        (_, false) => [u8::MAX; 3],
+        (_, false) => ([u8::MAX; 3], None),
     };
 
     // A failed send means the connection went away between asking and being
     // answered, which is ordinary rather than an error.
     let _ = request
         .reply
-        .send(blob.map(|blob| crate::transport::endpoint::Served { blob, tint, sealed }));
+        .send(blob.map(|blob| crate::transport::endpoint::Served {
+            blob,
+            tint,
+            fog,
+            sealed,
+        }));
 }
 
 /// The block an edit changed.

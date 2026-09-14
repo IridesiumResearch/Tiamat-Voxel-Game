@@ -607,6 +607,8 @@ pub struct Served {
     pub blob: Vec<u8>,
     /// The chunk's biome colour, white when no mod gives one.
     pub tint: [u8; 3],
+    /// The chunk's column's own fog, when a mod gives one.
+    pub fog: Option<tiamot_core::proto::ChunkFog>,
     /// Whether the chunk is one opaque, unlit material through and through.
     ///
     /// Decided where the chunk is in hand and carried to the streamer, which
@@ -2905,12 +2907,22 @@ async fn pump_chunks(
     let mut still_waiting = Vec::with_capacity(pending.len());
     for (pos, level, mut receiver) in pending.drain(..) {
         match receiver.try_recv() {
-            Ok(Some(Served { blob, tint, sealed })) => {
+            Ok(Some(Served {
+                blob,
+                tint,
+                fog,
+                sealed,
+            })) => {
                 // Whichever was asked for. Sending the wrong message for a
                 // blob would be a client decoding a summary as a chunk, which
                 // is not a thing the codec can catch — both are byte strings.
                 let message = match level {
-                    None => ServerMessage::ChunkData { pos, blob, tint },
+                    None => ServerMessage::ChunkData {
+                        pos,
+                        blob,
+                        tint,
+                        fog,
+                    },
                     // A summary is a distant silhouette: it carries no tinted
                     // materials to colour, so the tint has nowhere to land.
                     Some(_) => ServerMessage::ChunkSummary { pos, blob },

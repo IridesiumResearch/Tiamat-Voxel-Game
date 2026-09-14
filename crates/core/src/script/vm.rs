@@ -1223,6 +1223,25 @@ pub trait ScriptVm: Sized {
         Ok([u8::MAX; 3])
     }
 
+    /// The fog a mod gives one chunk's column, or `None` for the sky's alone.
+    ///
+    /// Asked beside [`Self::chunk_tint`], for the same reasons and on the same
+    /// terms: when the chunk is served, never stored, first mod to answer wins.
+    ///
+    /// # Errors
+    ///
+    /// [`ScriptError`] if the callback faulted or answered something that is not
+    /// a fog; the mod is disabled and the chunk is served without one.
+    fn chunk_fog(
+        &mut self,
+        domain: &str,
+        world_seed: u64,
+        pos: ChunkPos,
+    ) -> Result<Option<crate::proto::ChunkFog>, ScriptError> {
+        let _ = (domain, world_seed, pos);
+        Ok(None)
+    }
+
     /// Tells the VM which numeric id each registered fluid was given.
     ///
     /// **Called once, after the registries freeze and before anything

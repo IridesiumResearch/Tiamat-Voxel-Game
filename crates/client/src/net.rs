@@ -351,7 +351,10 @@ pub enum Event {
     ///
     /// Boxed: a `Chunk` is far larger than every other variant, and an unboxed
     /// one would make the whole queue pay for it.
-    Chunk(Box<Chunk>, [u8; 3]),
+    ///
+    /// With the chunk's biome colour and its column's own fog, which arrive in
+    /// the same message so no frame draws the terrain without them.
+    Chunk(Box<Chunk>, [u8; 3], Option<tiamot_core::proto::ChunkFog>),
 
     /// A downsampled chunk, for the horizon.
     ///
@@ -1316,13 +1319,18 @@ async fn session(
                 });
             }
 
-            ServerMessage::ChunkData { pos, blob, tint } => {
+            ServerMessage::ChunkData {
+                pos,
+                blob,
+                tint,
+                fog,
+            } => {
                 // The same bounded decoder the world file uses. A blob that
                 // does not decode costs one chunk and a warning; there is no
                 // version of this that should end a session.
                 match tiamot_core::persist::codec::decode_chunk(pos, &blob, &materials, &[]) {
                     Ok(chunk) => {
-                        let _ = events.send(Event::Chunk(Box::new(chunk), tint));
+                        let _ = events.send(Event::Chunk(Box::new(chunk), tint, fog));
                     }
                     Err(err) => say(format!(
                         "the server sent a chunk at {pos:?} that would not decode: {err}"

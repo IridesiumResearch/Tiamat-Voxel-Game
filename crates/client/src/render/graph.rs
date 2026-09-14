@@ -92,6 +92,10 @@ struct Uniforms {
     /// untouched — see [`super::grade`].
     graded: f32,
     _pad: f32,
+    /// Every place's fog, as the world shader's globals carry it.
+    ///
+    /// **Appended**, so every field above stays where `post.wgsl` reads it.
+    place_fog: super::place_fog::Uniforms,
 }
 
 /// What the frame's sky is doing, as the composite needs it.
@@ -116,6 +120,9 @@ pub struct Frame {
     /// How the finished frame is graded, already interpolated and sanitised by
     /// `crate::sky`.
     pub grade: tiamot_core::proto::SkyGrade,
+    /// Where the camera stands among the places' fogs. Mode 3 applies them
+    /// here, from depth, so they reach the sky; see `super::place_fog`.
+    pub place_fog: super::place_fog::Uniforms,
 }
 
 /// How much of the sun's colour the haze takes on where the view points at it.
@@ -235,6 +242,18 @@ fn post_bind_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
                     },
                     count: None,
                 },
+                // Every place's fog: the world shader's grid, read by the
+                // composite at the position each depth sample reconstructs to.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         })
 }
@@ -323,6 +342,9 @@ struct Step<'a> {
     /// written is a hazard the validator rejects.
     bloom: Option<&'a wgpu::TextureView>,
     target: &'a wgpu::TextureView,
+    /// The grid of every place's fog, which every pass binds and the
+    /// composite reads.
+    fog: &'a wgpu::Buffer,
 }
 
 /// The world pipeline for the float target, with or without cascades to bind.
@@ -658,6 +680,7 @@ impl Post {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         frame: &Frame,
+        fog: &wgpu::Buffer,
     ) {
         let full_texel = [1.0 / self.size.0 as f32, 1.0 / self.size.1 as f32];
         // The BLOOM buffer's texel, not the frame's. Stepping a blur by a
@@ -684,6 +707,7 @@ impl Post {
                 source: &self.scene.view,
                 bloom: None,
                 target: &self.bloom[0].view,
+                fog,
             },
             Step {
                 label: "post-blur-h",
@@ -692,6 +716,7 @@ impl Post {
                 source: &self.bloom[0].view,
                 bloom: None,
                 target: &self.bloom[1].view,
+                fog,
             },
             Step {
                 label: "post-blur-v",
@@ -700,6 +725,7 @@ impl Post {
                 source: &self.bloom[1].view,
                 bloom: None,
                 target: &self.bloom[0].view,
+                fog,
             },
             Step {
                 label: "post-composite",
@@ -708,6 +734,7 @@ impl Post {
                 source: &self.scene.view,
                 bloom: Some(&self.bloom[0].view),
                 target,
+                fog,
             },
         ] {
             self.step(gpu, encoder, &step);
@@ -737,6 +764,7 @@ impl Post {
                 // enough for an ungraded world.
                 graded: f32::from(u8::from(frame.grade != tiamot_core::proto::SkyGrade::NONE)),
                 _pad: 0.0,
+                place_fog: frame.place_fog,
             }),
         );
     }
@@ -775,6 +803,10 @@ impl Post {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(self.grading.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: step.fog.as_entire_binding(),
                 },
             ],
         });

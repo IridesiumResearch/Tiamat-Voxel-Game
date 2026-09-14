@@ -22,9 +22,9 @@
 use std::path::PathBuf;
 
 use tiamot_core::proto::{
-    ActionDef, Click, ClientMessage, DialogEvent, DisconnectReason, Edit, EntityDef, EntityDelta,
-    FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION, ServerMessage, SkyFrame,
-    SkyGrade, SoundDef, WireSignature, encode,
+    ActionDef, ChunkFog, Click, ClientMessage, DialogEvent, DisconnectReason, Edit, EntityDef,
+    EntityDelta, FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION, ServerMessage,
+    SkyFrame, SkyGrade, SoundDef, WireSignature, encode,
 };
 use tiamot_core::{BlockPos, ChunkPos, SubNodePos};
 
@@ -441,11 +441,24 @@ fn server_messages() -> Vec<Vec<u8>> {
             pos: ChunkPos::new(1, -2, 3),
             blob: vec![0x05, 0x00, 0x01, 0x02, 0x03],
             tint: [0x00, 0x7F, 0xFF],
+            fog: None,
+        },
+        // Protocol v53: a place's fog, with the top at the far end of its range.
+        ServerMessage::ChunkData {
+            pos: ChunkPos::new(-7, 0, 2),
+            blob: vec![0x05, 0x00],
+            tint: [u8::MAX; 3],
+            fog: Some(ChunkFog {
+                colour: [0, 0x80, 0xFF],
+                visibility: u16::MAX,
+                top: Some(i32::MIN),
+            }),
         },
         ServerMessage::ChunkData {
             pos: ChunkPos::new(0, 0, 0),
             blob: Vec::new(),
             tint: [u8::MAX; 3],
+            fog: None,
         },
         ServerMessage::ChunkUnload {
             pos: ChunkPos::new(-4, 5, -6),

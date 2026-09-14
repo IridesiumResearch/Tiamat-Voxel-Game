@@ -120,6 +120,20 @@ pub trait ChunkSource {
         [u8::MAX; 3]
     }
 
+    /// This chunk's column's own fog, or `None` for only the sky's.
+    ///
+    /// Beside [`Self::tint`] and on the same terms — defaulted to nothing,
+    /// asked when served, never stored. See `game.register_chunk_fog`.
+    fn fog(
+        &mut self,
+        domain: &str,
+        pos: ChunkPos,
+        world_seed: u64,
+    ) -> Option<tiamot_core::proto::ChunkFog> {
+        let _ = (domain, pos, world_seed);
+        None
+    }
+
     /// Disables a mod here because it faulted somewhere else.
     ///
     /// The generation workers (`worldgen::Pool`) each run their own VM, and a
@@ -181,6 +195,16 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
         self.host
             .chunk_tint(domain, world_seed, pos)
             .unwrap_or([u8::MAX; 3])
+    }
+
+    fn fog(
+        &mut self,
+        domain: &str,
+        pos: ChunkPos,
+        world_seed: u64,
+    ) -> Option<tiamot_core::proto::ChunkFog> {
+        // As the tint: a faulted mod is disabled, and clear air is the answer.
+        self.host.chunk_fog(domain, world_seed, pos).ok().flatten()
     }
 
     fn generate_with_fluid(
@@ -482,6 +506,21 @@ impl ChunkSource for Generator {
         match self {
             Self::Mods(generator) => generator.tint(domain, pos, world_seed),
             Self::Air(air) => air.tint(domain, pos, world_seed),
+        }
+    }
+
+    // **Forwarded, which is the whole of this method.** `tint` was not, for a
+    // month, and every real server served white while every test that built a
+    // `ModGenerator` saw colour.
+    fn fog(
+        &mut self,
+        domain: &str,
+        pos: ChunkPos,
+        world_seed: u64,
+    ) -> Option<tiamot_core::proto::ChunkFog> {
+        match self {
+            Self::Mods(generator) => generator.fog(domain, pos, world_seed),
+            Self::Air(air) => air.fog(domain, pos, world_seed),
         }
     }
 

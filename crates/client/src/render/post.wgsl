@@ -42,6 +42,12 @@ struct Post {
     // exactly the identity — see `render::grade`.
     graded: f32,
     _pad: f32,
+    // Every place's fog, as the world shader's globals carry it — see
+    // `render::place_fog`. Colour and density at the camera; the grid's corner,
+    // the camera's fog top and height; cells per side, any, daylight.
+    fog_here: vec4<f32>,
+    fog_frame: vec4<f32>,
+    fog_grid: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> post: Post;
@@ -57,6 +63,93 @@ struct Post {
 // pixels up in. sRGB-encoded, so this sample comes back linear. Bound by every
 // pass and read by the composite alone.
 @group(0) @binding(5) var grade_lut: texture_3d<f32>;
+// Every place's fog: the same grid the world shader reads. Bound by every pass
+// and read by the composite alone.
+@group(0) @binding(6) var<storage, read> fog_cells: array<vec4<f32>>;
+
+// How far a view of the sky is taken to cross a place's fog, in blocks. Must
+// match `render::SKY_FOG_REACH`, which clears the sky to the same answer in
+// the modes without this pass.
+const SKY_FOG_REACH: f32 = 512.0;
+
+// Must match `place_fog::FALLOFF`.
+const FOG_FALLOFF: f32 = 4.0;
+
+// `place_fog_at`, `fog_height_integral` and `place_fog` from `world.wgsl`, word
+// for word but for where the uniforms live. WGSL has no includes, and the two
+// have to agree or a player changing lighting mode watches the weather change.
+fn fog_cell(x: u32, z: u32) -> array<vec4<f32>, 2> {
+    let side = u32(post.fog_grid.x);
+    let index = 2u * (z * side + x);
+    return array<vec4<f32>, 2>(fog_cells[index], fog_cells[index + 1u]);
+}
+
+fn place_fog_at(relative: vec2<f32>) -> array<vec4<f32>, 2> {
+    let last = post.fog_grid.x - 1.0;
+    let p = clamp((relative - post.fog_frame.xy) / 16.0 - 0.5, vec2<f32>(0.0), vec2<f32>(last));
+    let base = floor(p);
+    let t = p - base;
+    let x0 = u32(base.x);
+    let z0 = u32(base.y);
+    let x1 = min(x0 + 1u, u32(last));
+    let z1 = min(z0 + 1u, u32(last));
+    let a = fog_cell(x0, z0);
+    let b = fog_cell(x1, z0);
+    let c = fog_cell(x0, z1);
+    let d = fog_cell(x1, z1);
+    let near0 = mix(a[0], b[0], t.x);
+    let near1 = mix(a[1], b[1], t.x);
+    let far0 = mix(c[0], d[0], t.x);
+    let far1 = mix(c[1], d[1], t.x);
+    return array<vec4<f32>, 2>(mix(near0, far0, t.y), mix(near1, far1, t.y));
+}
+
+fn fog_height_integral(y: f32, top: f32) -> f32 {
+    let above = y - top;
+    if (above <= 0.0) {
+        return above;
+    }
+    return FOG_FALLOFF * (1.0 - exp(-above / FOG_FALLOFF));
+}
+
+fn place_fog(lit: vec3<f32>, relative: vec3<f32>, distance: f32) -> vec3<f32> {
+    if (post.fog_grid.y < 0.5) {
+        return lit;
+    }
+    let there = place_fog_at(relative.xz);
+    let here_density = post.fog_here.w;
+    let total = here_density + there[0].w;
+    if (total <= 0.000001) {
+        return lit;
+    }
+    let colour = (post.fog_here.rgb * here_density + there[0].rgb) / total;
+    let top = (post.fog_frame.z * here_density + there[1].x) / total;
+    let eye = post.fog_frame.w;
+    let point = eye + relative.y;
+    var profile: f32;
+    if (abs(point - eye) < 0.01) {
+        profile = exp(-max(eye - top, 0.0) / FOG_FALLOFF);
+    } else {
+        profile = (fog_height_integral(point, top) - fog_height_integral(eye, top)) / (point - eye);
+    }
+    let depth = 0.5 * total * distance * profile;
+    let hidden = 1.0 - exp(-depth);
+    return mix(lit, colour * post.fog_grid.z, hidden);
+}
+
+// Where a pixel's depth sample is, relative to the camera — or, for the sky,
+// `SKY_FOG_REACH` blocks along its view ray, which is as far as a place's fog
+// is taken to reach.
+fn scene_point(pixel: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
+    let depth = textureLoad(scene_depth, pixel, 0);
+    let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    let view = post.inverse_view_projection * clip;
+    let point = view.xyz / view.w;
+    if (depth >= 1.0) {
+        return normalize(point) * SKY_FOG_REACH;
+    }
+    return point;
+}
 
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
@@ -259,12 +352,16 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // the world shader's own fog is per-surface and cannot do either. The world
     // shader skips its fog in this mode so the two do not stack.
     let distance = scene_distance(vec2<i32>(input.clip.xy), input.uv);
+    // A place's fog first, and the sky's over it — the order `world.wgsl`
+    // applies them in, for the reason it gives.
+    let point = scene_point(vec2<i32>(input.clip.xy), input.uv);
+    let misted = place_fog(lit, point, length(point));
     // The same power curve `world.wgsl` uses, and it has to be the same or a
     // player switching lighting mode would watch the weather change with it.
     // `sun_direction.w` carries the exponent; `sky.w` carries the far distance.
     let curve = post.sun_direction.w;
     let haze = pow(clamp(distance / max(post.sky.w, 0.001), 0.0, 1.0), curve);
-    let fogged = mix(lit, scattered_fog(input.uv), haze);
+    let fogged = mix(misted, scattered_fog(input.uv), haze);
 
     // Graded last, on the display-referred result. The table's domain is 0..1
     // and this is where the frame first lives in it: grading before the tonemap

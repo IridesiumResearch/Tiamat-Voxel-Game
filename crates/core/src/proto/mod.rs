@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 52;
+pub const PROTOCOL_VERSION: u32 = 53;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 52;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v53 (post-15b): `ChunkData` carries `fog`, a place's own fog from
+// `game.register_chunk_fog`. Beside the tint and for the same reasons: asked
+// when the chunk is served, never stored, blended across columns on the client.
 // v52 (post-15b): appended `ClientMessage::Use`. The place control landing on a
 // block with nothing it can place: an empty hand, or an item. The client used to
 // answer that itself with a warning and send nothing, so no mod could hear a
@@ -1384,6 +1387,12 @@ pub enum ServerMessage {
         /// precision than the eye has, and 9 bytes a chunk is less than the
         /// blob's compression noise.
         tint: [u8; 3],
+        /// This chunk's column's own fog, or `None` for only the sky's.
+        ///
+        /// **Appended to this variant** (protocol v53). The same kind of value
+        /// as `tint` — a mod's answer about a place, asked when the chunk is
+        /// served and never stored — so it travels the same way.
+        fog: Option<ChunkFog>,
     },
     /// A chunk left the client's interest set.
     ChunkUnload {
@@ -2105,6 +2114,29 @@ pub struct FluidDef {
     /// opinion about either (charter rule 1): the mod that registered the fluid
     /// says.
     pub color: [u8; 3],
+}
+
+/// A place's own fog: what `game.register_chunk_fog` answers for a chunk.
+///
+/// **Presentation only.** Nothing in the simulation reads it — a mob sees
+/// through fog exactly as well as through clear air — so it is exempt from
+/// charter rule 4, and the client is free to approximate how light crosses it.
+///
+/// Per chunk COLUMN on the client, like the biome colour: a fog is a fact about
+/// a place on the map, and the column's corners are blended so a foggy valley
+/// thins over a chunk's width rather than ending in a wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkFog {
+    /// The fog's colour in daylight. The client dims it with the sky.
+    pub colour: [u8; 3],
+    /// How far a player sees into it, in blocks: at this distance the fog hides
+    /// 95% of what is behind it. Never zero.
+    pub visibility: u16,
+    /// The world height the fog lies under, or `None` for fog at every height.
+    ///
+    /// Above it the fog thins over a few blocks, which is ground fog: thick in
+    /// the valley, clear on the hill, and seen from above as a layer.
+    pub top: Option<i32>,
 }
 
 /// One moment in a mod's day, on the wire.
@@ -2943,6 +2975,17 @@ mod tests {
                 pos: ChunkPos::new(1, -2, 3),
                 blob: vec![5, 6, 7],
                 tint: [12, 240, 3],
+                fog: None,
+            },
+            ServerMessage::ChunkData {
+                pos: ChunkPos::new(1, -2, 3),
+                blob: vec![5, 6, 7],
+                tint: [12, 240, 3],
+                fog: Some(ChunkFog {
+                    colour: [90, 110, 95],
+                    visibility: 24,
+                    top: Some(-70),
+                }),
             },
             ServerMessage::Disconnect {
                 reason: DisconnectReason::VersionMismatch {
@@ -3421,6 +3464,7 @@ mod tests {
                     pos: ChunkPos::new(0, 0, 0),
                     blob: Vec::new(),
                     tint: [u8::MAX; 3],
+                    fog: None,
                 },
                 5,
             ),

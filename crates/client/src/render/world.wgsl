@@ -67,6 +67,15 @@ struct Globals {
     // The camera's RIGHT in world space, xyz; w unused. Read by the sprite
     // stage, which builds its quad facing the camera — Contract §8.4.
     camera_right: vec4<f32>,
+    // Every place's fog — see `render::place_fog`. The fog at the camera:
+    // colour in xyz, density per block in w.
+    fog_here: vec4<f32>,
+    // The fog grid's -x-z corner relative to the camera in xy, in blocks; the
+    // camera's fog top in z and the camera's height in w, both relative to the
+    // grid's reference height.
+    fog_frame: vec4<f32>,
+    // Cells per side in x; whether any place has fog in y; daylight in z.
+    fog_grid: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -87,6 +96,89 @@ struct MaterialTint {
     high: vec4<f32>,
 };
 @group(0) @binding(3) var<storage, read> tints: array<MaterialTint>;
+
+// Every place's fog, two vec4s per chunk column round the camera, laid out
+// z * side + x: colour × density and density, then top × density. See
+// `render::place_fog`, whose `sample` and `amount` are this file's
+// `place_fog_at` and `place_fog` written once more in Rust for the tests.
+@group(0) @binding(4) var<storage, read> fog_cells: array<vec4<f32>>;
+
+// How many blocks above its top a place's fog thins by a factor of e. Must
+// match `place_fog::FALLOFF`.
+const FOG_FALLOFF: f32 = 4.0;
+
+// One grid cell, premultiplied, as colour-and-density then top.
+fn fog_cell(x: u32, z: u32) -> array<vec4<f32>, 2> {
+    let side = u32(globals.fog_grid.x);
+    let index = 2u * (z * side + x);
+    return array<vec4<f32>, 2>(fog_cells[index], fog_cells[index + 1u]);
+}
+
+// The fog grid filtered under a camera-relative x/z: bilinear between chunk
+// column centres, clamped to the edge. Premultiplied in, premultiplied out.
+fn place_fog_at(relative: vec2<f32>) -> array<vec4<f32>, 2> {
+    let last = globals.fog_grid.x - 1.0;
+    let p = clamp((relative - globals.fog_frame.xy) / 16.0 - 0.5, vec2<f32>(0.0), vec2<f32>(last));
+    let base = floor(p);
+    let t = p - base;
+    let x0 = u32(base.x);
+    let z0 = u32(base.y);
+    let x1 = min(x0 + 1u, u32(last));
+    let z1 = min(z0 + 1u, u32(last));
+    let a = fog_cell(x0, z0);
+    let b = fog_cell(x1, z0);
+    let c = fog_cell(x0, z1);
+    let d = fog_cell(x1, z1);
+    let near0 = mix(a[0], b[0], t.x);
+    let near1 = mix(a[1], b[1], t.x);
+    let far0 = mix(c[0], d[0], t.x);
+    let far1 = mix(c[1], d[1], t.x);
+    return array<vec4<f32>, 2>(mix(near0, far0, t.y), mix(near1, far1, t.y));
+}
+
+// The antiderivative of the height profile: one under the top, e^-(y-top)/k
+// over it. The two halves meet at zero, which is what makes the mean below
+// exact across the boundary.
+fn fog_height_integral(y: f32, top: f32) -> f32 {
+    let above = y - top;
+    if (above <= 0.0) {
+        return above;
+    }
+    return FOG_FALLOFF * (1.0 - exp(-above / FOG_FALLOFF));
+}
+
+// A place's fog over a lit colour, for a point `relative` to the camera.
+//
+// The density along the ray is the mean of its two ends' — the camera's
+// column and the point's — and the height profile is integrated exactly; see
+// `render::place_fog` for why that is the approximation worth making. A world
+// with no place fog anywhere returns at the uniform branch.
+fn place_fog(lit: vec3<f32>, relative: vec3<f32>, distance: f32) -> vec3<f32> {
+    if (globals.fog_grid.y < 0.5) {
+        return lit;
+    }
+    let there = place_fog_at(relative.xz);
+    let here_density = globals.fog_here.w;
+    let total = here_density + there[0].w;
+    if (total <= 0.000001) {
+        return lit;
+    }
+    let colour = (globals.fog_here.rgb * here_density + there[0].rgb) / total;
+    let top = (globals.fog_frame.z * here_density + there[1].x) / total;
+    let eye = globals.fog_frame.w;
+    let point = eye + relative.y;
+    var profile: f32;
+    if (abs(point - eye) < 0.01) {
+        profile = exp(-max(eye - top, 0.0) / FOG_FALLOFF);
+    } else {
+        profile = (fog_height_integral(point, top) - fog_height_integral(eye, top)) / (point - eye);
+    }
+    let depth = 0.5 * total * distance * profile;
+    let hidden = 1.0 - exp(-depth);
+    // Lit by the sky rather than by what the mod said: a fog described once
+    // cannot know it is midnight.
+    return mix(lit, colour * globals.fog_grid.z, hidden);
+}
 
 // How fast the wind field drifts, in field units a second.
 const WIND_SPEED: f32 = 0.08;
@@ -918,7 +1010,8 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     // Mode 3 fogs in the post chain instead, from the depth buffer — which is
     // what lets its fog reach the sky and take the sun's colour with it. Doing
     // it here as well would apply it twice, and the second application is over
-    // a colour that has already lost its contrast to the first.
+    // a colour that has already lost its contrast to the first. That goes for
+    // a place's fog as much as the sky's.
     if (globals.lighting_mode == 2u) {
         return vec4<f32>(lit, texel.a);
     }
@@ -926,8 +1019,13 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     // Fog last, over the lit colour rather than under it: fog is between the
     // eye and the surface, so it is not something the surface's own light
     // shines through. Mixing before lighting would let a lamp brighten the air.
+    //
+    // The place's fog first and the sky's over it: the sky's is what hides
+    // the edge of the loaded world, and a forest's mist does not get to be in
+    // front of that.
+    let misted = place_fog(lit, input.world, input.distance);
     let haze = fog_amount(input.distance);
-    return vec4<f32>(mix(lit, globals.sky_colour.rgb, haze), texel.a);
+    return vec4<f32>(mix(misted, globals.sky_colour.rgb, haze), texel.a);
 }
 
 // Mode 2's shadows, which are not shadows.

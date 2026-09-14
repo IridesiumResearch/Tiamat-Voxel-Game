@@ -601,6 +601,24 @@ impl Bot {
             .collect()
     }
 
+    /// Every chunk's place fog received so far, with its position.
+    ///
+    /// The tint's twin, and for the tint's reason: a fog that a VM answers and
+    /// the server never forwards is a fog every unit test sees and no player
+    /// does.
+    #[must_use]
+    pub fn chunk_fogs_received(
+        &self,
+    ) -> Vec<(tiamot_core::ChunkPos, Option<tiamot_core::proto::ChunkFog>)> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::ChunkData { pos, fog, .. } => Some((pos, fog)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every chunk received so far, in arrival order.
     #[must_use]
     pub fn chunks_received(&self) -> Vec<tiamot_core::ChunkPos> {

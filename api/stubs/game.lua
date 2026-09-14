@@ -834,6 +834,50 @@ function game.register_on_generate(callback) end
 ---@param callback fun(pos: table): number, number, number
 function game.register_chunk_tint(callback) end
 
+---Gives one chunk's column its own fog — a rainforest's ground mist, a marsh's
+---murk — on top of the sky's distance fog.
+---
+---```lua
+---game.register_chunk_fog(function(pos)
+---    local wet = game.density(HUMIDITY):bounds(pos)
+---    if wet.low < 0.3 then return nil end              -- clear air
+---    return {
+---        r = 0.55, g = 0.62, b = 0.55,                  -- the mist, in daylight
+---        visibility = 20,                               -- blocks you see into it
+---        top = 70,                                      -- lies under y = 70
+---    }
+---end)
+---```
+---
+---- `visibility` (required): how far a player sees into it, in blocks. At that
+---  distance it hides 95% of what is behind it. At least 1.
+---- `r`, `g`, `b`: its colour in DAYLIGHT, 0..1, clamped; an unnamed channel
+---  is 1. The engine dims it with the sky, because a fog you describe once
+---  cannot know it is midnight.
+---- `top`: the height it lies under. Above it the fog thins by `e` every four
+---  blocks — thick in the valley, clear on the hill, and a layer seen from
+---  above. Leave it out for fog at every height.
+---
+---Return `nil` for no fog of your own. Answering at all speaks for the place, so
+---a later mod is not asked. A table with no `visibility`, or anything that is
+---not a table, is a bug and disables your mod the way an error would.
+---
+---**Per COLUMN, and blended.** Every chunk column's fog is filtered with its
+---neighbours', so a foggy biome thins over a chunk's width rather than ending
+---in a wall — and it is seen from outside as well as within: looking at a
+---misty forest from a clear hill, the forest is misty.
+---
+---Asked every time a chunk is served, never stored, one per mod, first answer
+---wins — exactly the terms `game.register_chunk_tint` has, and for its reasons.
+---Presentation only: nothing in the simulation sees through fog any worse.
+---
+---**Limits, stated.** The horizon past the detail radius is drawn from summaries
+---that carry no fog, so a fogged place far away reads as its nearest column's
+---fog; under water the water's murk replaces it; and a body (a mob, a player)
+---is fogged by the camera's own column, not its own.
+---@param callback fun(pos: table): { r: number?, g: number?, b: number?, visibility: number, top: number? }|nil
+function game.register_chunk_fog(callback) end
+
 ---Called when somebody leaves. **Registration window only.**
 ---
 ---The other half of `register_on_player_join`, and a mod needs both: anything

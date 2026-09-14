@@ -29,6 +29,8 @@ struct Globals {
     sun_intensity: f32,
     ambient: f32,
     fog_curve: f32,
+    tint_any: u32,
+    sway_any: u32,
     sun_colour: vec4<f32>,
     sky_colour: vec4<f32>,
     light_view_projection: array<mat4x4<f32>, 3>,
@@ -36,6 +38,15 @@ struct Globals {
     sun_direction: vec4<f32>,
     shadow_texel: vec4<f32>,
     fluid: vec4<f32>,
+    // Read by nothing here; spelled out so the place fog below lands at the
+    // offset `world.wgsl` has it.
+    camera_right: vec4<f32>,
+    // Every place's fog — see `render::place_fog`. A body is fogged by the
+    // camera's own, over its distance: it has no world position to look its
+    // column up with, and it is near enough that its column is the camera's.
+    fog_here: vec4<f32>,
+    fog_frame: vec4<f32>,
+    fog_grid: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -181,5 +192,17 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     );
-    return vec4<f32>(mix(lit, globals.sky_colour.rgb, haze), 1.0);
+    return vec4<f32>(mix(camera_fog(lit, input.distance), globals.sky_colour.rgb, haze), 1.0);
+}
+
+// The camera's own place fog over `distance` blocks of level ray. Mode 3
+// leaves it to the post pass, which fogs whatever the depth buffer says is
+// here — bodies included.
+fn camera_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
+    if (globals.fog_grid.y < 0.5 || globals.lighting_mode == 2u) {
+        return lit;
+    }
+    let above = max(globals.fog_frame.w - globals.fog_frame.z, 0.0);
+    let depth = globals.fog_here.w * distance * exp(-above / 4.0);
+    return mix(lit, globals.fog_here.rgb * globals.fog_grid.z, 1.0 - exp(-depth));
 }

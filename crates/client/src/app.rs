@@ -4262,7 +4262,7 @@ impl App {
                     ..
                 } => self.joined_world(spawn, tick, may_fly, seed),
 
-                Event::Chunk(chunk, tint) => {
+                Event::Chunk(chunk, tint, fog) => {
                     // The new space has started arriving, so there is something
                     // to look at. Cleared here rather than on a timer: what the
                     // player is waiting for is terrain, and this is it.
@@ -4280,6 +4280,9 @@ impl App {
                     let pos = chunk.pos();
                     self.store.set_tint(pos, tint);
                     self.renderer.set_chunk_tint(pos, tint);
+                    // The place's fog, by the same rule: the latest chunk of a
+                    // column speaks for it, so a fog that stops is cleared.
+                    self.renderer.set_chunk_fog(pos, fog);
                     self.store.insert(*chunk);
                 }
 
@@ -4736,6 +4739,10 @@ impl App {
         // chain, and both take the same colour and distance. It also gets the
         // background right, which a tint over the frame would not: the sky
         // through the surface is milk, not sky.
+        // Under water the water's murk is the whole view, and a forest's mist
+        // behind it is not something anybody down there can see.
+        self.renderer
+            .set_place_fog_visible(self.submerged_in().is_none());
         let (sky, far) = match self.submerged_in() {
             Some(fluid) => (self.store.fluid_colour(fluid), UNDERWATER_VISIBILITY),
             // **The HORIZON, not the detail radius, and inside it.** Since

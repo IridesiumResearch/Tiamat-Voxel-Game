@@ -231,7 +231,7 @@ impl Seen {
             Event::DialogClosed { form } => {
                 self.dialogs.remove(&form);
             }
-            Event::Chunk(chunk, tint) => {
+            Event::Chunk(chunk, tint, _) => {
                 self.store.set_tint(chunk.pos(), tint);
                 self.store.insert(*chunk);
             }

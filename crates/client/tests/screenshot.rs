@@ -414,6 +414,104 @@ fn fog_past_its_far_distance_leaves_nothing_of_the_terrain() {
     }
 }
 
+/// A place's fog over every column of the fixed scene and around it.
+fn fog_everywhere(renderer: &mut Renderer, fog: tiamot_core::proto::ChunkFog) {
+    for x in -2..=4 {
+        for z in -2..=4 {
+            renderer.set_chunk_fog(ChunkPos::new(x, 0, z), Some(fog));
+        }
+    }
+}
+
+#[test]
+fn a_places_fog_hides_the_ground_in_every_mode() {
+    // `game.register_chunk_fog`, drawn. Three paths, as for the sky's fog:
+    // modes 1 and 2 per surface in `world.wgsl`, mode 3 from depth in the post
+    // chain. A red fog so the answer is a HUE, which no amount of lighting or
+    // tonemapping produces from grey stone by accident: the same frame without
+    // the fog is the control, and it must not be red.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let red = tiamot_core::proto::ChunkFog {
+        colour: [255, 40, 40],
+        visibility: 6,
+        top: None,
+    };
+
+    for mode in [
+        client::config::LightingMode::Simple,
+        client::config::LightingMode::Classic,
+        client::config::LightingMode::Beautiful,
+    ] {
+        let redness = |fogged: bool| {
+            let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+            renderer.set_lighting_mode(mode);
+            if fogged {
+                fog_everywhere(&mut renderer, red);
+            }
+            let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+            let frame = target
+                .capture(&mut renderer, &viewpoint())
+                .expect("capture");
+            let ground = average(&frame, 0, HEIGHT * 3 / 4, WIDTH, HEIGHT);
+            (ground[0] - ground[1], renderer.fog_here())
+        };
+        let (clear, none) = redness(false);
+        let (misted, here) = redness(true);
+        assert!(!none.any(), "a world with no place fog drew some");
+        assert!(here.any(), "in {mode:?} the fog never reached the renderer");
+        assert!(
+            clear.abs() < 0.05,
+            "in {mode:?} the control is already red ({clear:.3}), so it proves nothing"
+        );
+        assert!(
+            misted > 0.35,
+            "in {mode:?} the ground ten blocks down in a six-block fog is only {misted:.3} \
+             redder than green"
+        );
+    }
+}
+
+#[test]
+fn a_ground_fog_lies_under_its_top() {
+    // The rainforest's floor mist: a fog with a `top` is thick below it and
+    // gone a few blocks above. The camera stands ten blocks over the floor.
+    // With the top above the floor the ray comes down into the fog and the
+    // ground is lost in it; with the top far below the floor the same fog
+    // hides nothing — which is what makes this a HEIGHT test, where the first
+    // half alone would pass for a fog that ignored its top.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let redness = |top: i32| {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        fog_everywhere(
+            &mut renderer,
+            tiamot_core::proto::ChunkFog {
+                colour: [255, 40, 40],
+                visibility: 6,
+                top: Some(top),
+            },
+        );
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let frame = target
+            .capture(&mut renderer, &viewpoint())
+            .expect("capture");
+        let ground = average(&frame, 0, HEIGHT * 3 / 4, WIDTH, HEIGHT);
+        ground[0] - ground[1]
+    };
+    // The floor's surface is at y = 8 and the camera at y = 18.
+    let buried = redness(13);
+    let below = redness(-40);
+    assert!(
+        buried > 0.35,
+        "a floor under the fog's top came out {buried:.3}"
+    );
+    assert!(
+        below < 0.05,
+        "a fog forty blocks under the floor still reddened it by {below:.3}"
+    );
+}
+
 #[test]
 fn distant_terrain_fades_into_the_sky() {
     // **Fog exists to hide the edge of the loaded world.** Without it, the far

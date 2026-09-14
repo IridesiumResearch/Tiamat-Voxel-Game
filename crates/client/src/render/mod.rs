@@ -31,6 +31,7 @@ pub mod frustum;
 pub mod grade;
 pub mod graph;
 pub mod offscreen;
+pub mod place_fog;
 pub mod shadow;
 pub mod skinned;
 pub mod viewmodel;
@@ -217,7 +218,19 @@ struct Globals {
     /// every frame because it is the camera's, and read only by the sprite
     /// stage — Contract §8.4, which builds its quad facing the viewer.
     camera_right: [f32; 4],
+    /// The fog where the camera stands, and where the camera stands in the
+    /// grid of every place's fog — see [`place_fog::Uniforms`].
+    ///
+    /// **Appended**, for the reason `light_view_projection` documents. Three
+    /// `vec4`s, 48 bytes, rewritten with the rest once a frame.
+    place_fog: place_fog::Uniforms,
 }
+
+/// How far a view of the sky is taken to cross a place's fog, in blocks.
+///
+/// Must match `SKY_FOG_REACH` in `post.wgsl`, or mode 3's sky and the other
+/// modes' disagree about how foggy the same place is.
+pub const SKY_FOG_REACH: f32 = 512.0;
 
 /// How much light the darkest place still gets.
 ///
@@ -843,6 +856,11 @@ pub struct Renderer {
     /// [`Self::set_chunk_tint`]. Distinct from `tints`, which is the per
     /// MATERIAL table: this one says what a place is, that one what a thing is.
     biome_tints: BTreeMap<(i32, i32), [u8; 3]>,
+    /// Each chunk column's own fog, and the grid of it around the camera the
+    /// shaders read. See [`Self::set_chunk_fog`].
+    place_fog: place_fog::PlaceFog,
+    /// This frame's view of it: where the camera stands, and the fog there.
+    fog_here: place_fog::Uniforms,
     /// Retired chunk buffers, kept for reuse. See [`BufferPool`].
     pool: BufferPool,
     instances: wgpu::Buffer,
@@ -1022,8 +1040,9 @@ impl Renderer {
 
         // One tint entry, meaning nothing varies: no material does until a
         // table says one does, and the shader's first test is the scale.
+        let place_fog = place_fog::PlaceFog::new(&gpu);
         let (view, grid, side, tints, bind_group) =
-            build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler);
+            build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, place_fog.buffer());
 
         let instances = build_instance_buffer(&gpu, 64);
 
@@ -1101,6 +1120,8 @@ impl Renderer {
             // scenes assert on.
             fog_curve: FOG_CURVE,
             fog_end: f32::MAX,
+            place_fog,
+            fog_here: place_fog::Uniforms::NONE,
             drawn: 0,
             cast: 0,
             entities_at: Vec::new(),
@@ -1322,6 +1343,7 @@ impl Renderer {
             &self.atlas_view,
             &self.sampler,
             &self.tints.buffer,
+            self.place_fog.buffer(),
         );
     }
 
@@ -1340,6 +1362,7 @@ impl Renderer {
             &view,
             &self.sampler,
             &self.tints.buffer,
+            self.place_fog.buffer(),
         );
         self.hands.set_atlas(&self.gpu, &view, &self.sampler);
         self.atlas_view = view;
@@ -1373,6 +1396,29 @@ impl Renderer {
     /// different number in next frame's instance.
     pub fn set_chunk_tint(&mut self, pos: ChunkPos, tint: [u8; 3]) {
         self.biome_tints.insert((pos.x, pos.z), tint);
+    }
+
+    /// Records a chunk column's own fog — `game.register_chunk_fog` — or that
+    /// it has none.
+    ///
+    /// Per COLUMN for the biome colour's reason, and `None` clears it: the last
+    /// chunk served for a column speaks for it. Costs nothing per frame until
+    /// the camera changes chunk or a fog changes, when the grid the shaders
+    /// read is rebuilt.
+    pub fn set_chunk_fog(&mut self, pos: ChunkPos, fog: Option<tiamot_core::proto::ChunkFog>) {
+        self.place_fog.set((pos.x, pos.z), fog);
+    }
+
+    /// Whether place fog is drawn. The client turns it off under water, where
+    /// the water's own murk is the whole view.
+    pub const fn set_place_fog_visible(&mut self, visible: bool) {
+        self.place_fog.set_visible(visible);
+    }
+
+    /// The fog the camera stood in last frame, for the tests and the overlay.
+    #[must_use]
+    pub const fn fog_here(&self) -> place_fog::Uniforms {
+        self.fog_here
     }
 
     /// The colour at one chunk-column CORNER, as the mean of the four columns
@@ -1541,6 +1587,12 @@ impl Renderer {
         for (_, mesh) in std::mem::take(&mut self.chunks) {
             self.pool.give_mesh(mesh);
         }
+        // **A place's looks belong to the world they came from.** Kept, the
+        // last world's fog and colours stood in whatever columns the next
+        // world had not served yet — the same parked-renderer bug that once
+        // mixed two worlds' chunk meshes.
+        self.place_fog.clear();
+        self.biome_tints.clear();
     }
 
     /// Sets the blob shadows to draw this frame.
@@ -1761,6 +1813,32 @@ impl Renderer {
         self.chunks.values().map(|chunk| chunk.used_bytes).sum()
     }
 
+    /// The colour the sky is cleared to: the sky, seen through the fog the
+    /// camera is standing in.
+    ///
+    /// **The sky has no geometry to fog**, so in modes 1 and 2 this is the only
+    /// place a thick fog can reach it — and a player in a pea-souper with blue
+    /// sky above the trees reads as a rendering bug. A level ray out to
+    /// [`SKY_FOG_REACH`] through the camera's own fog decides how much: in the
+    /// valley, all of it; three falloffs above a ground fog's top, the sky.
+    /// Mode 3 fogs the sky per pixel in the post pass, over this.
+    fn clear_colour(&self) -> wgpu::Color {
+        if !self.fog_here.any() || self.post.is_some() {
+            return SKY;
+        }
+        let here = self.fog_here.here();
+        let height = self.fog_here.frame[3];
+        let (hidden, colour) = place_fog::amount(here, here, height, height, SKY_FOG_REACH);
+        let light = self.fog_here.grid[2];
+        let mix = |sky: f64, fog: f32| sky + (f64::from(fog * light) - sky) * f64::from(hidden);
+        wgpu::Color {
+            r: mix(SKY.r, colour[0]),
+            g: mix(SKY.g, colour[1]),
+            b: mix(SKY.b, colour[2]),
+            a: 1.0,
+        }
+    }
+
     /// Everything the shader is told about this frame.
     ///
     /// Split out of [`Renderer::render`] because it is a list of settings and
@@ -1821,6 +1899,7 @@ impl Renderer {
             },
             fluid: [self.elapsed, 0.0, 0.0, 0.0],
             camera_right: self.camera_right,
+            place_fog: self.fog_here,
         }
     }
 
@@ -2073,7 +2152,9 @@ impl Renderer {
                 fog_curve: self.fog_curve,
                 fog_end: self.fog_end,
                 grade: self.grade,
+                place_fog: self.fog_here,
             },
+            self.place_fog.buffer(),
         );
     }
 
@@ -2470,6 +2551,10 @@ impl Renderer {
             post.bake_grade(&self.gpu, &grade);
         }
 
+        // Before the globals, which carry where the camera stands in it.
+        let daylight = self.sun_intensity.max(AMBIENT_FLOOR);
+        self.fog_here = self.place_fog.prepare(&self.gpu, camera, daylight);
+
         self.gpu.queue.write_buffer(
             &self.globals,
             0,
@@ -2513,7 +2598,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(SKY),
+                        load: wgpu::LoadOp::Clear(self.clear_colour()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -3344,6 +3429,21 @@ fn build_bind_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
                     },
                     count: None,
                 },
+                // **Every place's fog, as a grid of chunk columns round the
+                // camera** — see `place_fog`. A storage buffer the fragment
+                // filters by hand rather than a texture, because it is read by
+                // the post pass too and a buffer is one thing to bind in two
+                // layouts where a texture is a view and a sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         })
 }
@@ -3975,6 +4075,7 @@ fn build_atlas_bindings(
     layout: &wgpu::BindGroupLayout,
     globals: &wgpu::Buffer,
     sampler: &wgpu::Sampler,
+    fog: &wgpu::Buffer,
 ) -> (wgpu::TextureView, u32, u32, TintTable, wgpu::BindGroup) {
     let placeholder = Atlas::build(&[None]);
     let (view, grid, side) = upload_atlas(gpu, &placeholder);
@@ -3984,7 +4085,7 @@ fn build_atlas_bindings(
         swaying: 0,
         any: 0,
     };
-    let bind_group = make_bind_group(gpu, layout, globals, &view, sampler, &tints.buffer);
+    let bind_group = make_bind_group(gpu, layout, globals, &view, sampler, &tints.buffer, fog);
     (view, grid, side, tints, bind_group)
 }
 
@@ -4077,6 +4178,7 @@ fn make_bind_group(
     atlas: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
     tints: &wgpu::Buffer,
+    fog: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("world"),
@@ -4097,6 +4199,10 @@ fn make_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: tints.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: fog.as_entire_binding(),
             },
         ],
     })
