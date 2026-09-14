@@ -482,10 +482,24 @@ const EMISSIVE_GAIN: f32 = 1.2;
 // thing surrounded by daylight: the eye reads it against its surroundings, and
 // a hue that is technically correct reads as washed out next to a white world.
 //
+// **Was 1.45, doubled on 2026-09-14 — "make coloured lights about 2 times as
+// saturated as they currently are".** The distance from grey is linear in this
+// number, so a subtle coloured light is twice the colour it was. The brightest
+// lamplit surfaces gain less than that and it is worth knowing why: the weak
+// channel of a strongly tinted lamp reaches zero and the clamp below holds it
+// there, so what more push buys them is a dimmer weak channel rather than a
+// wider gap. Measured on the gate's own fixture — a wall at a full-strength
+// `core:lamp` — the distance from grey goes 0.47 to 0.84 rather than to 0.94,
+// and the frame goes (1.00, 0.85, 0.53) to (1.00, 0.76, 0.16): further into
+// orange, still an orange.
+//
 // The gate is `a_lamps_colour_survives_mode_threes_tonemap`, which measures
-// mode 3's distance from grey against mode 2's. Too high and a warm lamp turns
-// into a red one and the weak channel clamps at zero, taking the hue with it.
-const EMISSIVE_SATURATION: f32 = 1.45;
+// mode 3's distance from grey against mode 2's and checks the hue's ORDERING
+// survives — red before green before blue for a warm lamp. That second half is
+// what watches the failure this number courts: pushed far enough a warm lamp
+// becomes a red one, because the channel that clamped at zero took the hue
+// with it.
+const EMISSIVE_SATURATION: f32 = 2.9;
 
 // How much of the original brightness survives the steeper falloff, at the
 // source. Squaring a level in 0..1 only ever darkens, so without this a lamp

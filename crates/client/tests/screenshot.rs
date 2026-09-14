@@ -1976,9 +1976,9 @@ fn a_lamps_colour_survives_mode_threes_tonemap() {
          coloured enough for the comparison below to mean anything"
     );
 
-    // Measured on lavapipe: mode 2 lands at 0.26 and mode 3 at 0.47.
+    // Measured on lavapipe: mode 2 lands at 0.26 and mode 3 at 0.84.
     //
-    // The history in three numbers. With the tonemap's roll-off applied per
+    // The history in four numbers. With the tonemap's roll-off applied per
     // channel, mode 3 measured 0.17 — barely two thirds of mode 2's, and that
     // was the first report of "almost white". Rolling off the peak instead put
     // it at 0.30, ahead of the mode with no tonemap at all, because mode 2 has
@@ -1988,11 +1988,20 @@ fn a_lamps_colour_survives_mode_threes_tonemap() {
     // It was reported AGAIN, which is the interesting part: 0.30 is a faithful
     // rendering of the light and still reads as washed out, because a lamp is a
     // small warm thing seen against a large white world. `EMISSIVE_SATURATION`
-    // is the deliberate exaggeration that answers it, and 0.47 is where it
-    // lands. The bound below is a floor rather than a window: a change that
-    // quietly took the colour back out is the regression worth catching.
+    // is the deliberate exaggeration that answers it, and it put this at 0.47.
+    // Doubling that dial on 2026-09-14 — "about 2 times as saturated" — puts it
+    // at 0.84 rather than at 0.94, because this fixture is the extreme case:
+    // the lamp is at full strength right against the wall, its weak channel
+    // reaches zero, and the clamp in the shader holds it there. A dimmer or
+    // less tinted light, which is most of the coloured light in a world, does
+    // get the full doubling.
+    //
+    // The bound is a floor rather than a window: a change that quietly took the
+    // colour back out is the regression worth catching, and there is no upper
+    // limit worth writing here — the hue ordering below is what guards the
+    // other direction.
     assert!(
-        tonemapped > untonemapped * 1.4,
+        tonemapped > untonemapped * 2.4,
         "mode 3 kept {tonemapped} of the lamp's colour against mode 2's {untonemapped} — the \
          highlights are draining toward white again"
     );
