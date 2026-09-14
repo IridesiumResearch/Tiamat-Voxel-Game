@@ -1015,7 +1015,12 @@ fn the_fluid_scenarios_actually_hold_milk() {
 /// first, would settle differently on one of the three CI targets and nowhere
 /// else — and the horizon would disagree between two players standing beside
 /// each other.
-const LOD_GOLDEN: u64 = 13_632_031_266_035_353_490;
+///
+/// **Regenerated 2026-09-14 for `lod::SUMMARY_RULE` 2**: a block is solid at a
+/// third of its cells and a coarser cell at half its children, where both were
+/// a majority with ties to air. Setting the two thresholds back to 14 and 5
+/// reproduced the previous constant exactly, so the rule is the whole change.
+const LOD_GOLDEN: u64 = 16_478_387_116_901_781_655;
 
 /// A chunk with enough shape in it that a summary has something to lose.
 ///

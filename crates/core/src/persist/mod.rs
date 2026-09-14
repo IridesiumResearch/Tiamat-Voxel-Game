@@ -92,6 +92,8 @@ pub mod meta_keys {
     /// would be a domain nothing could name the next morning. See
     /// [`crate::domain`].
     pub const DOMAIN_INSTANCES: &str = "domain_instances";
+    /// Which rule built the cached summaries, as [`crate::lod::SUMMARY_RULE`].
+    pub const SUMMARY_RULE: &str = "summary_rule";
 }
 
 /// The format an entity blob is written in.
@@ -350,6 +352,15 @@ impl WorldDb {
         }
 
         Self::write_meta_str(&conn, meta_keys::ENGINE_VERSION, env!("CARGO_PKG_VERSION"))?;
+
+        // **Summaries built by another rule are forgotten, not served.** They
+        // are derived state: one that is gone costs a recompute, and a horizon
+        // half built one way and half another is a patchwork nothing downstream
+        // can tell is stale. A world with no rule recorded predates the key.
+        if Self::read_meta_i64(&conn, meta_keys::SUMMARY_RULE)? != Some(crate::lod::SUMMARY_RULE) {
+            conn.execute("DELETE FROM chunk_summaries", [])?;
+            Self::write_meta_i64(&conn, meta_keys::SUMMARY_RULE, crate::lod::SUMMARY_RULE)?;
+        }
 
         let mut ids = IdTable::load(&conn)?;
         let materials = ids.reconcile(&conn, registry)?;

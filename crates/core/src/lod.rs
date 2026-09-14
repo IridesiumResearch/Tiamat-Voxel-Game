@@ -22,18 +22,31 @@
 //! the shape invalidation already has to take: an edit dirties a column of
 //! levels, and rebuilding one rebuilds the rest from it.
 //!
-//! # Majority, and what a tie means
+//! # When a cell is solid, and what it is made of
 //!
-//! A cell takes the material most of it is made of, **air included**. A block
-//! that is one chiselled corner of stone is mostly air, and at a distance where
-//! one cell is eight blocks across, drawing it solid would put a hillside where
-//! there is a handrail.
+//! Two questions, answered separately. **Whether** a cell is solid is a count
+//! against a threshold ([`SOLID_CELLS_PER_BLOCK`] of a block's 27 sub-nodes,
+//! [`SOLID_CHILDREN`] of a coarser cell's eight); **what** it is made of is
+//! the commonest solid material in it.
 //!
-//! Ties are broken by the LOWEST material id, which is not arbitrary: it has to
-//! be a total order that both ends agree on and that does not depend on
-//! iteration order (charter rule 4). Air is id 0, so a cell exactly half air
-//! reads as air — the conservative answer for something being drawn at a size
-//! where it is nearly invisible anyway.
+//! **Why not a plain majority, air included, which is what this was.** A
+//! majority erodes anything round. A ball of leaves three blocks across,
+//! drawn at sub-node resolution, has corner and edge blocks less than half
+//! full, so its level-1 summary was its centre and its six face neighbours —
+//! a 3D cross — and the next level's majority wore that down to a single cell
+//! or nothing. Reported from the window as a woodland's crowns reading as "+"
+//! shapes floating at canopy height past the view distance, and small clumps
+//! as lone crosses. `examples/lodprobe.rs` prints the shapes. A third of a
+//! block keeps the edge blocks of a round thing and still drops a chiselled
+//! corner (one cell of 27) or a handrail — the reason the old rule said it
+//! preferred air.
+//!
+//! At the coarser levels a tie — four of eight — is solid. Half is
+//! volume-neutral, where tie-to-air removed every wall exactly one block thick
+//! at level 2, which is most walls.
+//!
+//! Material ties are broken by the LOWEST id, a total order both ends agree on
+//! that does not depend on iteration order (charter rule 4).
 //!
 //! # Determinism
 //!
@@ -52,6 +65,22 @@ use crate::{CHUNK_BLOCKS, Chunk};
 ///
 /// LOD0 is the chunk itself and has no [`Summary`] — see the module docs.
 pub const FINEST: u8 = 1;
+
+/// How many of a block's 27 sub-nodes must be solid for its level-1 cell to be.
+///
+/// A third — see the module docs for the cross it replaced. Nine, not eight,
+/// so a block exactly one cell-layer thick (a slab of nine) still counts, and
+/// anything thinner or a single chiselled corner does not.
+pub const SOLID_CELLS_PER_BLOCK: usize = 9;
+
+/// How many of a coarser cell's eight children must be solid for it to be.
+pub const SOLID_CHILDREN: usize = 4;
+
+/// Which rule built a stored summary. **Bump it whenever what a summary holds
+/// changes**: a world opened under another rule forgets its cached summaries,
+/// because a horizon half built by one rule and half by another is a patchwork
+/// nobody can tell is stale. See `persist::WorldDb::open`.
+pub const SUMMARY_RULE: i64 = 2;
 
 /// The coarsest level, where the whole chunk is one cell.
 ///
@@ -338,7 +367,7 @@ impl Summary {
                             }
                         }
                     }
-                    cells.push(majority(&group));
+                    cells.push(solid_majority(&group, SOLID_CHILDREN));
                 }
             }
         }
@@ -457,7 +486,7 @@ pub enum SummaryError {
     },
 }
 
-/// The material most of a block is made of, air included.
+/// What a block's level-1 cell is: see the module docs.
 fn dominant_subnode(view: &BlockView<'_>) -> MaterialId {
     // The common cases without counting: a uniform block is its material, and
     // most of a world is uniform.
@@ -468,7 +497,22 @@ fn dominant_subnode(view: &BlockView<'_>) -> MaterialId {
     for (index, cell) in cells.iter_mut().enumerate() {
         *cell = view.subnode(index);
     }
-    majority(&cells)
+    solid_majority(&cells, SOLID_CELLS_PER_BLOCK)
+}
+
+/// Air unless at least `threshold` of `cells` are solid; then the commonest
+/// solid material, ties to the lowest id.
+fn solid_majority(cells: &[MaterialId], threshold: usize) -> MaterialId {
+    let mut solid = [MaterialId::AIR; SUBNODES_PER_BLOCK];
+    let mut count = 0;
+    for cell in cells.iter().filter(|cell| !cell.is_air()) {
+        solid[count] = *cell;
+        count += 1;
+    }
+    if count < threshold {
+        return MaterialId::AIR;
+    }
+    majority(&solid[..count])
 }
 
 /// The most common material in a slice, ties going to the lowest id.
@@ -935,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn a_block_that_is_mostly_air_reads_as_air() {
+    fn a_block_with_a_chiselled_corner_reads_as_air() {
         // **The handrail case.** A block with one chiselled corner of stone is
         // mostly nothing, and at a distance where a cell is eight blocks across
         // drawing it solid would put a hillside where there is a handrail.
@@ -966,6 +1010,73 @@ mod tests {
     }
 
     #[test]
+    fn a_ball_of_leaves_summarises_round_and_not_as_a_cross() {
+        // Reported from the window: small leaf clumps past the view distance
+        // were lone crosses. A ball three blocks across at sub-node resolution,
+        // centred in a block across and on a block BOUNDARY vertically — so
+        // the layer of blocks above its middle is its upper half. Under the old
+        // majority that layer's level-1 cells were a "+", centre and four
+        // sides; `examples/lodprobe.rs` prints it. (Centred in a block
+        // vertically, the widest slab keeps its corners under either rule,
+        // which is how the first version of this test passed on the old code.)
+        let mut chunk = Chunk::air(home());
+        let (across, up) = (8.5_f32, 8.0_f32);
+        for x in 0..48 {
+            for y in 0..48 {
+                for z in 0..48 {
+                    let at = |cell: i32, centre: f32| (cell as f32 + 0.5) / 3.0 - centre;
+                    let (dx, dy, dz) = (at(x, across), at(y, up), at(z, across));
+                    if dx * dx + dy * dy + dz * dz <= 1.5 * 1.5 {
+                        chunk
+                            .set_subnode(crate::SubNodePos::new(x, y, z), STONE)
+                            .expect("in chunk");
+                    }
+                }
+            }
+        }
+        let chain = Summary::chain(&chunk);
+        let slice = |x: u32, z: u32| chain[0].cell(x, 8, z) == Some(STONE);
+        // The four diagonal neighbours of the middle, which a cross drops.
+        for (x, z) in [(7, 7), (9, 7), (7, 9), (9, 9)] {
+            assert!(
+                slice(x, z),
+                "the corner at ({x}, {z}) was eroded into a cross"
+            );
+        }
+        // And it does not grow past the ball: two blocks out is air.
+        assert!(!slice(10, 8) && !slice(6, 8), "the ball was inflated");
+        // Still there a level up. Under the old rule the cross covered exactly
+        // four of the one level-2 cell's eight children, the tie went to air,
+        // and the clump was gone. Not at level 3: a cell there is four blocks
+        // across and a ball three across is under half of any of them, which
+        // is an honest vanish.
+        assert!(
+            !chain[1].is_empty(),
+            "a clump three blocks across was worn away at level 2"
+        );
+    }
+
+    #[test]
+    fn a_wall_one_block_thick_survives_the_first_halving() {
+        // A tie at the coarser levels is solid: a wall exactly one block thick
+        // is four of every eight, and tie-to-air erased every such wall at
+        // level 2.
+        let mut chunk = Chunk::air(home());
+        for y in 0..16 {
+            for z in 0..16 {
+                chunk.set_block_local(LocalBlock::new(4, y, z), crate::BlockValue::Uniform(STONE));
+            }
+        }
+        let chain = Summary::chain(&chunk);
+        assert_eq!(
+            chain[1].cell(2, 3, 3),
+            Some(STONE),
+            "a one-block wall vanished at level 2"
+        );
+        assert_eq!(chain[1].cell(0, 3, 3), Some(MaterialId::AIR));
+    }
+
+    #[test]
     fn a_tie_goes_to_the_lowest_id_and_not_to_whichever_was_seen_first() {
         // The tie-break has to be a total order both ends agree on. Scan order
         // is fixed but relying on it would make the answer depend on where a
@@ -973,9 +1084,14 @@ mod tests {
         assert_eq!(majority(&[STONE, DIRT]), STONE);
         assert_eq!(majority(&[DIRT, STONE]), STONE, "scan order decided a tie");
         assert_eq!(
-            majority(&[MaterialId::AIR, STONE]),
+            solid_majority(&[MaterialId::AIR, STONE], 1),
+            STONE,
+            "at a threshold of one, half solid is solid"
+        );
+        assert_eq!(
+            solid_majority(&[MaterialId::AIR, MaterialId::AIR, DIRT], 2),
             MaterialId::AIR,
-            "a cell exactly half air should read as air"
+            "under the threshold is air however the rest is made"
         );
         assert_eq!(majority(&[STONE, STONE, DIRT]), STONE, "a majority lost");
     }
@@ -1024,12 +1140,13 @@ mod tests {
             "the sky filled in"
         );
 
-        // Exactly half, so the tie-break decides — and air wins, which is the
-        // conservative answer for something drawn at a size where it is nearly
-        // invisible. Written down because it is a choice, not an accident.
+        // Exactly half, so the tie decides — and a tie is SOLID, which is what
+        // the comment at the top of this test asks for. It was air until
+        // `SUMMARY_RULE` 2; tie-to-air also erased every one-block wall at level
+        // 2, and see the module docs for the crosses the old majority made.
         assert_eq!(
             chain.last().and_then(|whole| whole.cell(0, 0, 0)),
-            Some(MaterialId::AIR)
+            Some(DIRT)
         );
     }
 }

@@ -1257,6 +1257,50 @@ fn the_overworld_cannot_be_destroyed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn summaries_built_by_another_rule_are_forgotten_when_the_world_opens() {
+    // `lod::SUMMARY_RULE` changed when the downsample stopped eroding round
+    // things into crosses. A world holding summaries from the old rule would
+    // otherwise serve a horizon half built one way and half the other, which
+    // nothing downstream can tell is stale. Reopening under the SAME rule is
+    // the counter-example: the cache is kept, or the rule check would be a
+    // cache that empties itself on every start.
+    let path = scratch("summary-rule");
+    let mut registry = registry_with(&["test:stone"]);
+    let stone = registry.register("test:stone").expect("register");
+    let at = ChunkPos::new(0, 0, 0);
+    let chain: Vec<(u8, Vec<u8>)> = tiamot_core::lod::Summary::chain(&Chunk::new(at, stone))
+        .iter()
+        .map(|summary| (summary.level(), tiamot_core::lod::codec::encode(summary)))
+        .collect();
+
+    let db = WorldDb::open(&path, &mut registry).expect("open");
+    db.save_summaries(DEFAULT_DOMAIN, at, &chain).expect("save");
+    db.close().expect("close");
+
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(
+        db.summary_rows(DEFAULT_DOMAIN).expect("count"),
+        chain.len(),
+        "the same rule threw its own cache away"
+    );
+    // As a world written before this rule would be: an older number.
+    db.set_meta(
+        tiamot_core::persist::meta_keys::SUMMARY_RULE,
+        &(tiamot_core::lod::SUMMARY_RULE - 1).to_le_bytes(),
+    )
+    .expect("set");
+    db.close().expect("close");
+
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(
+        db.summary_rows(DEFAULT_DOMAIN).expect("count"),
+        0,
+        "summaries from another rule were kept"
+    );
+    db.close().expect("close");
+}
+
+#[test]
 fn an_edit_forgets_every_level_above_it_and_leaves_its_neighbours_alone() {
     // **Criterion: edit invalidation.** A summary is derived state, so an edit
     // at LOD0 makes every level of that column wrong at once — and a summary
