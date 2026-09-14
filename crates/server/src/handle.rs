@@ -1047,12 +1047,34 @@ fn serve_one_chunk(
     // wonder. Without this a joining player sees a pond only once something
     // disturbs it.
     if blob.is_some() {
-        let layer = fluidics
-            .read()
-            .expect("fluid lock")
-            .get(&request.domain)
-            .and_then(|fluid| fluid.layer(request.pos).cloned())
-            .unwrap_or_else(tiamot_core::fluid::FluidLayer::empty);
+        let layer = {
+            let mut ponds = fluidics.write().expect("fluid lock");
+            let fluid = ponds.of(&request.domain);
+            // **A chunk generated this tick has its fluid in the world and not
+            // yet in the simulation.** `adopt_generated` writes the layer and
+            // puts the chunk on the arrival list; the pass that reads it into
+            // `Fluidics` runs later in the tick, and until this was here the
+            // message that "travels with the chunk" went out EMPTY for every
+            // freshly generated chunk — and nothing ever corrected it, because
+            // still water never ticks and only a change re-sends a layer. A
+            // generated sea was invisible to the client that first saw it,
+            // present to the server that simulated it (so a player swam in
+            // nothing), and drawn as a wall wherever a chunk that had it met
+            // one that did not. Reading it here costs one row of the world
+            // database, once, for a chunk that is going out anyway.
+            if !fluid.knows(request.pos) {
+                match world.load_fluid(&request.domain, request.pos) {
+                    Ok(layer) => fluid.chunk_loaded(request.pos, layer.unwrap_or_default()),
+                    Err(err) => {
+                        debug!(pos = ?request.pos, "could not load a chunk's fluid: {err}");
+                    }
+                }
+            }
+            fluid
+                .layer(request.pos)
+                .cloned()
+                .unwrap_or_else(tiamot_core::fluid::FluidLayer::empty)
+        };
         // To the requester's own space: the same position is a different pond
         // elsewhere.
         shared.broadcast_in(
