@@ -3303,13 +3303,25 @@ impl ServerHandle {
                             // still means something — a refusal arrives before
                             // anything has been removed, which is what "BEFORE
                             // anything is removed" has always promised.
+                            //
+                            // **Lent the world while they are asked.** A hook
+                            // that decides by what the block HOLDS — blooms on
+                            // a bush, eggs in a nest — has to be able to look,
+                            // and the event names one material of a block that
+                            // may hold three. Asked outside the lease,
+                            // `game.get_block` answered nil for the very block
+                            // being dug with the player standing on it.
                             let verdict = if bite.first {
-                                source.may_dig(&tiamot_core::script::DigEvent {
-                                    player: *uuid.as_bytes(),
-                                    target,
-                                    material,
-                                    brush,
-                                })
+                                let (returned, verdict) = sight.lending(world, || {
+                                    source.may_dig(&tiamot_core::script::DigEvent {
+                                        player: *uuid.as_bytes(),
+                                        target,
+                                        material,
+                                        brush,
+                                    })
+                                });
+                                world = returned;
+                                verdict
                             } else {
                                 tiamot_core::script::HookOutcome::allow()
                             };
@@ -3637,13 +3649,19 @@ impl ServerHandle {
                             // load and save — and a world with a mod removed
                             // asked the mods to judge the wrong block.
                             let as_registered = material;
-                            let verdict = source.may_place(&tiamot_core::script::PlaceEvent {
-                                player: *request.actor.as_bytes(),
-                                block: plan.block,
-                                material: as_registered,
-                                occupancy: plan.occupancy,
-                                units: plan.units,
+                            // Lent the world, as the dig hook is: a veto that
+                            // cannot look at where it is being asked about is
+                            // deciding blind.
+                            let (returned, verdict) = sight.lending(world, || {
+                                source.may_place(&tiamot_core::script::PlaceEvent {
+                                    player: *request.actor.as_bytes(),
+                                    block: plan.block,
+                                    material: as_registered,
+                                    occupancy: plan.occupancy,
+                                    units: plan.units,
+                                })
                             });
+                            world = returned;
                             for (mod_id, err) in &verdict.faults {
                                 error!(mod_id = %mod_id, "mod disabled after an on_place failure: {err}");
                             }
@@ -4135,11 +4153,17 @@ impl ServerHandle {
                                 player.swung_on = tick;
                             }
 
-                            let verdict = source.may_punch(&tiamot_core::script::PunchEvent {
-                                attacker: *uuid.as_bytes(),
-                                target: id,
-                                owner: owner.map(|owner| *owner.as_bytes()),
+                            // Lent the world, like every hook a player's own
+                            // action reaches: a mod judging a hit may want to
+                            // know what the target is standing in.
+                            let (returned, verdict) = sight.lending(world, || {
+                                source.may_punch(&tiamot_core::script::PunchEvent {
+                                    attacker: *uuid.as_bytes(),
+                                    target: id,
+                                    owner: owner.map(|owner| *owner.as_bytes()),
+                                })
                             });
+                            world = returned;
                             for (mod_id, err) in &verdict.faults {
                                 error!(mod_id = %mod_id, "mod disabled after an on_punch failure: {err}");
                             }

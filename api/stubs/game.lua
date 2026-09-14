@@ -2026,6 +2026,11 @@ function game.set_block(position, block, occupancy, options) end
 ---Return `false` to refuse with the engine's wording, a string to refuse with
 ---your own, or `""` to cancel silently — the same ladder
 ---`game.register_on_place` uses.
+---
+---**The world can be read from inside it.** `game.get_block` on the block being
+---dug answers what it holds before anything is removed, so a hook can decide by
+---the whole block rather than by the one material the event names. Writes from
+---a veto are still refused.
 ---@param callback fun(event: Tiamot.DigEvent): boolean|string|nil
 function game.register_on_dig_complete(callback) end
 
@@ -2054,7 +2059,7 @@ function game.register_on_dig_complete(callback) end
 ---
 ---The same rules as `game.register_on_dig_complete` otherwise: the first
 ---cancellation stops the rest, and an error disables your mod while letting the
----placement through.
+---placement through — and `game.get_block` answers inside it.
 ---@param callback fun(event: Tiamot.PlaceEvent): boolean|string|nil
 function game.register_on_place(callback) end
 

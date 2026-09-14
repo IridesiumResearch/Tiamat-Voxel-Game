@@ -378,6 +378,84 @@ fn a_hook_can_refuse_selectively_using_the_event_it_is_given() {
     assert!(server.stop());
 }
 
+#[test]
+fn a_veto_hook_can_read_the_world_it_is_judging() {
+    // Reported by the world mod: a bush with blooms is picked by cancelling
+    // its dig, and the hook has to LOOK at the bush to know whether there is
+    // anything to pick. `game.get_block` answered nil there for the very
+    // block being dug, with the player standing next to it, because the dig
+    // path asked the mods outside the window the world is lent in.
+    //
+    // Each hook refuses with what it read, so the notice carries the answer
+    // out. "blind" is the bug; the other two words say it looked and saw the
+    // right thing, which a hook that merely got a table back would not.
+    let server = start(
+        "veto-reads",
+        write_warden(
+            "veto-reads",
+            "game.register_on_dig_complete(function(e)\n\
+             \x20   local at = game.get_block{ x = e.x // 3, y = e.y // 3, z = e.z // 3 }\n\
+             \x20   if at == nil then return 'dig blind' end\n\
+             \x20   if e.x // 3 ~= 2 then return end\n\
+             \x20   if at.material == e.material then return 'dig saw the block' end\n\
+             \x20   return 'dig saw something else'\n\
+             end)\n\
+             game.register_on_place(function(e)\n\
+             \x20   local at = game.get_block{ x = e.x, y = e.y, z = e.z }\n\
+             \x20   if at == nil then return 'place blind' end\n\
+             \x20   if at.material == game.AIR then return 'place saw air' end\n\
+             \x20   return 'place saw something else'\n\
+             end)",
+        ),
+    );
+    let stone = stone();
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let pos = BlockPos::new(2, -1, 0);
+        assert!(
+            !dig_and_see(&mut bot, &server, pos, stone).await,
+            "the hook refuses every dig, so the block should have stayed"
+        );
+        let told = |bot: &Bot, word: &str| bot.notices().iter().any(|text| text.starts_with(word));
+        assert!(
+            told(&bot, "dig saw the block"),
+            "the dig hook could not read the block it was judging; notices {:?}",
+            bot.notices()
+        );
+
+        // Something to place with, the way a player gets it: the hook lets
+        // every dig but the probe's through.
+        assert!(
+            dig_and_see(&mut bot, &server, BlockPos::new(-3, -1, 0), stone).await,
+            "a dig away from the probe should be allowed"
+        );
+        assert!(
+            !told(&bot, "dig blind"),
+            "the second dig's hook could not read; notices {:?}",
+            bot.notices()
+        );
+        bot.await_inventory(Duration::from_secs(10))
+            .await
+            .expect("the dig should credit");
+        settled_inventory(&mut bot).await;
+        bot.place_from_inventory(centre_of(BlockPos::new(-2, 0, 0)), stone)
+            .await
+            .expect("send");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && !told(&bot, "place") {
+            let _ = tokio::time::timeout(Duration::from_millis(200), bot.recv()).await;
+        }
+        assert!(
+            told(&bot, "place saw air"),
+            "the place hook could not read where it was asked about; notices {:?}",
+            bot.notices()
+        );
+    });
+
+    assert!(server.stop());
+}
+
 /// Where the reference mods live, for the test below.
 fn reference_mods() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
