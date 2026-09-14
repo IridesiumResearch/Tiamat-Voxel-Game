@@ -434,6 +434,98 @@ impl Solver {
     }
 }
 
+/// How many brimming blocks have to touch before they are a body.
+///
+/// **Three, because two is a spilled bucket.** It is the smallest number that
+/// tells a body somebody meant — a river, a pond, a sea — from water in
+/// motion, and the difference decides what survives a chunk load (§4.5).
+pub const BODY_BLOCKS: u32 = 3;
+
+/// The six face neighbours, in a fixed order.
+///
+/// All six, unlike [`LATERAL`]: a body is a three-dimensional thing and a sea
+/// is connected through its own depth. This is not a flow direction list —
+/// fluid still never climbs — it is a connectivity one.
+const FACES: [[i32; 3]; 6] = [
+    [-1, 0, 0],
+    [1, 0, 0],
+    [0, -1, 0],
+    [0, 1, 0],
+    [0, 0, -1],
+    [0, 0, 1],
+];
+
+/// Whether a block holds every cell it has room for.
+///
+/// **Sub-Node Contract §4.5's "brims".** Capacity rather than 27, because the
+/// bed of a river is rarely a whole block of air: a block one third full of
+/// gravel brims at eighteen cells and is as much a part of the river as the
+/// clear water beside it. A block that cannot hold fluid at all never brims —
+/// there is nothing there to be part of anything.
+///
+/// `false` for a block that is not loaded, which is the conservative answer:
+/// what cannot be read cannot be counted on.
+fn brims<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: BlockPos) -> bool {
+    let Some(occupancy) = world.occupancy(at) else {
+        return false;
+    };
+    let room = capacity(occupancy, tuning.waterlogs_at);
+    room > 0 && world.fluid(at).volume() >= room
+}
+
+/// Whether `at` is part of a body: [`BODY_BLOCKS`] brimming blocks that touch.
+///
+/// **Sub-Node Contract §4.5, and what loading a chunk asks before it wakes
+/// anything.** A body is water that has come to rest in the shape somebody
+/// meant — worldgen's river, a sea, a pond a player filled — and re-running the
+/// physics over it every time it streams in is how a river whose banks the
+/// terrain never built empties itself.
+///
+/// # Connectivity, not a count of neighbours
+///
+/// The end block of a one-wide river has exactly one brimming neighbour, and
+/// that neighbour has another: counting neighbours would wake both ends of
+/// every river and let them unravel from the tips. So this is reachability —
+/// and it needs no component tracking, because **two steps reach every
+/// 3-connected set containing `at`**. The worst case is a straight line with
+/// `at` at one end.
+///
+/// Nothing is allocated and the answer does not depend on the order the
+/// neighbours are visited, which charter rule 4 requires of anything the
+/// simulation acts on.
+pub fn in_a_body<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: BlockPos) -> bool {
+    if !brims(world, tuning, at) {
+        return false;
+    }
+    let step = |from: BlockPos, [dx, dy, dz]: [i32; 3]| {
+        BlockPos::new(
+            from.x.saturating_add(dx),
+            from.y.saturating_add(dy),
+            from.z.saturating_add(dz),
+        )
+    };
+    let mut found = 1;
+    let mut only = None;
+    for offset in FACES {
+        let next = step(at, offset);
+        if brims(world, tuning, next) {
+            found += 1;
+            if found >= BODY_BLOCKS {
+                return true;
+            }
+            only = Some(next);
+        }
+    }
+    // One neighbour, so the third block — if there is one — is out past it.
+    let Some(only) = only else {
+        return false;
+    };
+    FACES
+        .into_iter()
+        .map(|offset| step(only, offset))
+        .any(|next| next != at && brims(world, tuning, next))
+}
+
 /// How much more fluid a block will take of `fluid`, in cells.
 ///
 /// Zero for a block already holding a different fluid: two fluids do not mix,
@@ -782,13 +874,19 @@ mod tests {
     pub(super) struct Scene {
         solid: BTreeSet<(i32, i32, i32)>,
         absorbent: BTreeMap<(i32, i32, i32), u32>,
+        /// Blocks part full of terrain, in cells. A river bed is rarely a whole
+        /// block of air, and §4.5's "brims" is about capacity rather than 27.
+        partial: BTreeMap<(i32, i32, i32), u32>,
         fluid: BTreeMap<(i32, i32, i32), Fluid>,
         loaded: Option<BTreeSet<(i32, i32, i32)>>,
     }
 
     impl Scene {
         /// A floor spanning `xs` by `zs` at `y`, with everything above it open.
-        fn floored(xs: std::ops::RangeInclusive<i32>, zs: std::ops::RangeInclusive<i32>) -> Self {
+        pub(super) fn floored(
+            xs: std::ops::RangeInclusive<i32>,
+            zs: std::ops::RangeInclusive<i32>,
+        ) -> Self {
             let mut scene = Self::default();
             for x in xs {
                 for z in zs.clone() {
@@ -832,6 +930,11 @@ mod tests {
             self.solid.insert((x, y, z));
         }
 
+        /// Puts `cells` of terrain in a block without making it solid.
+        pub(super) fn occupy(&mut self, x: i32, y: i32, z: i32, cells: u32) {
+            self.partial.insert((x, y, z), cells);
+        }
+
         pub(super) fn make_absorbent(&mut self, x: i32, y: i32, z: i32, rate: u32) {
             self.absorbent.insert((x, y, z), rate);
         }
@@ -864,11 +967,15 @@ mod tests {
             {
                 return None;
             }
-            Some(if self.solid.contains(&(pos.x, pos.y, pos.z)) {
-                MAX_VOLUME
-            } else {
-                0
-            })
+            if self.solid.contains(&(pos.x, pos.y, pos.z)) {
+                return Some(MAX_VOLUME);
+            }
+            Some(
+                self.partial
+                    .get(&(pos.x, pos.y, pos.z))
+                    .copied()
+                    .unwrap_or(0),
+            )
         }
 
         fn absorbency(&self, pos: BlockPos) -> u32 {
@@ -1332,6 +1439,128 @@ mod tests {
             took.len(),
             "every cell that left a block should have arrived in another"
         );
+    }
+
+    /// Sub-Node Contract §4.5. What a chunk load is allowed to wake.
+    mod bodies {
+        use super::*;
+
+        /// A floored scene with milk brimming in each of `blocks`.
+        fn body(blocks: &[(i32, i32, i32)]) -> Scene {
+            let mut scene = Scene::floored(-8..=8, -8..=8);
+            for (x, y, z) in blocks {
+                scene.pour(BlockPos::new(*x, *y, *z), MAX_VOLUME);
+            }
+            scene
+        }
+
+        fn is_body(scene: &Scene, at: (i32, i32, i32)) -> bool {
+            in_a_body(scene, Tuning::DEFAULT, BlockPos::new(at.0, at.1, at.2))
+        }
+
+        #[test]
+        fn one_block_is_not_a_body_and_neither_are_two() {
+            // Two touching blocks is a spilled bucket, and a bucket is water in
+            // motion: it must still be woken and still settle.
+            let lone = body(&[(0, 1, 0)]);
+            assert!(!is_body(&lone, (0, 1, 0)));
+
+            let pair = body(&[(0, 1, 0), (1, 1, 0)]);
+            assert!(!is_body(&pair, (0, 1, 0)));
+            assert!(!is_body(&pair, (1, 1, 0)));
+        }
+
+        #[test]
+        fn three_in_a_line_are_a_body_from_either_end() {
+            // **The case a count of neighbours gets wrong.** The end of a
+            // one-wide river has exactly one brimming neighbour, so a rule that
+            // counted them would wake both ends of every river and let it
+            // unravel from the tips. The middle block is the easy case; the
+            // ends are the test.
+            let line = body(&[(0, 1, 0), (1, 1, 0), (2, 1, 0)]);
+            assert!(is_body(&line, (1, 1, 0)), "the middle of a line");
+            assert!(is_body(&line, (0, 1, 0)), "one end of a line");
+            assert!(is_body(&line, (2, 1, 0)), "the other end");
+        }
+
+        #[test]
+        fn a_body_is_connected_in_three_dimensions() {
+            // A sea is joined through its own depth, so the six faces are the
+            // neighbours rather than the four a flow may take.
+            let column = body(&[(0, 1, 0), (0, 2, 0), (0, 3, 0)]);
+            assert!(is_body(&column, (0, 1, 0)));
+            assert!(is_body(&column, (0, 3, 0)));
+        }
+
+        #[test]
+        fn blocks_that_only_meet_at_a_corner_are_not_touching() {
+            // Diagonals are not faces. Two pairs that share only an edge are two
+            // spills, not one pond, and both stay awake.
+            let corner = body(&[(0, 1, 0), (1, 2, 0)]);
+            assert!(!is_body(&corner, (0, 1, 0)));
+            assert!(!is_body(&corner, (1, 2, 0)));
+        }
+
+        #[test]
+        fn water_that_does_not_brim_is_never_part_of_a_body() {
+            // A film on its way somewhere is exactly what loading must still
+            // wake, however much brimming water it is beside.
+            let mut scene = body(&[(0, 1, 0), (1, 1, 0), (2, 1, 0)]);
+            scene.pour(BlockPos::new(3, 1, 0), MAX_VOLUME - 1);
+            assert!(!is_body(&scene, (3, 1, 0)), "a block one cell short");
+            assert!(
+                is_body(&scene, (2, 1, 0)),
+                "and its neighbours are still a body"
+            );
+        }
+
+        #[test]
+        fn a_block_brims_at_the_capacity_its_terrain_leaves_it() {
+            // **The river bed.** A block a third full of gravel holds eighteen
+            // cells and is as much a part of the river as the clear water
+            // beside it; measuring against 27 would wake the whole bed of every
+            // stream in the world.
+            let mut scene = body(&[(0, 1, 0), (1, 1, 0)]);
+            scene.occupy(2, 1, 0, 9);
+            scene.pour(BlockPos::new(2, 1, 0), MAX_VOLUME - 9);
+            assert!(
+                is_body(&scene, (2, 1, 0)),
+                "a bed block full to its capacity"
+            );
+            assert!(
+                is_body(&scene, (0, 1, 0)),
+                "so the three of them are a body"
+            );
+        }
+
+        #[test]
+        fn a_block_with_no_room_at_all_is_not_water() {
+            // Fluid-solid: there is nothing there to be part of anything, and a
+            // body made of three of them would pin water that does not exist.
+            let mut scene = body(&[(0, 1, 0), (1, 1, 0)]);
+            scene.occupy(2, 1, 0, MAX_VOLUME);
+            assert!(!is_body(&scene, (2, 1, 0)));
+        }
+
+        #[test]
+        fn what_cannot_be_read_does_not_count() {
+            // §4.2 already says an unloaded neighbour is not readable. The
+            // conservative answer here is the same one: the two blocks this
+            // scene can see are not a body on their own, so they are woken and
+            // settle against the solid edge — which is where they already are.
+            let mut scene = Scene::sealed(4);
+            for x in 0..3 {
+                scene.pour(BlockPos::new(x, 1, 0), MAX_VOLUME);
+            }
+            assert!(is_body(&scene, (1, 1, 0)), "all three are loaded here");
+
+            let mut cut = Scene::sealed(4);
+            cut.pour(BlockPos::new(0, 1, 0), MAX_VOLUME);
+            cut.pour(BlockPos::new(1, 1, 0), MAX_VOLUME);
+            // The third block of the line is outside the loaded world.
+            cut.pour(BlockPos::new(5, 1, 0), MAX_VOLUME);
+            assert!(!is_body(&cut, (0, 1, 0)));
+        }
     }
 }
 

@@ -311,8 +311,9 @@ of the loaded world and a pond must not drain into a chunk that has not arrived.
 
 There are **no source blocks**. An infinite spring is a conservation violation
 by definition, so `flow_range`, `renews_from` and the source flag are gone with
-the model that needed them. Standing bodies of water large enough that draining
-them matters are a future mechanism, deliberately deferred — see §4.5.
+the model that needed them. What keeps a river or a sea from draining is not a
+source but §4.5: nothing moves until something touches it, and loading a chunk
+is not a touch.
 
 ### 4.3 Declared sinks, and why they are counted
 
@@ -352,17 +353,56 @@ reading as a solid column. Conservation removes the need for it: falling fluid
 genuinely holds little volume per block, so a waterfall is thin because it is
 thin, not because the renderer was told to lie about it.
 
-### 4.5 What is deferred, and why it is safe to defer
+### 4.5 Bodies at rest, and what loading may disturb
 
-Large standing bodies of water — oceans — want a mask and a global sea level
-rather than physical blocks, because simulating an ocean block by block is
-ruinous and because a conserved ocean drains into the first cave anybody digs
-under it. That mechanism is **deliberately not built yet**.
+A block **brims** when it holds its whole capacity. A brimming block connected
+to at least two more brimming blocks — by any path through the six face
+neighbours, so a chain counts — is part of a **body**.
 
-It is safe to defer because **no reference generator produces standing water**:
-every drop in a world comes out of a player's bucket. The day worldgen grows an
-ocean is the day this section needs its other half, and that is a mechanism
-task, not a tuning pass.
+**Loading a chunk does not wake a body.** It wakes everything else it reads.
+
+The solver is a work queue: nothing moves unless something touches it, and
+until this rule existed, reading a chunk's fluid off the disk touched every
+non-empty block in it. That re-ran the physics over a river or a sea every time
+it streamed in — and the first of those runs is the one that empties a river
+whose banks the terrain never built. **Worldgen's water is a declaration, not a
+proposal**, and a body that has come to rest is not asked to justify itself
+again.
+
+What this is not:
+
+- **Not a source.** No volume is created. A body that is woken flows exactly as
+  it always did, and if its container leaks it drains. This is hysteresis.
+- **Not a freeze.** An edit beside a body wakes it — dig the bank and the river
+  runs, dig under the sea and it falls into the cave. That is the behaviour a
+  player expects, and it is the whole reason to make loading the only thing
+  that is quiet.
+- **Not a change to the sinks.** Absorption and evaporation apply to blocks the
+  solver visits, and a body nothing has touched is not visited. A bed that has
+  already drunk its fill does not drink again on every load, which it used to.
+
+**Three, because two is a spilled bucket.** It is the smallest number that tells
+a body somebody meant from water in motion, and the test is connectivity rather
+than a count of neighbours: the end block of a one-wide river has exactly one
+brimming neighbour, and that neighbour has another. Two steps reach every
+3-connected set, so the search is bounded and needs no component tracking.
+
+Water that does not brim — a film, a droplet, a pour saved while it was still
+falling — is woken and settles as it always has. A body reaching into a chunk
+that is not loaded cannot see its own continuation there (§4.2: unloaded is not
+readable), so the last block or two at that seam may be woken; they settle
+against the solid edge and nothing moves.
+
+### 4.6 What is still deferred
+
+A sea that **survives being dug into** wants a declared level and a boundary
+condition — any block below the level that is open to the sea is simply full,
+refilled to that level and never above it — rather than a finite volume the
+solver can empty. §4.5 keeps an ocean where worldgen put it, which is what the
+streaming world needed; it does not make one inexhaustible, so breaching the
+seabed still drains what is above into the cave. That mechanism is **not built
+yet**, and it is the one place in this contract where creating volume would be
+honest, because a sea is outside the simulation by definition.
 
 ### Implemented by
 
@@ -370,7 +410,8 @@ task, not a tuning pass.
 is, the fluid's own `waterlogs_at` decides what that means for floor, and
 `Fluid::capacity` turns it into how much will fit. The world reports a fact; the
 policy lives with the fluid, so two fluids in one world may disagree about what
-counts as floor.
+counts as floor. §4.5 is `fluid::solver::in_a_body`, asked by
+`server::fluid::Fluidics::chunk_loaded` for every block it reads.
 
 ---
 

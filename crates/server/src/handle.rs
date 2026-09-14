@@ -279,6 +279,8 @@ fn load_domain_fluid(
         return;
     };
     let fluid = ponds.of(domain);
+    // What the terrain is, for the body test every load makes (Contract §4.5).
+    let terrain = world.solid(domain);
     for pos in arrived {
         // Already read: the lighting defers what it cannot relight by putting
         // the chunk back on the arrival list, so chunks arrive twice. Loading
@@ -289,7 +291,7 @@ fn load_domain_fluid(
         match world.load_fluid(domain, *pos) {
             // Recorded as read either way — a chunk with no row is dry, which
             // is an answer.
-            Ok(layer) => fluid.chunk_loaded(*pos, layer.unwrap_or_default()),
+            Ok(layer) => fluid.chunk_loaded(*pos, layer.unwrap_or_default(), &terrain),
             Err(err) => {
                 // Left unread so the next arrival retries. Treating a failed
                 // read as "dry" would quietly delete a pond.
@@ -1064,7 +1066,10 @@ fn serve_one_chunk(
             // database, once, for a chunk that is going out anyway.
             if !fluid.knows(request.pos) {
                 match world.load_fluid(&request.domain, request.pos) {
-                    Ok(layer) => fluid.chunk_loaded(request.pos, layer.unwrap_or_default()),
+                    Ok(layer) => {
+                        let terrain = world.solid(&request.domain);
+                        fluid.chunk_loaded(request.pos, layer.unwrap_or_default(), &terrain);
+                    }
                     Err(err) => {
                         debug!(pos = ?request.pos, "could not load a chunk's fluid: {err}");
                     }
@@ -4458,11 +4463,16 @@ impl ServerHandle {
                             }
                             let mut ponds = fluidics.write().expect("fluid lock");
                             let fluid = ponds.of(&domain);
+                            let terrain = world.solid(&domain);
                             for pos in poured {
                                 // Marked loaded with the pour kept: `chunk_loaded`
                                 // leaves the layer alone for an empty saved one,
                                 // and a chunk nobody had loaded has nothing saved.
-                                fluid.chunk_loaded(pos, tiamot_core::fluid::FluidLayer::empty());
+                                fluid.chunk_loaded(
+                                    pos,
+                                    tiamot_core::fluid::FluidLayer::empty(),
+                                    &terrain,
+                                );
                             }
                             let changes = fluid.tick(
                                 &domain,

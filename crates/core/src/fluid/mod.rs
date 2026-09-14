@@ -49,7 +49,9 @@ mod solver;
 pub mod codec;
 
 pub use layer::FluidLayer;
-pub use solver::{Absorbed, Blocked, Flow, Neighbourhood, Sinks, Solver, Tuning};
+pub use solver::{
+    Absorbed, BODY_BLOCKS, Blocked, Flow, Neighbourhood, Sinks, Solver, Tuning, in_a_body,
+};
 
 /// The fullest a block with nothing else in it can be, in cells of 27.
 ///

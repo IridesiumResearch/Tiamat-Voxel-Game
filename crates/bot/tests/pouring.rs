@@ -598,3 +598,125 @@ fn a_spawned_lake_wets_its_bed_and_then_stays() {
     });
     server.stop();
 }
+
+/// A mod whose generator lays a river with no banks at all.
+///
+/// Flat ground up to `y = 0`, and a three-wide ribbon of water standing on it
+/// from `y = 0` to `y = 2` — held in by nothing whatsoever. `fill_fluid_terraced`
+/// says as much: "whatever stands at its edge must hold the fluid in", and here
+/// deliberately nothing does. It is the worst river a generator could write, so
+/// Sub-Node Contract §4.5 either keeps it exactly where it was put or the whole
+/// rule is doing nothing.
+fn write_leaky_river(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("leaky");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"leaky\"\nname = \"Leaky\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        "local stone = game.register_block{ id = \"stone\" }\n\
+         local water_block = game.register_block{ id = \"water\" }\n\
+         game.register_fluid{ id = \"water\", material = \"leaky:water\" }\n\
+         local surface = game.density{ op = \"const\", value = 3 }\n\
+         local channel = game.density{\n\
+         \x20   op = \"sub\",\n\
+         \x20   a = { op = \"const\", value = 2 },\n\
+         \x20   b = { op = \"abs\", a = { op = \"z\" } },\n\
+         }\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), stone)\n\
+         \x20   buf:fill_fluid_terraced{\n\
+         \x20       level = surface,\n\
+         \x20       within = channel,\n\
+         \x20       fluid = \"leaky:water\",\n\
+         \x20   }\n\
+         end)\n",
+    )
+    .expect("script");
+    root
+}
+
+fn start_with(mods: PathBuf, world: PathBuf) -> ServerHandle {
+    ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: world,
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods),
+        enabled_mods: None,
+        seed: Some(7),
+        rcon: None,
+        materials: Vec::new(),
+    })
+    .expect("start")
+}
+
+#[test]
+fn a_generated_river_with_no_banks_stays_where_worldgen_put_it() {
+    // **Reported from the window: "rivers and oceans are kinda falling off the
+    // edges".** They were. The solver is a work queue, so nothing moves unless
+    // something touches it — and reading a chunk's fluid off the disk touched
+    // every block in it, which re-argued worldgen's water with the physics on
+    // every load. The first of those arguments is the one this river loses.
+    //
+    // Sub-Node Contract §4.5: a body is not woken by loading. Asserted through
+    // the real endpoint, over a restart, because the load path from the
+    // database is the one that was wrong.
+    let mods = write_leaky_river("leaky-mods");
+    let world = scratch("leaky-world");
+
+    // In the channel and out of it, all inside the chunk the player spawns in —
+    // which is the one chunk certain to have arrived by the time anything is
+    // read. The ribbon is |z| < 2, three blocks deep.
+    let inside = [
+        BlockPos::new(0, 0, 0),
+        BlockPos::new(5, 1, 1),
+        BlockPos::new(11, 2, 1),
+    ];
+    let outside = [BlockPos::new(3, 0, 4), BlockPos::new(9, 1, 7)];
+
+    // A different name each time: a name is a per-server claim bound to a UUID
+    // (charter rule 13), and the second session is a fresh identity.
+    let check = |server: &ServerHandle, who: &str, when: &str| {
+        block_on(async {
+            let mut bot = join(server, who).await;
+            bot.collect_chunks(9, Duration::from_secs(20))
+                .await
+                .expect("the neighbourhood");
+            // A moment of world time, so that if the river were going to run it
+            // would have started: the solver visits 512 blocks a fluid tick.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            for pos in inside {
+                assert_eq!(
+                    bot.fluid_at(pos).volume(),
+                    tiamot_core::fluid::MAX_VOLUME,
+                    "{when}: the river is missing at {pos:?}"
+                );
+            }
+            for pos in outside {
+                assert_eq!(
+                    bot.fluid_at(pos).volume(),
+                    0,
+                    "{when}: the river has run out over the plain at {pos:?}"
+                );
+            }
+            bot.disconnect().await;
+        });
+    };
+
+    let server = start_with(mods.clone(), world.clone());
+    check(&server, "Wader", "as generated");
+    assert!(server.stop(), "clean shutdown");
+
+    // And again from the database, which is the path that was re-arguing it.
+    let server = start_with(mods, world);
+    check(&server, "Paddler", "after a restart");
+    assert!(server.stop());
+}

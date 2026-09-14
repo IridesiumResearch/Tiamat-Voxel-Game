@@ -1684,8 +1684,21 @@ impl World {
 /// anything — which is what this is for. Implementing it on `World` was right
 /// while there was one domain and would now mean every body in the world
 /// falling through every floor but the overworld's.
+#[derive(Clone, Copy)]
 pub struct Solid<'a> {
     space: Option<&'a Space>,
+}
+
+impl Solid<'static> {
+    /// A view of nothing: every position reads as not loaded.
+    ///
+    /// What [`World::solid`] answers for a domain this world has never touched,
+    /// named so that a caller with no world — a test, a sparse domain — can say
+    /// so rather than having to build one.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { space: None }
+    }
 }
 
 impl<'a> Solid<'a> {
@@ -2000,7 +2013,7 @@ mod tests {
 
         let mut fluidics = Fluidics::new(Fluids::new());
         assert!(!fluidics.knows(chunk));
-        fluidics.chunk_loaded(chunk, layer);
+        fluidics.chunk_loaded(chunk, layer, &Solid::empty());
 
         assert!(fluidics.knows(chunk));
         assert!(

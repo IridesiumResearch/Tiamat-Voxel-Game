@@ -273,6 +273,10 @@ function ChunkBuffer:fill_fluid_below(level, fluid) end
 ---give no lips and are not counted as neighbours. Whatever stands at its edge
 ---must hold the fluid in — make the banks higher than the level.
 ---
+---**Nothing here moves on its own**, banks or no banks: three touching blocks
+---of fluid are a body and loading a chunk never wakes one (Contract §4.5). The
+---banks are what keeps it there once a player digs into it, which wakes it.
+---
 ---```lua
 ---buf:fill_fluid_terraced{
 ---    level = river_surface,           -- world heights, per column

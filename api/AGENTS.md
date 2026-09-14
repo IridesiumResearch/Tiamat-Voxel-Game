@@ -275,6 +275,24 @@ Fluid is a layer over the same blocks, not a material. How much goes into a
 block is the room the terrain leaves it, out of 27 cells, so a shoreline falls
 out of the terrain rather than having to be described.
 
+**Water you place stays where you put it.** Three or more blocks of fluid that
+touch, each holding all its block has room for, are a *body* — a river, a pond,
+a sea — and **loading a chunk never wakes a body**. That is why a generated
+river does not run off down the hillside the moment somebody flies past it, and
+it is what the engine can promise instead of the source blocks a conserved model
+cannot have. Sub-Node Contract §4.5.
+
+Two things follow that are worth designing around:
+
+- **A body is at rest, not frozen.** Anything that touches it — a player digging
+  its bank, a bucket, a block placed in it — wakes it, and from that moment it
+  flows like any other water. A river whose banks your terrain never built will
+  run the first time a player breaks into it. If you want one that survives
+  being dug, give it banks (`fill_fluid_terraced`'s `lip`, or terrain).
+- **Loose water still behaves.** One or two blocks is a spill, not a body, and
+  so is any block not filled to its capacity. It is woken on load and settles as
+  it always did, which is what keeps a bucket honest.
+
 **Heightmaps still exist and are still right** when a heightmap is what you
 mean. `game.noise_heightmap` + `buf:fill_below_heightmap` is 52 us a chunk
 against 719 us for terrain-with-caves — fourteen times cheaper. Cheaper still

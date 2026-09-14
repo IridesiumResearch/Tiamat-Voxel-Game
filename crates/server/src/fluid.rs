@@ -497,17 +497,52 @@ impl Fluidics {
     /// The chunk is still recorded as read — see [`Fluidics::knows`].
     /// Everything in the chunk is queued, because milk saved mid-flow has to
     /// carry on flowing when it comes back.
-    pub fn chunk_loaded(&mut self, pos: ChunkPos, layer: FluidLayer) {
+    pub fn chunk_loaded(
+        &mut self,
+        pos: ChunkPos,
+        layer: FluidLayer,
+        terrain: &crate::world::Solid<'_>,
+    ) {
         self.loaded.insert(pos);
         if layer.is_empty() {
             return;
         }
-        for (index, value) in layer.blocks().enumerate() {
-            if !value.is_empty() {
-                self.solver.touch(block_at(pos, index));
+        // **Bodies are not woken; everything else is.** Sub-Node Contract §4.5.
+        // This used to touch every non-empty block it read, which re-ran the
+        // physics over a river or a sea every time it streamed in — and the
+        // first of those runs is the one that empties a river whose banks the
+        // terrain never built. Worldgen's water is a declaration rather than a
+        // proposal, so water that has come to rest in a body is left exactly
+        // where it was put, and a film, a droplet or a pour saved while it was
+        // still falling is woken and settles as before.
+        //
+        // The layer goes in FIRST: `in_a_body` asks the world what a block
+        // holds, and this chunk's own water is most of the answer for every
+        // block in it.
+        let tuning = self.tuning();
+        let filled: Vec<BlockPos> = layer
+            .blocks()
+            .enumerate()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(index, _)| block_at(pos, index))
+            .collect();
+        self.layers.insert(pos, layer);
+        let Self {
+            layers,
+            solver,
+            absorbency,
+            ..
+        } = self;
+        let view = Wet {
+            terrain: *terrain,
+            layers,
+            absorbency,
+        };
+        for block in filled {
+            if !tiamot_core::fluid::in_a_body(&view, tuning, block) {
+                solver.touch(block);
             }
         }
-        self.layers.insert(pos, layer);
     }
 
     /// Forgets a chunk's fluid.
@@ -888,7 +923,7 @@ mod tests {
             tiamot_core::coords::LocalBlock::new(0, 0, 0),
             Fluid::new(milk, MAX_VOLUME),
         );
-        fluidics.chunk_loaded(pos, saved);
+        fluidics.chunk_loaded(pos, saved, &crate::world::Solid::empty());
         assert_eq!(fluidics.dirty(), 0, "a load dirtied the chunk it loaded");
 
         // A pour is.
@@ -943,7 +978,7 @@ mod tests {
         let pos = ChunkPos::new(0, 0, 0);
 
         assert!(!fluidics.knows(pos), "knew a chunk it has never seen");
-        fluidics.chunk_loaded(pos, FluidLayer::empty());
+        fluidics.chunk_loaded(pos, FluidLayer::empty(), &crate::world::Solid::empty());
         assert!(
             fluidics.knows(pos),
             "a chunk read and found dry must still count as read, or every \
@@ -1049,14 +1084,21 @@ mod tests {
         // that is easiest to get wrong: every chunk arrives, every chunk has a
         // layer, and the map grows without bound.
         let mut fluidics = Fluidics::new(Fluids::new());
-        fluidics.chunk_loaded(ChunkPos::new(0, 0, 0), FluidLayer::empty());
+        fluidics.chunk_loaded(
+            ChunkPos::new(0, 0, 0),
+            FluidLayer::empty(),
+            &crate::world::Solid::empty(),
+        );
         assert!(fluidics.is_empty());
         assert!(fluidics.is_settled());
     }
 
     #[test]
     fn a_saved_pond_comes_back_queued() {
-        // Milk saved mid-flow has to carry on flowing when it loads.
+        // Milk saved mid-flow has to carry on flowing when it loads. Four cells
+        // in a block that could hold twenty-seven is water in motion, not a
+        // body, so Contract §4.5 wakes it — which is the half of that rule this
+        // test now also guards.
         let milk = FluidId(1);
         let mut layer = FluidLayer::empty();
         layer.set(
@@ -1065,7 +1107,7 @@ mod tests {
         );
 
         let mut fluidics = Fluidics::new(Fluids::new());
-        fluidics.chunk_loaded(ChunkPos::new(0, 0, 0), layer);
+        fluidics.chunk_loaded(ChunkPos::new(0, 0, 0), layer, &crate::world::Solid::empty());
 
         assert!(!fluidics.is_empty());
         assert!(!fluidics.is_settled(), "a loaded pond was not queued");
@@ -1091,5 +1133,191 @@ mod tests {
         let mut fluidics = Fluidics::new(Fluids::new());
         assert!(!fluidics.set(BlockPos::new(5, 5, 5), Fluid::EMPTY));
         assert!(fluidics.is_empty());
+    }
+
+    /// Sub-Node Contract §4.5: what loading a chunk may disturb.
+    mod bodies {
+        use super::*;
+
+        /// A world whose chunk at the origin is resident and entirely air.
+        ///
+        /// **Air, which is the leakiest container there is.** A body floating in
+        /// it has nothing holding it up at all, so if loading woke it, it would
+        /// fall — which makes "it is still there" an honest assertion rather
+        /// than a container doing the work.
+        fn air_world(name: &str) -> crate::world::World {
+            let dir = std::env::temp_dir().join("tiamot-fluid-bodies").join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let mut registry = tiamot_core::Registry::new();
+            let db = tiamot_core::persist::WorldDb::open(dir.join("world.sqlite"), &mut registry)
+                .expect("open");
+            let mut world = crate::world::World::open(db, 7).expect("world");
+            world
+                .chunk(
+                    tiamot_core::domain::OVERWORLD,
+                    ChunkPos::new(0, 0, 0),
+                    &mut crate::world::Air,
+                )
+                .expect("the origin chunk");
+            world
+        }
+
+        /// A layer holding `blocks` brimming with milk, in the origin chunk.
+        fn layer_of(blocks: &[(u32, u32, u32)]) -> FluidLayer {
+            let mut layer = FluidLayer::empty();
+            for (x, y, z) in blocks {
+                layer.set(
+                    tiamot_core::coords::LocalBlock::new(*x, *y, *z),
+                    Fluid::new(FluidId(1), MAX_VOLUME),
+                );
+            }
+            layer
+        }
+
+        fn settle(fluidics: &mut Fluidics, world: &crate::world::World, ticks: u64) {
+            for tick in 0..ticks {
+                fluidics.tick(tiamot_core::domain::OVERWORLD, world, tick, 0);
+            }
+        }
+
+        #[test]
+        fn a_body_survives_being_loaded_over_and_over() {
+            // **The report this rule exists for**: rivers and oceans falling
+            // off their edges as the world streamed in. Loading used to touch
+            // every block it read, so worldgen's water was re-argued with the
+            // physics on every load — and the first of those arguments is the
+            // one a river whose banks were never built loses.
+            //
+            // Ten cycles, because the symptom was cumulative: a body that gives
+            // up a little on each load is gone by the time anybody flies back.
+            let world = air_world("over-and-over");
+            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let pos = ChunkPos::new(0, 0, 0);
+            let saved = layer_of(&[(1, 8, 1), (2, 8, 1), (3, 8, 1)]);
+            let mut fluidics = Fluidics::new(Fluids::new());
+
+            for cycle in 0..10 {
+                fluidics.chunk_loaded(pos, saved.clone(), &terrain);
+                assert!(
+                    fluidics.is_settled(),
+                    "loading a body queued work on cycle {cycle}"
+                );
+                settle(&mut fluidics, &world, 8);
+                for x in 1..=3 {
+                    assert_eq!(
+                        fluidics.at(BlockPos::new(x, 8, 1)).volume(),
+                        MAX_VOLUME,
+                        "the body lost its block at x = {x} on cycle {cycle}"
+                    );
+                }
+                assert_eq!(
+                    fluidics.at(BlockPos::new(2, 7, 1)).volume(),
+                    0,
+                    "the body fell a block on cycle {cycle}"
+                );
+                fluidics.forget(pos);
+            }
+        }
+
+        #[test]
+        fn water_that_is_not_a_body_falls_when_its_chunk_loads() {
+            // The other half, and the reason this is not simply "never wake
+            // anything": two blocks is a spilled bucket, and a bucket saved
+            // mid-air has to carry on falling when it comes back.
+            let world = air_world("not-a-body");
+            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let mut fluidics = Fluidics::new(Fluids::new());
+            fluidics.chunk_loaded(
+                ChunkPos::new(0, 0, 0),
+                layer_of(&[(1, 8, 1), (2, 8, 1)]),
+                &terrain,
+            );
+            assert!(!fluidics.is_settled(), "a spill was not queued");
+            settle(&mut fluidics, &world, 32);
+            let pos = ChunkPos::new(0, 0, 0);
+            let layer = fluidics
+                .layer(pos)
+                .expect("the spill is still in the world");
+            let mut total = 0;
+            for (index, value) in layer.blocks().enumerate() {
+                let at = block_at(pos, index);
+                assert!(
+                    value.is_empty() || at.y == 0,
+                    "the spill left {} cells hanging at y = {}",
+                    value.volume(),
+                    at.y
+                );
+                total += value.volume();
+            }
+            // Conserved on the way down, and spread out on the floor rather
+            // than stacked: where exactly it lands is the update rule's
+            // business, and this test's business is that it moved at all.
+            assert_eq!(total, 2 * MAX_VOLUME, "the spill lost volume falling");
+        }
+
+        /// **Ignored: it measures rather than asserts.** Run it by hand —
+        /// `cargo test -p server --release measure_loading -- --ignored
+        /// --nocapture` — when touching §4.5, and put the number in the commit.
+        #[test]
+        #[ignore = "measures rather than asserts; run by hand"]
+        fn measure_loading_a_full_chunk() {
+            // A chunk of sea: every block of it brims. This is the load the
+            // rule has to earn its keep against, because it is the one that
+            // used to put 4,096 blocks into a queue the solver walks 512 at a
+            // time.
+            let world = air_world("measure");
+            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let pos = ChunkPos::new(0, 0, 0);
+            let side = tiamot_core::CHUNK_BLOCKS;
+            let mut layer = FluidLayer::empty();
+            for x in 0..side {
+                for y in 0..side {
+                    for z in 0..side {
+                        layer.set(
+                            tiamot_core::coords::LocalBlock::new(x, y, z),
+                            Fluid::new(FluidId(1), MAX_VOLUME),
+                        );
+                    }
+                }
+            }
+            let rounds = 20;
+            let at = std::time::Instant::now();
+            for _ in 0..rounds {
+                let mut fluidics = Fluidics::new(Fluids::new());
+                fluidics.chunk_loaded(pos, layer.clone(), &terrain);
+                assert!(fluidics.is_settled());
+            }
+            println!(
+                "loading a chunk of sea: {:?}, and it queues nothing where it used to queue {}",
+                at.elapsed() / rounds,
+                side * side * side
+            );
+        }
+
+        #[test]
+        fn an_edit_beside_a_body_wakes_it() {
+            // **Hysteresis, not a freeze.** Dig the bank and the river runs;
+            // that is the behaviour that makes it honest to leave a body alone
+            // in the first place. Here the "edit" is milk poured against the
+            // body, which touches it exactly as a block change does.
+            let world = air_world("edit-wakes");
+            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let mut fluidics = Fluidics::new(Fluids::new());
+            fluidics.chunk_loaded(
+                ChunkPos::new(0, 0, 0),
+                layer_of(&[(1, 8, 1), (2, 8, 1), (3, 8, 1)]),
+                &terrain,
+            );
+            assert!(fluidics.is_settled());
+
+            fluidics.set(BlockPos::new(4, 8, 1), Fluid::new(FluidId(1), MAX_VOLUME));
+            settle(&mut fluidics, &world, 32);
+            assert_eq!(
+                fluidics.at(BlockPos::new(2, 8, 1)).volume(),
+                0,
+                "the body was touched and did not move, so it is frozen rather than at rest"
+            );
+        }
     }
 }
