@@ -50,6 +50,7 @@ pub mod input;
 pub mod launcher;
 pub mod mesher;
 pub mod net;
+pub mod particles;
 pub mod pictures;
 pub mod predict;
 pub mod render;

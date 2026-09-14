@@ -523,6 +523,17 @@ columns, and a fog is visible from outside as well as inside, so return what the
 PLACE is and let the edges take care of themselves. It runs where the tint does,
 in the generation workers.
 
+**Particles: `game.emit_particles`, a burst at a time.** Sea spray, a drip off a
+canopy, mist drifting over a floor. You describe a burst — where, how many,
+colour, size, lifetime, starting velocity, random `spread`, spawn `area`,
+`gravity`, whether it stops at solid ground — and the server sends it to every
+player nearby in that domain; each client animates it alone. It is decoration:
+nothing reads a particle back, and bursts are dropped rather than queued for
+ever, so a spray that must be seen every tick is a spray to make smaller. Emit
+from a tick or a hook, near players (the call returns how many were told), and
+never from a generator. Mist is large, faint, slow and `collide = false`; a drip
+is small with gravity and `collide = true`.
+
 ---
 
 ## Interfaces: what a mod can and cannot do to the look

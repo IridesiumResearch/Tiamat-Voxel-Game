@@ -463,6 +463,21 @@ fn server_messages() -> Vec<Vec<u8>> {
         ServerMessage::ChunkUnload {
             pos: ChunkPos::new(-4, 5, -6),
         },
+        // Protocol v54: a spray, at the edge of every range it may have.
+        ServerMessage::Particles {
+            bursts: vec![tiamot_core::particle::Burst {
+                pos: [-120_000.0, 64.0, 7.5],
+                count: tiamot_core::particle::MAX_PER_BURST,
+                colour: [255, 0, 128, 40],
+                size: tiamot_core::particle::MAX_SIZE,
+                lifetime: tiamot_core::particle::MAX_LIFETIME,
+                velocity: [0.0, tiamot_core::particle::MAX_SPEED, -1.5],
+                spread: 4.0,
+                area: [tiamot_core::particle::MAX_AREA, 0.0, 1.0],
+                gravity: -9.5,
+                collide: false,
+            }],
+        },
         ServerMessage::BlockDelta {
             edit: Edit::Block {
                 pos: BlockPos::new(2, 3, 4),

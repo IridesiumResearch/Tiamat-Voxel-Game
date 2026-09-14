@@ -473,6 +473,74 @@ fn a_places_fog_hides_the_ground_in_every_mode() {
 }
 
 #[test]
+fn particles_are_drawn_in_every_mode_and_hidden_behind_the_ground() {
+    // `game.emit_particles`, drawn. A cluster of red particles in front of the
+    // camera turns the middle of the frame red in all three modes — mode 3
+    // draws them into the float target, the others straight to the surface —
+    // and the same cluster pushed under the floor draws nothing, because the
+    // pass tests depth even though it does not write it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let camera = viewpoint();
+    let forward = camera.forward();
+
+    for mode in [
+        client::config::LightingMode::Simple,
+        client::config::LightingMode::Classic,
+        client::config::LightingMode::Beautiful,
+    ] {
+        let redness = |along: f32, down: f32| {
+            let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+            renderer.set_lighting_mode(mode);
+            let mut sprites = Vec::new();
+            if along > 0.0 {
+                for dx in -2..=2 {
+                    for dy in -2..=2 {
+                        sprites.push(client::render::particle::Sprite {
+                            centre: [
+                                forward.x * along + dx as f32 * 0.4,
+                                forward.y * along + dy as f32 * 0.4 - down,
+                                forward.z * along,
+                            ],
+                            size: 1.2,
+                            colour: [1.0, 0.0, 0.0, 1.0],
+                        });
+                    }
+                }
+            }
+            renderer.set_particles(&sprites);
+            let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+            let frame = target.capture(&mut renderer, &camera).expect("capture");
+            let middle = average(
+                &frame,
+                WIDTH * 2 / 5,
+                HEIGHT * 2 / 5,
+                WIDTH * 3 / 5,
+                HEIGHT * 3 / 5,
+            );
+            middle[0] - middle[1]
+        };
+        let none = redness(0.0, 0.0);
+        let spray = redness(5.0, 0.0);
+        // Straight down forty blocks from the same spot: under ten of air and
+        // eight of stone.
+        let buried = redness(5.0, 40.0);
+        assert!(
+            none.abs() < 0.05,
+            "in {mode:?} the control is red ({none:.3})"
+        );
+        assert!(
+            spray > 0.5,
+            "in {mode:?} the particles did not show ({spray:.3})"
+        );
+        assert!(
+            buried < 0.05,
+            "in {mode:?} particles under the floor showed through it ({buried:.3})"
+        );
+    }
+}
+
+#[test]
 fn a_ground_fog_lies_under_its_top() {
     // The rainforest's floor mist: a fog with a `top` is thick below it and
     // gone a few blocks above. The camera stands ten blocks over the floor.

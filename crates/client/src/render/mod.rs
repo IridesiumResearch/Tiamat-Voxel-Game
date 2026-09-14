@@ -31,6 +31,7 @@ pub mod frustum;
 pub mod grade;
 pub mod graph;
 pub mod offscreen;
+pub mod particle;
 pub mod place_fog;
 pub mod shadow;
 pub mod skinned;
@@ -859,6 +860,8 @@ pub struct Renderer {
     /// Each chunk column's own fog, and the grid of it around the camera the
     /// shaders read. See [`Self::set_chunk_fog`].
     place_fog: place_fog::PlaceFog,
+    /// Every live particle, drawn last in the world pass. See `crate::particles`.
+    particles: particle::Pass,
     /// This frame's view of it: where the camera stands, and the fog there.
     fog_here: place_fog::Uniforms,
     /// Retired chunk buffers, kept for reuse. See [`BufferPool`].
@@ -1041,6 +1044,7 @@ impl Renderer {
         // One tint entry, meaning nothing varies: no material does until a
         // table says one does, and the shader's first test is the scale.
         let place_fog = place_fog::PlaceFog::new(&gpu);
+        let particles = particle::Pass::new(&gpu);
         let (view, grid, side, tints, bind_group) =
             build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, place_fog.buffer());
 
@@ -1121,6 +1125,7 @@ impl Renderer {
             fog_curve: FOG_CURVE,
             fog_end: f32::MAX,
             place_fog,
+            particles,
             fog_here: place_fog::Uniforms::NONE,
             drawn: 0,
             cast: 0,
@@ -1407,6 +1412,34 @@ impl Renderer {
     /// read is rebuilt.
     pub fn set_chunk_fog(&mut self, pos: ChunkPos, fog: Option<tiamot_core::proto::ChunkFog>) {
         self.place_fog.set((pos.x, pos.z), fog);
+    }
+
+    /// Writes the particle pass's view of this frame.
+    fn prepare_particles(&self, camera: &Camera, view_projection: glam::Mat4) {
+        self.particles.prepare(
+            &self.gpu,
+            camera,
+            &particle::Frame {
+                view_projection,
+                sky: self.sky_colour,
+                fog_end: self.fog_end,
+                fog_curve: self.fog_curve,
+                fogs: self.post.is_none(),
+            },
+        );
+    }
+
+    /// Sets the particles to draw this frame, already camera-relative.
+    ///
+    /// **Every frame, like the blobs.** A particle is where it is now.
+    pub fn set_particles(&mut self, sprites: &[particle::Sprite]) {
+        self.particles.set(&self.gpu, sprites);
+    }
+
+    /// How many particles the next frame draws.
+    #[must_use]
+    pub const fn particle_count(&self) -> u32 {
+        self.particles.count()
     }
 
     /// Whether place fog is drawn. The client turns it off under water, where
@@ -2568,6 +2601,8 @@ impl Renderer {
             .prepare(&self.gpu, camera.projection(aspect), &hands);
         self.hands_at = hands;
 
+        self.prepare_particles(camera, view_projection);
+
         let culled = self.cull_and_upload(camera, view_projection);
         self.upload_chunk_borders(camera, &culled.visible);
 
@@ -2678,6 +2713,10 @@ impl Renderer {
             self.draw_glass(&mut pass, pass_targets.glass, &culled.visible);
 
             self.draw_fluid(&mut pass, pass_targets.fluid, &culled.visible);
+
+            // Particles last of the blended things: they are in front of the
+            // water as often as behind it, and unsorted either way.
+            self.particles.draw(&mut pass, self.post.is_some());
 
             self.draw_overlays(&mut pass, pass_targets.selection);
         }

@@ -289,6 +289,15 @@ pub struct Shared {
     /// telling the whole server that somebody tried to build into a wall is
     /// noise at best.
     pub notices: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, Vec<String>>>,
+    /// Particle bursts waiting for each player's connection task.
+    ///
+    /// **Its own queue, and a lossy one.** A spray is decoration: a burst that
+    /// does not arrive costs a puff of mist, where one that crowded the entity
+    /// queue past its cap would clear it and cost the spawns a client needs to
+    /// draw anything. Bounded by [`MAX_QUEUED_BURSTS`], past which new bursts
+    /// are dropped.
+    pub particles:
+        std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, Vec<tiamot_core::particle::Burst>>>,
 
     /// Entity messages waiting for one player.
     ///
@@ -819,6 +828,12 @@ pub const MAX_QUEUED_EDITS: usize = 4096;
 /// than a healthy connection needs and far less than an unbounded queue. Past
 /// it the queue is cleared and the player re-told from scratch.
 const MAX_QUEUED_ENTITY_MESSAGES: usize = 60;
+
+/// How many particle bursts one player may have waiting.
+///
+/// A second of a busy coast's spray. Past it a burst is dropped, which is the
+/// right loss for decoration — see `Shared::particles`.
+pub const MAX_QUEUED_BURSTS: usize = 256;
 
 /// How many unread notices one player may accumulate.
 ///
@@ -2089,6 +2104,29 @@ impl Shared {
         }
     }
 
+    /// Queues a particle burst for one player, dropping it past the cap.
+    ///
+    /// Returns whether it was queued.
+    pub fn queue_particles(&self, uuid: &PlayerUuid, burst: tiamot_core::particle::Burst) -> bool {
+        let Ok(mut queues) = self.particles.lock() else {
+            return false;
+        };
+        let queue = queues.entry(*uuid).or_default();
+        if queue.len() >= MAX_QUEUED_BURSTS {
+            return false;
+        }
+        queue.push(burst);
+        true
+    }
+
+    /// Takes the bursts waiting for one player.
+    pub fn take_particles(&self, uuid: &PlayerUuid) -> Vec<tiamot_core::particle::Burst> {
+        self.particles
+            .lock()
+            .map(|mut queues| queues.remove(uuid).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
     /// Queues entity messages for one player.
     ///
     /// Returns whether the queue overflowed, in which case it was cleared and
@@ -2475,6 +2513,14 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     // message, and they will simply try again.
                     for text in shared.take_notices(&uuid) {
                         frame::write(&mut send, &ServerMessage::Chat { from: None, text }).await?;
+                    }
+                    // Sprays near them, batched to the protocol's cap.
+                    let bursts = shared.take_particles(&uuid);
+                    for batch in bursts.chunks(tiamot_core::particle::MAX_BURSTS_PER_MESSAGE) {
+                        let message = ServerMessage::Particles {
+                            bursts: batch.to_vec(),
+                        };
+                        frame::write(&mut send, &message).await?;
                     }
                 }
                 continue;
@@ -3128,6 +3174,7 @@ mod tests {
             inventories: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             inventory_dirty: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,

@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 53;
+pub const PROTOCOL_VERSION: u32 = 54;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,8 @@ pub const PROTOCOL_VERSION: u32 = 53;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v54 (post-15b): appended `ServerMessage::Particles`, bursts a mod scattered
+// near this player. Presentation the client animates alone; see `particle`.
 // v53 (post-15b): `ChunkData` carries `fog`, a place's own fog from
 // `game.register_chunk_fog`. Beside the tint and for the same reasons: asked
 // when the chunk is served, never stored, blended across columns on the client.
@@ -2000,6 +2002,17 @@ pub enum ServerMessage {
         /// [`MAX_MOD_SETTINGS`].
         settings: Vec<SettingDef>,
     },
+    /// Bursts of particles a mod scattered near this player.
+    ///
+    /// **Appended at the end** (protocol v54). Sent only to players in the
+    /// burst's domain and radius, and batched: a tick's sprays for one player
+    /// travel together. Lossy by design — the server drops bursts past a
+    /// per-player queue rather than let a spraying mod crowd out what must
+    /// arrive. See [`crate::particle`].
+    Particles {
+        /// At most [`crate::particle::MAX_BURSTS_PER_MESSAGE`].
+        bursts: Vec<crate::particle::Burst>,
+    },
 }
 
 /// An entity as a client is first told about it.
@@ -2408,6 +2421,25 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
     Ok(())
 }
 
+/// Rejects a particle message outside the ranges `particle::sanitise` keeps a
+/// well-behaved server inside.
+fn check_particles(bursts: &[crate::particle::Burst]) -> Result<(), ProtocolError> {
+    check_len(
+        "particles",
+        bursts.len(),
+        crate::particle::MAX_BURSTS_PER_MESSAGE,
+    )?;
+    if bursts.iter().all(crate::particle::Burst::is_valid) {
+        Ok(())
+    } else {
+        Err(ProtocolError::FieldTooLarge {
+            field: "particle_burst",
+            len: 0,
+            limit: 0,
+        })
+    }
+}
+
 /// Rejects an occupancy mask that addresses cells a block does not have.
 ///
 /// A block has [`crate::UNITS_PER_BLOCK`] cells, so only that many
@@ -2751,6 +2783,10 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         // rule 14). The same check the spawn's item gets, for the same reason:
         // a mask with bits above the block would index past the cells a
         // renderer walks.
+        // **A spray from an untrusted server is bounded twice**: how many
+        // bursts, and every number in each — a burst of four billion particles
+        // is a hostile message, not a large one.
+        ServerMessage::Particles { bursts } => check_particles(bursts)?,
         ServerMessage::EntityArmed { entities } => {
             check_len("entity_armed", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
             for entity in entities {
@@ -2934,6 +2970,66 @@ pub const fn version_compatible(peer: u32) -> bool {
     // Exact match for now. When the protocol gains a compatibility window, this
     // is the one place that changes.
     peer == PROTOCOL_VERSION
+}
+
+#[cfg(test)]
+mod particle_tests {
+    use super::*;
+
+    fn burst() -> crate::particle::Burst {
+        crate::particle::Burst {
+            pos: [0.0, 64.0, 0.0],
+            count: 8,
+            colour: [255; 4],
+            size: 0.2,
+            lifetime: 1.0,
+            velocity: [0.0; 3],
+            spread: 1.0,
+            area: [0.0; 3],
+            gravity: 9.0,
+            collide: true,
+        }
+    }
+
+    #[test]
+    fn a_client_refuses_a_spray_no_server_should_send() {
+        let fine = ServerMessage::Particles {
+            bursts: vec![burst(); crate::particle::MAX_BURSTS_PER_MESSAGE],
+        };
+        assert!(validate_server_message(&fine).is_ok());
+
+        let too_many = ServerMessage::Particles {
+            bursts: vec![burst(); crate::particle::MAX_BURSTS_PER_MESSAGE + 1],
+        };
+        assert!(validate_server_message(&too_many).is_err());
+
+        for broken in [
+            crate::particle::Burst {
+                count: crate::particle::MAX_PER_BURST + 1,
+                ..burst()
+            },
+            crate::particle::Burst {
+                lifetime: f32::NAN,
+                ..burst()
+            },
+            crate::particle::Burst {
+                size: 1.0e6,
+                ..burst()
+            },
+            crate::particle::Burst {
+                pos: [f64::INFINITY, 0.0, 0.0],
+                ..burst()
+            },
+        ] {
+            let message = ServerMessage::Particles {
+                bursts: vec![broken],
+            };
+            assert!(
+                validate_server_message(&message).is_err(),
+                "accepted {broken:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3907,6 +4003,15 @@ mod tests {
         })
         .expect("encode");
         assert_eq!(armed[0], 36);
+        // Protocol v47, unpinned until v54 appended after it.
+        let settings = encode(&ServerMessage::ModSettings {
+            settings: Vec::new(),
+        })
+        .expect("encode");
+        assert_eq!(settings[0], 42);
+        // Protocol v54.
+        let particles = encode(&ServerMessage::Particles { bursts: Vec::new() }).expect("encode");
+        assert_eq!(particles[0], 43);
     }
 
     #[test]

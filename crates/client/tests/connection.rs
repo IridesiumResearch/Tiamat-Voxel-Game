@@ -205,6 +205,7 @@ impl Seen {
             // A mod's options. Same reasoning: this test's server declares
             // none, and an empty table is still a table that arrives.
             Event::ModSettings { .. } => {}
+            Event::Particles(_) => {}
             // A mod's font. Same reasoning as the picture above.
             Event::Font { .. } => {}
             Event::Materials { table, images } => {

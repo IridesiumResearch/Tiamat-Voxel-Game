@@ -356,6 +356,9 @@ pub enum Event {
     /// the same message so no frame draws the terrain without them.
     Chunk(Box<Chunk>, [u8; 3], Option<tiamot_core::proto::ChunkFog>),
 
+    /// Bursts of particles a mod scattered nearby.
+    Particles(Vec<tiamot_core::particle::Burst>),
+
     /// A downsampled chunk, for the horizon.
     ///
     /// Arrives INSTEAD of an [`Event::Chunk`] for a position outside the detail
@@ -1336,6 +1339,10 @@ async fn session(
                         "the server sent a chunk at {pos:?} that would not decode: {err}"
                     )),
                 }
+            }
+
+            ServerMessage::Particles { bursts } => {
+                let _ = events.send(Event::Particles(bursts));
             }
 
             ServerMessage::ChunkSummary { pos, blob } => {

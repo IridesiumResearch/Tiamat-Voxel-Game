@@ -1112,6 +1112,14 @@ pub trait ScriptVm: Sized {
     /// a mod making a noise during worldgen has nobody to make it for.
     fn set_sound_access(&mut self, access: std::sync::Arc<dyn crate::sound::Access>);
 
+    /// Points `game.emit_particles` at the connected players.
+    ///
+    /// The sound seam's twin. Defaulted, because only the tick's VM has players
+    /// to show a spray to; a generation worker's `emit_particles` does nothing.
+    fn set_particle_access(&mut self, access: std::sync::Arc<dyn crate::particle::Access>) {
+        let _ = access;
+    }
+
     /// Points `game.show_dialog` and friends at the connected players.
     ///
     /// The same seam as [`Self::set_sound_access`], for the same reason: the

@@ -51,6 +51,21 @@ const HUD_FONT: &[u8] = include_bytes!("../assets/third-party/go-font/Go-Mono.tt
 /// knob that can be added when something wants one.
 const UNDERWATER_VISIBILITY: f32 = 16.0;
 
+/// The least light a particle is drawn with, so a spray at night is dim rather
+/// than a hole in the picture.
+const PARTICLE_FLOOR: f32 = 0.12;
+
+/// The sub-node cell a world position is in.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "charter rule 4 exempts rendering; which cell a particle is in decides only whether \
+              this client stops drawing it"
+)]
+fn particle_cell(at: [f64; 3]) -> tiamot_core::SubNodePos {
+    let cell = |value: f64| (value * 3.0).floor() as i32;
+    tiamot_core::SubNodePos::new(cell(at[0]), cell(at[1]), cell(at[2]))
+}
+
 /// Installs any font a server's mods have pushed, once per batch.
 ///
 /// **Called from the frame, not from the network pump**, because installing
@@ -994,6 +1009,8 @@ pub struct App {
     /// note applies: none of this is simulation, so nothing here has to be
     /// deterministic.
     heard: Vec<crate::net::Event>,
+    /// Every particle a mod has scattered near this player, still in flight.
+    particles: crate::particles::System,
     /// What each material sounds like to walk on, by world material id.
     step_sounds: std::collections::BTreeMap<u16, String>,
     /// Distance walked since the last footstep, in blocks.
@@ -1335,6 +1352,7 @@ impl App {
             dialog_events: Vec::new(),
             mixer,
             heard: Vec::new(),
+            particles: crate::particles::System::default(),
             step_sounds: std::collections::BTreeMap::new(),
             items: std::collections::BTreeSet::new(),
             hosting: None,
@@ -1429,6 +1447,12 @@ impl App {
             chunk.y - self.displacement[1],
             chunk.z - self.displacement[2],
         )
+    }
+
+    /// The particles in flight on this client, for tests and the overlay.
+    #[must_use]
+    pub fn particles(&self) -> &[crate::particles::Particle] {
+        self.particles.live()
     }
 
     /// The renderer, for drawing a frame.
@@ -4262,29 +4286,7 @@ impl App {
                     ..
                 } => self.joined_world(spawn, tick, may_fly, seed),
 
-                Event::Chunk(chunk, tint, fog) => {
-                    // The new space has started arriving, so there is something
-                    // to look at. Cleared here rather than on a timer: what the
-                    // player is waiting for is terrain, and this is it.
-                    self.entering = None;
-                    // The colour before the blocks: the two arrived in one
-                    // message precisely so there is no frame in which the
-                    // terrain is on screen wearing the wrong one.
-                    //
-                    // **And its neighbours are marked**, because a corner
-                    // colour is the mean of the four columns meeting there —
-                    // so a column arriving changes the colour of the chunks
-                    // already drawn beside it. The renderer reads the colours
-                    // fresh every frame, so nothing has to be remeshed; the
-                    // instance simply carries different numbers next frame.
-                    let pos = chunk.pos();
-                    self.store.set_tint(pos, tint);
-                    self.renderer.set_chunk_tint(pos, tint);
-                    // The place's fog, by the same rule: the latest chunk of a
-                    // column speaks for it, so a fog that stops is cleared.
-                    self.renderer.set_chunk_fog(pos, fog);
-                    self.store.insert(*chunk);
-                }
+                Event::Chunk(chunk, tint, fog) => self.adopt_chunk(*chunk, tint, fog),
 
                 Event::ChunkSummary { pos, summary } => self.adopt_summary(pos, *summary),
 
@@ -4354,12 +4356,15 @@ impl App {
                     }
                     self.store.clear();
                     self.entities.clear();
+                    self.particles.clear();
                     tracing::info!(%domain, "moved to another domain");
                 }
 
                 Event::Edit(edit) => {
                     self.store.apply(&edit);
                 }
+
+                Event::Particles(bursts) => self.adopt_particles(&bursts),
 
                 Event::PlayerState(state) => self.accept_player_state(&state),
 
@@ -5010,6 +5015,7 @@ impl App {
         // hands hold hangs off the clip's phase and the heading, and two copies
         // of those would be two things to keep in step.
         self.place_props(Some(&figure));
+        self.place_particles(dt);
     }
 
     /// Places every entity in view for this frame.
@@ -5044,6 +5050,90 @@ impl App {
     /// boolean and an entity has not even got that. So this walks down from the
     /// feet a few blocks looking for the first solid cell. A body over a drop
     /// gets no blob at all, which is right: there is no ground under it to mark.
+    /// Takes a chunk into the store, with its biome colour and its place's fog.
+    fn adopt_chunk(
+        &mut self,
+        chunk: tiamot_core::Chunk,
+        tint: [u8; 3],
+        fog: Option<tiamot_core::proto::ChunkFog>,
+    ) {
+        // The new space has started arriving, so there is something to look at.
+        // Cleared here rather than on a timer: what the player is waiting for is
+        // terrain, and this is it.
+        self.entering = None;
+        // The colour before the blocks: the two arrived in one message
+        // precisely so there is no frame in which the terrain is on screen
+        // wearing the wrong one.
+        //
+        // **And its neighbours are marked**, because a corner colour is the mean
+        // of the four columns meeting there — so a column arriving changes the
+        // colour of the chunks already drawn beside it. The renderer reads the
+        // colours fresh every frame, so nothing has to be remeshed; the instance
+        // simply carries different numbers next frame.
+        let pos = chunk.pos();
+        self.store.set_tint(pos, tint);
+        self.renderer.set_chunk_tint(pos, tint);
+        // The place's fog, by the same rule: the latest chunk of a column speaks
+        // for it, so a fog that stops is cleared.
+        self.renderer.set_chunk_fog(pos, fog);
+        self.store.insert(chunk);
+    }
+
+    /// Makes the particles of bursts a server sent, each lit where it starts.
+    fn adopt_particles(&mut self, bursts: &[tiamot_core::particle::Burst]) {
+        for burst in bursts {
+            let light = self.particle_light(burst.pos);
+            self.particles.spawn(burst, light);
+        }
+    }
+
+    /// Moves every particle on and hands the renderer where they are now.
+    ///
+    /// A colliding particle dies in a cell that stops a body — solid and not
+    /// passable — so a drip stops at the ground and falls through a fern.
+    fn place_particles(&mut self, dt: f32) {
+        let store = &self.store;
+        let passable = &self.passable;
+        self.particles.advance(dt, |at| {
+            let cell = particle_cell(at);
+            store
+                .get(cell.chunk())
+                .and_then(|chunk| chunk.get_subnode(cell))
+                .is_some_and(|material| !material.is_air() && !passable.contains(&material.0))
+        });
+        let sprites: Vec<crate::render::particle::Sprite> = self
+            .particles
+            .live()
+            .iter()
+            .map(|particle| crate::render::particle::Sprite {
+                centre: self.camera.position.offset_to(particle.pos),
+                size: particle.size,
+                colour: [
+                    particle.colour[0],
+                    particle.colour[1],
+                    particle.colour[2],
+                    particle.opacity(),
+                ],
+            })
+            .collect();
+        self.renderer.set_particles(&sprites);
+    }
+
+    /// What a burst at `pos` is lit by: the sky's light, dimmed by the time of
+    /// day, or the block light there, whichever is brighter — the same `max`
+    /// the world shader takes — and never quite black.
+    fn particle_light(&self, pos: [f64; 3]) -> [f32; 3] {
+        let cell = particle_cell(pos);
+        let light = self.store.light_at(cell.block());
+        let sun = f32::from(light.sun()) / 15.0 * self.renderer.sun_intensity();
+        let channel = |level: u8| (f32::from(level) / 15.0).max(sun).max(PARTICLE_FLOOR);
+        [
+            channel(light.red()),
+            channel(light.green()),
+            channel(light.blue()),
+        ]
+    }
+
     fn place_blobs(&mut self) {
         /// How far down to look for ground, in blocks. Past this a body is over
         /// a drop and casts nothing.

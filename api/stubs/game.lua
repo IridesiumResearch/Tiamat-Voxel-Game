@@ -1786,6 +1786,49 @@ function game.register_hud_script(file) end
 ---@return integer told
 function game.play_sound(spec) end
 
+---Fields accepted by `game.emit_particles`. Every number is clamped into its
+---range rather than refused; a wrong TYPE is an error.
+---@class Tiamot.ParticleSpec
+---@field pos { x: number, y: number, z: number, domain: string? } Required. The burst's centre, in world blocks.
+---@field count integer? How many particles. Default 8, at most 256.
+---@field colour { r: number?, g: number?, b: number?, a: number? }? Colour and opacity, 0..1; an unnamed channel is 1. Lit by where the burst is, so a spray at night is dim.
+---@field size number? Blocks across. Default 0.1, at most 4.
+---@field lifetime number? Seconds each lives, give or take a quarter. Default 1, at most 30. Particles fade over the second half.
+---@field velocity { x: number?, y: number?, z: number? }? The velocity all start with, blocks per second. Default still; each axis at most 64.
+---@field spread number? Random velocity each adds, in a random direction, blocks per second. Default 0.
+---@field area { x: number?, y: number?, z: number? }? Half-size of the box they start in, per axis. Default a point; at most 16.
+---@field gravity number? How fast they fall, blocks per second per second. Default 0 (they drift); negative rises, like steam.
+---@field collide boolean? Whether one vanishes on reaching a solid cell — a drip stops at the floor. Default true. Passable blocks do not stop them.
+---@field radius number? How far away a player may be and still be sent it. Default 32, at most 128.
+
+---Scatters a burst of short-lived sprites — sea spray, a drip, mist.
+---
+---**Presentation, and nothing more.** The server simulates none of it: it sends
+---the burst to every player in the same domain within `radius`, and each client
+---animates its own copy. Nothing reads a particle back, so do not build anything
+---that needs one to be somewhere.
+---
+---```lua
+------ A blowhole: white spray up and falling back.
+---game.emit_particles{ pos = { x = 10, y = 40, z = -3 }, count = 60,
+---    colour = { r = 0.9, g = 0.95, b = 1, a = 0.8 }, size = 0.25,
+---    velocity = { y = 14 }, spread = 4, gravity = 20, lifetime = 1.5 }
+---
+------ Mist over a forest floor: large, faint, slow, and through the undergrowth.
+---game.emit_particles{ pos = at, count = 6, size = 2.5, lifetime = 8,
+---    colour = { r = 0.8, g = 0.85, b = 0.8, a = 0.15 }, area = { x = 8, y = 1, z = 8 },
+---    spread = 0.2, collide = false }
+---```
+---
+---Returns how many players were told — not a promise anybody SAW it. Bursts are
+---dropped rather than queued without end if a mod sprays faster than a player's
+---connection sends, and a client draws at most 8,192 particles at once. Call it
+---from a tick or a hook; from a generator it does nothing, since generation runs
+---in worker VMs with nobody to show a spray to.
+---@param spec Tiamot.ParticleSpec
+---@return integer told
+function game.emit_particles(spec) end
+
 ---A walkable route between two points, or why there is not one.
 ---
 ---Navigation is **block resolution** and deliberately simple (Sub-Node Contract

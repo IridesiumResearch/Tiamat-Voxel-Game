@@ -2220,6 +2220,7 @@ impl ServerHandle {
             placements: std::sync::Mutex::new(std::collections::VecDeque::new()),
             seeds: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             // Capacity is per-receiver backlog, not a total. 1024 messages at
@@ -2606,6 +2607,11 @@ impl ServerHandle {
                             // And who is close enough to hear a mod's sounds.
                             host.vm_mut()
                                 .set_sound_access(std::sync::Arc::new(Earshot {
+                                    shared: std::sync::Arc::clone(&shared),
+                                }));
+                            // And who is close enough to see a mod's sprays.
+                            host.vm_mut()
+                                .set_particle_access(std::sync::Arc::new(Sprayer {
                                     shared: std::sync::Arc::clone(&shared),
                                 }));
                             // And whose screen a mod's dialogs open on. Kept
@@ -5331,6 +5337,45 @@ impl tiamot_core::ui::host::Access for Screens {
 /// tell about one (rule 1).
 struct Earshot {
     shared: std::sync::Arc<crate::transport::endpoint::Shared>,
+}
+
+/// `game.emit_particles`, answered: who is close enough to see a spray.
+///
+/// Sound's `Earshot` with one more question, and one it should arguably ask
+/// too: whether the player is in the same DOMAIN. A burst at a ship's
+/// coordinates is not in the overworld's sky at the same numbers.
+struct Sprayer {
+    shared: std::sync::Arc<crate::transport::endpoint::Shared>,
+}
+
+impl tiamot_core::particle::Access for Sprayer {
+    fn emit(&self, request: &tiamot_core::particle::EmitRequest) -> u32 {
+        let Ok(bodies) = self.shared.bodies.lock() else {
+            return 0;
+        };
+        let radius = f64::from(request.radius);
+        let mut told = 0;
+        for (uuid, player) in bodies.iter() {
+            if player.domain != request.domain {
+                continue;
+            }
+            let at =
+                tiamot_core::ent::Transform::at(player.origin, player.body.position).to_world();
+            let offset = [
+                at[0] - request.burst.pos[0],
+                at[1] - request.burst.pos[1],
+                at[2] - request.burst.pos[2],
+            ];
+            let distance = offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2];
+            if distance > radius * radius {
+                continue;
+            }
+            if self.shared.queue_particles(uuid, request.burst) {
+                told += 1;
+            }
+        }
+        told
+    }
 }
 
 /// The next `count` sub-nodes to take out of a block, as edits.

@@ -970,6 +970,9 @@ pub struct MluaVm {
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::inventory::Access>>>>,
     /// Where `game.play_sound` reaches, once there are players to hear it.
     sounds: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::sound::Access>>>>,
+    /// Where `game.emit_particles` reaches, once there are players to see it.
+    particles:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::particle::Access>>>>,
     /// The server's dialog API, installed once the world is running.
     dialogs: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::ui::host::Access>>>>,
     /// Where `game.set_block` sends its edits, once there is a world.
@@ -1591,6 +1594,7 @@ impl ScriptVm for MluaVm {
             tools: std::sync::Arc::new(std::sync::Mutex::new(None)),
             inventories: std::sync::Arc::new(std::sync::Mutex::new(None)),
             sounds: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            particles: std::sync::Arc::new(std::sync::Mutex::new(None)),
             dialogs: std::sync::Arc::new(std::sync::Mutex::new(None)),
             entities: std::sync::Arc::new(std::sync::Mutex::new(None)),
             domains: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1666,6 +1670,12 @@ impl ScriptVm for MluaVm {
 
     fn set_sound_access(&mut self, access: std::sync::Arc<dyn crate::sound::Access>) {
         if let Ok(mut slot) = self.sounds.lock() {
+            *slot = Some(access);
+        }
+    }
+
+    fn set_particle_access(&mut self, access: std::sync::Arc<dyn crate::particle::Access>) {
+        if let Ok(mut slot) = self.particles.lock() {
             *slot = Some(access);
         }
     }
@@ -2859,6 +2869,27 @@ impl ScriptVm for MluaVm {
 }
 
 impl MluaVm {
+    /// `game.emit_particles`.
+    fn install_particles(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.particles);
+        let emit_particles = self
+            .lua
+            .create_function(move |_, spec: Table| {
+                let request = crate::particle::sanitise(particle_request(&spec)?);
+                // How many were told — the mod's only feedback, and not a
+                // promise anybody saw it.
+                let told = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.emit(&request)));
+                Ok(told.unwrap_or(0))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("emit_particles", emit_particles)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     /// Builds the `game` table for one mod.
     ///
     /// Per mod rather than shared, because every registration call has to know
@@ -4019,6 +4050,7 @@ impl MluaVm {
         self.install_tools(game)?;
         self.install_inventory(game)?;
         self.install_sound(mod_id, game)?;
+        self.install_particles(game)?;
         self.install_dialogs(mod_id, game)?;
 
         // The two cancellable hooks. Registered exactly like `on_tick` — one
@@ -7883,6 +7915,67 @@ fn qualify_id(mod_id: &str, id: &str) -> Result<String, String> {
     }
 }
 
+/// Reads `game.emit_particles`' table into a request, before sanitising.
+///
+/// Wrong TYPES are refused, because they are a mistake the mod wants to hear
+/// about; wrong NUMBERS are clamped by `particle::sanitise`, because a spray
+/// that is a little too big still deserves to be seen.
+fn particle_request(spec: &Table) -> mlua::Result<crate::particle::EmitRequest> {
+    let pos: Table = spec
+        .get("pos")
+        .map_err(|_| mlua::Error::external("emit_particles needs a `pos` table"))?;
+    let triple = |name: &str, fallback: f32| -> mlua::Result<[f32; 3]> {
+        let Some(table) = spec.get::<Option<Table>>(name).map_err(|_| {
+            mlua::Error::external(format!("emit_particles: `{name}` is a table {{ x, y, z }}"))
+        })?
+        else {
+            return Ok([fallback; 3]);
+        };
+        Ok([
+            table.get::<Option<f32>>("x")?.unwrap_or(fallback),
+            table.get::<Option<f32>>("y")?.unwrap_or(fallback),
+            table.get::<Option<f32>>("z")?.unwrap_or(fallback),
+        ])
+    };
+    let channel = |value: Option<f32>| {
+        let value = value.unwrap_or(1.0);
+        if value.is_nan() {
+            u8::MAX
+        } else {
+            (value.clamp(0.0, 1.0) * 255.0) as u8
+        }
+    };
+    let colour = match spec
+        .get::<Option<Table>>("colour")
+        .map_err(|_| mlua::Error::external("emit_particles: `colour` is a table { r, g, b, a }"))?
+    {
+        Some(colour) => [
+            channel(colour.get("r")?),
+            channel(colour.get("g")?),
+            channel(colour.get("b")?),
+            channel(colour.get("a")?),
+        ],
+        None => [u8::MAX; 4],
+    };
+    let count = spec.get::<Option<i64>>("count")?.unwrap_or(8);
+    Ok(crate::particle::EmitRequest {
+        burst: crate::particle::Burst {
+            pos: [pos.get("x")?, pos.get("y")?, pos.get("z")?],
+            count: u16::try_from(count.max(0)).unwrap_or(u16::MAX),
+            colour,
+            size: spec.get::<Option<f32>>("size")?.unwrap_or(0.1),
+            lifetime: spec.get::<Option<f32>>("lifetime")?.unwrap_or(1.0),
+            velocity: triple("velocity", 0.0)?,
+            spread: spec.get::<Option<f32>>("spread")?.unwrap_or(0.0),
+            area: triple("area", 0.0)?,
+            gravity: spec.get::<Option<f32>>("gravity")?.unwrap_or(0.0),
+            collide: spec.get::<Option<bool>>("collide")?.unwrap_or(true),
+        },
+        domain: domain_of(&pos)?,
+        radius: spec.get::<Option<f32>>("radius")?.unwrap_or(32.0),
+    })
+}
+
 /// Reads a `noise` node's options into an operation.
 ///
 /// Its own function because every field is optional with a documented default,
@@ -8721,6 +8814,93 @@ mod tests {
                 .expect("asked"),
             None,
             "the faulted mod was asked again"
+        );
+    }
+
+    /// Records every burst a mod asked for.
+    #[derive(Default)]
+    struct Spray {
+        asked: std::sync::Mutex<Vec<crate::particle::EmitRequest>>,
+    }
+
+    impl crate::particle::Access for Spray {
+        fn emit(&self, request: &crate::particle::EmitRequest) -> u32 {
+            self.asked.lock().expect("spray lock").push(request.clone());
+            3
+        }
+    }
+
+    #[test]
+    fn a_mod_scatters_particles_with_defaults_and_its_numbers_clamped() {
+        // Asked for by the world mod's blowholes and canopy drips. The table's
+        // shape reaches the seam; a careless number is clamped rather than an
+        // error, and a wrong TYPE is refused, because that one is a mistake.
+        let mut host = vm();
+        let spray = std::sync::Arc::new(Spray::default());
+        host.set_particle_access(spray.clone());
+        load(
+            &mut host,
+            "coast",
+            "told = game.emit_particles{\n\
+             \x20   pos = { x = 10.5, y = 64, z = -3, domain = 'coast:caves' },\n\
+             \x20   count = 100000, colour = { r = 0.5, b = 2 }, size = 0.3,\n\
+             \x20   velocity = { y = 12 }, spread = 2, gravity = 20, lifetime = 0/0,\n\
+             }\n\
+             game.emit_particles{ pos = { x = 0, y = 0, z = 0 } }",
+        )
+        .expect("load");
+        let env = host.environment("coast").expect("env");
+        assert_eq!(
+            env.get::<u32>("told").expect("told"),
+            3,
+            "the count came back"
+        );
+
+        let asked = spray.asked.lock().expect("lock").clone();
+        assert_eq!(asked.len(), 2);
+        let spout = &asked[0];
+        assert_eq!(spout.domain, "coast:caves");
+        assert!(
+            spout
+                .burst
+                .pos
+                .iter()
+                .zip([10.5, 64.0, -3.0])
+                .all(|(got, want)| (got - want).abs() < f64::EPSILON),
+            "{:?}",
+            spout.burst.pos
+        );
+        assert_eq!(
+            spout.burst.count,
+            crate::particle::MAX_PER_BURST,
+            "clamped, not refused"
+        );
+        assert_eq!(spout.burst.colour, [127, 255, 255, 255]);
+        assert!((spout.burst.velocity[1] - 12.0).abs() < f32::EPSILON);
+        assert!(
+            (spout.burst.lifetime - 1.0).abs() < f32::EPSILON,
+            "a NaN lifetime is the default"
+        );
+        assert!(
+            spout.burst.collide,
+            "particles stop at the ground unless told not to"
+        );
+        assert!(spout.burst.is_valid());
+
+        let plain = &asked[1];
+        assert_eq!(plain.domain, crate::domain::OVERWORLD);
+        assert_eq!(plain.burst.count, 8);
+        assert!((plain.radius - 32.0).abs() < f32::EPSILON);
+
+        let mut fresh = vm();
+        let refused = load(
+            &mut fresh,
+            "coast",
+            "game.emit_particles{ pos = { x = 0, y = 0, z = 0 }, velocity = 4 }",
+        );
+        assert!(
+            refused.is_err(),
+            "a velocity that is not a table was accepted"
         );
     }
 

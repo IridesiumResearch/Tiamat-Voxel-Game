@@ -776,6 +776,70 @@ fn an_empty_hand_on_a_block_is_a_use_the_mods_hear() {
 }
 
 #[test]
+fn a_mods_spray_reaches_the_window_and_is_handed_to_the_renderer() {
+    // `game.emit_particles` from a real mod to what the renderer is told to
+    // draw: the server's seam, the wire, the client's system and the frame's
+    // sprites, with nothing stubbed. The spray is magenta, which nothing else
+    // in this world is, and floats rather than falls so it outlives the wait.
+    let Some(gpu) = gpu() else { return };
+    let mods = scratch("spray-mods");
+    let dir = mods.join("fountain");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"fountain\"\nname = \"Fountain\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        "local ground = game.register_block{ id = \"ground\" }\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
+         end)\n\
+         local turn = 0\n\
+         game.register_on_tick(function()\n\
+         \x20   turn = turn + 1\n\
+         \x20   if turn % 10 ~= 0 then return end\n\
+         \x20   game.emit_particles{ pos = { x = 1, y = 3, z = 1 }, count = 20, size = 0.3,\n\
+         \x20       colour = { r = 1, g = 0, b = 1 }, lifetime = 4, spread = 0.5, collide = false }\n\
+         end)\n",
+    )
+    .expect("script");
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("spray-world"),
+        identity_path: None,
+        max_players: 1,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods),
+        enabled_mods: None,
+        seed: Some(7),
+        rcon: None,
+        materials: Vec::new(),
+    })
+    .expect("the embedded server must start");
+    let mut app = client("spray", &server, gpu);
+
+    assert!(
+        run_frames(&mut app, |app| app.joined() && !app.particles().is_empty()),
+        "no particle ever reached the client"
+    );
+    let first = app.particles()[0];
+    assert!(first.colour[0] > 0.0 && first.colour[1].abs() < f32::EPSILON && first.colour[2] > 0.0);
+    // One more frame, so the renderer has been handed this frame's sprites.
+    assert!(run_frames(&mut app, |_| true));
+    assert!(
+        app.renderer().particle_count() > 0,
+        "particles in flight were never handed to the renderer"
+    );
+
+    app.shutdown();
+    assert!(server.stop());
+}
+
+#[test]
 fn the_selection_outlines_the_real_shape_of_a_chiselled_block() {
     // The task asks for an outline "honouring Partial occupancy — outline the
     // actual occupied sub-node cells". The easy version draws a cube whatever

@@ -80,6 +80,7 @@ pub mod lod;
 pub mod material;
 pub mod model;
 pub mod modload;
+pub mod particle;
 pub mod path;
 pub mod persist;
 pub mod phys;

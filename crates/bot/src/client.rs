@@ -619,6 +619,19 @@ impl Bot {
             .collect()
     }
 
+    /// Every particle burst received so far, in arrival order.
+    #[must_use]
+    pub fn particles_received(&self) -> Vec<tiamot_core::particle::Burst> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Particles { bursts } => Some(bursts),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Every chunk received so far, in arrival order.
     #[must_use]
     pub fn chunks_received(&self) -> Vec<tiamot_core::ChunkPos> {
