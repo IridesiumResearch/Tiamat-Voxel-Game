@@ -280,7 +280,13 @@ impl Lighting {
             .is_some_and(|chunk| self.is_dark_solid(chunk))
         {
             self.dark_shortcuts += 1;
-            return std::iter::once(pos).collect();
+            let mut touched = Touched::default();
+            touched.chunks.insert(pos);
+            // Dark for free, but still a roof: rock arriving over a lit chunk
+            // is the commonest way the sky under it goes away.
+            self.roof_over_below(domain, world, pos, &mut touched);
+            self.compact(&touched.chunks);
+            return touched.chunks;
         }
 
         // Exactly the chunk. The blocks around it are handled as a boundary
@@ -306,8 +312,42 @@ impl Lighting {
         self.with_centre(domain, world, pos, &mut touched, |lit| {
             propagate::relight(lit, region);
         });
+        self.roof_over_below(domain, world, pos, &mut touched);
         self.compact(&touched.chunks);
         touched.chunks
+    }
+
+    /// Takes away the daylight a chunk that has just arrived now stands in
+    /// front of, in the lit chunk under it.
+    ///
+    /// **The sky is wherever the loaded world ends**, so the chunk below took
+    /// full sun through a gap that was only "nothing loaded yet", and a relight
+    /// of the arrival clears the arrival and nothing else. A floor loaded
+    /// before its canopy — it is nearer the player, so it always is — stayed
+    /// lit like a meadow. See [`propagate::roofed`].
+    ///
+    /// Nothing to do when the chunk below holds no light: it has not been lit
+    /// yet, and when it is, the arrival will already be over it.
+    fn roof_over_below(
+        &mut self,
+        domain: &str,
+        world: &World,
+        pos: ChunkPos,
+        touched: &mut Touched,
+    ) {
+        let below = ChunkPos::new(pos.x, pos.y - 1, pos.z);
+        if !self.layers.contains_key(&below) {
+            return;
+        }
+        let corner = BlockPos::from_chunk_corner(pos);
+        let span = CHUNK_BLOCKS as i32 - 1;
+        let region = Region {
+            min: corner,
+            max: BlockPos::new(corner.x + span, corner.y + span, corner.z + span),
+        };
+        self.with_centre(domain, world, below, touched, |lit| {
+            propagate::roofed(lit, region);
+        });
     }
 
     /// Re-lights around a block whose content just changed.
@@ -652,6 +692,65 @@ mod tests {
             MAX_LEVEL,
             "sunlight did not reach the bottom of an empty chunk"
         );
+    }
+
+    #[test]
+    fn a_chunk_arriving_over_a_lit_one_takes_its_sky_away() {
+        // The floor loads first because it is nearer, and used to keep the
+        // sun it saw through the gap that was only "not loaded yet". Both
+        // arrival paths: a chunk of rock is dark for free and must still roof
+        // what is under it, and a canopy with a hole goes through the relight.
+        let floor = ChunkPos::new(0, 0, 0);
+        let above = ChunkPos::new(0, 1, 0);
+        // A corner twenty blocks from the hole, beyond the fifteen daylight
+        // spreads sideways: nearer, a lit floor is the right answer.
+        let under = BlockPos::new(0, 0, 0);
+
+        for holed in [false, true] {
+            let mut world = world();
+            let mut light = lighting();
+            resident(&mut world, floor);
+            light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, floor);
+            assert_eq!(light.at(under).sun(), MAX_LEVEL, "no sky to lose");
+
+            resident(&mut world, above);
+            {
+                let chunk = world
+                    .chunk(tiamot_core::domain::OVERWORLD, above, &mut Empty)
+                    .expect("chunk");
+                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                    let hole = holed && (10..13).contains(&local.x) && (10..13).contains(&local.z);
+                    if !hole {
+                        chunk.set_block_local(local, BlockValue::Uniform(STONE));
+                    }
+                }
+            }
+            let shortcuts = light.dark_shortcuts;
+            let touched = light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, above);
+            assert_eq!(
+                light.dark_shortcuts > shortcuts,
+                !holed,
+                "the fixture did not exercise the path it names"
+            );
+
+            assert_eq!(
+                light.at(under).sun(),
+                0,
+                "the floor kept its sky under an arriving roof (holed = {holed})"
+            );
+            assert!(
+                touched.contains(&floor),
+                "the floor's light changed and was not reported: {touched:?}"
+            );
+            if holed {
+                assert_eq!(
+                    light.at(BlockPos::new(11, 0, 11)).sun(),
+                    MAX_LEVEL,
+                    "the floor under the hole lost the sky it still has"
+                );
+            }
+        }
     }
 
     #[test]

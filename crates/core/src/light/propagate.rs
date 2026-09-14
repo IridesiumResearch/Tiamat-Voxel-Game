@@ -408,6 +408,65 @@ pub fn edited(world: &mut impl Neighbourhood, pos: BlockPos) {
     flood(world, &mut refill);
 }
 
+/// Takes away the daylight a region that has just arrived now stands in front of.
+///
+/// **The sky is wherever the loaded world ends** ([`sky_reaches`]), so a block
+/// with nothing loaded over it takes full daylight — and keeps it when the
+/// region over it arrives later. [`relight`] clears only its own region and a
+/// flood only brightens, so the layer underneath stayed at sunlight under a
+/// roof, a canopy or a cliff for as long as it was loaded. Which chunk came
+/// first decided what the ground looked like: a player walking up to a
+/// woodland loads the floor before the leaves (it is nearer), and the forest
+/// floor was lit like a meadow.
+///
+/// Call it after relighting `region`. It asks, for every block in the layer
+/// just below the region, whether that block holds full daylight the block
+/// above it no longer delivers; each one that does is a sky source that has
+/// gone, and is removed exactly as [`edited`] removes a light that went out —
+/// clearing what could only have come from it and refilling from whatever
+/// else is lit. A region whose underside passes the sun straight down finds
+/// nothing to do in 256 comparisons.
+///
+/// Only a FULL level is a candidate. Nothing but the sky puts
+/// [`MAX_LEVEL`] into the sun channel undimmed, so a floor at fourteen is lit
+/// from the side, and the removal walk from the stale column beside it is what
+/// reaches it if that side light was stale too.
+pub fn roofed(world: &mut impl Neighbourhood, region: Region) {
+    const SUN: usize = 0;
+    let down = super::face_negative(1);
+
+    let mut refill = VecDeque::new();
+    let below = region.min.y - 1;
+    for z in region.min.z..=region.max.z {
+        for x in region.min.x..=region.max.x {
+            let floor = BlockPos::new(x, below, z);
+            let had = world.light(floor).channel(SUN);
+            if had != MAX_LEVEL || sky_reaches(world, floor) {
+                continue;
+            }
+            let roof = BlockPos::new(x, region.min.y, z);
+            let delivered = world
+                .faces(roof)
+                .and_then(|faces| crosses_from(world, faces, roof, down))
+                .map_or(0, |_| arriving(SUN, world.light(roof).channel(SUN), down));
+            if delivered >= had || world.emission(floor).channel(SUN) >= had {
+                continue;
+            }
+            world.set_light(floor, world.light(floor).with_channel(SUN, 0));
+            remove(world, floor, SUN, had, &mut refill);
+            // What the roof does deliver, and anything lit beside the column.
+            refill.push_back(roof);
+            for face in 0..FACE_COUNT {
+                if let Some(next) = removal_step(world, floor, face) {
+                    refill.push_back(next);
+                }
+            }
+        }
+    }
+    refill.retain(|pos| !world.light(*pos).is_dark());
+    flood(world, &mut refill);
+}
+
 /// The neighbour across a face, for a removal walk.
 ///
 /// **Deliberately does not test the source's own permeability, only the
@@ -595,6 +654,65 @@ mod tests {
             "sunlight came through a solid roof"
         );
         assert_eq!(world.at(BlockPos::new(5, 0, 5)).sun(), 0);
+    }
+
+    #[test]
+    fn a_roof_that_arrives_after_the_floor_darkens_it_as_if_it_had_come_first() {
+        // Reported from a rainforest: the floor loaded first (it was nearest),
+        // took full sun, and kept it when the canopy's chunk arrived. The
+        // incremental answer has to be the answer a relight of everything
+        // gives, whichever half of the world came first.
+        let (x_max, z_max) = (24, 24);
+        let build = |world: &mut Box3| {
+            // A roof at y = 12 with a gap in it, and a lamp under it, so the
+            // refill has daylight through the gap and a second channel's worth
+            // of light that the removal must leave alone.
+            world.fill(BlockPos::new(0, 12, 0), BlockPos::new(x_max, 12, z_max));
+            for x in 10..13 {
+                world.set_solid(BlockPos::new(x, 12, 10), false);
+            }
+            world.lamp(BlockPos::new(4, 3, 4), Light::new(0, MAX_LEVEL, 0, 0));
+        };
+
+        // All at once.
+        let mut whole = Box3::new(BlockPos::new(0, 0, 0), BlockPos::new(x_max, 20, z_max));
+        build(&mut whole);
+        let region = whole.region;
+        relight(&mut whole, region);
+
+        // The floor first — everything below the roof — then the rest.
+        let mut arrived = Box3::new(BlockPos::new(0, 0, 0), BlockPos::new(x_max, 11, z_max));
+        build(&mut arrived);
+        let floor = arrived.region;
+        relight(&mut arrived, floor);
+        let early = arrived.at(BlockPos::new(3, 0, 20)).sun();
+        assert_eq!(early, MAX_LEVEL, "the floor had no sky to lose");
+
+        arrived.region.max.y = 20;
+        let top = Region {
+            min: BlockPos::new(0, 12, 0),
+            max: BlockPos::new(x_max, 20, z_max),
+        };
+        relight(&mut arrived, top);
+
+        // Without the pass, the floor keeps the sky it saw before the roof.
+        let stale = arrived.at(BlockPos::new(3, 0, 20)).sun();
+        assert_eq!(stale, MAX_LEVEL, "the counter-example: relight alone");
+
+        roofed(&mut arrived, top);
+
+        for pos in whole.region.blocks() {
+            assert_eq!(
+                arrived.at(pos),
+                whole.at(pos),
+                "at {pos:?} the roof arriving second gave a different light"
+            );
+        }
+        // And the comparison was about something: under the roof is dark,
+        // under the gap is not.
+        assert_eq!(arrived.at(BlockPos::new(3, 0, 20)).sun(), 0);
+        assert_eq!(arrived.at(BlockPos::new(11, 0, 10)).sun(), MAX_LEVEL);
+        assert_eq!(arrived.at(BlockPos::new(4, 3, 4)).red(), MAX_LEVEL);
     }
 
     #[test]
