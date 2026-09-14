@@ -813,6 +813,11 @@ It turns about the vertical axis only, so it never lies over when a player looks
 down at it, and the cells stay exactly where they are for collision, light,
 fluid and the dig ray. Only the drawing changes.
 
+**Never add `cutout` or `transparent` to a billboard** — `register_block`
+refuses it. Those flags are rules about a cell's cube faces, and declared
+together the cells used to be drawn as cutout cubes with the sprite lost inside
+them. A billboard alpha-tests on its own.
+
 **Place it with `fill_cover`, not with a field.** A density has no idea which
 block a sample is in, so a two-cell run written by `fill_density` lands half in
 one block and half in the next, and the sampled fill misses most of it in

@@ -6275,6 +6275,22 @@ fn check_block_fields(id: &str, spec: &Table) -> mlua::Result<()> {
              see-through in places; a block is one or the other"
         )));
     }
+    // **A sprite has no cube faces to cull.** Sub-Node Contract §8.4: glass and
+    // foliage are rules about which faces of a cell are drawn, and the mesher
+    // emitted a billboard that also claimed one as cubes — a ninth of the tile
+    // on each face, the sprite lost inside. `billboard` is `true` or "cross".
+    let billboard = !matches!(
+        spec.get::<Option<Value>>("billboard"),
+        Ok(None | Some(Value::Boolean(false)))
+    );
+    for other in ["transparent", "cutout"] {
+        if billboard && declared(other) {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): a `billboard` is drawn as a sprite and has no faces for \
+                 `{other}` to apply to; declare the billboard alone (it alpha-tests already)"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -8385,6 +8401,39 @@ mod tests {
             ],
             "a full mask should go the whole-block way and a partial one carry its mask"
         );
+    }
+
+    #[test]
+    fn a_billboard_is_never_also_glass_or_foliage() {
+        // **Contract §8.4.** Declared together, the mesher drew the cells as
+        // cutout cubes and the sprite vanished inside them — reported from the
+        // world mod's grass. Both spellings of a billboard, both see-through
+        // flags.
+        for billboard in ["true", "'cross'"] {
+            for other in ["cutout", "transparent"] {
+                let mut both = vm();
+                let err = load(
+                    &mut both,
+                    "wood",
+                    &format!("game.register_block{{ id = 'grass', billboard = {billboard}, {other} = true }}"),
+                )
+                .expect_err("a billboard claiming a culling rule was accepted");
+                let detail = format!("{err:?}");
+                assert!(
+                    detail.contains("has no faces"),
+                    "the error should say what is wrong: {detail}"
+                );
+            }
+        }
+        // `billboard = false` is not a billboard, and alone it is fine.
+        let mut fresh = vm();
+        load(
+            &mut fresh,
+            "wood",
+            "game.register_block{ id = 'leaves', billboard = false, cutout = true }\n\
+             game.register_block{ id = 'grass', billboard = 'cross' }",
+        )
+        .expect("a lone billboard, or a non-billboard leaf, should load");
     }
 
     #[test]

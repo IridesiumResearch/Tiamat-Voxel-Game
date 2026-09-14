@@ -952,6 +952,14 @@ would be, so the tile is whole across it; both sides are drawn, and sway
 applies to their tops as before. The renderer emits two instances per run and
 hands each its heading, so nothing in the mesh changes but a flag.
 
+**A billboard is not also glass or foliage.** `register_block` refuses a block
+declaring `billboard` with `transparent` or `cutout`. §8.1 and §8.2 are rules
+about which of a cell's CUBE faces are drawn, and a billboard cell has none: a
+block declaring both had its cells emitted as cutout cubes, a ninth of the tile
+on each face, with the sprite lost inside them. As with §8.2's pair, a silent
+winner is refused rather than chosen. A sprite already alpha-tests on its own;
+nothing is lost by declaring the billboard alone.
+
 ---
 
 ### 8.5 Biome colour — per chunk column, blended, never stored
