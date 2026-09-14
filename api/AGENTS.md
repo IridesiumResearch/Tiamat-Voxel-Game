@@ -700,6 +700,11 @@ crossings into the VM for an answer `fill_density` gives in one call, in native
 code, with the bounds pruning in front of it. It is the exact cost the opaque
 handles exist to prevent, and the engine cannot tell a loop from a list.
 
+Outside a generator — a tick, a join, a dig — there is no `pos` to carry the
+seed, so read **`game.world_seed`**: the same number, set in every VM once the
+world opens (it is `nil` while your `init.lua` runs, which is before). Aiming a
+new player's spawn at the ground is `surface:at(x, 0, z, game.world_seed)`.
+
 `buf:set_subnode_world(x, y, z, material)` is the same write at cell resolution,
 where the coordinates count cells rather than blocks — three to a block.
 

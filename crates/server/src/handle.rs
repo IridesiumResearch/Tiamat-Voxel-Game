@@ -2437,6 +2437,10 @@ impl ServerHandle {
                     let mut parked = Parked::default();
                     let mut source = match host {
                         Some(mut host) => {
+                            // The seed, now that the world has said which one
+                            // it keeps. A generator is handed it on `pos`; a
+                            // tick, a join or a dig had no way to ask.
+                            host.vm_mut().set_world_seed(world.seed());
                             // Point `game.get_light` at the world now that
                             // there is one. Charter rule 1: a mod deciding
                             // where something may spawn needs to be able to ask

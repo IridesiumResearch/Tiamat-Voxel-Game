@@ -1721,6 +1721,20 @@ impl ScriptVm for MluaVm {
         }
     }
 
+    fn set_world_seed(&mut self, seed: u64) {
+        // Every mod's own table: `game` is per mod (see `build_game_table`),
+        // so there is no one table to set it on. Set with the same conversion
+        // `pos.seed` is, so the two compare equal in Lua.
+        for (mod_id, env) in &self.environments {
+            let installed = env
+                .get::<Table>("game")
+                .and_then(|game| game.set("world_seed", seed));
+            if let Err(err) = installed {
+                tracing::error!(%mod_id, "could not install the world seed: {err}");
+            }
+        }
+    }
+
     fn chunk_tint(
         &mut self,
         domain: &str,
@@ -8400,6 +8414,44 @@ mod tests {
                 (crate::BlockPos::new(4, 5, 6), "core:white".to_owned()),
             ],
             "a full mask should go the whole-block way and a partial one carry its mask"
+        );
+    }
+
+    #[test]
+    fn the_world_seed_is_readable_outside_a_generator() {
+        // Asked for by the world mod, whose spawn aim samples its terrain
+        // density on the main thread and had no seed to sample it with: only a
+        // generator's `pos` carried one. Read from a tick, which is the case,
+        // and compared against a generator's `pos.seed` so the two cannot
+        // disagree about how a large seed converts.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "aim",
+            "game.register_on_tick(function() on_tick = game.world_seed end)\n\
+             game.register_on_generate(function(buf, pos) from_pos = pos.seed end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        let seed = 0xDEAD_BEEF_0123_4567_u64;
+        vm.set_world_seed(seed);
+        vm.tick(1).expect("tick");
+        vm.generate_chunk(
+            crate::domain::OVERWORLD,
+            seed,
+            crate::ChunkPos::new(0, 0, 0),
+            MaterialId::AIR,
+        )
+        .expect("generate");
+
+        let env = vm.environment("aim").expect("env");
+        let on_tick: Value = env.get("on_tick").expect("read");
+        let from_pos: Value = env.get("from_pos").expect("read");
+        assert!(!on_tick.is_nil(), "the tick saw no world seed");
+        assert_eq!(
+            format!("{on_tick:?}"),
+            format!("{from_pos:?}"),
+            "game.world_seed and pos.seed are different numbers in Lua"
         );
     }
 

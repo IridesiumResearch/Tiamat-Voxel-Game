@@ -541,6 +541,7 @@ function Stream:next_bool() end
 ---@field ITEMS_PER_STACK integer How many of a thing one inventory slot holds. 90. Anything over it spills into the next slot rather than being refused, so this is what a recipe means by "a stack" and never a limit on what a player may own.
 ---@field AIR integer The numeric id of air. Always 0.
 ---@field mod_id string Your mod's id, and your registration namespace.
+---@field world_seed integer? The world's seed — the same number a generator's `pos.seed` carries — for sampling a density or a map outside a generator (`density:at(x, y, z, game.world_seed)` to aim a spawn at the ground). `nil` during registration, which runs before the world opens; set in every VM, the generation workers' included, by the time anything else runs.
 game = {}
 
 ---Writes a line to the server log, attributed to your mod.

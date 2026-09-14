@@ -424,6 +424,9 @@ fn load(spec: &WorkerSpec) -> Result<ModHost<MluaVm>, String> {
 /// request parked for ever and a player's in-flight slot never freed.
 fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<String>) -> Done {
     let before: BTreeSet<String> = host.disabled().into_iter().collect();
+    // Per job rather than at spawn: the pool starts before the world has said
+    // which seed it keeps, and the job is what knows. A table write per mod.
+    host.vm_mut().set_world_seed(job.seed);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (chunk, fluid) =
             match host.generate_chunk_with_fluid(&job.domain, job.seed, job.pos, MaterialId::AIR) {

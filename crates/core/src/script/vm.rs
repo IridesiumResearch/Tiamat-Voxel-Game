@@ -1212,6 +1212,15 @@ pub trait ScriptVm: Sized {
     /// to say which liquid it is made of.
     fn set_fluid_ids(&mut self, _ids: &[(String, crate::fluid::FluidId)]) {}
 
+    /// Puts the world seed on every mod's `game` table as `game.world_seed`.
+    ///
+    /// **Called when the world opens, and before each chunk a worker VM
+    /// generates.** A generator is handed the seed on `pos`, but nothing that
+    /// runs on the tick is — ticks, joins, digs — so a mod that samples a
+    /// density at runtime (aiming a spawn at the ground, say) had no seed to
+    /// sample it with. The same number `pos.seed` carries.
+    fn set_world_seed(&mut self, _seed: u64) {}
+
     /// Runs every registered `on_tick` callback once.
     ///
     /// `dt_ticks` is how many simulation steps this call covers — normally 1,
