@@ -2429,6 +2429,46 @@ function game.density(spec) end
 ---@return Tiamot.Schematic
 function game.schematic(blocks) end
 
+---A structure CUT from shapes, for `buf:scatter` to stamp: paths with a
+---thickness, ellipsoids and the named cells of single blocks, rasterised to the
+---cell natively.
+---
+---`game.schematic` takes the blocks already cut; this cuts them. A tree is a
+---trunk that tapers, limbs that leave it at an angle and clumps of leaves on
+---their ends, and turning that into cell masks in Lua is a distance test per
+---cell of every block a shape's box touches — for a trunk fifty blocks tall and
+---a dozen clumps seven across, tens of millions of instructions, well past a
+---call's budget.
+---
+---Each shape is a table with a `kind`, a numeric `material` (air carves) and an
+---optional `priority` (default 0). A cell takes the material of the highest
+---priority shape that covers it, the later shape winning a tie — so give wood a
+---higher priority than the leaves pushed over a limb's end, and air a higher
+---one than the log it hollows. `rough` (default 0) moves each cell's edge in or
+---out by up to that share, from a hash of the cell alone.
+---
+---* `{ kind = "path", points = { {x, y, z, r}, ... }, material, rough, priority }`
+---  — every cell within `r` of the line through the points, `r` carried
+---  linearly between them. Two points at least.
+---* `{ kind = "ellipsoid", centre = {x, y, z}, radii = {rx, ry, rz}, material, rough, priority }`
+---* `{ kind = "cells", at = {x, y, z}, mask = cells, material, priority }` — the
+---  named cells of one block, `x + 3*y + 9*z`.
+---
+---Coordinates are blocks from the root, which `buf:scatter` puts at the surface
+---block when `sink` is 1. Deterministic: plain arithmetic, coordinate order.
+---
+---```lua
+---local tree = game.schematic_shapes{
+---    { kind = "path", material = log, priority = 1,
+---      points = { {0.5, -1, 0.5, 0.8}, {0.5, 9, 0.5, 0.4} } },
+---    { kind = "ellipsoid", material = leaves, rough = 0.25,
+---      centre = {0.5, 10, 0.5}, radii = {3, 2, 3} },
+---}
+---```
+---@param shapes table[]
+---@return Tiamot.Schematic
+function game.schematic_shapes(shapes) end
+
 ---A structure for `buf:scatter`. See `game.schematic`.
 ---@class Tiamot.Schematic
 local Schematic = {}

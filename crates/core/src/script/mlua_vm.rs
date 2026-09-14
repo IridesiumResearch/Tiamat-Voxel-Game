@@ -33,6 +33,7 @@ use mlua::{Lua, Table, Value};
 use crate::CHUNK_BLOCKS;
 use crate::chunk::Chunk;
 use crate::coords::{ChunkPos, LocalBlock};
+use crate::detgen::shapes::{Shape, rasterise};
 use crate::detgen::{
     ChunkBuffer, Density, FractalParams, Region2d, Scatter, Schematic, StampBlock, StreamRng,
     Terraces, fill_2d,
@@ -170,6 +171,83 @@ struct DensityHandle {
 /// read it back would be one loop away from writing it by hand.
 struct SchematicHandle {
     schematic: Schematic,
+}
+
+/// One entry of `game.schematic_shapes`, read.
+fn shape_from_table(entry: &Table, index: usize) -> mlua::Result<Shape> {
+    let what = |message: &str| {
+        mlua::Error::external(format!("schematic_shapes: shape {index}: {message}"))
+    };
+    let numbers = |table: Table, count: usize, message: &str| -> mlua::Result<Vec<f64>> {
+        let values: Vec<f64> = table.sequence_values::<f64>().collect::<Result<_, _>>()?;
+        if values.len() == count {
+            Ok(values)
+        } else {
+            Err(what(message))
+        }
+    };
+    let triple = |key: &str| -> mlua::Result<Vec<f64>> {
+        let message = format!("`{key}` is three numbers");
+        let table: Table = entry.get(key).map_err(|_| what(&message))?;
+        numbers(table, 3, &message)
+    };
+    let material: u16 = entry
+        .get("material")
+        .map_err(|_| what("`material` is a block id"))?;
+    let material = MaterialId(material);
+    let priority: i32 = entry.get::<Option<i32>>("priority")?.unwrap_or(0);
+    let rough: f64 = entry.get::<Option<f64>>("rough")?.unwrap_or(0.0);
+    let kind: String = entry
+        .get("kind")
+        .map_err(|_| what("`kind` is \"path\", \"ellipsoid\" or \"cells\""))?;
+    match kind.as_str() {
+        "path" => {
+            let points: Table = entry
+                .get("points")
+                .map_err(|_| what("`points` is a list"))?;
+            let mut list = Vec::new();
+            for point in points.sequence_values::<Table>() {
+                let p = numbers(point?, 4, "every point is `{x, y, z, r}`")?;
+                list.push([p[0], p[1], p[2], p[3]]);
+            }
+            if list.len() < 2 {
+                return Err(what("a path needs two points at least"));
+            }
+            Ok(Shape::Path {
+                points: list,
+                material,
+                rough,
+                priority,
+            })
+        }
+        "ellipsoid" => {
+            let c = triple("centre")?;
+            let r = triple("radii")?;
+            if r.iter().any(|v| *v <= 0.0) {
+                return Err(what("every radius is above zero"));
+            }
+            Ok(Shape::Ellipsoid {
+                centre: [c[0], c[1], c[2]],
+                radii: [r[0], r[1], r[2]],
+                material,
+                rough,
+                priority,
+            })
+        }
+        "cells" => {
+            let at = triple("at")?;
+            let mask: u32 = entry
+                .get("mask")
+                .map_err(|_| what("`mask` is a 27-bit cell mask"))?;
+            Ok(Shape::Cells {
+                at: [at[0] as i32, at[1] as i32, at[2] as i32],
+                mask: mask & ((1 << 27) - 1),
+                material,
+                priority,
+            })
+        }
+        other => Err(what(&format!("no shape called `{other}`"))),
+    }
 }
 
 impl mlua::UserData for SchematicHandle {
@@ -5582,6 +5660,31 @@ impl MluaVm {
     /// A structure as a list of blocks — `{dx, dy, dz, material, mask}` each —
     /// compiled once into a handle `buf:scatter` stamps natively. See
     /// `detgen::Schematic` for why the blocks are not written one by one.
+    /// Installs `game.schematic_shapes`: a schematic CUT from shapes rather
+    /// than listed block by block — see `detgen::shapes`. A megatree
+    /// rasterised in Lua is tens of millions of instructions; here it is none.
+    fn install_schematic_shapes(&self, game: &Table) -> Result<(), ScriptError> {
+        let shapes = self
+            .lua
+            .create_function(|_, list: Table| {
+                let mut shapes = Vec::new();
+                for (index, entry) in list.sequence_values::<Table>().enumerate() {
+                    shapes.push(shape_from_table(&entry?, index + 1)?);
+                }
+                let schematic = rasterise(&shapes);
+                if schematic.is_empty() {
+                    return Err(mlua::Error::external(
+                        "schematic_shapes: the shapes cover no cell",
+                    ));
+                }
+                Ok(SchematicHandle { schematic })
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("schematic_shapes", shapes)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     fn install_schematic(&self, game: &Table) -> Result<(), ScriptError> {
         let schematic = self
             .lua
@@ -5621,6 +5724,8 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("schematic", schematic)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_schematic_shapes(game)?;
+
         Ok(())
     }
 

@@ -32,6 +32,7 @@ mod density;
 mod map;
 pub mod noise;
 pub mod rng;
+pub mod shapes;
 pub mod trig;
 
 pub use buffer::{
