@@ -2391,6 +2391,10 @@ function Density:at(x, y, z, seed) end
 ---  `stream` really matters: it is a NAME, hashed into the world seed, and two
 ---  nodes with different names give independent fields. Give your terrain and
 ---  your caves different streams or the caves will follow the hills exactly.
+---  `stretch = { x = 1, y = 4, z = 1 }` draws the field out along an axis —
+---  features four times as tall here, as if sampled at `y / 4` — for rock that
+---  flutes vertically or strata that run level; an axis left out is 1. Every
+---  value must be above zero. Bounds follow it, so pruning still works.
 ---- `{ op = "map", map = <a Tiamot.Map> }` — the map's value under this
 ---  sample, ignoring y. **The way an eroded field becomes terrain.** A map is
 ---  a surface, so subtract `y` to get a density from it. The node takes a COPY

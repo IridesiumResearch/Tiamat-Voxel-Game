@@ -141,7 +141,10 @@ end)
 ```
 
 That is overhangs, arches and caves in one mechanism. Give each noise node a
-different `stream` name or your caves will follow your hills exactly. The full
+different `stream` name or your caves will follow your hills exactly. A noise
+round in every axis reads as lumps; `stretch = { y = 4 }` on a noise node makes
+its features four times as tall without making them wider, which is cliff rock,
+and `stretch = { x = 6, z = 6 }` lays them out flat, which is strata. The full
 operation list is in the stubs, and it is short on purpose: every operation is
 in the deterministic subset, so there is no `pow`, `sin` or `sqrt` and asking
 for one is asking to break the cross-platform guarantee.

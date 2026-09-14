@@ -7753,17 +7753,34 @@ fn density_noise_params(spec: &Table) -> crate::detgen::FractalParams {
     params
 }
 
-fn density_noise(spec: &Table) -> crate::detgen::Op {
+fn density_noise(spec: &Table) -> mlua::Result<crate::detgen::Op> {
     let params = density_noise_params(spec);
     // **The stream is a NAME, hashed.** A number would invite two mods to pick
     // 1, and a field that silently equals somebody else's is the hardest kind
     // of worldgen bug to see.
     let stream: String = spec.get("stream").unwrap_or_else(|_| "default".to_owned());
-    crate::detgen::Op::Noise {
+    // `stretch = { y = 4 }`: any axis left out is round. Read strictly — a
+    // stretch that is the wrong type is a mistake the mod wants to hear about,
+    // not a round field it did not ask for. `compile` refuses a stretch that
+    // is not above zero.
+    let mut stretch = crate::detgen::UNSTRETCHED;
+    if let Some(table) = spec.get::<Option<Table>>("stretch").map_err(|_| {
+        mlua::Error::external("a noise node's `stretch` is a table: { x = 1, y = 4, z = 1 }")
+    })? {
+        for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+            if let Some(value) = table.get::<Option<f32>>(name).map_err(|_| {
+                mlua::Error::external(format!("a noise node's `stretch.{name}` is a number"))
+            })? {
+                stretch[axis] = value;
+            }
+        }
+    }
+    Ok(crate::detgen::Op::Noise {
         params,
         amplitude: spec.get::<f32>("amplitude").unwrap_or(1.0),
         stream: crate::detgen::fnv1a(stream.as_bytes()),
-    }
+        stretch,
+    })
 }
 
 /// How deep a density table may nest before it is refused.
@@ -7808,14 +7825,28 @@ fn compile_density(
         "x" => ops.push(Op::Coordinate(Axis::X)),
         "y" => ops.push(Op::Coordinate(Axis::Y)),
         "z" => ops.push(Op::Coordinate(Axis::Z)),
-        "noise" => ops.push(density_noise(spec)),
+        "noise" => ops.push(density_noise(spec)?),
         "contour" => {
             // The distance to a 2D noise's zero contour, in blocks — the
             // same stream, frequency and octaves as a noise node; no
             // amplitude, since a distance has none. See `Op::Contour`.
-            let crate::detgen::Op::Noise { params, stream, .. } = density_noise(spec) else {
+            let crate::detgen::Op::Noise {
+                params,
+                stream,
+                stretch,
+                ..
+            } = density_noise(spec)?
+            else {
                 unreachable!("density_noise builds a noise op")
             };
+            // Its noise is sampled on the ground plane, so there is no y to
+            // stretch — and a stretched x or z is a question `contour`'s
+            // distance does not answer. Refused rather than ignored.
+            if stretch != crate::detgen::UNSTRETCHED {
+                return Err(mlua::Error::external(
+                    "a `contour` node takes no `stretch`; stretch is a `noise` option",
+                ));
+            }
             let signed: bool = spec.get::<Option<bool>>("signed")?.unwrap_or(false);
             ops.push(crate::detgen::Op::Contour {
                 params,
@@ -8415,6 +8446,55 @@ mod tests {
             ],
             "a full mask should go the whole-block way and a partial one carry its mask"
         );
+    }
+
+    #[test]
+    fn a_noise_node_can_be_stretched_along_an_axis() {
+        // Asked for by the world mod's coast: cliff rock flutes vertically,
+        // and with one frequency a feature could only be made taller by being
+        // made wider. `stretch = { y = 4 }` is the round field read at y / 4,
+        // so the stretched field at height 40 is the round one at height 10 —
+        // exactly, through the same point sample a generator uses.
+        let mut host = vm();
+        load(
+            &mut host,
+            "coast",
+            "local round = game.density{ op = 'noise', stream = 'rock', frequency = 0.05 }\n\
+             local tall = game.density{ op = 'noise', stream = 'rock', frequency = 0.05,\n\
+             \x20   stretch = { y = 4 } }\n\
+             same = tall:at(3, 40, -7, 99) == round:at(3, 10, -7, 99)\n\
+             differs = tall:at(3, 40, -7, 99) ~= round:at(3, 40, -7, 99)",
+        )
+        .expect("a stretched noise should load");
+        let env = host.environment("coast").expect("env");
+        assert!(
+            env.get::<bool>("same").expect("read"),
+            "y was not divided by the stretch"
+        );
+        assert!(
+            env.get::<bool>("differs").expect("read"),
+            "the stretch changed nothing"
+        );
+
+        // Refused, each with a reason, rather than quietly read as round.
+        for (spec, says) in [
+            ("{ op = 'noise', stretch = 4 }", "is a table"),
+            ("{ op = 'noise', stretch = { y = 'tall' } }", "stretch.y"),
+            ("{ op = 'noise', stretch = { y = 0 } }", "greater than zero"),
+            (
+                "{ op = 'contour', stretch = { y = 2 } }",
+                "takes no `stretch`",
+            ),
+        ] {
+            let mut fresh = vm();
+            let err = load(&mut fresh, "coast", &format!("game.density{spec}"))
+                .expect_err("a bad stretch loaded");
+            let detail = format!("{err:?}");
+            assert!(
+                detail.contains(says),
+                "{spec} should say `{says}`: {detail}"
+            );
+        }
     }
 
     #[test]

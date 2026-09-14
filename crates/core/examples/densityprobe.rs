@@ -29,6 +29,7 @@ fn noise(stream: u64, frequency: f32, octaves: u32, amplitude: f32) -> Op {
         },
         amplitude,
         stream,
+        stretch: tiamot_core::detgen::UNSTRETCHED,
     }
 }
 

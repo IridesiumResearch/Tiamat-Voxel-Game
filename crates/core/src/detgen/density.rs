@@ -57,7 +57,9 @@
 //! of a landscape it has; the engine holds no opinion about which idea is
 //! right.
 
-use super::noise::{BufferSizeMismatch, Fractal, FractalParams, Region3d, fill_3d};
+use super::noise::{
+    BufferSizeMismatch, Fractal, FractalParams, Region3d, fill_3d, fill_3d_stretched,
+};
 
 /// How many operations one density program may hold.
 ///
@@ -215,6 +217,18 @@ pub enum Op {
         /// across a chunk boundary, so nothing about which chunk is being
         /// generated may reach the seed.
         stream: u64,
+        /// How far the noise is drawn out along x, y and z: a feature is
+        /// `stretch` times as long along that axis as the frequency alone
+        /// makes it. [`UNSTRETCHED`] is round.
+        ///
+        /// **Rock is not the same shape in every direction.** It flutes and
+        /// weathers vertically and its strata run level, and a noise round in
+        /// every axis reads as lumps; with one frequency, the only way to make
+        /// a feature taller was to make it wider by the same amount. Here
+        /// rather than in [`super::noise::FractalParams`], which is built in
+        /// thirty-odd places that mean a 2D or a round field, and whose
+        /// meaning would change under all of them.
+        stretch: [f32; 3],
     },
     /// The distance, in blocks, from the zero contour of a 2D noise field:
     /// the noise sampled on the ground plane (y held at 0), so the contour
@@ -345,6 +359,12 @@ pub enum DensityError {
         /// Which value.
         what: &'static str,
     },
+    /// A noise stretch that is not a positive number.
+    #[error("a noise stretch must be greater than zero, not {}", f32::from_bits(*found))]
+    NotAStretch {
+        /// The stretch given, as its bits: the error is `Eq`, and a float is not.
+        found: u32,
+    },
     /// The output buffer was the wrong length.
     #[error(transparent)]
     Size(#[from] BufferSizeMismatch),
@@ -422,6 +442,15 @@ impl Density {
                 if !value.is_finite() {
                     return Err(DensityError::NotFinite { what });
                 }
+            }
+            // A stretch divides the coordinate, so zero is a division by zero
+            // and a negative one mirrors the field for no reason anyone wants.
+            if let Op::Noise { stretch, .. } = op
+                && let Some(found) = stretch.iter().copied().find(|value| *value <= 0.0)
+            {
+                return Err(DensityError::NotAStretch {
+                    found: found.to_bits(),
+                });
             }
             let wanted = op.arity();
             if height < wanted {
@@ -501,7 +530,15 @@ impl Density {
         axes: &[Interval; 3],
         params: &super::noise::FractalParams,
         amplitude: f32,
+        stretch: [f32; 3],
     ) -> Interval {
+        // The box the noise is actually SAMPLED over: each axis divided by its
+        // stretch, exactly as the fill divides each coordinate. A positive
+        // divisor keeps low below high, and `compile` refuses any other.
+        let axes = [0, 1, 2].map(|axis| Interval {
+            low: axes[axis].low / stretch[axis],
+            high: axes[axis].high / stretch[axis],
+        });
         let (low, high) = super::noise::fractal_3d_bounds(
             seed,
             (axes[0].low, axes[0].high),
@@ -646,7 +683,14 @@ impl Density {
                     params,
                     amplitude,
                     stream,
-                } => stack.push(Self::noise_bounds(seed ^ stream, &axes, params, *amplitude)),
+                    stretch,
+                } => stack.push(Self::noise_bounds(
+                    seed ^ stream,
+                    &axes,
+                    params,
+                    *amplitude,
+                    *stretch,
+                )),
                 // A distance: never negative, never past the cap. Nothing
                 // tighter without evaluating it, and a crack is thin enough
                 // that a box's bound would rarely exclude it anyway.
@@ -769,9 +813,16 @@ impl Density {
                     params,
                     amplitude,
                     stream,
+                    stretch,
                 } => {
                     let slot = &mut stack[height];
-                    fill_3d(seed ^ stream, region, params, slot)?;
+                    // The round field keeps its own loop, so no world that
+                    // never asked for a stretch changes by a bit.
+                    if *stretch == UNSTRETCHED {
+                        fill_3d(seed ^ stream, region, params, slot)?;
+                    } else {
+                        fill_3d_stretched(seed ^ stream, region, params, *stretch, slot)?;
+                    }
                     if (*amplitude - 1.0).abs() > f32::EPSILON {
                         for value in slot.iter_mut() {
                             *value *= amplitude;
@@ -856,18 +907,27 @@ impl Op {
         match self {
             Self::Constant(value) => vec![(*value, "a constant")],
             Self::Noise {
-                params, amplitude, ..
+                params,
+                amplitude,
+                stretch,
+                ..
             } => vec![
                 (*amplitude, "a noise amplitude"),
                 (params.frequency, "a noise frequency"),
                 (params.lacunarity, "a noise lacunarity"),
                 (params.gain, "a noise gain"),
+                (stretch[0], "a noise stretch"),
+                (stretch[1], "a noise stretch"),
+                (stretch[2], "a noise stretch"),
             ],
             Self::Clamp { low, high } => vec![(*low, "a clamp bound"), (*high, "a clamp bound")],
             _ => Vec::new(),
         }
     }
 }
+
+/// A noise drawn out along no axis: [`Op::Noise`]'s `stretch` for a round field.
+pub const UNSTRETCHED: [f32; 3] = [1.0; 3];
 
 /// The default fractal shape, for a mod that names only a frequency.
 #[must_use]
@@ -1093,6 +1153,7 @@ mod tests {
             params,
             amplitude: 1.0,
             stream: 5,
+            stretch: UNSTRETCHED,
         }])
         .expect("compiles");
         let contour = Density::compile(vec![Op::Contour {
@@ -1155,6 +1216,7 @@ mod tests {
                 },
                 amplitude,
                 stream: 7,
+                stretch: UNSTRETCHED,
             },
             Op::Coordinate(Axis::Y),
             Op::Subtract,
@@ -1255,6 +1317,7 @@ mod tests {
             },
             amplitude: 1.0,
             stream: 0,
+            stretch: UNSTRETCHED,
         }]
     }
 
@@ -1449,6 +1512,7 @@ mod tests {
                 },
                 amplitude: 1.0,
                 stream: 3,
+                stretch: UNSTRETCHED,
             },
             Op::Constant(threshold),
             Op::Subtract,
@@ -1533,6 +1597,175 @@ mod tests {
         );
     }
 
+    fn stretched(stretch: [f32; 3]) -> Op {
+        Op::Noise {
+            params: FractalParams {
+                fractal: Fractal::Fbm,
+                octaves: 3,
+                frequency: 0.05,
+                lacunarity: 2.0,
+                gain: 0.5,
+            },
+            amplitude: 8.0,
+            stream: 21,
+            stretch,
+        }
+    }
+
+    #[test]
+    fn a_stretched_noise_is_the_round_one_sampled_at_divided_coordinates() {
+        // What `stretch` means, stated as the arithmetic: a feature four times
+        // as tall is the round field read at y / 4. Bit-identical, so the bulk
+        // fill, the point sample and anything a mod reasons about agree.
+        let Op::Noise { params, .. } = stretched(UNSTRETCHED) else {
+            unreachable!()
+        };
+        let stretch = [1.0, 4.0, 0.5];
+        let density = Density::compile(vec![stretched(stretch)]).expect("compile");
+        let region = Region3d {
+            origin_x: -40.0,
+            origin_y: 3.0,
+            origin_z: 900.0,
+            step: 1.0 / 3.0,
+            width: 7,
+            height: 9,
+            depth: 5,
+        };
+        let mut field = vec![0.0; region.len()];
+        density.evaluate(9, &region, &mut field).expect("evaluate");
+
+        let mut index = 0;
+        for layer in 0..region.depth {
+            let z = region.origin_z + layer as f32 * region.step;
+            for row in 0..region.height {
+                let y = region.origin_y + row as f32 * region.step;
+                for column in 0..region.width {
+                    let x = region.origin_x + column as f32 * region.step;
+                    let (world_seed, stream): (u64, u64) = (9, 21);
+                    let expected = super::super::noise::fractal_3d(
+                        world_seed ^ stream,
+                        x / stretch[0],
+                        y / stretch[1],
+                        z / stretch[2],
+                        &params,
+                    ) * 8.0;
+                    assert_eq!(
+                        field[index].to_bits(),
+                        expected.to_bits(),
+                        "at ({x}, {y}, {z})"
+                    );
+                    let point = density.sample(9, x, y, z).expect("sample");
+                    assert_eq!(
+                        point.to_bits(),
+                        expected.to_bits(),
+                        "point at ({x}, {y}, {z})"
+                    );
+                    index += 1;
+                }
+            }
+        }
+
+        // And it is a different field from the round one, or the equality
+        // above could be satisfied by a stretch that is read and ignored.
+        let round = Density::compile(vec![stretched(UNSTRETCHED)]).expect("compile");
+        let mut plain = vec![0.0; region.len()];
+        round.evaluate(9, &region, &mut plain).expect("evaluate");
+        assert_ne!(plain, field, "the stretch changed nothing");
+    }
+
+    #[test]
+    fn a_bound_over_a_box_holds_for_a_stretched_noise() {
+        // The bound is taken over the box the noise is SAMPLED over, each axis
+        // divided by its stretch. Bounding the undivided box would be a bound
+        // on a different region of the round field — sound only by luck. A
+        // squash (stretch below one) is the dangerous direction: it samples a
+        // wider box than the chunk, and a bound on the chunk's own box is
+        // narrower than what the fill reads.
+        //
+        // The slow, hard-squashed case is the one with teeth: at frequency
+        // 0.002 a sixteen-block box bounds to a sliver of the noise's range,
+        // and a squash of fifty reads eight hundred blocks of it. Bounding the
+        // chunk's own box fails there; the faster cases only hold the rest.
+        let slow = |stretch: [f32; 3]| {
+            let Op::Noise {
+                amplitude, stream, ..
+            } = stretched(stretch)
+            else {
+                unreachable!()
+            };
+            Op::Noise {
+                params: FractalParams {
+                    fractal: Fractal::Fbm,
+                    octaves: 2,
+                    frequency: 0.002,
+                    lacunarity: 2.0,
+                    gain: 0.5,
+                },
+                amplitude,
+                stream,
+                stretch,
+            }
+        };
+        let cases = [
+            slow([0.02, 1.0, 0.02]),
+            slow([1.0, 0.02, 1.0]),
+            stretched([1.0, 6.0, 1.0]),
+            stretched([3.0, 0.2, 9.0]),
+        ];
+        for op in cases {
+            let Op::Noise { stretch, .. } = op else {
+                unreachable!()
+            };
+            let density = Density::compile(vec![op]).expect("compile");
+            for corner in [-3000.0, 0.0, 77.0, 40_000.0] {
+                let region = Region3d {
+                    origin_x: corner,
+                    origin_y: corner * 0.5 - 8.0,
+                    origin_z: 13.0 - corner,
+                    step: 1.0,
+                    width: 16,
+                    height: 16,
+                    depth: 16,
+                };
+                let bounds = density.bounds(4, &region);
+                let fine = Region3d {
+                    step: 1.0 / 3.0,
+                    width: 46,
+                    height: 46,
+                    depth: 46,
+                    ..region
+                };
+                let mut field = vec![0.0; fine.len()];
+                density.evaluate(4, &fine, &mut field).expect("evaluate");
+                for value in &field {
+                    assert!(
+                        *value >= bounds.low && *value <= bounds.high,
+                        "a sample {value} of noise stretched {stretch:?} near {corner} escaped \
+                         its box's bound ({}, {})",
+                        bounds.low,
+                        bounds.high
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stretch_that_is_not_above_zero_is_refused() {
+        for bad in [0.0, -1.0, -0.0] {
+            let refused = Density::compile(vec![stretched([1.0, bad, 1.0])]);
+            assert!(
+                matches!(refused, Err(DensityError::NotAStretch { .. })),
+                "a stretch of {bad} was {refused:?}"
+            );
+        }
+        assert!(matches!(
+            Density::compile(vec![stretched([1.0, f32::INFINITY, 1.0])]),
+            Err(DensityError::NotFinite { .. })
+        ));
+        Density::compile(vec![stretched([0.001, 1000.0, 1.0])]).expect("any positive stretch");
+    }
+
     fn evaluate(ops: Vec<Op>) -> Vec<f32> {
         let density = Density::compile(ops).expect("compile");
         let region = chunk_region();
@@ -1585,6 +1818,7 @@ mod tests {
                 params: default_params(),
                 amplitude: 1.0,
                 stream: 11,
+                stretch: UNSTRETCHED,
             },
             Op::Coordinate(Axis::Y),
             Op::Constant(0.05),
@@ -1617,11 +1851,13 @@ mod tests {
             params: default_params(),
             amplitude: 1.0,
             stream: 1,
+            stretch: UNSTRETCHED,
         }]);
         let two = evaluate(vec![Op::Noise {
             params: default_params(),
             amplitude: 1.0,
             stream: 2,
+            stretch: UNSTRETCHED,
         }]);
         assert_ne!(one, two);
     }

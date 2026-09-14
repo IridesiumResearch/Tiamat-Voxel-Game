@@ -39,7 +39,9 @@ pub use buffer::{
     BufferError, ChunkBuffer, Detail, Layer, MAX_PALETTE_BANDS, Palette, PaletteError, Scatter,
     Schematic, StampBlock, Terraces,
 };
-pub use density::{Axis, Density, DensityError, MAX_DEPTH, MAX_OPS, Op, Scratch, default_params};
+pub use density::{
+    Axis, Density, DensityError, MAX_DEPTH, MAX_OPS, Op, Scratch, UNSTRETCHED, default_params,
+};
 pub use map::{Combine, Map, MapError};
 pub use noise::{
     Fractal, FractalParams, Region2d, Region3d, fill_2d, fill_3d, fractal_2d, fractal_3d,

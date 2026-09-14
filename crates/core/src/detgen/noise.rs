@@ -1084,6 +1084,46 @@ pub fn fill_3d(
     Ok(())
 }
 
+/// Fills a 3D buffer with fractal noise drawn out along each axis.
+///
+/// [`fill_3d`] with every coordinate divided by its axis's `stretch` before it
+/// is sampled, so a stretch of 4 along y makes features four times as tall.
+/// A division rather than a multiplication by a stored reciprocal: `x / s` is
+/// one correctly rounded operation, where the reciprocal would be rounded once
+/// and then again in every product. Both are inside charter rule 4's subset.
+///
+/// # Errors
+///
+/// [`BufferSizeMismatch`] if `out` is not exactly `region.len()` long.
+pub fn fill_3d_stretched(
+    seed: u64,
+    region: &Region3d,
+    params: &FractalParams,
+    stretch: [f32; 3],
+    out: &mut [f32],
+) -> Result<(), BufferSizeMismatch> {
+    if out.len() != region.len() {
+        return Err(BufferSizeMismatch {
+            expected: region.len(),
+            found: out.len(),
+        });
+    }
+
+    for layer in 0..region.depth {
+        let z = (region.origin_z + layer as f32 * region.step) / stretch[2];
+        for row in 0..region.height {
+            let y = (region.origin_y + row as f32 * region.step) / stretch[1];
+            let start = (layer * region.height + row) * region.width;
+            let slice = &mut out[start..start + region.width];
+            for (column, sample) in slice.iter_mut().enumerate() {
+                let x = (region.origin_x + column as f32 * region.step) / stretch[0];
+                *sample = fractal_3d(seed, x, y, z, params);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
