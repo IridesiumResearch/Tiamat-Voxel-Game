@@ -725,6 +725,13 @@ Meshing is at sub-node resolution using **binary greedy meshing**, per §1.
   material only.
 - Faces are culled against the neighbouring cell, including across chunk
   boundaries via the two padding bits.
+- **A fluid face is never drawn against a neighbour chunk that has not
+  arrived**, sideways or below; it is drawn upward, where it is a surface.
+  Terrain draws against an unarrived chunk on purpose (a wall inside rock is
+  invisible, a hole is a window), but fluid is transparent, so the same rule
+  stood a sheet of water on every seam of a sea still streaming in. The
+  padding marks the unarrived side wet for the fluid's culling only; terrain's
+  faces are unchanged.
 - Positions quantise to 6 bits per axis (`0..=48`), giving an 8-byte vertex.
 
 Task 08 implements this. Task 02b's prototype measured 0.110 ms/chunk on

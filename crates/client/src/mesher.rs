@@ -553,7 +553,21 @@ impl SubNodeGrid {
                         (v / per_axis) as i32,
                         neighbour_block,
                     );
-                    if self.block_height(bx, by, bz).is_none() {
+                    // **A neighbour that has not arrived is not dry.** The
+                    // absent policy draws terrain against it on purpose — a
+                    // wall inside rock is invisible (`ABSENT_POLICY`) — but
+                    // water is transparent, so the same rule stood a sheet of
+                    // it on every seam of an ocean whose next chunk was still
+                    // in flight, reported from the window as walls between the
+                    // chunks of the sea. So for the fluid's own culling an
+                    // unarrived side reads as more of the same body. Terrain's
+                    // faces are untouched: a wet padding bit is not opaque.
+                    //
+                    // Not upward: a sea whose surface is a chunk's top edge
+                    // would lose its surface until the air above it streamed
+                    // in, and a missing surface is a hole, not a seam.
+                    let unarrived = neighbour.is_none() && !(axis == 1 && positive);
+                    if !unarrived && self.block_height(bx, by, bz).is_none() {
                         continue;
                     }
                     let Some(fluid) = self.fluid.as_mut() else {

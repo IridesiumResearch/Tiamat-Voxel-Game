@@ -529,3 +529,86 @@ fn the_shore_never_lies_in_the_same_plane_as_the_floor() {
          z-fighting speckle"
     );
 }
+
+/// An ocean the way the client really holds one: chunks of air in the store,
+/// each with the layer `fill_fluid_below` gives it, meshed through the store's
+/// own neighbours and fluid lookup and the game's absent policy.
+///
+/// Reported from the window: walls rendering between the fluid chunks of an
+/// ocean. The store here holds a 3×3 of sea at two heights with its corner
+/// columns NOT yet arrived and nothing under the lower layer, which is what
+/// streaming leaves on screen while a sea fills in. A side face against a
+/// chunk still in flight was a sheet of water standing in the sea.
+#[test]
+fn an_ocean_in_the_store_draws_no_walls_between_its_chunks() {
+    use client::world::{ABSENT_POLICY, ChunkStore};
+    use tiamot_core::fluid::{Fluid, FluidId, FluidLayer};
+
+    let water = FluidId(1);
+    let mut store = ChunkStore::new();
+    store.set_fluid_table(&[tiamot_core::proto::FluidDef {
+        id: 1,
+        name: "sea:water".to_owned(),
+        material: MILK.get(),
+        color: [40, 90, 200],
+    }]);
+    // A sea whose surface is at y = 10: full blocks below it, in the chunk
+    // that holds the surface and all the chunk under it.
+    for cx in -1..=1 {
+        for cz in -1..=1 {
+            // One side still in flight, so the centre has an unarrived
+            // neighbour at the same height as the sea.
+            if (cx, cz) == (1, 0) {
+                continue;
+            }
+            for cy in [-1, 0] {
+                let pos = ChunkPos::new(cx, cy, cz);
+                store.insert(Chunk::new(pos, MaterialId::AIR));
+                let mut layer = FluidLayer::default();
+                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                    if cy < 0 || local.y < 10 {
+                        layer.set(local, Fluid::new(water, tiamot_core::fluid::MAX_VOLUME));
+                    }
+                }
+                store.set_fluid(pos, layer);
+            }
+        }
+    }
+
+    for centre in [ChunkPos::new(0, 0, 0), ChunkPos::new(0, -1, 0)] {
+        let chunk = store.get(centre).expect("held");
+        let mesh = mesher::mesh_chunk(
+            chunk,
+            &store.neighbours(centre),
+            ABSENT_POLICY,
+            &DAY,
+            &store.fluid_for(centre),
+            &mesher::NoGlass,
+        );
+        let edge = tiamot_core::CHUNK_SUBNODES;
+        let mut walls = Vec::new();
+        for quad in quads(&mesh) {
+            let (axis, positive) = quad[0].face();
+            let (x, y, z) = quad[0].position();
+            let along = [x, y, z][usize::from(axis)];
+            let on_seam = if positive { along == edge } else { along == 0 };
+            // The sea's own surface is a real face; everything else on a seam
+            // is milk drawn against milk.
+            let surface = axis == 1 && positive;
+            if on_seam && !surface {
+                walls.push((axis, positive, (x, y, z)));
+            }
+        }
+        println!(
+            "chunk {centre:?}: {} fluid quads, {} on seams: {:?}",
+            mesh.fluid_vertices.len() / 4,
+            walls.len(),
+            walls.iter().take(8).collect::<Vec<_>>()
+        );
+        assert!(
+            walls.is_empty(),
+            "the ocean draws walls on the seams of {centre:?}"
+        );
+    }
+}

@@ -618,6 +618,16 @@ pub struct Served {
     pub tint: [u8; 3],
     /// The chunk's column's own fog, when a mod gives one.
     pub fog: Option<tiamot_core::proto::ChunkFog>,
+    /// The chunk's fluid layer, encoded, sent as a `ChunkFluid` just before the
+    /// chunk. `None` for a summary, which carries no fluid.
+    ///
+    /// **On the requester's own reply, not the broadcast.** The broadcast is a
+    /// bounded channel a client that falls behind LOSES messages from, and a
+    /// chunk's fluid is sent once: still water never ticks, so nothing ever
+    /// re-sent a lost layer. A player streaming an ocean — every chunk wet,
+    /// every chunk a message — was the one most likely to fall behind, and
+    /// each layer it lost was a chunk drawn dry with a wall of water round it.
+    pub fluid: Option<Vec<u8>>,
     /// Whether the chunk is one opaque, unlit material through and through.
     ///
     /// Decided where the chunk is in hand and carried to the streamer, which
@@ -2957,8 +2967,13 @@ async fn pump_chunks(
                 blob,
                 tint,
                 fog,
+                fluid,
                 sealed,
             })) => {
+                // The fluid first, so the chunk is never drawn without it.
+                if let (None, Some(fluid)) = (level, fluid) {
+                    frame::write(send, &ServerMessage::ChunkFluid { pos, fluid }).await?;
+                }
                 // Whichever was asked for. Sending the wrong message for a
                 // blob would be a client decoding a summary as a chunk, which
                 // is not a thing the codec can catch — both are byte strings.

@@ -831,6 +831,7 @@ fn serve_chunk_requests(
                             blob,
                             tint: [u8::MAX; 3],
                             fog: None,
+                            fluid: None,
                             sealed: false,
                         }));
             } else {
@@ -911,6 +912,7 @@ fn serve_chunk_requests(
                     blob,
                     tint: [u8::MAX; 3],
                     fog: None,
+                    fluid: None,
                     sealed: false,
                 }));
                 continue;
@@ -956,6 +958,7 @@ fn serve_chunk_requests(
                     blob,
                     tint: [u8::MAX; 3],
                     fog: None,
+                    fluid: None,
                     sealed: false,
                 }));
             continue;
@@ -1051,7 +1054,12 @@ fn serve_one_chunk(
     // so telling a client there is no milk here costs less than making it
     // wonder. Without this a joining player sees a pond only once something
     // disturbs it.
-    if blob.is_some() {
+    //
+    // **To the requester, on its reply** (`Served::fluid`), not broadcast: a
+    // client behind on the broadcast loses what it missed, and nothing re-sends
+    // a still pond. Anybody else holding this chunk was sent its fluid when
+    // THEY were served it, and every change since has been broadcast.
+    let fluid = if blob.is_some() {
         let layer = {
             let mut ponds = fluidics.write().expect("fluid lock");
             let fluid = ponds.of(&request.domain);
@@ -1083,16 +1091,10 @@ fn serve_one_chunk(
                 .cloned()
                 .unwrap_or_else(tiamot_core::fluid::FluidLayer::empty)
         };
-        // To the requester's own space: the same position is a different pond
-        // elsewhere.
-        shared.broadcast_in(
-            &request.domain,
-            ServerMessage::ChunkFluid {
-                pos: request.pos,
-                fluid: tiamot_core::fluid::codec::encode(&layer),
-            },
-        );
-    }
+        Some(tiamot_core::fluid::codec::encode(&layer))
+    } else {
+        None
+    };
 
     // **Asked for, never stored.** The colour comes from the mod every time
     // the chunk is served, so changing a biome's palette recolours the world
@@ -1133,6 +1135,7 @@ fn serve_one_chunk(
             blob,
             tint,
             fog,
+            fluid,
             sealed,
         }));
 }
