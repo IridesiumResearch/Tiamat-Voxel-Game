@@ -2004,6 +2004,16 @@ function game.set_block(position, block, occupancy, options) end
 ---@field occupancy integer Bitmask of which of the block's 27 cells would be filled.
 ---@field units integer How many units it would cost, which is the number of set bits in `occupancy`.
 
+---The place control landing on a block with nothing to place.
+---@class Tiamot.UseEvent
+---@field player string Who is using, as 64 hex characters.
+---@field x integer The CELL under the crosshair — cell coordinates, three to a block, as a dig's are. `x // 3` is the block.
+---@field y integer
+---@field z integer
+---@field domain string The space the player is in, so `game.get_block{ x, y, z, domain = e.domain }` reads the right world.
+---@field material integer What that cell is made of.
+---@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil }|nil What is in the main hand — the shape `game.held` answers with — or `nil` for an empty one. An item, when not nil: a placeable stack is a placement, not a use.
+
 ---Registers a veto on completed digs.
 ---
 ---**Registration window only.**
@@ -2063,6 +2073,45 @@ function game.register_on_dig_complete(callback) end
 ---placement through — and `game.get_block` answers inside it.
 ---@param callback fun(event: Tiamot.PlaceEvent): boolean|string|nil
 function game.register_on_place(callback) end
+
+---Registers a handler for USING a block: the place control with nothing to place.
+---
+---**Registration window only.**
+---
+---Called when a player presses the place control (right mouse, by default) at a
+---block in reach with an empty hand or an item in it — picking a bush, opening
+---a door, pulling a lever. A hand holding something placeable places it
+---instead, and this is not called.
+---
+---The same return ladder as `game.register_on_place`, read as "handled":
+---
+---| returned | meaning |
+---|---|---|
+---| `nil`, `true` | not mine — the next mod is asked |
+---| `false` | handled, and the player is told the engine's wording |
+---| a string | handled, and the player is told that |
+---| `""` | handled, and the player is told nothing |
+---
+---The first mod to handle it stops the rest. A use nobody handles is answered
+---with the warning an empty hand has always had ("nothing selected to build
+---with"), so a world with no `on_use` plays as it did.
+---
+---**The world can be read inside it** — `game.get_block` on the cell answers
+---what the block holds, which is the point: the event names one material of a
+---block that may hold three. The event carries the cell, not the block; divide
+---by three for the block. An error disables your mod and the use is treated as
+---unhandled.
+---
+---```lua
+---game.register_on_use(function(e)
+---    local at = game.get_block{ x = e.x // 3, y = e.y // 3, z = e.z // 3, domain = e.domain }
+---    if not (at and has_blooms(at)) then return end   -- not ours: let it pass
+---    game.give(e.player, { material = "my_mod:rose", units = 27 })
+---    return ""                                          -- handled, silently
+---end)
+---```
+---@param callback fun(event: Tiamot.UseEvent): boolean|string|nil
+function game.register_on_use(callback) end
 
 ---Somebody hitting something.
 ---@class Tiamot.PunchEvent

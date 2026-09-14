@@ -456,6 +456,88 @@ fn a_veto_hook_can_read_the_world_it_is_judging() {
     assert!(server.stop());
 }
 
+#[test]
+fn a_use_of_a_block_reaches_the_mods_and_an_unhandled_one_gets_the_engines_word() {
+    // Asked for by the world mod, to pick roses: right-click a bush with an
+    // empty hand. A client used to answer that itself with a warning and send
+    // nothing, so `register_on_use` is the first time a mod has heard it.
+    //
+    // The hook reads the block it is asked about (the world is lent) and
+    // answers with what it saw and what was in the hand, so the notice carries
+    // it out. A use it lets pass is answered with the warning the client used
+    // to show, which is what keeps an unmodded world the same to play.
+    let server = start(
+        "use",
+        write_warden(
+            "use",
+            "game.register_on_use(function(e)\n\
+             \x20   if e.x // 3 ~= 2 then return end\n\
+             \x20   local at = game.get_block{ x = e.x // 3, y = e.y // 3, z = e.z // 3 }\n\
+             \x20   local looked = at and at.material == e.material\n\
+             \x20   return 'picked: looked=' .. tostring(looked) .. ' held=' .. tostring(e.held)\n\
+             end)",
+        ),
+    );
+    let stone = stone();
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let bush = BlockPos::new(2, -1, 0);
+        assert!(server.seed_block(bush, stone), "seed queue full");
+        bot.expect_block(bush, stone, Duration::from_secs(10))
+            .await
+            .expect("the seed should land");
+
+        let told = |bot: &Bot, word: &str| bot.notices().iter().any(|text| text.starts_with(word));
+        async fn wait_for(bot: &mut Bot, word: &str) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline
+                && !bot.notices().iter().any(|text| text.starts_with(word))
+            {
+                let _ = tokio::time::timeout(Duration::from_millis(200), bot.recv()).await;
+            }
+        }
+
+        bot.use_block(centre_of(bush)).await.expect("send");
+        wait_for(&mut bot, "picked").await;
+        assert!(
+            told(&bot, "picked: looked=true held=nil"),
+            "the mod did not handle the use, could not read the block, or saw a hand that \
+             was not empty; notices {:?}",
+            bot.notices()
+        );
+        assert!(
+            !told(&bot, "nothing selected"),
+            "a handled use was also answered with the engine's warning; notices {:?}",
+            bot.notices()
+        );
+
+        // The ground beside it, which the hook lets pass.
+        bot.use_block(centre_of(BlockPos::new(-2, -1, 0)))
+            .await
+            .expect("send");
+        wait_for(&mut bot, "nothing selected").await;
+        assert!(
+            told(&bot, "nothing selected to build with"),
+            "a use nobody handled said nothing; notices {:?}",
+            bot.notices()
+        );
+
+        // And reach is the server's, as for a dig.
+        bot.use_block(centre_of(BlockPos::new(2, -1, 40)))
+            .await
+            .expect("send");
+        wait_for(&mut bot, "that is too far").await;
+        assert!(
+            told(&bot, "that is too far away"),
+            "a use out of reach was not refused; notices {:?}",
+            bot.notices()
+        );
+    });
+
+    assert!(server.stop());
+}
+
 /// Where the reference mods live, for the test below.
 fn reference_mods() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

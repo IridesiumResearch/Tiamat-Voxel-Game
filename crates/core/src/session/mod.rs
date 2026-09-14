@@ -115,6 +115,15 @@ pub enum Action {
         detail: Option<String>,
     },
 
+    /// The place control landed on a block with nothing to place.
+    ///
+    /// A request, like [`Action::Place`]: reach, what the cell holds and what
+    /// the player carries are the simulation's to read.
+    Use {
+        /// The cell under the crosshair.
+        target: crate::coords::SubNodePos,
+    },
+
     /// Hit an entity.
     ///
     /// A request, like [`Action::Place`]: the session has established only that
@@ -460,6 +469,7 @@ impl Session {
                 face: *face,
                 detail: detail.clone(),
             }),
+            ClientMessage::Use { target } => Response::act(Action::Use { target: *target }),
             _ => return None,
         })
     }
@@ -979,6 +989,7 @@ impl Session {
             ClientMessage::SelectSlot { .. } => "SelectSlot",
             ClientMessage::SetSetting { .. } => "SetSetting",
             ClientMessage::Place { .. } => "Place",
+            ClientMessage::Use { .. } => "Use",
             ClientMessage::ViewDistance { .. } => "ViewDistance",
             ClientMessage::Punch { .. } => "Punch",
             ClientMessage::SwapOffhand { .. } => "SwapOffhand",

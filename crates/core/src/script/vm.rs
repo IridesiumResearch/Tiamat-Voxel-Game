@@ -719,6 +719,27 @@ pub struct PlaceEvent {
     pub units: u32,
 }
 
+/// The place control landing on a block with nothing to place.
+///
+/// Handed to `on_use` when a player's hand is empty or holds an item and they
+/// press the place control at a block in reach. There is no engine action to
+/// veto — nothing would have been placed — so a mod returning a refusal is
+/// saying it HANDLED the use: `""` silently, a string with that notice. A use
+/// nobody handles is answered with the engine's own warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseEvent {
+    /// Who is using.
+    pub player: [u8; 32],
+    /// The space they are in, so a hook can read the block it was asked about.
+    pub domain: String,
+    /// The cell under the crosshair.
+    pub target: crate::coords::SubNodePos,
+    /// What that cell is made of, in the id space a mod speaks.
+    pub material: MaterialId,
+    /// What the player holds in the main hand, if anything.
+    pub held: Option<crate::inventory::Stack>,
+}
+
 /// Somebody hitting something.
 ///
 /// The attacker is a canonical player UUID (charter rule 13); the target is an
@@ -1317,6 +1338,13 @@ pub trait ScriptVm: Sized {
     /// The same rules as [`Self::dig_complete`], and called after the engine's
     /// own checks pass but before anything is written or charged.
     fn place(&mut self, event: &PlaceEvent) -> HookOutcome;
+
+    /// Asks every registered `on_use` whether it handles a use of a block.
+    ///
+    /// The same ladder as [`Self::place`], read the other way round: the first
+    /// mod to return anything but `nil`/`true` has handled it and the rest are
+    /// not asked. An outcome that still `allowed` is a use nobody handled.
+    fn use_block(&mut self, event: &UseEvent) -> HookOutcome;
 
     /// Tells every registered `on_player_join` that somebody arrived.
     ///

@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 51;
+pub const PROTOCOL_VERSION: u32 = 52;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 51;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v52 (post-15b): appended `ClientMessage::Use`. The place control landing on a
+// block with nothing it can place: an empty hand, or an item. The client used to
+// answer that itself with a warning and send nothing, so no mod could hear a
+// player right-click a bush, a door or a lever.
 // v50 (post-15b): `MaterialDef` carries `billboard_cross`. A billboard that
 // stands as two fixed crossed cards rather than turning to the camera.
 // v48 (post-15b): `MaterialDef` carries `billboard`. Presentation only, and the
@@ -1170,6 +1174,22 @@ pub enum ClientMessage {
         /// `0` or `1` for a toggle; an index into the declared options for a
         /// choice. Out of range is clamped, for the reason a bad default is.
         value: u32,
+    },
+
+    /// The place control landed on a block and there was nothing to place.
+    ///
+    /// **Appended at the end** (protocol v52).
+    ///
+    /// Sent instead of [`Self::Place`] when the hand is empty or holds an item,
+    /// which is when a client used to warn locally and send nothing — and so
+    /// when no mod could hear a player right-click a bush to pick it, a door to
+    /// open it or a lever to pull it. A request, like every other: whether the
+    /// cell is in reach, what is in it and what the player holds are read by
+    /// the server, and the client names only where it was aiming.
+    Use {
+        /// The cell under the crosshair — the one a dig would take, not the
+        /// empty one a placement would step across to.
+        target: SubNodePos,
     },
 }
 
@@ -2332,6 +2352,8 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
         | ClientMessage::CancelDig
         | ClientMessage::SelectTool { tool: None }
         | ClientMessage::Place { .. }
+        // A cell position. Reach is the server's check, as it is for a dig.
+        | ClientMessage::Use { .. }
         // Two bytes, and `ViewDistance::clamped` bounds them on the way in —
         // there is no value a peer can put here that costs anything to hold.
         | ClientMessage::ViewDistance { .. }
@@ -3255,6 +3277,19 @@ mod tests {
         // Protocol v30.
         let select = encode(&ClientMessage::SelectSlot { slot: 0 }).expect("encode");
         assert_eq!(select[0], 19);
+        // Protocol v47, unpinned until v52 appended the next one.
+        let setting = encode(&ClientMessage::SetSetting {
+            id: String::new(),
+            value: 0,
+        })
+        .expect("encode");
+        assert_eq!(setting[0], 20);
+        // Protocol v52.
+        let used = encode(&ClientMessage::Use {
+            target: SubNodePos::new(0, 0, 0),
+        })
+        .expect("encode");
+        assert_eq!(used[0], 21);
     }
 
     #[test]

@@ -60,6 +60,12 @@ const HOOK_DIG: &str = "on_dig_complete";
 /// Hook name used in registry keys and in fault messages.
 const HOOK_PLACE: &str = "on_place";
 
+/// Registry key holding the mods that registered `on_use`.
+const USERS: &str = "tiamot.users";
+
+/// Hook name used in registry keys and in fault messages.
+const HOOK_USE: &str = "on_use";
+
 /// Registry key holding the mods that registered `on_fluid_flow`.
 const FLOWERS: &str = "tiamot.flowers";
 
@@ -2110,6 +2116,30 @@ impl ScriptVm for MluaVm {
         self.run_hook(HOOK_PLACE, PLACERS, &table)
     }
 
+    fn use_block(&mut self, event: &crate::script::UseEvent) -> HookOutcome {
+        let Ok(table) = self.hook_event(event.player).and_then(|table| {
+            table.set("x", event.target.x)?;
+            table.set("y", event.target.y)?;
+            table.set("z", event.target.z)?;
+            table.set("domain", event.domain.as_str())?;
+            table.set("material", event.material.0)?;
+            // The same shape `game.held` answers with, absent for an empty
+            // hand, so `if event.held then` is the test.
+            let held = event
+                .held
+                .as_ref()
+                .map(|stack| stack_table(&self.lua, stack))
+                .transpose()?;
+            table.set("held", held)?;
+            Ok(table)
+        }) else {
+            // Nothing handled it, which is the honest answer for a VM that
+            // could not build the question.
+            return HookOutcome::allow();
+        };
+        self.run_hook(HOOK_USE, USERS, &table)
+    }
+
     fn punch(&mut self, event: &crate::script::PunchEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.attacker).and_then(|table| {
             // `attacker` as well as `player`, because a punch has two parties
@@ -2785,6 +2815,11 @@ impl MluaVm {
         game.set(
             "register_on_punch",
             self.hook_registrar(mod_id, HOOK_PUNCH, PUNCHERS)?,
+        )
+        .map_err(|err| self.vm_error(&err))?;
+        game.set(
+            "register_on_use",
+            self.hook_registrar(mod_id, HOOK_USE, USERS)?,
         )
         .map_err(|err| self.vm_error(&err))?;
         // Registered through the same machinery even though it cannot veto:
@@ -5921,6 +5956,7 @@ impl MluaVm {
         for list in [
             DIGGERS,
             PLACERS,
+            USERS,
             PUNCHERS,
             FLOWERS,
             JOINERS,
@@ -8035,6 +8071,7 @@ mod tests {
             // which does not exist, and duly failed on a hook that was fine.
             "register_on_dig_complete",
             "register_on_place",
+            "register_on_use",
             "register_on_punch",
             "register_on_fluid_flow",
             "register_on_player_join",
@@ -8830,6 +8867,74 @@ mod tests {
 
         assert!(!vm.dig_complete(&a_dig()).allowed, "the veto was ignored");
         assert!(!vm.place(&a_place()).allowed, "the veto was ignored");
+    }
+
+    #[test]
+    fn a_use_reaches_the_first_mod_that_handles_it_and_no_further() {
+        // A use has no engine action behind it to veto, so the ladder means
+        // "handled": the first mod returning anything but nil stops the rest,
+        // and a use every mod lets pass is one nobody handled. The event
+        // carries the cell, what it is made of and what is in the hand.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "garden",
+            "game.register_on_use(function(e)\n\
+             \x20   seen = e\n\
+             \x20   if e.material == 7 then return '' end\n\
+             end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "later",
+            "asked = 0\ngame.register_on_use(function() asked = asked + 1 end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let bush = crate::script::UseEvent {
+            player: [0xEF; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
+            target: crate::coords::SubNodePos::new(4, -2, 9),
+            material: MaterialId(7),
+            held: crate::inventory::Stack::new(MaterialId(3), 27),
+        };
+        let handled = vm.use_block(&bush);
+        assert!(
+            !handled.allowed,
+            "the garden mod handled it and the outcome says nobody did"
+        );
+        assert_eq!(handled.reason.as_deref(), Some(""), "handled silently");
+
+        let env = vm.environment("garden").expect("env").clone();
+        let seen: Table = env.get("seen").expect("the hook saw the event");
+        assert_eq!(seen.get::<i32>("x").expect("x"), 4);
+        assert_eq!(seen.get::<i32>("y").expect("y"), -2);
+        assert_eq!(seen.get::<String>("domain").expect("domain"), "overworld");
+        let held: Table = seen.get("held").expect("held");
+        assert_eq!(held.get::<u16>("material").expect("material"), 3);
+        assert_eq!(held.get::<u32>("units").expect("units"), 27);
+        let later = vm.environment("later").expect("env").clone();
+        assert_eq!(
+            later.get::<i32>("asked").expect("asked"),
+            0,
+            "a handled use went on"
+        );
+
+        // Stone nobody handles: both are asked, and the outcome says so.
+        let stone = crate::script::UseEvent {
+            material: MaterialId(2),
+            held: None,
+            ..bush
+        };
+        assert!(vm.use_block(&stone).allowed, "nobody handled stone");
+        assert_eq!(later.get::<i32>("asked").expect("asked"), 1);
+        let seen: Table = env.get("seen").expect("seen");
+        assert!(
+            seen.get::<Value>("held").expect("held").is_nil(),
+            "an empty hand has a held"
+        );
     }
 
     #[test]

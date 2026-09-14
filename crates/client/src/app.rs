@@ -2304,27 +2304,37 @@ impl App {
     /// [`App::place_target`] — deciding what to do with it is the server's
     /// (charter rule 2).
     ///
-    /// Nothing happens with an empty inventory or nothing in reach. Anything
-    /// else the server may still refuse — it owns that decision — and says why,
-    /// which arrives as a warning.
+    /// **With nothing to place, the control is a USE** of the block under the
+    /// crosshair: an empty hand or an item sends the cell, and the server asks
+    /// the mods (`register_on_use`) — picking a bush, opening a door. The
+    /// warning this used to show locally is what the server answers when no
+    /// mod handles it, so a use a mod handles says nothing. Aimed at nothing,
+    /// the warning stays local: there is no block to ask about.
+    ///
+    /// Anything else the server may still refuse — it owns that decision — and
+    /// says why, which arrives as a warning.
     pub fn place(&mut self) {
         // **Which STACK, not merely which material.** A player placing a stair
         // must spend the stairs they crafted rather than the loose rubble
         // beside them, so the cut goes with the request and the server matches
         // the pair.
         self.swing();
-        let Some(stack) = self.hotbar.get(self.selected).cloned().flatten() else {
-            self.warn("nothing selected to build with".to_owned());
+        let stack = self.hotbar.get(self.selected).cloned().flatten();
+        // An item is not a block (see `App::items`), so holding one is having
+        // nothing to place, the same as an empty hand.
+        let placeable = stack
+            .as_ref()
+            .filter(|stack| !self.items.contains(&stack.material));
+        let Some(stack) = placeable.cloned() else {
+            match self.dig_target() {
+                Some(target) => {
+                    self.connection.send(Command::Use { target });
+                }
+                None if stack.is_none() => self.warn("nothing selected to build with".to_owned()),
+                None => self.warn("that is not something you can build with".to_owned()),
+            }
             return;
         };
-        // **Told here rather than after a round trip.** The server refuses this
-        // too and owns the decision, but a client that asked would leave the
-        // player watching nothing happen for the length of a round trip. See
-        // `App::items`.
-        if self.items.contains(&stack.material) {
-            self.warn("that is not something you can build with".to_owned());
-            return;
-        }
         let Some((target, face)) = self.place_aim() else {
             return;
         };

@@ -1824,6 +1824,20 @@ impl Bot {
         .await
     }
 
+    /// Uses the block at `target`: the place control with nothing to place.
+    ///
+    /// What a client sends with an empty hand or an item, and what reaches a
+    /// mod's `register_on_use`. The server reads what the cell holds and what
+    /// the bot is holding; the bot names only the cell.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Frame`] if the write fails.
+    pub async fn use_block(&mut self, target: tiamot_core::SubNodePos) -> Result<(), BotError> {
+        self.send(&tiamot_core::proto::ClientMessage::Use { target })
+            .await
+    }
+
     pub async fn place_from_inventory(
         &mut self,
         target: tiamot_core::SubNodePos,

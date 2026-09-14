@@ -584,6 +584,15 @@ pub enum Command {
         detail: Option<String>,
     },
 
+    /// The place control landed on a block with nothing to place.
+    ///
+    /// A request: the server reads the cell and asks the mods whether one
+    /// handles it (`register_on_use`).
+    Use {
+        /// The cell under the crosshair — the one a dig would take.
+        target: tiamot_core::SubNodePos,
+    },
+
     /// Report that a mod-registered action was pressed or released.
     ///
     /// Only actions a server registered — the engine's own controls travel as
@@ -1903,6 +1912,7 @@ fn to_wire(command: Command) -> ClientMessage {
             material,
             shape,
         },
+        Command::Use { target } => ClientMessage::Use { target },
         Command::Action { id, pressed } => ClientMessage::Action { id, pressed },
         Command::Dialog { form, event } => ClientMessage::DialogEvent { form, event },
         Command::Disconnect => ClientMessage::Disconnect,

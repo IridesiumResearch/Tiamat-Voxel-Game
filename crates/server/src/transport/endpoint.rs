@@ -195,6 +195,10 @@ pub struct Shared {
     /// both belong to the tick thread. Two connections punching at once would
     /// otherwise resolve in whichever order the OS woke them.
     pub punches: std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, u64)>>,
+    /// Uses of a block — the place control with nothing to place — waiting for
+    /// the tick to ask the mods. Queued for the reason punches are: what the
+    /// cell holds and whether it is in reach are the tick's to read.
+    pub uses: std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, tiamot_core::SubNodePos)>>,
     /// Mod-registered actions waiting to be handed to the mods.
     ///
     /// Queued on the connection thread and drained by the tick, like every
@@ -1483,6 +1487,28 @@ impl Shared {
             .unwrap_or_default()
     }
 
+    /// Records a use of a block for the next tick to hand to the mods.
+    ///
+    /// Bounded like every queue a client fills.
+    pub fn queue_use(&self, actor: PlayerUuid, target: tiamot_core::SubNodePos) -> bool {
+        let Ok(mut queue) = self.uses.lock() else {
+            return false;
+        };
+        if queue.len() >= MAX_QUEUED_EDITS {
+            return false;
+        }
+        queue.push_back((actor, target));
+        true
+    }
+
+    /// Takes the uses waiting for the mods.
+    pub fn drain_uses(&self) -> Vec<(PlayerUuid, tiamot_core::SubNodePos)> {
+        self.uses
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+
     /// Asks the simulation to encode a chunk.
     ///
     /// Returns `None` if the queue is full, in which case the caller retries
@@ -2747,6 +2773,13 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     shared.queue_punch(uuid, *entity);
                 }
             }
+            Action::Use { target } => {
+                if let Some(uuid) = session.uuid()
+                    && !shared.queue_use(uuid, *target)
+                {
+                    warn!("use queue is full; dropping a use");
+                }
+            }
             Action::SwapOffhand { slot } => {
                 if let Some(uuid) = session.uuid() {
                     shared.swap_offhand(&uuid, usize::from(*slot));
@@ -3069,6 +3102,7 @@ mod tests {
             control: Control::new(),
             edits: std::sync::Mutex::new(std::collections::VecDeque::new()),
             punches: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            uses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             actions: std::sync::Mutex::new(std::collections::VecDeque::new()),
             setting_answers: std::sync::Mutex::new(std::collections::VecDeque::new()),
             dialog_events: std::sync::Mutex::new(std::collections::VecDeque::new()),

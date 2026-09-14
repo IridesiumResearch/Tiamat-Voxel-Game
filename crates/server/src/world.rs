@@ -381,6 +381,20 @@ impl Generator {
         }
     }
 
+    /// Asks the mods whether one of them handles a use of a block.
+    ///
+    /// An outcome still `allowed` is a use nobody handled; with no mods, that
+    /// is every use.
+    pub fn may_use(
+        &mut self,
+        event: &tiamot_core::script::UseEvent,
+    ) -> tiamot_core::script::HookOutcome {
+        match self {
+            Self::Mods(generator) => generator.host_mut().vm_mut().use_block(event),
+            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+        }
+    }
+
     /// Tells the mods a player used one of their registered actions.
     ///
     /// Named `did_` rather than `may_` because there is nothing to permit: the

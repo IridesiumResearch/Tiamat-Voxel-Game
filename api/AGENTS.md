@@ -111,8 +111,15 @@ calling one is a hard error. Anything conditional on the world, the player or
 the time of day belongs in a hook, not in registration.
 
 Hooks (`register_on_tick`, `register_on_chat`, `register_on_place`,
-`register_on_dig_complete`, `register_on_generate`, …) are registered in the
-window and called for ever after.
+`register_on_dig_complete`, `register_on_use`, `register_on_generate`, …) are
+registered in the window and called for ever after.
+
+**Right-clicking a block with nothing to place is `register_on_use`**, not a
+cancelled dig. Picking fruit, opening a door, pulling a lever: the event has the
+cell, what it is made of and what is in the hand, `game.get_block` works inside
+it, and returning `""` says you handled it. Return `nil` for blocks that are not
+yours, so the next mod — and in the end the engine's own "nothing selected"
+warning — gets its turn.
 
 ### 5. Worldgen: describe the field, never sample it
 

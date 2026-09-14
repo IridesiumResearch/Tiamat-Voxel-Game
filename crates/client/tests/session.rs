@@ -699,6 +699,83 @@ fn a_player_can_dig_and_then_build_with_what_they_dug() {
 }
 
 #[test]
+fn an_empty_hand_on_a_block_is_a_use_the_mods_hear() {
+    // The place control with nothing to place used to end in a warning the
+    // client printed itself, sending nothing — so a mod could not hear a
+    // player right-click a bush. It sends a use now, and the notice here can
+    // only come from a mod's `register_on_use`: nothing else in this world says
+    // it, and the warning the client used to print says something else.
+    let Some(gpu) = gpu() else { return };
+    let mods = scratch("use-mods");
+    let dir = mods.join("gardener");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"gardener\"\nname = \"Gardener\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        "local ground = game.register_block{ id = \"ground\" }\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
+         end)\n\
+         game.register_on_use(function(e)\n\
+         \x20   if e.held == nil then return 'used from the window' end\n\
+         end)\n",
+    )
+    .expect("script");
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("use-world"),
+        identity_path: None,
+        max_players: 1,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods),
+        enabled_mods: None,
+        seed: Some(7),
+        rcon: None,
+        materials: Vec::new(),
+    })
+    .expect("the embedded server must start");
+    let mut app = client("use", &server, gpu);
+
+    assert!(run_frames(&mut app, |app| app.joined()
+        && app.predicting()
+        && app.meshed_chunks() >= 1));
+    app.look_down_by(std::f32::consts::FRAC_PI_4);
+    assert!(
+        run_frames(&mut app, |app| app.dig_target().is_some()),
+        "the crosshair found no ground within reach"
+    );
+    assert!(app.carried().is_empty(), "the hand should start empty");
+
+    app.place();
+    // A server's notice arrives as a line of chat from nobody.
+    let heard = run_frames(&mut app, |app| {
+        app.chat().any(|line| line.contains("used from the window"))
+    });
+    assert!(
+        heard,
+        "the mod never heard the use; chat: {:?}, warnings: {:?}",
+        app.chat().collect::<Vec<_>>(),
+        app.warnings()
+    );
+    assert!(
+        !app.warnings()
+            .iter()
+            .any(|text| text.starts_with("nothing selected")),
+        "the client still answered the use itself; warnings: {:?}",
+        app.warnings()
+    );
+
+    app.shutdown();
+    assert!(server.stop());
+}
+
+#[test]
 fn the_selection_outlines_the_real_shape_of_a_chiselled_block() {
     // The task asks for an outline "honouring Partial occupancy — outline the
     // actual occupied sub-node cells". The easy version draws a cube whatever

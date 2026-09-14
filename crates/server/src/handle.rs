@@ -2203,6 +2203,7 @@ impl ServerHandle {
             control: control.clone(),
             edits: std::sync::Mutex::new(std::collections::VecDeque::new()),
             punches: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            uses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             actions: std::sync::Mutex::new(std::collections::VecDeque::new()),
             setting_answers: std::sync::Mutex::new(std::collections::VecDeque::new()),
             dialog_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -3798,6 +3799,71 @@ impl ServerHandle {
                                     actor = %request.actor.short(),
                                     "a placement would not apply: {err}"
                                 );
+                            }
+                        }
+
+                        // **Uses: the place control with nothing to place.**
+                        // A client with an empty hand or an item used to warn
+                        // and send nothing, so no mod could hear a player
+                        // right-click a bush to pick it. It sends the cell now,
+                        // and the warning it used to show is what a use nobody
+                        // handles still gets — from here, so a mod can replace
+                        // it.
+                        for (actor, target) in shared.drain_uses() {
+                            let using_in = shared.player_domain(&actor);
+                            let in_reach = shared
+                                .player_eye(&actor)
+                                .is_none_or(|(origin, eye)| {
+                                    tiamot_core::place::within_reach(origin, eye, target)
+                                });
+                            if !in_reach {
+                                shared.tell(&actor, "that is too far away".to_owned());
+                                continue;
+                            }
+                            let held = shared.hands_of(&actor).main;
+                            let fallback = match &held {
+                                None => "nothing selected to build with",
+                                Some(stack) if shared.items.contains(&stack.material) => {
+                                    "that is not something you can build with"
+                                }
+                                // A placeable stack is a placement, which the
+                                // client sends as one; a peer sending a use
+                                // instead is asked about, and told nothing.
+                                Some(_) => "",
+                            };
+                            let material = world
+                                .subnode(&using_in, target, &mut source)
+                                .unwrap_or(tiamot_core::MaterialId::AIR);
+                            // Air is not a block to use: whatever was aimed at
+                            // went between the click and the tick.
+                            let verdict = if material.is_air() {
+                                tiamot_core::script::HookOutcome::allow()
+                            } else {
+                                let event = tiamot_core::script::UseEvent {
+                                    player: *actor.as_bytes(),
+                                    domain: using_in.clone(),
+                                    target,
+                                    material,
+                                    held,
+                                };
+                                // Lent the world, as every hook a player's own
+                                // action reaches: a use decides by what the
+                                // block HOLDS, and has to be able to look.
+                                let (returned, verdict) =
+                                    sight.lending(world, || source.may_use(&event));
+                                world = returned;
+                                verdict
+                            };
+                            for (mod_id, err) in &verdict.faults {
+                                error!(mod_id = %mod_id, "mod disabled after an on_use failure: {err}");
+                            }
+                            let notice = if verdict.allowed {
+                                Some(fallback)
+                            } else {
+                                verdict.notice(fallback)
+                            };
+                            if let Some(notice) = notice.filter(|notice| !notice.is_empty()) {
+                                shared.tell(&actor, notice.to_owned());
                             }
                         }
 

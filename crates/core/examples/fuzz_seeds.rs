@@ -305,6 +305,14 @@ fn client_messages() -> Vec<Vec<u8>> {
         // bug a fuzzer would find by asking for slot 65,535.
         ClientMessage::SwapOffhand { slot: 0 },
         ClientMessage::SwapOffhand { slot: u16::MAX },
+        // Protocol v52: a use of a block. Reach is the server's check, so the
+        // far corner of the coordinate space is the seed that asks for it.
+        ClientMessage::Use {
+            target: SubNodePos::new(3, -1, 0),
+        },
+        ClientMessage::Use {
+            target: SubNodePos::new(i32::MIN, i32::MAX, i32::MIN),
+        },
         // **Every dialog event**, which had NO seeds at all until protocol
         // v25 — the whole family of messages a client sends back from a
         // server's own interface, every string of which the server echoed to
