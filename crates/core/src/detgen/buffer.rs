@@ -377,6 +377,22 @@ impl Schematic {
     }
 }
 
+/// What [`ChunkBuffer::fill_fluid_terraced`] fills.
+#[derive(Clone, Copy)]
+pub struct Terraces<'a> {
+    /// The fluid's level in WORLD blocks, per column: sampled once at each
+    /// column's centre, on this chunk's lowest layer. A 2D field (one that
+    /// never reads `y`) is the intended argument.
+    pub level: &'a super::density::Density,
+    /// Positive where the body is. `None` for every column.
+    pub within: Option<&'a super::density::Density>,
+    /// The fluid.
+    pub fluid: crate::fluid::FluidId,
+    /// What a lip is made of. `None` for no lips: every column filled to its
+    /// own level and nothing holding it there.
+    pub lip: Option<MaterialId>,
+}
+
 /// What [`ChunkBuffer::scatter`] places, and where it may stand.
 #[derive(Clone, Copy)]
 pub struct Scatter<'a> {
@@ -1635,6 +1651,131 @@ impl ChunkBuffer {
         }
     }
 
+    /// Fills a body of fluid whose level is its OWN in every column, and holds
+    /// it there with lips.
+    ///
+    /// **A river on a slope, which [`Self::fill_fluid_below`] cannot place.**
+    /// A sea is one level for the world; a river running down a hillside has a
+    /// different level every few blocks, and the solver conserves and flows,
+    /// so water placed at a slope does not stay at one — it runs to the lowest
+    /// point of the valley the moment its chunk loads and floods it.
+    ///
+    /// So the level is a field, read per column and taken DOWN to a whole
+    /// block: the column's fluid fills every block below that top, around the
+    /// terrain, exactly as a sea fills below its level. Where the next column
+    /// over stands higher, its fluid would pour sideways into this one's air,
+    /// so this column gets a **lip**: the blocks from its own top up to the
+    /// higher neighbour's are made solid wherever the terrain has left them
+    /// less than whole. The body comes out as level pools, each held up by a
+    /// one-block step to the next — a stepped creek — and nothing in it can
+    /// move: every block of fluid has fluid or solid ground on each side at its
+    /// own height and under it.
+    ///
+    /// That holds for any path, not only across one step: fluid at a height
+    /// can only reach a column whose top is above that height (fluid there) or
+    /// one whose top is at or below it, which is a lip or ground. Only the
+    /// four lateral neighbours are compared, because only they are flow
+    /// directions.
+    ///
+    /// `within` bounds the body: columns where it is not positive hold nothing
+    /// and give no lips, and do not count as neighbours. Whatever stands at its
+    /// edge must hold the fluid in — the banks of the river, which the terrain
+    /// makes.
+    ///
+    /// Both fields are evaluated over the chunk and a ring of one column round
+    /// it, so a lip on a chunk edge is the same from either side. Returns how
+    /// many blocks became lips.
+    ///
+    /// # Errors
+    ///
+    /// [`BufferError::Density`] if a field will not evaluate.
+    pub fn fill_fluid_terraced(
+        &mut self,
+        seed: u64,
+        terraces: &Terraces<'_>,
+    ) -> Result<usize, BufferError> {
+        const PAD: i32 = 1;
+        let side = CHUNK_BLOCKS as i32;
+        let padded = (side + 2 * PAD) as usize;
+        let (x0, y0, z0) = (self.pos.x * side, self.pos.y * side, self.pos.z * side);
+        let region = super::noise::Region3d {
+            origin_x: (x0 - PAD) as f32 + 0.5,
+            origin_y: y0 as f32 + 0.5,
+            origin_z: (z0 - PAD) as f32 + 0.5,
+            step: 1.0,
+            width: padded,
+            height: 1,
+            depth: padded,
+        };
+        // Nothing reaches this chunk if no column's level is over its floor:
+        // the fluid is below a top and a lip is below a neighbour's top, and
+        // every top is at most the level.
+        if terraces.level.bounds(seed, &region).high <= y0 as f32 {
+            return Ok(0);
+        }
+        if let Some(within) = terraces.within
+            && within.bounds(seed, &region).is_all_empty()
+        {
+            return Ok(0);
+        }
+        let mut scratch = super::density::Scratch::default();
+        let mut levels = vec![0.0_f32; region.len()];
+        terraces
+            .level
+            .evaluate_with(seed, &region, &mut levels, &mut scratch)?;
+        let mut inside = vec![1.0_f32; region.len()];
+        if let Some(within) = terraces.within {
+            within.evaluate_with(seed, &region, &mut inside, &mut scratch)?;
+        }
+        let tops: Vec<Option<i32>> = levels
+            .iter()
+            .zip(&inside)
+            .map(|(level, inside)| {
+                (*inside > 0.0 && level.is_finite()).then(|| super::floor_to_i32(*level))
+            })
+            .collect();
+        let top_at = |x: i32, z: i32| tops[(x + PAD) as usize + padded * (z + PAD) as usize];
+
+        let mut lips = 0;
+        for z in 0..side {
+            for x in 0..side {
+                let Some(top) = top_at(x, z) else {
+                    continue;
+                };
+                for y in 0..(top - y0).clamp(0, side) {
+                    let local = LocalBlock::new(x as u32, y as u32, z as u32);
+                    let room = crate::fluid::MAX_VOLUME.saturating_sub(self.filled_cells(local));
+                    if room > 0 {
+                        self.fluid
+                            .set(local, crate::fluid::Fluid::new(terraces.fluid, room));
+                    }
+                }
+                let Some(lip) = terraces.lip else {
+                    continue;
+                };
+                let Some(rim) = [
+                    top_at(x - 1, z),
+                    top_at(x + 1, z),
+                    top_at(x, z - 1),
+                    top_at(x, z + 1),
+                ]
+                .into_iter()
+                .flatten()
+                .max() else {
+                    continue;
+                };
+                for y in (top - y0).clamp(0, side)..(rim - y0).clamp(0, side) {
+                    let local = LocalBlock::new(x as u32, y as u32, z as u32);
+                    if self.filled_cells(local) < crate::fluid::MAX_VOLUME {
+                        self.set_block(local, lip);
+                        lips += 1;
+                    }
+                }
+            }
+        }
+        Ok(lips)
+    }
+
     /// How many of a block's 27 cells hold terrain.
     ///
     /// **Whole-block first.** A buffer that has never been chiselled stores one
@@ -2856,6 +2997,109 @@ mod tests {
     }
 
     /// Ground below y = 8 everywhere: 8 - y.
+    /// Ground below y = 4, and a level that falls a block every four columns
+    /// along x: a river running downhill.
+    fn terraced(within: bool) -> ChunkBuffer {
+        use super::super::density::{Axis, Density, Op};
+        let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
+        let ground = Density::compile(vec![
+            Op::Constant(4.0),
+            Op::Coordinate(Axis::Y),
+            Op::Subtract,
+        ])
+        .expect("compiles");
+        buffer.fill_density(&ground, 7, STONE).expect("fills");
+        let level = Density::compile(vec![
+            Op::Coordinate(Axis::X),
+            Op::Constant(-0.25),
+            Op::Multiply,
+            Op::Constant(12.5),
+            Op::Add,
+        ])
+        .expect("compiles");
+        let bound = Density::compile(vec![
+            Op::Constant(8.0),
+            Op::Coordinate(Axis::Z),
+            Op::Subtract,
+        ])
+        .expect("compiles");
+        buffer
+            .fill_fluid_terraced(
+                7,
+                &Terraces {
+                    level: &level,
+                    within: within.then_some(&bound),
+                    fluid: crate::fluid::FluidId(1),
+                    lip: Some(MaterialId(5)),
+                },
+            )
+            .expect("fills");
+        buffer
+    }
+
+    #[test]
+    fn a_terraced_fluid_fills_each_column_to_its_own_level_and_lips_the_steps() {
+        let buffer = terraced(false);
+        let fluid = |x: u32, y: u32| buffer.fluid().get(LocalBlock::new(x, y, 3)).volume();
+        let block = |x: u32, y: u32| buffer.get_block(LocalBlock::new(x, y, 3));
+        // Column 0's level is 12.375: fluid from the ground up to y = 11.
+        assert_eq!(fluid(0, 4), 27);
+        assert_eq!(fluid(0, 11), 27);
+        assert_eq!(fluid(0, 12), 0);
+        // Column 2's is 11.875: fluid to y = 10, and a lip at 11, level with
+        // column 1's surface, because column 1 stands a block higher.
+        assert_eq!(fluid(2, 10), 27);
+        assert_eq!(block(2, 11), MaterialId(5));
+        assert_eq!(fluid(2, 11), 0);
+        // Column 3 is the same height as column 2: no lip.
+        assert_eq!(block(3, 11), MaterialId::AIR);
+        // Under the ground, no fluid.
+        assert_eq!(fluid(0, 3), 0);
+    }
+
+    #[test]
+    fn nothing_a_terraced_fluid_places_can_flow() {
+        // The invariant the lips exist for. Every block of fluid has, at its
+        // own height on each of its four sides, fluid or a whole block — so
+        // the solver's sideways rule has nowhere to send it — and under it
+        // ground or fluid. Checked on the chunk's inside, where every
+        // neighbour is in the buffer.
+        for within in [false, true] {
+            let buffer = terraced(within);
+            let full = |x: u32, y: u32, z: u32| {
+                let local = LocalBlock::new(x, y, z);
+                buffer.filled_cells(local) == crate::fluid::MAX_VOLUME
+                    || buffer.fluid().get(local).volume() > 0
+            };
+            let mut blocks = 0;
+            for z in 1..CHUNK_BLOCKS - 1 {
+                for y in 1..CHUNK_BLOCKS {
+                    for x in 1..CHUNK_BLOCKS - 1 {
+                        if buffer.fluid().get(LocalBlock::new(x, y, z)).volume() == 0 {
+                            continue;
+                        }
+                        blocks += 1;
+                        assert!(full(x, y - 1, z), "({x}, {y}, {z}) falls");
+                        if within && z == 7 {
+                            // The body's edge: the banks hold it, and this
+                            // test has none. What is checked is that the
+                            // columns outside are left dry.
+                            assert_eq!(buffer.fluid().get(LocalBlock::new(x, y, 8)).volume(), 0);
+                            continue;
+                        }
+                        for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+                            assert!(
+                                full(nx, y, nz),
+                                "({x}, {y}, {z}) spills to ({nx}, {y}, {nz})"
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(blocks > 500, "the body is there: {blocks} blocks");
+        }
+    }
+
     fn flat_ground() -> super::super::density::Density {
         use super::super::density::{Axis, Density, Op};
         Density::compile(vec![

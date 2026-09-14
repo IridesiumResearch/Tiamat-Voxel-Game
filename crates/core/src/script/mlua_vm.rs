@@ -35,7 +35,7 @@ use crate::chunk::Chunk;
 use crate::coords::{ChunkPos, LocalBlock};
 use crate::detgen::{
     ChunkBuffer, Density, FractalParams, Region2d, Scatter, Schematic, StampBlock, StreamRng,
-    fill_2d,
+    Terraces, fill_2d,
 };
 use crate::material::MaterialId;
 use crate::script::vm::{
@@ -539,6 +539,50 @@ impl BufferHandle {
                 )
                 .map_err(|err| mlua::Error::external(err.to_string()))?;
             Ok(placed)
+        });
+        // A fluid at a level of its own per column, held up by lips — see
+        // `ChunkBuffer::fill_fluid_terraced`. A river on a slope, which one
+        // sea level cannot place.
+        methods.add_method_mut("fill_fluid_terraced", |_, this, spec: Table| {
+            let level: mlua::AnyUserData = spec.get("level").map_err(|_| {
+                mlua::Error::external("fill_fluid_terraced: `level` is a density of world heights")
+            })?;
+            let level = level.borrow::<DensityHandle>().map_err(|_| {
+                mlua::Error::external("fill_fluid_terraced: `level` is not a density")
+            })?;
+            let within: Option<mlua::AnyUserData> = spec.get("within")?;
+            let within = within
+                .as_ref()
+                .map(|within| {
+                    within.borrow::<DensityHandle>().map_err(|_| {
+                        mlua::Error::external("fill_fluid_terraced: `within` is not a density")
+                    })
+                })
+                .transpose()?;
+            let fluid: String = spec.get("fluid").map_err(|_| {
+                mlua::Error::external("fill_fluid_terraced: `fluid` is a fluid's full id")
+            })?;
+            let Some(id) = this.fluids.get(&fluid).copied() else {
+                return Err(mlua::Error::external(format!(
+                    "no fluid called `{fluid}` — register it with game.register_fluid, \
+                     and name it in full, as \"your_mod:its_id\""
+                )));
+            };
+            let lip: Option<u16> = spec.get("lip")?;
+            let seed = this.world_seed;
+            let lips = this
+                .buffer
+                .fill_fluid_terraced(
+                    seed,
+                    &Terraces {
+                        level: &level.density,
+                        within: within.as_ref().map(|within| &within.density),
+                        fluid: crate::fluid::FluidId(id),
+                        lip: lip.map(MaterialId),
+                    },
+                )
+                .map_err(|err| mlua::Error::external(err.to_string()))?;
+            Ok(lips)
         });
     }
 

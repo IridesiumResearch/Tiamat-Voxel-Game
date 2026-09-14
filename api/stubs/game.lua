@@ -252,6 +252,42 @@ function ChunkBuffer:fill_cover(material, options) end
 ---@param fluid string The qualified fluid id.
 function ChunkBuffer:fill_fluid_below(level, fluid) end
 
+---Fills a body of fluid whose level is its own in every column, and holds it
+---there with lips: a river running downhill.
+---
+---`fill_fluid_below` is one level for the world, which is a sea. Fluid is
+---conserved and flows, so water laid at a SLOPE does not stay put — it runs to
+---the lowest point of its valley as soon as the chunk loads. Here `level` is a
+---density whose value is a world height; it is read once per column (at the
+---column's centre, on the chunk's lowest layer, so give it a field that does
+---not read `y`) and taken down to a whole block, and the column's fluid fills
+---every block below that, around the terrain, as a sea does.
+---
+---Where a neighbouring column's top is higher, this column gets a **lip**: the
+---blocks from its own top up to the neighbour's are made `lip` wherever the
+---terrain has left them less than whole. The body comes out as level pools
+---held up by one-block steps, and nothing in it can move — every block of
+---fluid has fluid or a whole block beside it at its own height, and under it.
+---
+---`within` bounds the body: columns where it is not positive hold nothing,
+---give no lips and are not counted as neighbours. Whatever stands at its edge
+---must hold the fluid in — make the banks higher than the level.
+---
+---```lua
+---buf:fill_fluid_terraced{
+---    level = river_surface,           -- world heights, per column
+---    within = in_the_channel,         -- positive in the channel; nil for everywhere
+---    fluid = "my_mod:water",
+---    lip = stone,                     -- nil: no lips, and the body will run
+---}
+---```
+---
+---Run it after the terrain, and after anything stamped into the channel: the
+---fluid takes the room the blocks leave. Returns how many blocks became lips.
+---@param spec { level: Tiamot.Density, within: Tiamot.Density?, fluid: string, lip: integer? }
+---@return integer lips
+function ChunkBuffer:fill_fluid_terraced(spec) end
+
 ---Sets one whole block. Coordinates are chunk-local, 0..15.
 ---@param x integer
 ---@param y integer
