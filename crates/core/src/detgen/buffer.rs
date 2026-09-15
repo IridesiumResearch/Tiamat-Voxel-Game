@@ -1727,6 +1727,36 @@ impl ChunkBuffer {
         if let Some(within) = terraces.within {
             within.evaluate_with(seed, &region, &mut inside, &mut scratch)?;
         }
+        // **The level where it is, not where this chunk's floor is.** The
+        // field is read at the floor, and a level that leans on a 3D noise —
+        // the world's relief, a kilometre deep, which rises half a block for
+        // every block climbed in places — reads several blocks low there, and
+        // differently in each chunk layer: pools that ended at a layer's
+        // floor, and levels that stepped at it. Where a column's level is
+        // over the floor it is read again at that level, twice, and the
+        // three reads extrapolated to where they are heading (Aitken): the
+        // reads close in geometrically at the field's slope, so the answer
+        // is the level the field has AT the level, which is the same answer
+        // from every layer. A column at or under the floor is left alone:
+        // with a slope under one, a level under the floor has its fixed point
+        // under the floor too, and gives this chunk nothing.
+        for (index, level) in levels.iter_mut().enumerate() {
+            if inside[index] <= 0.0 || !level.is_finite() || *level <= y0 as f32 {
+                continue;
+            }
+            let x = region.origin_x + (index % padded) as f32;
+            let z = region.origin_z + (index / padded) as f32;
+            let first = *level;
+            let second = terraces.level.sample(seed, x, first, z)?;
+            let third = terraces.level.sample(seed, x, second, z)?;
+            let (near, far) = (second - first, third - second);
+            let ratio = if near.abs() > 1e-4 { far / near } else { 0.0 };
+            *level = if ratio.abs() < 0.9 {
+                third + far * ratio / (1.0 - ratio)
+            } else {
+                third
+            };
+        }
         let tops: Vec<Option<i32>> = levels
             .iter()
             .zip(&inside)
@@ -3059,6 +3089,43 @@ mod tests {
         assert_eq!(block(3, 11), MaterialId::AIR);
         // Under the ground, no fluid.
         assert_eq!(fluid(0, 3), 0);
+    }
+
+    #[test]
+    fn a_terraced_level_that_leans_on_height_is_read_at_the_level() {
+        // A level of y / 2 + 5.25 is 10.5 where it meets itself. Read at the
+        // chunk's floor it is 5.5, a pool five blocks short.
+        use super::super::density::{Axis, Density, Op};
+        let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
+        let ground = Density::compile(vec![
+            Op::Constant(4.0),
+            Op::Coordinate(Axis::Y),
+            Op::Subtract,
+        ])
+        .expect("compiles");
+        buffer.fill_density(&ground, 7, STONE).expect("fills");
+        let level = Density::compile(vec![
+            Op::Coordinate(Axis::Y),
+            Op::Constant(0.5),
+            Op::Multiply,
+            Op::Constant(5.25),
+            Op::Add,
+        ])
+        .expect("compiles");
+        buffer
+            .fill_fluid_terraced(
+                7,
+                &Terraces {
+                    level: &level,
+                    within: None,
+                    fluid: crate::fluid::FluidId(1),
+                    lip: None,
+                },
+            )
+            .expect("fills");
+        let fluid = |y: u32| buffer.fluid().get(LocalBlock::new(5, y, 5)).volume();
+        assert_eq!(fluid(9), 27, "filled to the level the field has at the level");
+        assert_eq!(fluid(10), 0);
     }
 
     #[test]
