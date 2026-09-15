@@ -3124,7 +3124,11 @@ mod tests {
             )
             .expect("fills");
         let fluid = |y: u32| buffer.fluid().get(LocalBlock::new(5, y, 5)).volume();
-        assert_eq!(fluid(9), 27, "filled to the level the field has at the level");
+        assert_eq!(
+            fluid(9),
+            27,
+            "filled to the level the field has at the level"
+        );
         assert_eq!(fluid(10), 0);
     }
 

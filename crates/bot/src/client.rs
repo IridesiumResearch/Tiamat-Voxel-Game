@@ -641,7 +641,8 @@ impl Bot {
         let mut held: BTreeMap<tiamot_core::ChunkPos, Option<u8>> = BTreeMap::new();
         let (mut chunks, mut summaries, mut unloads) = (0usize, 0usize, 0usize);
         let mut centre: Option<tiamot_core::ChunkPos> = None;
-        let mut wet: std::collections::BTreeSet<tiamot_core::ChunkPos> = std::collections::BTreeSet::new();
+        let mut wet: std::collections::BTreeSet<tiamot_core::ChunkPos> =
+            std::collections::BTreeSet::new();
         for message in self.received() {
             match message {
                 ServerMessage::ChunkFluid { pos, .. } => {
@@ -709,10 +710,18 @@ impl Bot {
                 Some(m) if m == tiamot_core::MaterialId::AIR => 0,
                 Some(_) => 1,
                 None => {
-                    if chunk.blocks().all(|(_, b)| b.is_empty()) { 0 } else { 2 }
+                    if chunk.blocks().all(|(_, b)| b.is_empty()) {
+                        0
+                    } else {
+                        2
+                    }
                 }
             };
-            match k { 0 => air += 1, 1 => solid += 1, _ => mixed += 1 }
+            match k {
+                0 => air += 1,
+                1 => solid += 1,
+                _ => mixed += 1,
+            }
             kind.insert(*pos, k);
         }
         // A one-material chunk under a chunk of air that holds fluid is a
@@ -733,7 +742,9 @@ impl Bot {
                 }
             }
             let sky = tiamot_core::ChunkPos::new(pos.x, pos.y + 2, pos.z);
-            if *k == 1 && kind.get(&over) == Some(&2) && kind.get(&sky) == Some(&0)
+            if *k == 1
+                && kind.get(&over) == Some(&2)
+                && kind.get(&sky) == Some(&0)
                 && let Ok(chunk) = self.decode_chunk(*pos, &materials)
                 && let Some(material) = chunk.is_uniform()
             {
