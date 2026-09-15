@@ -641,8 +641,12 @@ impl Bot {
         let mut held: BTreeMap<tiamot_core::ChunkPos, Option<u8>> = BTreeMap::new();
         let (mut chunks, mut summaries, mut unloads) = (0usize, 0usize, 0usize);
         let mut centre: Option<tiamot_core::ChunkPos> = None;
+        let mut wet: std::collections::BTreeSet<tiamot_core::ChunkPos> = std::collections::BTreeSet::new();
         for message in self.received() {
             match message {
+                ServerMessage::ChunkFluid { pos, .. } => {
+                    wet.insert(pos);
+                }
                 ServerMessage::ChunkData { pos, .. } => {
                     chunks += 1;
                     held.insert(pos, None);
@@ -711,7 +715,9 @@ impl Bot {
             match k { 0 => air += 1, 1 => solid += 1, _ => mixed += 1 }
             kind.insert(*pos, k);
         }
-        let (mut flat_tops, mut real_tops) = (0usize, 0usize);
+        // A one-material chunk under a chunk of air that holds fluid is a
+        // seabed under water, not a slab: counted apart.
+        let (mut flat_tops, mut real_tops, mut seabeds) = (0usize, 0usize, 0usize);
         // And what the one-material chunks directly under the surface chunks
         // — a mixed chunk with sky over it — are made of: the first thing a
         // hole in the ground shows.
@@ -719,7 +725,12 @@ impl Bot {
         for (pos, k) in &kind {
             let over = tiamot_core::ChunkPos::new(pos.x, pos.y + 1, pos.z);
             if kind.get(&over) == Some(&0) {
-                match k { 1 => flat_tops += 1, 2 => real_tops += 1, _ => {} }
+                match k {
+                    1 if wet.contains(&over) => seabeds += 1,
+                    1 => flat_tops += 1,
+                    2 => real_tops += 1,
+                    _ => {}
+                }
             }
             let sky = tiamot_core::ChunkPos::new(pos.x, pos.y + 2, pos.z);
             if *k == 1 && kind.get(&over) == Some(&2) && kind.get(&sky) == Some(&0)
@@ -751,7 +762,7 @@ impl Bot {
             .collect();
         format!(
             "centre {},{},{}: within {view} chunks ({} positions) {near_full} full, {near_summary} summaries [{}]; \
-             received {chunks} chunks, {summaries} summaries, {unloads} unloads; holding {} positions;              full near: {air} air, {solid} one-material solid, {mixed} mixed ({undecodable} undecodable);              under air: {real_tops} mixed (terrain), {flat_tops} solid (flat to the chunk face);              one-material under the surface chunks: [{}]",
+             received {chunks} chunks, {summaries} summaries, {unloads} unloads; holding {} positions;              full near: {air} air, {solid} one-material solid, {mixed} mixed ({undecodable} undecodable);              under air: {real_tops} mixed (terrain), {flat_tops} solid (flat to the chunk face), {seabeds} solid under water;              one-material under the surface chunks: [{}]",
             centre.x,
             centre.y,
             centre.z,
