@@ -632,6 +632,136 @@ impl Bot {
             .collect()
     }
 
+    /// What the client holds within `view` chunks of where the server last put
+    /// it, worked out from the messages in order: the last of chunk, summary
+    /// or unload for a position is what the client has for it.
+    #[must_use]
+    pub fn chunk_report(&self, view: i32) -> String {
+        use std::collections::BTreeMap;
+        let mut held: BTreeMap<tiamot_core::ChunkPos, Option<u8>> = BTreeMap::new();
+        let (mut chunks, mut summaries, mut unloads) = (0usize, 0usize, 0usize);
+        let mut centre: Option<tiamot_core::ChunkPos> = None;
+        for message in self.received() {
+            match message {
+                ServerMessage::ChunkData { pos, .. } => {
+                    chunks += 1;
+                    held.insert(pos, None);
+                }
+                ServerMessage::ChunkSummary { pos, blob } => {
+                    summaries += 1;
+                    let level = tiamot_core::lod::codec::decode(&blob)
+                        .map(|summary| summary.level())
+                        .unwrap_or(0);
+                    held.insert(pos, Some(level));
+                }
+                ServerMessage::ChunkUnload { pos } => {
+                    unloads += 1;
+                    held.remove(&pos);
+                }
+                ServerMessage::PlayerState { chunk, .. } => centre = Some(chunk),
+                _ => {}
+            }
+        }
+        let Some(centre) = centre else {
+            return "no player state yet".to_owned();
+        };
+        let (mut near_full, mut near_summary) = (0usize, 0usize);
+        let mut levels: BTreeMap<u8, usize> = BTreeMap::new();
+        for (pos, level) in &held {
+            let near = (pos.x - centre.x).abs() <= view
+                && (pos.y - centre.y).abs() <= view
+                && (pos.z - centre.z).abs() <= view;
+            if !near {
+                continue;
+            }
+            match level {
+                None => near_full += 1,
+                Some(level) => {
+                    near_summary += 1;
+                    *levels.entry(*level).or_default() += 1;
+                }
+            }
+        }
+        // What the full chunks near the centre are made of, decoded: a
+        // one-material solid chunk with air directly over it is a surface
+        // flattened to a chunk face, which is a generator's bound gone wrong
+        // and not a thing terrain does.
+        let materials = tiamot_core::persist::idmap::MaterialMap::passthrough();
+        let mut kind: BTreeMap<tiamot_core::ChunkPos, u8> = BTreeMap::new(); // 0 air, 1 solid uniform, 2 mixed
+        let (mut air, mut solid, mut mixed, mut undecodable) = (0usize, 0usize, 0usize, 0usize);
+        for (pos, level) in &held {
+            if level.is_some()
+                || (pos.x - centre.x).abs() > view
+                || (pos.y - centre.y).abs() > view
+                || (pos.z - centre.z).abs() > view
+            {
+                continue;
+            }
+            let Ok(chunk) = self.decode_chunk(*pos, &materials) else {
+                undecodable += 1;
+                continue;
+            };
+            let k = match chunk.is_uniform() {
+                Some(m) if m == tiamot_core::MaterialId::AIR => 0,
+                Some(_) => 1,
+                None => {
+                    if chunk.blocks().all(|(_, b)| b.is_empty()) { 0 } else { 2 }
+                }
+            };
+            match k { 0 => air += 1, 1 => solid += 1, _ => mixed += 1 }
+            kind.insert(*pos, k);
+        }
+        let (mut flat_tops, mut real_tops) = (0usize, 0usize);
+        // And what the one-material chunks directly under the surface chunks
+        // — a mixed chunk with sky over it — are made of: the first thing a
+        // hole in the ground shows.
+        let mut under_surface: BTreeMap<u16, usize> = BTreeMap::new();
+        for (pos, k) in &kind {
+            let over = tiamot_core::ChunkPos::new(pos.x, pos.y + 1, pos.z);
+            if kind.get(&over) == Some(&0) {
+                match k { 1 => flat_tops += 1, 2 => real_tops += 1, _ => {} }
+            }
+            let sky = tiamot_core::ChunkPos::new(pos.x, pos.y + 2, pos.z);
+            if *k == 1 && kind.get(&over) == Some(&2) && kind.get(&sky) == Some(&0)
+                && let Ok(chunk) = self.decode_chunk(*pos, &materials)
+                && let Some(material) = chunk.is_uniform()
+            {
+                *under_surface.entry(material.0).or_default() += 1;
+            }
+        }
+        let names: BTreeMap<u16, String> = self
+            .material_table()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|def| (def.id, def.name))
+            .collect();
+        let under_surface: Vec<String> = under_surface
+            .iter()
+            .map(|(material, count)| {
+                let name = names
+                    .get(material)
+                    .map_or_else(|| format!("m{material}"), |name| name.clone());
+                format!("{name}x{count}")
+            })
+            .collect();
+        let side = (2 * view + 1) as usize;
+        let levels: Vec<String> = levels
+            .iter()
+            .map(|(level, count)| format!("L{level}x{count}"))
+            .collect();
+        format!(
+            "centre {},{},{}: within {view} chunks ({} positions) {near_full} full, {near_summary} summaries [{}]; \
+             received {chunks} chunks, {summaries} summaries, {unloads} unloads; holding {} positions;              full near: {air} air, {solid} one-material solid, {mixed} mixed ({undecodable} undecodable);              under air: {real_tops} mixed (terrain), {flat_tops} solid (flat to the chunk face);              one-material under the surface chunks: [{}]",
+            centre.x,
+            centre.y,
+            centre.z,
+            side * side * side,
+            levels.join(" "),
+            held.len(),
+            under_surface.join(" "),
+        )
+    }
+
     /// Every chunk received so far, in arrival order.
     #[must_use]
     pub fn chunks_received(&self) -> Vec<tiamot_core::ChunkPos> {

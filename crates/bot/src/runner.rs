@@ -133,6 +133,7 @@ async fn execute(bot: &mut Bot, command: &Command) -> Result<Reply, BotError> {
             let stacks = bot.await_inventory(Duration::from_millis(300)).await?;
             Ok(Reply::Inventory(stacks))
         }
+        Command::ChunkReport(view) => Ok(Reply::Text(bot.chunk_report(*view))),
         Command::Disconnect => Ok(Reply::Done),
     }
 }

@@ -81,6 +81,9 @@ pub enum Command {
     SleepTicks(u32),
     /// Ask for the current inventory.
     Inventory,
+    /// Ask what the client holds around itself: full chunks, summaries,
+    /// unloads, within this many chunks of the player.
+    ChunkReport(i32),
     /// Wait until the inventory holds at least this many units of a material.
     ExpectUnits(u16, u32, u64),
     /// Close the connection.
@@ -94,6 +97,8 @@ pub enum Reply {
     Done,
     /// The current inventory, as `(material id, units)`.
     Inventory(Vec<tiamot_core::proto::StackDef>),
+    /// A line of text, for a report.
+    Text(String),
     /// The command failed; the script should stop.
     Failed(String),
 }
@@ -286,6 +291,27 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
         table
             .set("disconnect", function)
             .map_err(|err| format!("could not set bot.disconnect: {err}"))?;
+    }
+
+    // `chunk_report(view)` says what the client holds within `view` chunks of
+    // where the server last put it: how many positions it has in full, how
+    // many as summaries (and at which levels), and the totals received. What
+    // a player SEES after a teleport is this, not what the server generated.
+    {
+        let channel = Arc::clone(&channel);
+        let function = lua
+            .create_function(move |_, view: Option<i32>| {
+                let reply = call(&channel, Command::ChunkReport(view.unwrap_or(6)))
+                    .map_err(mlua::Error::external)?;
+                Ok(match reply {
+                    Reply::Text(text) => text,
+                    _ => String::new(),
+                })
+            })
+            .map_err(|err| format!("could not bind bot.chunk_report: {err}"))?;
+        table
+            .set("chunk_report", function)
+            .map_err(|err| format!("could not set bot.chunk_report: {err}"))?;
     }
 
     // `inventory` returns a table of `{material = units}`, in units.
