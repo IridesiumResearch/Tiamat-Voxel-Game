@@ -1318,47 +1318,78 @@ fn holding_the_jump_key_hops_once_a_second_and_stops_when_released() {
         ..Input::default()
     };
 
-    // 150 frames is 50 ticks: launches at ticks 0, 20 and 40.
-    let mut peaks = Vec::new();
+    // **On the wall clock, and timed in seconds rather than counted in
+    // frames.** `jump_cooldown` is a number of server TICKS, and the server
+    // ticks in real time whatever this loop does — so a run of 150 frames
+    // advanced by a fixed 1/60 and no sleep predicts two and a half seconds of
+    // motion in whatever fraction of a second the machine takes, and the
+    // corrections that arrive meanwhile are from a server that has barely
+    // moved. That is a bet on how fast the runner is: it held here and on
+    // ubuntu and failed on macOS, hopping at frames [3, 63, 108] — the third
+    // launch 45 frames after the second rather than 60.
+    //
+    // Advancing by the dt that really elapsed keeps the client's clock and the
+    // server's together, and the assertion is then about the thing the rule is
+    // written in: one second between hops.
+    let mut peaks: Vec<f32> = Vec::new();
     let mut airborne = false;
-    for frame in 0..150 {
+    let started = Instant::now();
+    let mut last = started;
+    while started.elapsed() < Duration::from_millis(2500) {
         app.pump_network();
-        app.advance(held, 1.0 / 60.0);
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32();
+        last = now;
+        app.advance(held, dt);
         let height = app.camera().position.to_world().1 - resting;
         if height > 0.35 && !airborne {
             airborne = true;
-            peaks.push(frame);
+            peaks.push(started.elapsed().as_secs_f32());
         } else if height < 0.1 {
             airborne = false;
         }
+        std::thread::sleep(Duration::from_millis(16));
     }
     assert_eq!(
         peaks.len(),
         3,
         "a key held for two and a half seconds should hop three times, a second apart; \
-         it hopped at frames {peaks:?}"
+         it hopped at {peaks:?} seconds"
     );
     for pair in peaks.windows(2) {
         let gap = pair[1] - pair[0];
         assert!(
-            (54..=66).contains(&gap),
-            "hops {gap} frames apart; the cooldown is sixty frames, so they should be a \
-             second apart: {peaks:?}"
+            (0.8..=1.2).contains(&gap),
+            "hops {gap}s apart; `jump_cooldown` is a second at the tick rate, so they should \
+             be a second apart: {peaks:?}"
         );
     }
 
-    // Released: the body lands and stays down.
-    for _ in 0..40 {
+    // Released: the body lands and stays down. On the same clock, for the same
+    // reason — a second of landing, then a second of watching.
+    let settle = Instant::now();
+    let mut last = settle;
+    while settle.elapsed() < Duration::from_millis(700) {
         app.pump_network();
-        app.advance(Input::default(), 1.0 / 60.0);
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32();
+        last = now;
+        app.advance(Input::default(), dt);
+        std::thread::sleep(Duration::from_millis(16));
     }
     let mut hopped_again = false;
-    for _ in 0..60 {
+    let watch = Instant::now();
+    let mut last = watch;
+    while watch.elapsed() < Duration::from_millis(1200) {
         app.pump_network();
-        app.advance(Input::default(), 1.0 / 60.0);
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32();
+        last = now;
+        app.advance(Input::default(), dt);
         if app.camera().position.to_world().1 - resting > 0.35 {
             hopped_again = true;
         }
+        std::thread::sleep(Duration::from_millis(16));
     }
     assert!(!hopped_again, "the body hopped after the key was released");
 

@@ -566,9 +566,22 @@ fn a_spawned_lake_wets_its_bed_and_then_stays() {
             held(&bot)
         );
 
-        // Now let it settle and soak. It should lose SOME — the bed drinks —
-        // and then stop, rather than draining away like a puddle.
-        let full = held(&bot);
+        // **Wait for the lake to stop GROWING before measuring it.** The
+        // threshold above is crossed while the `lake` command is still laying
+        // water down, so `full` used to be a reading taken mid-fill — and the
+        // soak assertion below then compared a part-poured lake against a
+        // finished one and called the difference growth. Windows CI caught it
+        // exactly that way: "301 cells before, 605 after".
+        let mut full = held(&bot);
+        for _ in 0..30 {
+            bot.sleep_ticks(10).await;
+            let now = held(&bot);
+            if now <= full {
+                full = now;
+                break;
+            }
+            full = now;
+        }
         for _ in 0..12 {
             bot.sleep_ticks(20).await;
         }
@@ -578,9 +591,24 @@ fn a_spawned_lake_wets_its_bed_and_then_stays() {
             settled > 0,
             "the lake soaked away entirely, so nothing deep can ever stand"
         );
+        // **The bed drank, evidenced by the bed and not by arithmetic.** This
+        // used to be `settled < full`, which is only true if some of the
+        // soaking happens after the reading — and a lake that finishes drinking
+        // while it is still being laid down would fail it while behaving
+        // perfectly. What the claim actually is is that the ground under the
+        // water got wet, which the ground itself says.
+        let damp = material_named(&bot, "core:damp");
+        let soaked = material_named(&bot, "core:soaked");
         assert!(
-            settled < full,
-            "the bed never drank anything: {full} cells before, {settled} after"
+            basin
+                .iter()
+                .filter(|pos| !bot.fluid_at(**pos).is_empty())
+                .any(|pos| {
+                    let under = BlockPos::new(pos.x, pos.y - 1, pos.z);
+                    became(&bot, under, damp) || became(&bot, under, soaked)
+                }),
+            "nothing under the lake ever became damp or soaked, so the bed never drank: \
+             {full} cells before, {settled} after"
         );
 
         // And it has genuinely stopped, rather than being partway through
