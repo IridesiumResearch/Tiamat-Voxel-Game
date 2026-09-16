@@ -1695,75 +1695,73 @@ impl ChunkBuffer {
         terraces: &Terraces<'_>,
     ) -> Result<usize, BufferError> {
         const PAD: i32 = 1;
+        /// The plane every chunk layer reads the level on: the centre of the
+        /// blocks at `y = 0`, chosen because it is the same one everywhere.
+        const LEVEL_SLICE: f32 = 0.5;
         let side = CHUNK_BLOCKS as i32;
         let padded = (side + 2 * PAD) as usize;
         let (x0, y0, z0) = (self.pos.x * side, self.pos.y * side, self.pos.z * side);
+        // **One slice for every chunk layer, and that is the whole of this
+        // function's correctness.**
+        //
+        // A column's water level is a fact about the COLUMN. Read the field on
+        // this chunk's own floor and each layer of the same column asks a
+        // different question, so two layers could answer a block apart — and
+        // the lower one then stopped a block short of the upper one's water,
+        // leaving a sheet of it hanging over an air gap exactly on the seam.
+        // Found by a diagnostic over stacked layers: 8 to 13 columns in 4,096
+        // with a level that leans on a 3D noise, every one of them on a chunk
+        // boundary. Evaluated here on the plane `y = 0` whatever chunk is
+        // asking, so every layer of a column reads the same number, does the
+        // same arithmetic on it, and rounds it the same way.
         let region = super::noise::Region3d {
             origin_x: (x0 - PAD) as f32 + 0.5,
-            origin_y: y0 as f32 + 0.5,
+            origin_y: LEVEL_SLICE,
             origin_z: (z0 - PAD) as f32 + 0.5,
             step: 1.0,
             width: padded,
             height: 1,
             depth: padded,
         };
-        // Nothing reaches this chunk if no column's level is over its floor:
-        // the fluid is below a top and a lip is below a neighbour's top, and
-        // every top is at most the level.
-        if terraces.level.bounds(seed, &region).high <= y0 as f32 {
+        // **Nothing reaches this chunk if the level cannot meet itself at or
+        // above its floor**, bounded over the chunk's OWN height rather than
+        // over the slice the level is read on.
+        //
+        // The slice bound would be wrong here, and wrong in the direction that
+        // empties a lake: it says what the field reads at `y = 0`, and a level
+        // that climbs with height meets itself far above anything measured down
+        // there. Bounding over `y0 ..= y0 + 16` instead asks the question that
+        // matters — if the field is under this chunk's floor everywhere in the
+        // chunk's own span, then no height `L` in that span can satisfy
+        // `level(L) == L`, so the water's top is below the chunk and there is
+        // nothing to fill.
+        //
+        // That leaves one case, and it is the one this function already cannot
+        // serve: a level whose fixed point is ABOVE the chunk while the field
+        // reads below its floor inside it, which needs the field to climb by
+        // more than a block per block. The iteration below diverges on exactly
+        // that (`ratio` at or over 0.9 gives up), so such a field has no
+        // answer to give either way.
+        //
+        // Interval arithmetic over the box, so spanning the height costs the
+        // same as spanning one plane of it — see `Density::bounds`.
+        let slab = super::noise::Region3d {
+            origin_y: y0 as f32,
+            height: CHUNK_BLOCKS as usize + 1,
+            ..region
+        };
+        if terraces.level.bounds(seed, &slab).high <= y0 as f32 {
             return Ok(0);
         }
+        // `within` is decided on the canonical slice, so it is bounded there:
+        // whether a column is in the body is a fact about the column, like its
+        // level.
         if let Some(within) = terraces.within
             && within.bounds(seed, &region).is_all_empty()
         {
             return Ok(0);
         }
-        let mut scratch = super::density::Scratch::default();
-        let mut levels = vec![0.0_f32; region.len()];
-        terraces
-            .level
-            .evaluate_with(seed, &region, &mut levels, &mut scratch)?;
-        let mut inside = vec![1.0_f32; region.len()];
-        if let Some(within) = terraces.within {
-            within.evaluate_with(seed, &region, &mut inside, &mut scratch)?;
-        }
-        // **The level where it is, not where this chunk's floor is.** The
-        // field is read at the floor, and a level that leans on a 3D noise —
-        // the world's relief, a kilometre deep, which rises half a block for
-        // every block climbed in places — reads several blocks low there, and
-        // differently in each chunk layer: pools that ended at a layer's
-        // floor, and levels that stepped at it. Where a column's level is
-        // over the floor it is read again at that level, twice, and the
-        // three reads extrapolated to where they are heading (Aitken): the
-        // reads close in geometrically at the field's slope, so the answer
-        // is the level the field has AT the level, which is the same answer
-        // from every layer. A column at or under the floor is left alone:
-        // with a slope under one, a level under the floor has its fixed point
-        // under the floor too, and gives this chunk nothing.
-        for (index, level) in levels.iter_mut().enumerate() {
-            if inside[index] <= 0.0 || !level.is_finite() || *level <= y0 as f32 {
-                continue;
-            }
-            let x = region.origin_x + (index % padded) as f32;
-            let z = region.origin_z + (index / padded) as f32;
-            let first = *level;
-            let second = terraces.level.sample(seed, x, first, z)?;
-            let third = terraces.level.sample(seed, x, second, z)?;
-            let (near, far) = (second - first, third - second);
-            let ratio = if near.abs() > 1e-4 { far / near } else { 0.0 };
-            *level = if ratio.abs() < 0.9 {
-                third + far * ratio / (1.0 - ratio)
-            } else {
-                third
-            };
-        }
-        let tops: Vec<Option<i32>> = levels
-            .iter()
-            .zip(&inside)
-            .map(|(level, inside)| {
-                (*inside > 0.0 && level.is_finite()).then(|| super::floor_to_i32(*level))
-            })
-            .collect();
+        let tops = terraced_tops(seed, terraces, &region, padded)?;
         let top_at = |x: i32, z: i32| tops[(x + PAD) as usize + padded * (z + PAD) as usize];
 
         let mut lips = 0;
@@ -1926,6 +1924,82 @@ impl ChunkBuffer {
         }
         Some(LocalBlock { x, y, z })
     }
+}
+
+/// Where a terraced body's surface stands in each column of a padded region.
+///
+/// `None` for a column outside the body. See
+/// [`ChunkBuffer::fill_fluid_terraced`], whose correctness this is: the region
+/// is ONE plane for every chunk layer, so a column gets the same answer
+/// whichever layer asks — which is what stops water in one chunk standing over
+/// a dry block in the chunk below it.
+///
+/// Its own function because the fill sits at clippy's line ceiling, and because
+/// "where is the surface" and "what does this chunk hold" are two questions
+/// that share nothing but the answer.
+fn terraced_tops(
+    seed: u64,
+    terraces: &Terraces<'_>,
+    region: &super::noise::Region3d,
+    padded: usize,
+) -> Result<Vec<Option<i32>>, BufferError> {
+    let solve = terraces.level.reads_y();
+    let mut scratch = super::density::Scratch::default();
+    let mut levels = vec![0.0_f32; region.len()];
+    terraces
+        .level
+        .evaluate_with(seed, region, &mut levels, &mut scratch)?;
+    let mut inside = vec![1.0_f32; region.len()];
+    if let Some(within) = terraces.within {
+        within.evaluate_with(seed, region, &mut inside, &mut scratch)?;
+    }
+    // **The level where it MEETS ITSELF**, for a field that leans on
+    // height. The world's relief is a field a kilometre deep that can rise
+    // half a block for every block climbed, so `level` read on any one
+    // plane is not the height of the water — the height of the water is
+    // the `L` where `level(x, L, z) == L`. Read at `y = 0` and then twice
+    // more at where the last read pointed, and the three extrapolated to
+    // where they are heading (Aitken): the reads close in geometrically at
+    // the field's slope.
+    //
+    // **Every column inside the body, and not only the ones over this
+    // chunk's floor.** The old skip was sound when the first read was
+    // taken at the floor and is not now: a column whose field says 10 down
+    // here can still meet itself at 30, and skipping it would leave a
+    // chunk dry under a lake. Columns that end up under the floor cost
+    // three samples and fill nothing, which is the price of every layer
+    // agreeing.
+    //
+    // A field that never reads height is already its own answer, and is
+    // left exactly as it was read — no samples, no arithmetic, nothing to
+    // round differently.
+    if solve {
+        for (index, level) in levels.iter_mut().enumerate() {
+            if inside[index] <= 0.0 || !level.is_finite() {
+                continue;
+            }
+            let x = region.origin_x + (index % padded) as f32;
+            let z = region.origin_z + (index / padded) as f32;
+            let first = *level;
+            let second = terraces.level.sample(seed, x, first, z)?;
+            let third = terraces.level.sample(seed, x, second, z)?;
+            let (near, far) = (second - first, third - second);
+            let ratio = if near.abs() > 1e-4 { far / near } else { 0.0 };
+            *level = if ratio.abs() < 0.9 {
+                third + far * ratio / (1.0 - ratio)
+            } else {
+                third
+            };
+        }
+    }
+
+    Ok(levels
+        .iter()
+        .zip(&inside)
+        .map(|(level, inside)| {
+            (*inside > 0.0 && level.is_finite()).then(|| super::floor_to_i32(*level))
+        })
+        .collect())
 }
 
 /// A buffer operation was given something it could not use.

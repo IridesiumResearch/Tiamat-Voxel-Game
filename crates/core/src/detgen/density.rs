@@ -418,6 +418,25 @@ pub struct Density {
 }
 
 impl Density {
+    /// Whether this program's value depends on the height it is sampled at.
+    ///
+    /// **A question about the program, answered by reading it**, which is what
+    /// lets a caller treat a 2D field as the 2D field it is. A level that never
+    /// reads `y` has one value per column and can be evaluated on any slice;
+    /// one that does has to be solved for the height where it meets itself,
+    /// which is more work and is only worth doing where it is really needed.
+    /// See [`super::buffer::ChunkBuffer::fill_fluid_terraced`].
+    ///
+    /// `Coordinate(Y)` reads it outright and a noise node reads it implicitly —
+    /// the fractal is sampled in three dimensions. A contour and a map are both
+    /// taken on the ground plane with `y` held at zero, so neither does.
+    #[must_use]
+    pub fn reads_y(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, Op::Coordinate(Axis::Y) | Op::Noise { .. }))
+    }
+
     /// Checks a program and records how many buffers it needs.
     ///
     /// # Errors
