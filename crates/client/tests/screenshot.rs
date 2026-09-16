@@ -4482,3 +4482,147 @@ fn no_sky_shows_through_the_seam_between_two_lod_levels() {
         );
     }
 }
+
+#[test]
+fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
+    // **Asked for from the window: grass cards should be affected by shadows in
+    // mode 3.** They were not. A sprite and a leaf share the cutout fragment
+    // stage, and it took mode 2's generic term — orientation only, nothing
+    // asked about what stands between the fragment and the sun — in every mode.
+    // So a field kept full midday sun inside the shadow the ground under it was
+    // drawing, and the plants read as pasted onto the scene rather than
+    // standing in it.
+    //
+    // Measured the way `a_wall_throws_a_shadow_dark_enough_to_see` measures the
+    // floor, and for its reason: move only the SUN, so the same pixels are
+    // shadowed in one frame and lit in the other and the geometry cancels.
+    // Mode 2 is the control — it has no map, so its grass must not change.
+    let Some(gpu) = gpu() else { return };
+
+    const GRASS: MaterialId = MaterialId(3);
+
+    let mut chunks = wall_scene();
+    // A field on the floor east of the wall, which is where the wall's shadow
+    // falls in the casting frame.
+    for chunk in &mut chunks {
+        let corner = BlockPos::from_chunk_corner(chunk.pos());
+        if corner.x < 16 {
+            continue;
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                let at = BlockPos::new(corner.x + x, 8, corner.z + z);
+                chunk
+                    .set_subnode(at.subnode(1, 0, 1), GRASS)
+                    .expect("in chunk");
+            }
+        }
+    }
+
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    // Stone white, grass green, so a grass pixel can be told from the floor it
+    // stands on by its colour alone.
+    let atlas = Atlas::build(&[
+        None,
+        None,
+        Some(Image::white_with_border()),
+        Some(Image::solid(16, 16, [80, 200, 90, 255])),
+    ]);
+    renderer.set_atlas(&atlas);
+    renderer.set_tints(&[MaterialDef {
+        id: GRASS.get(),
+        name: "grass".to_owned(),
+        step_sound: None,
+        texture: None,
+        placeable: true,
+        transparent: false,
+        cutout: false,
+        passable: false,
+        sway: false,
+        billboard: true,
+        billboard_cross: false,
+        tint: None,
+    }]);
+    upload_with(
+        &mut renderer,
+        &chunks,
+        &client::mesher::Sight {
+            glass: std::collections::BTreeSet::new(),
+            foliage: std::collections::BTreeSet::new(),
+            sprites: [GRASS.get()].into_iter().collect(),
+            crosses: std::collections::BTreeSet::new(),
+        },
+    );
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // Along the field at grass height, looking east away from the wall, so the
+    // cards fill the frame rather than being seen from above as specks.
+    let mut camera = Camera {
+        position: Position::from_world(18.0, 9.5, 24.0),
+        ..Camera::default()
+    };
+    camera.look(-0.25 * std::f32::consts::TAU, -0.15);
+
+    // The sun travels in this direction, so it throws the wall's shadow onto
+    // the field the camera is looking at; `clear` is the same sun on the other
+    // side of the wall, which lights that field fully.
+    let casting = [0.80_f32, -0.45, 0.0];
+    let clear = [-0.80_f32, -0.45, 0.0];
+
+    // **The same pixels in both frames, chosen from the lit one.** Green
+    // dominance finds the grass and never the white floor or the sky — but a
+    // card dark enough can stop qualifying, so choosing the set separately per
+    // frame would compare one population against another and call the
+    // difference a shadow.
+    let lit_mask = |frame: &Image| {
+        let mut mask = Vec::new();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let p = frame.pixel(x, y).expect("pixel");
+                let (red, green, blue) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+                if green > red + 10 && green > blue + 10 {
+                    mask.push((x, y));
+                }
+            }
+        }
+        mask
+    };
+    let mean = |frame: &Image, mask: &[(u32, u32)]| {
+        let sum: f32 = mask
+            .iter()
+            .map(|(x, y)| f32::from(frame.pixel(*x, *y).expect("pixel")[1]) / 255.0)
+            .sum();
+        sum / mask.len() as f32
+    };
+
+    let ratio = |renderer: &mut Renderer, mode| {
+        renderer.set_lighting_mode(mode);
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], clear);
+        let lit_frame = target.capture(renderer, &camera).expect("capture");
+        let mask = lit_mask(&lit_frame);
+        assert!(
+            mask.len() > 200,
+            "only {} grass pixels are in frame to measure",
+            mask.len()
+        );
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], casting);
+        let shadowed_frame = target.capture(renderer, &camera).expect("capture");
+        mean(&shadowed_frame, &mask) / mean(&lit_frame, &mask)
+    };
+
+    let mode2 = ratio(&mut renderer, LightingMode::Classic);
+    let mode3 = ratio(&mut renderer, LightingMode::Beautiful);
+    println!("grass in shadow: mode 2 {mode2}, mode 3 {mode3}");
+
+    assert!(
+        mode2 > 0.97,
+        "mode 2's grass changed by more than rounding ({mode2}) when only the sun moved, so it \
+         is shadowing something it has no map for"
+    );
+    assert!(
+        mode3 < 0.9,
+        "mode 3's shadowed grass is {mode3} of the same grass lit, which is the sprite pass \
+         ignoring the cascades the ground under it reads — mode 2, which has none, measures \
+         {mode2}"
+    );
+}

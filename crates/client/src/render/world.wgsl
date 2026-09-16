@@ -1349,9 +1349,37 @@ fn fragment_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
 // it, and the terrain must not pay that to make leaves work.
 @fragment
 fn fragment_cutout(input: VertexOut) -> @location(0) vec4<f32> {
+    return cut_out(input, generic_shadow(input));
+}
+
+// Mode 3's foliage and sprites: the same holes, with the cascades consulted.
+//
+// **Reported from the window: grass standing bright in a tower's shadow.** A
+// leaf and a grass card both come through `cut_out`, and it took mode 2's
+// generic term in every mode — so in mode 3 a field kept full sunlight inside a
+// shadow the ground under it was drawing, and the plants read as pasted on top
+// of the scene rather than standing in it.
+//
+// This is to `fragment_cutout` what `fragment_shadowed` is to `fragment_main`,
+// and it exists for the same reason they are two entry points: the shadow maps
+// are a bind group, and a pipeline that could optionally read them would need
+// them to exist in modes 1 and 2, which allocate none of it.
+//
+// Sprites are shadow RECEIVERS and not casters — `fill_cascades` draws terrain
+// and figures only — so a card cannot shadow itself, which is what would
+// otherwise show up as acne crawling over a field as the camera turns. Grass
+// under a tree is dark because the tree is in the map, not because the grass
+// is.
+@fragment
+fn fragment_cutout_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
+    return cut_out(input, shadow_factor(input));
+}
+
+/// The cutout surface, shaded by whichever shadow term the mode has.
+fn cut_out(input: VertexOut, shadow: f32) -> vec4<f32> {
     let colour = surface(
         input,
-        generic_shadow(input),
+        shadow,
         cell_variation(input.anchored, input.normal),
     );
     // Half, and a constant rather than a per-material number for §8.1's

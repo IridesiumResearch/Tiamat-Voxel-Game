@@ -3724,7 +3724,15 @@ fn build_terrain_pipelines(
             target,
             false,
         ),
-        sprite_pipeline: build_sprite_pipeline(gpu, shader, &[Some(bind_layout)], target),
+        // Modes 1 and 2 have no cascades, so the sprite pass takes the same
+        // generic term the leaves do — see `cutout_entry`.
+        sprite_pipeline: build_sprite_pipeline(
+            gpu,
+            shader,
+            &[Some(bind_layout)],
+            "fragment_cutout",
+            target,
+        ),
     }
 }
 
@@ -3733,13 +3741,14 @@ fn build_terrain_pipelines(
 /// **Its own pipeline rather than a flag**, for `build_fluid_pipeline`'s
 /// reasons: the vertex input is different in kind — one instance and no
 /// vertices at all — and a pipeline's vertex layout is fixed when it is built.
-/// The fragment stage is `fragment_cutout` unchanged, because a sprite and a
-/// leaf want exactly the same thing of it: discard the holes, write depth, no
-/// sorting (Contract §8.4).
+/// The fragment stage is the cutout one, because a sprite and a leaf want
+/// exactly the same thing of it: discard the holes, write depth, no sorting
+/// (Contract §8.4) — and, in mode 3, the same cascades (`cutout_entry`).
 fn build_sprite_pipeline(
     gpu: &Gpu,
     shader: &wgpu::ShaderModule,
     bind_layouts: &[Option<&wgpu::BindGroupLayout>],
+    fragment_entry: &str,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     let layout = gpu
@@ -3804,7 +3813,7 @@ fn build_sprite_pipeline(
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fragment_cutout"),
+                entry_point: Some(fragment_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,
@@ -3833,18 +3842,23 @@ fn build_sprite_pipeline(
         })
 }
 
-/// The foliage pipeline for the float target, with or without cascades.
+/// Which cutout entry a pass has, by whether it has cascades to read.
 ///
-/// **One fragment entry, not two.** Glass has a shadowed variant because it is
-/// composited into a lit scene; foliage discards and writes depth, so the only
-/// thing its entry has to do differently is the discard — and the cascades it
-/// would consult are the same ones `fragment_cutout` already asks
-/// `generic_shadow` for. Mode 3 keeps its own shadowed terrain; leaves take the
-/// generic term, which is what they had as ordinary blocks.
+/// **Grass and leaves are shadow receivers in mode 3.** Both come through
+/// `cut_out`, which took mode 2's orientation-only term in every mode — so a
+/// field stood in full sun inside a shadow the ground under it was drawing,
+/// reported from the window. With cascades the shadowed entry reads the same
+/// maps the terrain does; without them there are no maps to read and the
+/// generic term is the whole of what mode 2 has.
+fn cutout_entry(shadows: Option<&shadow::Shadows>) -> &'static str {
+    if shadows.is_some() {
+        "fragment_cutout_shadowed"
+    } else {
+        "fragment_cutout"
+    }
+}
+
 /// The sprite pipeline for the float target.
-///
-/// The shadow layout is taken only so the bind groups match what mode 3 binds;
-/// `fragment_cutout` reads the cascades through `generic_shadow` either way.
 pub(crate) fn sprite_pipeline_for(
     gpu: &Gpu,
     shader: &wgpu::ShaderModule,
@@ -3855,7 +3869,13 @@ pub(crate) fn sprite_pipeline_for(
         Some(shadows) => vec![Some(layout), Some(shadows.sample_layout())],
         None => vec![Some(layout)],
     };
-    build_sprite_pipeline(gpu, shader, &layouts, graph::HDR_FORMAT)
+    build_sprite_pipeline(
+        gpu,
+        shader,
+        &layouts,
+        cutout_entry(shadows),
+        graph::HDR_FORMAT,
+    )
 }
 
 pub(crate) fn cutout_pipeline_for(
@@ -3873,7 +3893,7 @@ pub(crate) fn cutout_pipeline_for(
         gpu,
         shader,
         &layouts,
-        "fragment_cutout",
+        cutout_entry(shadows),
         mode,
         graph::HDR_FORMAT,
         false,
