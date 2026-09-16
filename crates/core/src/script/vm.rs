@@ -1245,7 +1245,7 @@ pub trait ScriptVm: Sized {
         pos: ChunkPos,
     ) -> Result<[u8; 3], ScriptError> {
         let _ = (domain, world_seed, pos);
-        Ok([u8::MAX; 3])
+        Ok(crate::proto::Tint::NEUTRAL)
     }
 
     /// The fog a mod gives one chunk's column, or `None` for the sky's alone.

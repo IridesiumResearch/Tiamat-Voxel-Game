@@ -1532,9 +1532,12 @@ impl Renderer {
                 .biome_tints
                 .get(&(x + dx, z + dz))
                 .copied()
-                .unwrap_or([u8::MAX; 3]);
+                .unwrap_or(tiamot_core::proto::Tint::NEUTRAL);
             for (sum, channel) in total.iter_mut().zip(held) {
-                *sum += f32::from(channel) / 255.0;
+                // `128` is 1.0, the same scale a material's own tint uses, so a
+                // biome can ask for more than the texture's brightness as well
+                // as less. See `proto::Tint::NEUTRAL`.
+                *sum += tiamot_core::proto::Tint::channel(channel);
             }
         }
         total.map(|sum| sum / 4.0)

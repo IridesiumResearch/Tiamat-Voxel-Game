@@ -829,7 +829,7 @@ fn serve_chunk_requests(
                         .reply
                         .send(summary.map(|blob| crate::transport::endpoint::Served {
                             blob,
-                            tint: [u8::MAX; 3],
+                            tint: tiamot_core::proto::Tint::NEUTRAL,
                             fog: None,
                             fluid: None,
                             sealed: false,
@@ -910,7 +910,7 @@ fn serve_chunk_requests(
                 report.summaries += 1;
                 let _ = request.reply.send(Some(crate::transport::endpoint::Served {
                     blob,
-                    tint: [u8::MAX; 3],
+                    tint: tiamot_core::proto::Tint::NEUTRAL,
                     fog: None,
                     fluid: None,
                     sealed: false,
@@ -956,7 +956,7 @@ fn serve_chunk_requests(
                 .reply
                 .send(summary.map(|blob| crate::transport::endpoint::Served {
                     blob,
-                    tint: [u8::MAX; 3],
+                    tint: tiamot_core::proto::Tint::NEUTRAL,
                     fog: None,
                     fluid: None,
                     sealed: false,

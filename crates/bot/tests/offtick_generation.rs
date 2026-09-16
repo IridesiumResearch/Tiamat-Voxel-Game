@@ -32,6 +32,16 @@ use tiamot_core::identity::{Allowlist, Identity};
 use tiamot_core::interest::ViewDistance;
 use tiamot_server::{ServerHandle, Settings};
 
+/// What the fixture's `return 0.2, 0.8, 0.4` comes back as.
+///
+/// **A multiplier, quantised on the tint's scale where 128 is 1.0** — not a
+/// colour over 0..255. Written through `Tint::quantise` rather than as three
+/// magic numbers, so the day that scale moves again this says what it means
+/// instead of what it used to equal.
+fn declared() -> [u8; 3] {
+    [0.2, 0.8, 0.4].map(tiamot_core::proto::Tint::quantise)
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("tiamot-offtick").join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -160,11 +170,7 @@ fn expensive_terrain_is_generated_by_the_workers_and_the_tick_keeps_its_budget()
         let tints = alice.chunk_tints_received();
         assert!(!tints.is_empty());
         for (pos, tint) in &tints {
-            assert_eq!(
-                *tint,
-                [51, 204, 102],
-                "the tint for {pos:?} is not the mod's"
-            );
+            assert_eq!(*tint, declared(), "the tint for {pos:?} is not the mod's");
         }
         alice.disconnect().await;
     });
@@ -283,7 +289,7 @@ fn every_vm_knows_the_world_seed() {
         for (pos, tint) in &tints {
             assert_eq!(
                 *tint,
-                [51, 204, 102],
+                declared(),
                 "the generating VM for {pos:?} did not know the world seed"
             );
         }

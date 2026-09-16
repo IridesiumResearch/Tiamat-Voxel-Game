@@ -1181,6 +1181,64 @@ end)
 }
 
 #[test]
+fn a_biome_colour_may_be_brighter_than_the_texture_it_multiplies() {
+    // **Engine ask 33, from a mod author writing biomes.** A chunk tint was
+    // clamped to 0..1 over the whole byte, so a biome could darken a colour or
+    // shift its hue and never brighten one: savanna gold came out olive-gold,
+    // and taiga rust came out muddy. The engine was quietly holding every biome
+    // at or below the texture's own brightness.
+    //
+    // It is quantised on the scale a MATERIAL's tint has always used — 128 is
+    // 1.0 — so the ceiling is just under 2 and the same function serves both.
+    let root = scratch("bright-tint");
+    write_mod(
+        &root,
+        "bright",
+        "",
+        r#"
+game.register_chunk_tint(function(pos)
+    if pos.x > 0 then
+        return 1.6, 1.3, 0.7   -- savanna: gold, and BRIGHTER than the texture
+    else
+        return 0.5, 0.5, 0.5   -- shade, which always worked
+    end
+end)
+"#,
+    );
+
+    let mut host = host_for(&root);
+    assert!(host.failed().is_empty(), "the mod should load");
+    host.freeze().expect("freeze");
+
+    let mut tint = |x: i32| {
+        host.chunk_tint(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+            .expect("tint")
+    };
+    let neutral = tiamot_core::proto::Tint::NEUTRAL[0];
+
+    let gold = tint(4);
+    assert!(
+        gold[0] > neutral && gold[1] > neutral,
+        "a biome asking for 1.6 and 1.3 came back at {gold:?}, which is at or below the          texture's own brightness ({neutral}) — it can still only darken"
+    );
+    // And the NUMBER survives rather than merely being "more than one": 1.6 on
+    // a scale where 128 is 1.0, to within the one part in 128 the byte has.
+    let asked = f32::from(gold[0]) / 128.0;
+    assert!(
+        (asked - 1.6).abs() < 1.0 / 128.0,
+        "a biome asking for 1.6 came back as {asked}"
+    );
+
+    // Darkening is untouched, which is what says this did not simply move the
+    // whole scale up.
+    let shade = tint(-4);
+    assert!(
+        shade[0] < neutral,
+        "a biome asking for 0.5 came back at {shade:?}, which no longer darkens"
+    );
+}
+
+#[test]
 fn a_structure_crosses_a_chunk_edge_and_does_not_care_which_chunk_was_made_first() {
     // **The order-independent shape, which is the only correct one.** The
     // obvious way to build a structure across an edge is to let a generator

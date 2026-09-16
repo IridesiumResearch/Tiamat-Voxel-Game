@@ -4734,3 +4734,89 @@ fn a_fluid_hides_what_is_under_it_by_the_opacity_its_mod_declared() {
          {defaulted} — the value is not being read, only its presence"
     );
 }
+
+#[test]
+fn a_biome_colour_brighter_than_one_brightens_the_world() {
+    // **Engine ask 33, reported by a mod author writing biomes:** "the engine's
+    // tint can only darken or shift a colour, never brighten it. So Savanna
+    // grass reads olive-gold rather than bright gold."
+    //
+    // The cause was the SCALE. A chunk's biome colour was quantised as 0..1
+    // over the whole byte, so the most a biome could ask for was the texture's
+    // own brightness; a material's own tint had spanned 0..2 all along, with
+    // 128 meaning 1.0. The chunk tint uses that same scale now.
+    //
+    // Measured against the untinted frame rather than in absolute colours, so
+    // no driver's filtering decides it: the same scene, the same camera, and
+    // the only difference is what the biome asked for.
+    let Some(gpu) = gpu() else { return };
+    use tiamot_core::proto::{MaterialDef, Tint};
+
+    let mut renderer = prepare(gpu, &scene(), RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // **A material has to DECLARE a tint to vary with its place**, which is the
+    // rule `material_tint` documents: the biome colour rides on the material's
+    // own tint and nowhere else. Neutral ends, so what is measured here is the
+    // biome and not the field.
+    renderer.set_tints(&[MaterialDef {
+        step_sound: None,
+        id: 2,
+        name: "test:stone".to_owned(),
+        placeable: true,
+        texture: None,
+        transparent: false,
+        cutout: false,
+        passable: false,
+        sway: false,
+        billboard: false,
+        billboard_cross: false,
+        tint: Some(Tint {
+            strength: 0,
+            scale: 24,
+            low: Tint::NEUTRAL,
+            high: Tint::NEUTRAL,
+        }),
+    }]);
+
+    let brightness = |frame: &Image| {
+        let pixel = average(frame, WIDTH / 4, HEIGHT / 2, WIDTH * 3 / 4, HEIGHT * 3 / 4);
+        (pixel[0] + pixel[1] + pixel[2]) / 3.0
+    };
+    let lit = |renderer: &mut Renderer, colour: [u8; 3]| {
+        for chunk in scene() {
+            renderer.set_chunk_tint(chunk.pos(), colour);
+        }
+        brightness(&target.capture(renderer, &viewpoint()).expect("capture"))
+    };
+
+    // **The baseline is a world no biome has spoken for**, and that is what
+    // makes this test able to fail. Measuring a bright tint against a neutral
+    // one would pass on either scale — 192 is more than 128 and more than 255
+    // is impossible — so what has to be compared is a declared colour against
+    // no colour at all.
+    let untinted = brightness(
+        &target
+            .capture(&mut renderer, &viewpoint())
+            .expect("capture"),
+    );
+    let neutral = lit(&mut renderer, Tint::NEUTRAL);
+    let dark = lit(&mut renderer, [64, 64, 64]);
+    let bright = lit(&mut renderer, [192, 192, 192]);
+
+    assert!(
+        (neutral - untinted).abs() < 0.01,
+        "the neutral biome colour came out {neutral} against {untinted} for a world with no \
+         biome colour at all, so the value that means 'leave it alone' does not"
+    );
+    assert!(
+        dark < untinted,
+        "a biome at half brightness came out {dark} against {untinted} untinted, so darkening \
+         is broken"
+    );
+    assert!(
+        bright > untinted,
+        "a biome asking for half again the texture's brightness came out {bright} against \
+         {untinted} untinted — the tint still cannot brighten, which is ask 33"
+    );
+}

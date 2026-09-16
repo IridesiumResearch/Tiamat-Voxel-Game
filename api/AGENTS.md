@@ -523,6 +523,12 @@ end)
 
 Three things worth knowing before you design around it:
 
+- **The multiplier spans 0 to 2, and 1.0 is the texture's own colour.** Below
+  darkens, above BRIGHTENS, and past 2 is clamped. This is worth a moment: a
+  ceiling of 1.0 means every biome is at or below the brightness of the texture
+  it multiplies, which is why a savanna asking for gold used to read olive-gold
+  and a taiga's rust came out muddy. `1.6, 1.3, 0.7` is a gold. The same scale
+  `low`/`high` above have always used.
 - **It applies to materials that declare a `tint`, and only those.** Declaring
   one is what opts a material into varying with its surroundings, so it is also
   what opts it into varying with the place. You do not say it twice — and stone,

@@ -232,7 +232,10 @@ impl ChunkStore {
     /// asks about, which is four per chunk and some of them off the edge.
     #[must_use]
     pub fn tint(&self, x: i32, z: i32) -> [u8; 3] {
-        self.tints.get(&(x, z)).copied().unwrap_or([u8::MAX; 3])
+        self.tints
+            .get(&(x, z))
+            .copied()
+            .unwrap_or(tiamot_core::proto::Tint::NEUTRAL)
     }
 
     /// Stores a chunk's light, marking it for remeshing.

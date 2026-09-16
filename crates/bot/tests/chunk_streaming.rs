@@ -18,6 +18,16 @@ use tiamot_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 
+/// What the fixture's `return 0.2, 0.8, 0.4` comes back as.
+///
+/// **A multiplier, quantised on the tint's scale where 128 is 1.0** — not a
+/// colour over 0..255. Written through `Tint::quantise` rather than as three
+/// magic numbers, so the day that scale moves again this says what it means
+/// instead of what it used to equal.
+fn declared() -> [u8; 3] {
+    [0.2, 0.8, 0.4].map(tiamot_core::proto::Tint::quantise)
+}
+
 fn world_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("tiamot-stream-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -343,7 +353,7 @@ fn a_mods_chunk_tint_reaches_the_client() {
         for (pos, tint) in tints {
             assert_eq!(
                 tint,
-                [51, 204, 102],
+                declared(),
                 "the chunk at {pos:?} arrived {tint:?}, not the colour the mod declared"
             );
         }

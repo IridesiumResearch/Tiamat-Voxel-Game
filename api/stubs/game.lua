@@ -809,6 +809,12 @@ function game.register_on_generate(callback) end
 ---end)
 ---```
 ---
+---**A multiplier spanning 0 to 2, not 0 to 1.** `1.0` leaves a material at its
+---texture's own colour, below darkens, and ABOVE BRIGHTENS: `1.6, 1.3, 0.7` is
+---a savanna gold rather than the olive-gold a ceiling of 1.0 could only give.
+---Anything past 2 is clamped there. Values are quantised to one part in 128,
+---which is finer than the eye reads a colour multiplier.
+---
 ---**Only materials that declare a `tint` take it.** Declaring one is what opts
 ---a material into varying with its surroundings, so it is also what opts it
 ---into varying with the place — you do not say it twice, and stone stays the

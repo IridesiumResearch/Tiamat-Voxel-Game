@@ -1027,7 +1027,25 @@ impl MluaVm {
     /// neither is worth disabling it over, and a chunk is a poor place to learn
     /// about it. `f32 as u8` already saturates in Rust and maps NaN to zero,
     /// and the clamp is written anyway so the intent does not rest on that.
-    fn tint_bytes(colour: (f32, f32, f32)) -> [u8; 3] {
+    /// A mod's biome colour as the wire carries it.
+    ///
+    /// **`Tint::quantise`, which is the scale a material's own tint has always
+    /// used**: `128` is 1.0, so the byte spans 0 to just under 2 and a mod can
+    /// ask for MORE than the texture's own brightness. It used to be a 0..1
+    /// clamp over the whole byte, which meant a biome could darken a colour or
+    /// shift its hue and never brighten it — savanna gold came out olive, and
+    /// taiga rust came out muddy (engine ask 33). One function for both, so the
+    /// two kinds of tint cannot drift apart.
+    /// A mod's absolute colour as the wire carries it: 0..1 over the whole byte.
+    ///
+    /// **Distinct from [`Self::tint_bytes`], and the distinction is the whole
+    /// point.** A fog's colour IS a colour — what the distance is painted — and
+    /// a biome's tint is a multiplier that may legitimately exceed one. The two
+    /// shared a function until the tint's ceiling moved to 2.0, at which point
+    /// the shared one quietly halved every fog a mod had ever declared. The
+    /// tests caught it; the reason it is two functions now is so that the next
+    /// change to one of them cannot reach the other.
+    fn colour_bytes(colour: (f32, f32, f32)) -> [u8; 3] {
         let channel = |value: f32| -> u8 {
             if value.is_nan() {
                 return u8::MAX;
@@ -1035,6 +1053,14 @@ impl MluaVm {
             (value.clamp(0.0, 1.0) * 255.0) as u8
         };
         [channel(colour.0), channel(colour.1), channel(colour.2)]
+    }
+
+    fn tint_bytes(colour: (f32, f32, f32)) -> [u8; 3] {
+        [
+            crate::proto::Tint::quantise(colour.0),
+            crate::proto::Tint::quantise(colour.1),
+            crate::proto::Tint::quantise(colour.2),
+        ]
     }
 
     /// Where one mod's chunk-tint callback lives.
@@ -1062,7 +1088,7 @@ impl MluaVm {
             .filter(|value| !value.is_nan())
             .ok_or("a fog needs a `visibility`: how many blocks a player sees into it")?;
         let channel = |name: &str| number(name).map(|value| value.unwrap_or(1.0));
-        let colour = Self::tint_bytes((channel("r")?, channel("g")?, channel("b")?));
+        let colour = Self::colour_bytes((channel("r")?, channel("g")?, channel("b")?));
         let top = number("top")?
             .filter(|value| !value.is_nan())
             .map(crate::detgen::floor_to_i32);
@@ -1866,7 +1892,9 @@ impl ScriptVm for MluaVm {
             world_seed,
             pos,
         )?;
-        Ok(answer.map_or([u8::MAX; 3], |(_, colour)| Self::tint_bytes(colour)))
+        Ok(answer.map_or(crate::proto::Tint::NEUTRAL, |(_, colour)| {
+            Self::tint_bytes(colour)
+        }))
     }
 
     fn chunk_fog(

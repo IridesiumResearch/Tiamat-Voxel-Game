@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 55;
+pub const PROTOCOL_VERSION: u32 = 56;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -726,6 +726,15 @@ pub struct Tint {
 }
 
 impl Tint {
+    /// A biome colour that changes nothing, on this same scale.
+    ///
+    /// **`128`, not `255`.** A chunk's tint is a multiplier and is quantised
+    /// exactly as [`Tint::low`] and [`Tint::high`] are, so the value that
+    /// leaves a material alone is the one that means 1.0. It used to be `255`
+    /// on a 0..1 scale, which is why a mod could darken a colour and never
+    /// brighten one.
+    pub const NEUTRAL: [u8; 3] = [128; 3];
+
     /// What a byte of colour means as a multiplier: `128` is 1.0.
     #[must_use]
     pub fn channel(byte: u8) -> f32 {
@@ -1374,7 +1383,18 @@ pub enum ServerMessage {
         /// The chunk blob, in the Task 03 format.
         blob: Vec<u8>,
         /// This chunk's biome colour, which every tinted material here is
-        /// multiplied by. White (255, 255, 255) leaves them alone.
+        /// multiplied by. [`Tint::NEUTRAL`] leaves them alone.
+        ///
+        /// **A multiplier spanning 0..2, where `128` is 1.0** — the same scale
+        /// [`Tint::low`] and [`Tint::high`] have used all along, and quantised
+        /// by the same function. On the old 0..1 scale a mod could only darken
+        /// or shift a colour, never brighten one, so a savanna asking for gold
+        /// got olive-gold and a taiga's rust came out muddy: the engine was
+        /// silently holding every biome at or below the texture's own
+        /// brightness. Reported by a mod author writing biomes (engine ask 33).
+        ///
+        /// A value a mod already used renders exactly as it did — the same
+        /// number round-trips — and what changed is the ceiling.
         ///
         /// **Not in the blob, and so not on disk.** A mod computes it from the
         /// same field it chooses biomes with, and the server asks for it when
