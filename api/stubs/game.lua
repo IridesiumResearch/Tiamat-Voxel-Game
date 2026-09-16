@@ -420,7 +420,7 @@ function Stream:next_bool() end
 ---@field sway boolean? Whether the top of it moves in a fake wind: grass, leaves, a banner. **Presentation only** — the world does not know it is moving, so collision, lighting and the server's idea of where anything is are all untouched. The mesher marks the TOP EDGE of each face and the shader bends only those, so a plant bends from base to tip rather than sliding, and its base stays planted. The motion is smooth noise over world position and time, so a field leans in gusts rather than each plant buzzing on its own (Sub-Node Contract §8.3).
 ---@field billboard boolean|"cross"? Whether its cells are drawn as SPRITES rather than as geometry: grass, ferns, flowers. `true` is one card that turns to face the camera; `"cross"` is two FIXED cards on the diagonals of the run's column — the X Minecraft and Minetest draw, which reads as a plant and holds still as the player walks round it. **This is what a sprite card is here** — the engine has no diagonal geometry, and a cell drawn as a cube shows a NINTH of its texture per face (a texture repeats once per block), so grass built from cells reads as little floating boxes. A run of cells in a column is ONE sprite as tall as the run: one cell is a third of a yard, three is a yard. It turns about the vertical axis only, so it never lies over when you look down. The cells stay where they are for collision, light, fluid and the dig ray — only the drawing changes (Sub-Node Contract §8.4). A billboard may not also declare `transparent` or `cutout` — those are rules about a cell's cube faces and a sprite has none; the pair is refused.
 ---@field tint table? How this block's colour varies across the world: `{ strength = 0.15, scale = 32, low = {0.9, 1.0, 0.85}, high = {1.0, 0.95, 1.0} }`. **This is what stops ground reading as a repeating texture.** The client multiplies the texture by a colour sampled from one smooth field of world position — the same field for every material, so neighbouring materials vary together rather than each drifting on its own. `strength` (0..1) moves the TONE and is the whole of what most mods want: brightness variation alone breaks up the repeat. `low` and `high` are optional RGB multipliers at the two ends of the same field, for a hue shift — grass greener in one place than another — and default to no shift at all. `scale` is how many blocks one period spans, tens rather than ones: a period near a block makes noise rather than ground. Presentation only — nothing in the simulation reads it, and it is not in any determinism hash.
----@field absorbs { rate: integer, becomes: string? }? Ground that drinks. `rate` is how many of the block's 27 cells it takes out of fluid touching it, per fluid tick, 1..=27. `becomes` is the block it turns into once it has taken them, qualified against your own mod — omit it for ground that drinks for ever without changing, which is a drain rather than a sponge. **Saturation is a chain of materials, not engine state** (Sub-Node Contract §4.3): `dirt` → `damp_dirt` → `saturated_dirt`, and the chain ends where a block stops naming a successor. A block of two or more materials never absorbs, because there is no way to turn one material inside a mix into its successor without per-cell saturation state.
+---@field absorbs { rate: integer, becomes: string? }? Ground that drinks. **It drinks ANY fluid, not a named one**: the rate is a property of the material and nothing asks what is touching it, so ground that soaks up a puddle also soaks the river it is the bed of, and the sea through its floor. There is no way to say "absorbs rainwater but not seawater" today. `rate` is how many of the block's 27 cells it takes out of fluid touching it, per fluid tick, 1..=27. `becomes` is the block it turns into once it has taken them, qualified against your own mod — omit it for ground that drinks for ever without changing, which is a drain rather than a sponge. **Saturation is a chain of materials, not engine state** (Sub-Node Contract §4.3): `dirt` → `damp_dirt` → `saturated_dirt`, and the chain ends where a block stops naming a successor. A block of two or more materials never absorbs, because there is no way to turn one material inside a mix into its successor without per-cell saturation state.
 
 ---How `dominance` decides a mixed block's hardness.
 ---
@@ -1590,6 +1590,22 @@ function game.cue(spec) end
 ---to write — making sure the night loop is on, every tick — does not end up
 ---with a tick's worth of overlapping copies.
 ---
+---Four limits, because designing around them is easier than discovering them:
+---
+---* **`everywhere` means every connected player, in every domain.** Not the
+---  domain, not a radius — everyone on the server, including somebody inside a
+---  ship or in a space your mod has never heard of. There is no way to address
+---  a loop to one player today.
+---* **Replacing restarts the clip from its beginning.** So a loop whose `gain`
+---  you change every tick is a loop that never gets past its first second. Pick
+---  a gain and leave it, or accept the restart.
+---* **No fades.** A loop starts at full gain and stops over a fixed quarter of
+---  a second. Crossfading two ambiences is not expressible.
+---* **A positioned loop is panned once, where the listener stood when it
+---  started.** It does not re-pan or re-attenuate as they walk, so a loop meant
+---  to sit in one place wants a `radius` wide enough that a player crossing it
+---  does not notice, or a `stop`/`start` when they have moved far.
+---
 ---```lua
 ---game.register_on_tick(function()
 ---    if game.time_of_day() > 0.75 then
@@ -1901,6 +1917,24 @@ Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ---much fits — a block one third full of stone holds one third less — so you
 ---never have to think about a partially flooded chiselled block, only about how
 ---much room one has left.
+---
+---**Two fluids never mix, and the first one there keeps the space.** A block
+---holds one fluid and a volume of it, so a move into a block already holding a
+---DIFFERENT fluid is simply refused — nothing merges, nothing is displaced,
+---nothing is destroyed. Lava running into water does not hiss, harden or
+---vanish on its own: it stops. The meeting IS reported to
+---`register_on_fluid_flow`, beside or below, with `meets` naming the other
+---fluid, so whatever should happen when two of your fluids meet is your mod's
+---to write from there.
+---
+---**`tick_rate`, `waterlogs_at` and `evaporates` are NOT per fluid yet.** The
+---solver takes one set of settings for the whole world, from whichever fluid
+---was registered first — and registration order is alphabetical by qualified
+---id, across every loaded mod. So `core_milk:milk` sorts before
+---`my_mod:water`, and its `tick_rate` governs your water too. Until this is
+---fixed: expect a world's fluids to share one speed and one absorption
+---threshold, and do not design a fast fluid beside a slow one, or a puddle
+---that evaporates beside a sea that must not.
 ---
 ---**Fluid is conserved.** Volume moves between blocks and is never created;
 ---there are no source blocks, because an infinite spring is a conservation
