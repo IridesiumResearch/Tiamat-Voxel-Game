@@ -4299,7 +4299,7 @@ impl App {
 
                 Event::ChunkFluid(pos, layer) => self.store.set_fluid(pos, *layer),
 
-                Event::Fluids { fluids } => self.store.set_fluid_table(&fluids),
+                Event::Fluids { fluids } => self.adopt_fluids(&fluids),
 
                 // **The GRANTED radius, which is what the fog is drawn from.**
                 // Using the configured one instead would end the world in clear
@@ -5077,6 +5077,21 @@ impl App {
         // for it, so a fog that stops is cleared.
         self.renderer.set_chunk_fog(pos, fog);
         self.store.insert(chunk);
+    }
+
+    /// Takes the fluid table: what each fluid is, and how see-through it is.
+    ///
+    /// **The renderer needs the opacities and the store needs everything
+    /// else.** How much of the world a fluid hides belongs to the material it
+    /// is drawn as, because that is what a fluid vertex carries — see
+    /// `Renderer::set_fluid_opacity`.
+    fn adopt_fluids(&mut self, fluids: &[tiamot_core::proto::FluidDef]) {
+        let opacity: Vec<(u16, f32)> = fluids
+            .iter()
+            .map(|def| (def.material, def.opacity))
+            .collect();
+        self.renderer.set_fluid_opacity(&opacity);
+        self.store.set_fluid_table(fluids);
     }
 
     /// Makes the particles of bursts a server sent, each lit where it starts.

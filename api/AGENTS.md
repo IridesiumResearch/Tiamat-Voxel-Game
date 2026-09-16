@@ -303,6 +303,42 @@ Two things follow that are worth designing around:
   so is any block not filled to its capacity. It is woken on load and settles as
   it always did, which is what keeps a bucket honest.
 
+**Lava is water with two fields changed.** There is no lava in the engine and
+there will not be — it is content — but the two things that make one are
+mechanisms, and both are here:
+
+```lua
+game.register_block{
+    id = "molten", texture = "lava.png",
+    light_emit = { r = 15, g = 8, b = 2 },   -- the glow
+}
+game.register_fluid{
+    id = "lava", material = "my_mod:molten",
+    opacity = 1.0,                            -- a surface, not a window
+    tick_rate = 4,                            -- and slower than water
+}
+```
+
+- **`opacity`** is how much of the world behind it a surface of the fluid hides,
+  `0.0..=1.0`. The default is `0.72`, which is what every fluid was drawn at
+  before the field existed: you can make out a riverbed through it. `1.0` is
+  lava. `0.0` is invisible, which is allowed and is not the same as saying
+  nothing.
+- **A fluid glows with whatever its MATERIAL emits.** There is no `glow` field
+  on `register_fluid`, deliberately: a fluid already names a block, and a second
+  place to declare brightness is a second thing to keep in step. Put
+  `light_emit` on that block and a pool lights the cave it stands in, a flow
+  relights as it moves, and a bucket of it lights the room you carry it into.
+
+A block full of lava is AIR in the block store — a block holds terrain and fluid
+independently — so the engine looks at the fluid layer on purpose to find this.
+It costs nothing in a world whose fluids do not emit: the check is a set that is
+empty unless some fluid's material declares `light_emit`. **Emission does not
+scale with volume.** One cell of lava in a block glows as brightly as
+twenty-seven, for the same reason a lamp chiselled to a sliver is still a lamp —
+dimming by how much is left would make the solver a dimmer switch, which is a
+game decision and not the engine's.
+
 **Heightmaps still exist and are still right** when a heightmap is what you
 mean. `game.noise_heightmap` + `buf:fill_below_heightmap` is 52 us a chunk
 against 719 us for terrain-with-caves — fourteen times cheaper. Cheaper still

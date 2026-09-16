@@ -725,6 +725,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 name: "core_milk:milk".to_owned(),
                 material: 4,
                 color: [240, 240, 230],
+                opacity: 0.72,
             }],
         },
         ServerMessage::ViewDistance {

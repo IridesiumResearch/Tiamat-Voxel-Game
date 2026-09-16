@@ -1881,6 +1881,7 @@ function game.find_path(from, to, options) end
 ---@field color? { r: integer, g: integer, b: integer } What the world looks like from INSIDE the fluid — the tint and fog a submerged camera sees. Channels are 0..=255 and default to white. Deliberately not derived from `material`: a texture is what the surface looks like from outside, and clear water has a vivid surface with a faint tint. The engine has no opinion about either.
 ---@field waterlogs_at? integer How full of terrain a block must be before this fluid treats it as floor, in cells of 27. Default 14 — over half. Below it the block is more air than anything and the fluid runs through; at or above it the block holds the fluid up and a mod can swap it for a waterlogged one from `register_on_fluid_flow`. Set it to 1 for the blocky rule where a single chiselled cell makes a block waterproof.
 ---@field evaporates? integer One in how many fluid ticks a block open to the air loses a cell. Default 0, which never evaporates. **This destroys matter**, which is why the engine defaults it off and leaves the decision to you — a wide shallow pool goes before a deep narrow one, because more of it is exposed.
+---@field opacity? number How much of what is behind it a surface of this fluid hides, 0.0..=1.0. Default 0.72, which is what every fluid was drawn at before the field existed: you can make out a riverbed through it, and a deep pool still reads as deep. `1.0` is lava — a surface, not a window. `0.0` is invisible, which is legitimate and is not the same as "unsaid".
 
 ---Registers a fluid.
 ---
@@ -1899,9 +1900,22 @@ Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ---there are no source blocks, because an infinite spring is a conservation
 ---violation by definition. A bucket is a measurement.
 ---
+---**A fluid glows with whatever the block it is DRAWN as emits.** There is no
+---glow field here and there should not be: a fluid already names a block, and a
+---second place to say how bright it is would be two things to keep in step. Put
+---`light_emit` on that block and a pool of it lights the cave it stands in,
+---exactly as a lamp of the same material would — a block full of lava is AIR in
+---the block store, so this is the engine looking at the fluid layer on purpose.
+---A flow relights as it moves, and only a fluid whose material emits costs
+---anything: a world of water never pays for this.
+---
 ---```lua
 ---game.register_block{ id = "milk", texture = "milk.png" }
 ---game.register_fluid{ id = "milk", material = "milk" }
+---
+----- Lava: opaque, and a light source because its block is one.
+---game.register_block{ id = "molten", texture = "lava.png", light_emit = { r = 15, g = 8, b = 2 } }
+---game.register_fluid{ id = "lava", material = "molten", opacity = 1.0, tick_rate = 4 }
 ---```
 ---@param spec Tiamot.FluidSpec
 function game.register_fluid(spec) end

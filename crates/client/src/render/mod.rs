@@ -285,8 +285,14 @@ pub const BODY_WIDTH_CELLS: u8 = 2;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MaterialTint {
-    /// Tone amplitude in x, blocks per period in y, sway amplitude in z, one
-    /// spare.
+    /// Tone amplitude in x, blocks per period in y, sway amplitude in z, and a
+    /// fluid's opacity in w.
+    ///
+    /// **`w` is `1.0 + opacity`, and zero means "no fluid is drawn as this
+    /// material".** A fluid may legitimately declare an opacity of zero — an
+    /// invisible one is a mod's business — so the value itself cannot double as
+    /// the "nothing was said" sentinel, and the offset keeps the two apart
+    /// without a second buffer.
     ///
     /// Sway rides in the tint's own entry rather than a second buffer: it is one
     /// number per material read by the vertex stage, and a binding of its own
@@ -852,6 +858,12 @@ pub struct Renderer {
     /// losing it, and vice versa: the two arrive together and are replaced
     /// independently.
     tints: TintTable,
+    /// What each fluid's material is drawn at, `(material, opacity)`.
+    ///
+    /// Held rather than folded straight into `tints` because the material
+    /// table can arrive after the fluid table and rebuilds those rows; see
+    /// [`Self::set_fluid_opacity`].
+    fluid_opacity: Vec<(u16, f32)>,
     chunks: BTreeMap<ChunkPos, ChunkMesh>,
     /// Each chunk COLUMN's biome colour, keyed on `(x, z)`. See
     /// [`Self::set_chunk_tint`]. Distinct from `tints`, which is the per
@@ -1079,6 +1091,7 @@ impl Renderer {
             atlas_side: side,
             atlas_view: view,
             tints,
+            fluid_opacity: Vec::new(),
             biome_tints: BTreeMap::new(),
             chunks: BTreeMap::new(),
             pool: BufferPool::default(),
@@ -1336,11 +1349,57 @@ impl Renderer {
                 tints[usize::from(entry.id)].params[2] = SWAY_AMPLITUDE;
             }
         }
+        // **What the fluid table said, put back on top.** The two messages are
+        // independent and arrive in either order; rebuilding from the material
+        // table alone would drop every fluid's opacity whenever a material
+        // table landed second.
+        for (material, opacity) in &self.fluid_opacity {
+            let slot = usize::from(*material);
+            if slot >= tints.len() {
+                tints.resize(slot + 1, MaterialTint::none());
+            }
+            tints[slot].params[3] = 1.0 + opacity;
+        }
         self.tints = TintTable {
             buffer: upload_tints(&self.gpu, &tints),
+            rows: tints,
             any: u32::from(table.iter().any(|entry| entry.tint.is_some())),
             swaying: u32::from(table.iter().any(|entry| entry.sway)),
         };
+        self.bind_group = make_bind_group(
+            &self.gpu,
+            &self.bind_layout,
+            &self.globals,
+            &self.atlas_view,
+            &self.sampler,
+            &self.tints.buffer,
+            self.place_fog.buffer(),
+        );
+    }
+
+    /// How see-through each fluid's surface is, by the material it is drawn as.
+    ///
+    /// **Per fluid, where this was one constant for every fluid in the world.**
+    /// Water is a window onto a riverbed and lava is a surface; the mod that
+    /// registered the fluid says which (charter rule 1), and the number rides
+    /// in the spare slot of that material's tint row rather than in a binding
+    /// of its own — see [`MaterialTint::params`].
+    ///
+    /// Keyed by MATERIAL and not by fluid id because that is what a fluid
+    /// vertex carries: the mesher packs the material a block of it is drawn as,
+    /// and nothing downstream of that knows which fluid put it there.
+    pub fn set_fluid_opacity(&mut self, fluids: &[(u16, f32)]) {
+        self.fluid_opacity = fluids.to_vec();
+        let mut rows = std::mem::take(&mut self.tints.rows);
+        for (material, opacity) in fluids {
+            let slot = usize::from(*material);
+            if slot >= rows.len() {
+                rows.resize(slot + 1, MaterialTint::none());
+            }
+            rows[slot].params[3] = 1.0 + opacity;
+        }
+        self.tints.buffer = upload_tints(&self.gpu, &rows);
+        self.tints.rows = rows;
         self.bind_group = make_bind_group(
             &self.gpu,
             &self.bind_layout,
@@ -4141,6 +4200,7 @@ fn build_atlas_bindings(
     // One entry saying nothing varies: no material does until a table says so.
     let tints = TintTable {
         buffer: upload_tints(gpu, &[MaterialTint::none()]),
+        rows: vec![MaterialTint::none()],
         swaying: 0,
         any: 0,
     };
@@ -4155,6 +4215,13 @@ fn build_atlas_bindings(
 /// and the two must never disagree about whether that is so.
 struct TintTable {
     buffer: wgpu::Buffer,
+    /// What was uploaded, so either source can be re-applied over the other.
+    ///
+    /// The material table and the fluid table arrive in separate messages and
+    /// in either order, and each writes different fields of the same rows —
+    /// so rebuilding from one alone would drop what the other said. Keeping
+    /// the rows is far cheaper than keeping both messages.
+    rows: Vec<MaterialTint>,
     /// Uploaded to the shader as `Globals::tint_any`. A `u32` because that is
     /// what a uniform carries.
     any: u32,

@@ -469,6 +469,15 @@ pub struct FluidRules {
     pub evaporates: u32,
     /// What being inside it looks like, sRGB `0..=255`.
     pub color: [u8; 3],
+    /// How much of what is behind it a surface of this fluid hides, `0.0..=1.0`.
+    ///
+    /// **A fluid's own, because "see-through" is the difference between water
+    /// and lava.** One is a window onto a riverbed and the other is a surface;
+    /// the engine has no opinion about which a mod is making (charter rule 1).
+    /// `1.0` hides everything behind it, `0.0` is invisible, and
+    /// [`FluidRules::DEFAULT_OPACITY`] is what every fluid drew as before this
+    /// field existed.
+    pub opacity: f32,
 }
 
 impl FluidRules {
@@ -480,6 +489,14 @@ impl FluidRules {
 
     /// Whether a fluid evaporates, if its mod said nothing. It does not.
     pub const DEFAULT_EVAPORATES: u32 = 0;
+
+    /// How opaque a fluid is if its mod said nothing.
+    ///
+    /// A shade under three quarters, which was the engine-wide constant every
+    /// fluid was drawn with until a mod could say: enough to see the shape of a
+    /// riverbed through a pond, not so much that a deep pool stops reading as
+    /// deep.
+    pub const DEFAULT_OPACITY: f32 = 0.72;
 
     /// What a fluid looks like from inside, if its mod said nothing.
     ///

@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 54;
+pub const PROTOCOL_VERSION: u32 = 55;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -2105,7 +2105,10 @@ pub struct EntityDelta {
 }
 
 /// One registered fluid, as the wire carries it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `PartialEq` and not `Eq`: `opacity` is an `f32`, and nothing compares fluid
+/// definitions for equality outside tests.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FluidDef {
     /// The per-session numeric id a chunk's fluid layer refers to.
     pub id: u8,
@@ -2127,6 +2130,13 @@ pub struct FluidDef {
     /// opinion about either (charter rule 1): the mod that registered the fluid
     /// says.
     pub color: [u8; 3],
+    /// How much of what is behind it a surface of this fluid hides, `0.0..=1.0`.
+    ///
+    /// **Per fluid, where it used to be one constant in the world shader.** A
+    /// pond you can see the bottom of and a lake of lava you cannot see into at
+    /// all are the same mechanism with one number changed, and which one a mod
+    /// is making is not the engine's decision (charter rule 1).
+    pub opacity: f32,
 }
 
 /// A place's own fog: what `game.register_chunk_fog` answers for a chunk.

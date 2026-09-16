@@ -778,6 +778,22 @@ impl Neighbourhood for Wet<'_> {
     }
 }
 
+/// A pond of lava is a light source. See [`crate::light::Glowing`].
+///
+/// The store answers both halves directly: it holds the layers, and it holds
+/// the registry that says what each fluid is drawn as. Nothing is cached and
+/// nothing is derived — the lighting pass asks the same store the solver writes
+/// to, so a lake that moves cannot go on glowing where it was.
+impl crate::light::Glowing for Fluidics {
+    fn layer(&self, pos: ChunkPos) -> Option<&FluidLayer> {
+        Self::layer(self, pos)
+    }
+
+    fn material(&self, fluid: tiamot_core::fluid::FluidId) -> Option<tiamot_core::MaterialId> {
+        self.fluids().get(fluid).map(|entry| entry.material)
+    }
+}
+
 /// Builds the fluid registry from what the mods registered.
 ///
 /// `id_of` maps a block id to its **world** material id, exactly as light's
@@ -812,6 +828,7 @@ pub fn fluids_from_rules(
             evaporates: rule.evaporates,
             color: rule.color,
             material,
+            opacity: rule.opacity,
         }) {
             tracing::warn!(fluid = %rule.fluid, "could not register a fluid: {err}");
         }
@@ -857,6 +874,7 @@ mod tests {
                 evaporates: 0,
                 color: [255, 255, 255],
                 material: tiamot_core::MaterialId(4),
+                opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
             })
             .expect("register");
         let mut fluidics = Fluidics::new(fluids);

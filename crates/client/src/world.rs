@@ -967,6 +967,7 @@ mod tests {
             name: "test:milk".into(),
             material: STONE.get(),
             color: [255, 255, 255],
+            opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
         }]);
 
         // Milk in the neighbour only, in the block against the shared face.

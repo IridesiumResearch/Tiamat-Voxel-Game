@@ -308,6 +308,7 @@ fn fluid_named(name: &str) -> tiamot_core::fluid::Registered {
         evaporates: 0,
         color: [255, 255, 255],
         material: MaterialId(4),
+        opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
     }
 }
 

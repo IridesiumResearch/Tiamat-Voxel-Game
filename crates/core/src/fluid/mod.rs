@@ -320,7 +320,12 @@ pub trait Access: Send + Sync {
 /// The engine holds only what it must simulate and draw with. Anything that is
 /// a game decision — how fast it hurts, what it sounds like landing on stone —
 /// belongs to the mod that registered it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **`PartialEq` and not `Eq`**, because `opacity` is an `f32`. Nothing
+/// compares fluids for equality in the simulation — this is a registry read
+/// once at load — so the weaker bound costs nothing, and the alternative was
+/// quantising a presentation number to keep a trait nobody uses.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Registered {
     /// The canonical string id, `"core:milk"`.
     pub name: String,
@@ -351,6 +356,13 @@ pub struct Registered {
     /// terrain and fluid independently — so this is what the mesher and the
     /// texture atlas look up.
     pub material: MaterialId,
+    /// How much of what is behind it a surface of this fluid hides, `0.0..=1.0`.
+    ///
+    /// Presentation only — nothing in the simulation reads it, and a mob sees
+    /// through lava exactly as well as through water — so it is exempt from
+    /// charter rule 4 in the same way a fog is. See
+    /// [`crate::script::FluidRules::opacity`].
+    pub opacity: f32,
 }
 
 /// Every fluid the mods registered, by id.
@@ -359,7 +371,7 @@ pub struct Registered {
 /// than a map for the same reason [`crate::light::Emissions`] is one: ids are
 /// dense, assigned in registration order, and the solver reads this per block
 /// visited.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Fluids {
     by_id: Vec<Registered>,
     /// Ids that stand in for a fluid the world knows and no mod registered.
@@ -434,6 +446,9 @@ impl Fluids {
             color: [255, 255, 255],
             // Air, so a client that is somehow told about it draws nothing.
             material: MaterialId::AIR,
+            // Never drawn, so this is arbitrary too; the engine default is the
+            // one that says nothing was chosen.
+            opacity: crate::script::FluidRules::DEFAULT_OPACITY,
         })?;
         self.placeholders.insert(id);
         Ok(id)
@@ -586,6 +601,7 @@ mod tests {
                 color: [255, 255, 255],
                 tick_rate: 1,
                 material: MaterialId(4),
+                opacity: crate::script::FluidRules::DEFAULT_OPACITY,
             })
             .expect("first registration");
         assert_eq!(milk, FluidId(1), "zero is reserved for 'no fluid'");
@@ -604,6 +620,7 @@ mod tests {
             color: [255, 255, 255],
             tick_rate: 1,
             material: MaterialId(4),
+            opacity: crate::script::FluidRules::DEFAULT_OPACITY,
         };
         fluids.register(entry()).expect("first");
         assert!(matches!(
@@ -624,6 +641,7 @@ mod tests {
                     color: [255, 255, 255],
                     tick_rate: 1,
                     material: MaterialId(1),
+                    opacity: crate::script::FluidRules::DEFAULT_OPACITY,
                 })
                 .expect("within the limit");
         }
@@ -635,6 +653,7 @@ mod tests {
                 color: [255, 255, 255],
                 tick_rate: 1,
                 material: MaterialId(1),
+                opacity: crate::script::FluidRules::DEFAULT_OPACITY,
             }),
             Err(RegisterError::Full { .. })
         ));

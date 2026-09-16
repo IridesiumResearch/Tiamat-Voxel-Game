@@ -259,6 +259,22 @@ impl Lighting {
         world: &World,
         pos: ChunkPos,
     ) -> BTreeSet<ChunkPos> {
+        self.chunk_loaded_with_fluid(domain, world, pos, &Dry)
+    }
+
+    /// The same, with the fluid of that space in view.
+    ///
+    /// **Which is how a lava lake lights a cave.** A caller that has the fluid
+    /// store to hand passes it; one that has not — a test, or a space with no
+    /// fluid in it — takes [`Dry`] through the signature above and lights
+    /// exactly as it always did. See [`Glowing`].
+    pub fn chunk_loaded_with_fluid(
+        &mut self,
+        domain: &str,
+        world: &World,
+        pos: ChunkPos,
+        fluid: &dyn Glowing,
+    ) -> BTreeSet<ChunkPos> {
         self.layers.entry(pos).or_insert_with(LightLayer::dark);
         // **A chunk of one opaque, unlit material is dark, and knowing that
         // costs nothing.** Relighting it would darken all 4,096 blocks, scan
@@ -284,7 +300,7 @@ impl Lighting {
             touched.chunks.insert(pos);
             // Dark for free, but still a roof: rock arriving over a lit chunk
             // is the commonest way the sky under it goes away.
-            self.roof_over_below(domain, world, pos, &mut touched);
+            self.roof_over_below(domain, world, pos, &mut touched, fluid);
             self.compact(&touched.chunks);
             return touched.chunks;
         }
@@ -309,10 +325,10 @@ impl Lighting {
         // client cannot tell "dark" from "not arrived yet", and every
         // underground chunk goes unreported.
         touched.chunks.insert(pos);
-        self.with_centre(domain, world, pos, &mut touched, |lit| {
+        self.with_centre(domain, world, pos, &mut touched, fluid, |lit| {
             propagate::relight(lit, region);
         });
-        self.roof_over_below(domain, world, pos, &mut touched);
+        self.roof_over_below(domain, world, pos, &mut touched, fluid);
         self.compact(&touched.chunks);
         touched.chunks
     }
@@ -334,6 +350,7 @@ impl Lighting {
         world: &World,
         pos: ChunkPos,
         touched: &mut Touched,
+        fluid: &dyn Glowing,
     ) {
         let below = ChunkPos::new(pos.x, pos.y - 1, pos.z);
         if !self.layers.contains_key(&below) {
@@ -345,7 +362,7 @@ impl Lighting {
             min: corner,
             max: BlockPos::new(corner.x + span, corner.y + span, corner.z + span),
         };
-        self.with_centre(domain, world, below, touched, |lit| {
+        self.with_centre(domain, world, below, touched, fluid, |lit| {
             propagate::roofed(lit, region);
         });
     }
@@ -354,8 +371,19 @@ impl Lighting {
     ///
     /// Returns every chunk whose light changed.
     pub fn edited(&mut self, domain: &str, world: &World, pos: BlockPos) -> BTreeSet<ChunkPos> {
+        self.edited_with_fluid(domain, world, pos, &Dry)
+    }
+
+    /// The same, with the fluid of that space in view — see [`Glowing`].
+    pub fn edited_with_fluid(
+        &mut self,
+        domain: &str,
+        world: &World,
+        pos: BlockPos,
+        fluid: &dyn Glowing,
+    ) -> BTreeSet<ChunkPos> {
         let mut touched = Touched::default();
-        self.with_centre(domain, world, pos.chunk(), &mut touched, |lit| {
+        self.with_centre(domain, world, pos.chunk(), &mut touched, fluid, |lit| {
             propagate::edited(lit, pos);
         });
         self.compact(&touched.chunks);
@@ -379,6 +407,7 @@ impl Lighting {
         world: &World,
         centre: ChunkPos,
         touched: &mut Touched,
+        fluid: &dyn Glowing,
         pass: impl FnOnce(&mut Lit<'_>),
     ) {
         let held = self.layers.remove(&centre);
@@ -397,6 +426,8 @@ impl Lighting {
             layer: held.unwrap_or_else(LightLayer::dark),
             centre_blocks,
             memo: std::cell::Cell::new(None),
+            fluid,
+            fluid_memo: std::cell::Cell::new(None),
         };
         pass(&mut lit);
         let layer = lit.layer;
@@ -426,6 +457,44 @@ impl Lighting {
 #[derive(Debug, Default)]
 struct Touched {
     chunks: BTreeSet<ChunkPos>,
+}
+
+/// What glowing fluid a lighting pass can see.
+///
+/// **Lava is a light source, and lava is not a block.** A block holds terrain
+/// and fluid independently (Sub-Node Contract §4), so a block full of lava is
+/// AIR as far as the block store is concerned and emits nothing — which is how
+/// a lava lake left a cave pitch black. The rule is that a fluid glows with
+/// whatever the material it is drawn as emits: a mod says `light_emit` on the
+/// block its fluid looks like, once, and the fluid and the block agree by
+/// construction rather than by a second field somebody has to keep in step.
+///
+/// A layer at a time rather than a level at a block, so the pass can memo the
+/// chunk it is standing in exactly as it memos the terrain — an emission query
+/// happens for every block of a region and a map probe per block is what the
+/// rest of [`Lit`] exists to avoid.
+pub trait Glowing {
+    /// A chunk's fluid, if anything has pooled there.
+    fn layer(&self, pos: ChunkPos) -> Option<&tiamot_core::fluid::FluidLayer>;
+
+    /// What a full block of a fluid is drawn as, for [`Emissions::of`].
+    fn material(&self, fluid: tiamot_core::fluid::FluidId) -> Option<MaterialId>;
+}
+
+/// A world with no fluid in it at all.
+///
+/// The honest answer for every caller that has no fluid store to hand — the
+/// tests in this module, and anything lighting a space before a pond exists.
+pub struct Dry;
+
+impl Glowing for Dry {
+    fn layer(&self, _pos: ChunkPos) -> Option<&tiamot_core::fluid::FluidLayer> {
+        None
+    }
+
+    fn material(&self, _fluid: tiamot_core::fluid::FluidId) -> Option<MaterialId> {
+        None
+    }
 }
 
 /// The world and its light, as [`Neighbourhood`] wants to see them.
@@ -486,6 +555,14 @@ struct Lit<'a> {
     /// neighbours it floods into and it works along one at a time. A bigger
     /// cache would be a second copy of the map it is standing in front of.
     memo: std::cell::Cell<Option<(ChunkPos, &'a tiamot_core::chunk::Chunk)>>,
+    /// The fluid this pass can see glowing. See [`Glowing`].
+    fluid: &'a dyn Glowing,
+    /// The last fluid layer looked up, by the same argument as `memo`.
+    ///
+    /// `Some(None)` is "asked, and that chunk is dry" — worth remembering,
+    /// because a dry chunk is the overwhelmingly common case and re-asking is
+    /// the probe this exists to skip.
+    fluid_memo: std::cell::Cell<Option<(ChunkPos, Option<&'a tiamot_core::fluid::FluidLayer>)>>,
 }
 
 impl<'a> Lit<'a> {
@@ -506,6 +583,40 @@ impl<'a> Lit<'a> {
 }
 
 impl Lit<'_> {
+    /// What the fluid standing in a block glows, if any of it does.
+    ///
+    /// **Gated on there being any emitting material at all**, which is one bool
+    /// and is false in every world whose mods registered no lamp and no lava.
+    /// Any of the fluid, at full strength: a block holding one cell of lava
+    /// glows like a block holding twenty-seven, for the reason
+    /// [`Emissions::block`] gives about a chiselled lamp — dimming by how much
+    /// is there would make the solver a dimmer switch, and the engine has no
+    /// business deciding that.
+    fn fluid_emission(&self, pos: BlockPos) -> Light {
+        if !self.lighting.emissions.any() {
+            return Light::DARK;
+        }
+        let chunk = pos.chunk();
+        let layer = match self.fluid_memo.get() {
+            Some((at, layer)) if at == chunk => layer,
+            _ => {
+                let layer = self.fluid.layer(chunk);
+                self.fluid_memo.set(Some((chunk, layer)));
+                layer
+            }
+        };
+        let Some(layer) = layer else {
+            return Light::DARK;
+        };
+        let held = layer.get(pos.local());
+        if held.is_empty() {
+            return Light::DARK;
+        }
+        self.fluid
+            .material(held.fluid())
+            .map_or(Light::DARK, |material| self.lighting.emissions.of(material))
+    }
+
     /// The light at a block, from the centre layer where it lives there.
     fn level(&self, pos: BlockPos) -> Light {
         if pos.chunk() == self.centre {
@@ -555,9 +666,16 @@ impl Neighbourhood for Lit<'_> {
         let Some(chunk) = self.blocks(pos.chunk()) else {
             return Light::DARK;
         };
-        self.lighting
+        let block = self
+            .lighting
             .emissions
-            .block(&chunk.get_block_local(pos.local()))
+            .block(&chunk.get_block_local(pos.local()));
+        // **And what is POURED here, which is not in the block store at all.**
+        // See [`Glowing`]: a block of lava is air with a fluid in it, so
+        // without this a lake of it lights nothing. The brighter of the two per
+        // channel, exactly as a block of several materials takes the brightest
+        // of them — a lamp under water is still a lamp.
+        block.max(self.fluid_emission(pos))
     }
 
     fn light(&self, pos: BlockPos) -> Light {

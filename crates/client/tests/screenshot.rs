@@ -4626,3 +4626,111 @@ fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
          {mode2}"
     );
 }
+
+#[test]
+fn a_fluid_hides_what_is_under_it_by_the_opacity_its_mod_declared() {
+    // **Asked for from the window: "liquids can be registered as varying levels
+    // of opaque… I need to make lava."** Every fluid in the world was drawn at
+    // one shader constant, so a lake of lava was as see-through as a pond and
+    // read as blue-tinted glass over the cave floor.
+    //
+    // Measured the way `a_pond_can_be_seen_through` measures transparency, and
+    // for its reason: two floors of different colours under the same pool, so
+    // no absolute colour is asserted and no driver's filtering can decide it.
+    // What changes here is not the floor but the OPACITY the fluid declares —
+    // at 1.0 the floor beneath must stop mattering entirely.
+    let Some(gpu) = gpu() else { return };
+
+    const DARK: MaterialId = MaterialId(2);
+    const PALE: MaterialId = MaterialId(3);
+    const LAVA: MaterialId = MaterialId(4);
+
+    /// A pool filling one block layer over the floor.
+    struct Pool;
+    impl client::mesher::FluidFill for Pool {
+        fn fill(&self, _x: i32, y: i32, _z: i32) -> Option<(u16, u8)> {
+            (y == 9).then_some((LAVA.get(), 24))
+        }
+    }
+
+    let floor = |material: MaterialId| {
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+        for x in 0..16 {
+            for z in 0..16 {
+                chunk
+                    .set_block(BlockPos::new(x, 8, z), BlockValue::Uniform(material))
+                    .expect("in chunk");
+            }
+        }
+        chunk
+    };
+
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    let atlas = Atlas::build(&[
+        None,
+        None,
+        Some(Image::solid(16, 16, [40, 40, 40, 255])),
+        Some(Image::solid(16, 16, [230, 230, 230, 255])),
+        Some(Image::solid(16, 16, [220, 90, 30, 255])),
+    ]);
+    renderer.set_atlas(&atlas);
+
+    let mut camera = Camera {
+        position: Position::from_world(8.0, 16.0, 8.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, -1.2);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    let through = |renderer: &mut Renderer, material: MaterialId| {
+        let chunk = floor(material);
+        let mesh = mesher::mesh_chunk(
+            &chunk,
+            &Neighbours::none(),
+            Absent::Solid,
+            &DAY,
+            &Pool,
+            &mesher::NoGlass,
+        );
+        renderer.set_chunk(ChunkPos::new(0, 0, 0), &mesh);
+        let frame = target.capture(renderer, &camera).expect("capture");
+        average(&frame, WIDTH / 4, HEIGHT / 4, WIDTH * 3 / 4, HEIGHT * 3 / 4)
+    };
+
+    // How much the floor under the pool still shows through it.
+    let shows_through = |renderer: &mut Renderer| {
+        let over_dark = through(renderer, DARK);
+        let over_pale = through(renderer, PALE);
+        (0..3)
+            .map(|channel| (over_pale[channel] - over_dark[channel]).abs())
+            .fold(0.0_f32, f32::max)
+    };
+
+    // Nothing declared: the engine default, which is what every fluid was drawn
+    // at before a mod could say otherwise.
+    let defaulted = shows_through(&mut renderer);
+    assert!(
+        defaulted > 0.05,
+        "a fluid whose mod declared no opacity hides its floor completely ({defaulted}), so the \
+         default is not the see-through one every pond had"
+    );
+
+    // Lava: opaque, declared as such.
+    renderer.set_fluid_opacity(&[(LAVA.get(), 1.0)]);
+    let opaque = shows_through(&mut renderer);
+    assert!(
+        opaque < 0.01,
+        "a fluid declared fully opaque still shows {opaque} of the floor under it, against \
+         {defaulted} for the default — `opacity` is not reaching the shader"
+    );
+
+    // And back the other way, to prove the number is read rather than a flag:
+    // barely-there water shows MORE of the floor than the default does.
+    renderer.set_fluid_opacity(&[(LAVA.get(), 0.15)]);
+    let clear = shows_through(&mut renderer);
+    assert!(
+        clear > defaulted,
+        "a fluid at opacity 0.15 shows {clear} of its floor and the default 0.72 shows \
+         {defaulted} — the value is not being read, only its presence"
+    );
+}

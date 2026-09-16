@@ -551,6 +551,7 @@ fn an_ocean_in_the_store_draws_no_walls_between_its_chunks() {
         name: "sea:water".to_owned(),
         material: MILK.get(),
         color: [40, 90, 200],
+        opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
     }]);
     // A sea whose surface is at y = 10: full blocks below it, in the chunk
     // that holds the surface and all the chunk under it.

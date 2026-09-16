@@ -2641,6 +2641,7 @@ impl ScriptVm for MluaVm {
                         entry.get("color_b").ok()?,
                     ],
                     tick_rate: entry.get("tick_rate").ok()?,
+                    opacity: entry.get("opacity").ok()?,
                 })
             })
             .collect();
@@ -6984,6 +6985,20 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
 
     let color = fluid_colour(spec, &qualified)?;
 
+    // **How much of the world behind it this fluid hides.** Water is a window
+    // onto a riverbed; lava is a surface. Which one a mod is making is its own
+    // decision (charter rule 1), and until this field existed the engine made
+    // it for every fluid alike with one shader constant.
+    let opacity: f32 = spec.get("opacity").unwrap_or(FluidRules::DEFAULT_OPACITY);
+    if !(0.0..=1.0).contains(&opacity) || !opacity.is_finite() {
+        return Err(mlua::Error::external(format!(
+            "register_fluid(\"{qualified}\"): opacity must be 0.0..=1.0, got {opacity}. It is \
+             how much of what is behind a surface of this fluid it hides — 1.0 for lava, \
+             {} for water.",
+            FluidRules::DEFAULT_OPACITY
+        )));
+    }
+
     let registry: Table = lua.named_registry_value("tiamot.fluids")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
@@ -6997,6 +7012,7 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     entry.set("waterlogs_at", waterlogs_at)?;
     entry.set("tick_rate", tick_rate)?;
     entry.set("evaporates", evaporates)?;
+    entry.set("opacity", opacity)?;
     entry.set("color_r", color[0])?;
     entry.set("color_g", color[1])?;
     entry.set("color_b", color[2])?;
@@ -7325,12 +7341,13 @@ const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "defa
 /// a misspelled field is a mod that thinks it configured something.
 const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator"];
 
-const FLUID_FIELDS: [&str; 6] = [
+const FLUID_FIELDS: [&str; 7] = [
     "id",
     "material",
     "waterlogs_at",
     "tick_rate",
     "evaporates",
+    "opacity",
     "color",
 ];
 

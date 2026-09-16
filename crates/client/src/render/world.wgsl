@@ -1075,10 +1075,26 @@ const CELLS_PER_BLOCK: f32 = 3.0;
 //
 // A shade under three quarters: enough to see the shape of the bottom through a
 // pond and to know that a river has stones in it, not so much that a deep pool
-// stops reading as deep. Engine-wide rather than per fluid, which is the honest
-// limit here: `register_fluid` has a `color` and no alpha, and adding one is a
-// protocol change rather than a shader constant.
+// stops reading as deep.
+//
+// **The fallback now, not the rule.** `register_fluid{ opacity }` is per fluid
+// and rides in the spare slot of its material's tint row; this is what a fluid
+// whose material has no row is drawn at, which is what every fluid was drawn at
+// before the field existed.
 const FLUID_ALPHA: f32 = 0.72;
+
+// What a surface of this fluid hides, from its material's tint row.
+//
+// `params.w` holds `1.0 + opacity`, so zero means no fluid declared anything
+// for this material — a fluid may legitimately ask for an opacity of zero, and
+// the offset is what keeps "invisible" apart from "unsaid".
+fn fluid_opacity(material: u32) -> f32 {
+    let declared = tints[material & 0xFFFFu].params.w;
+    if (declared <= 0.0) {
+        return FLUID_ALPHA;
+    }
+    return clamp(declared - 1.0, 0.0, 1.0);
+}
 
 // Blocks per second a flowing surface's texture travels at full flow.
 //
@@ -1211,7 +1227,10 @@ fn fluid_fragment(input: FluidOut) -> @location(0) vec4<f32> {
     // `chunk_world`, which is also why `material_tint` reads the field at the
     // origin for fluid rather than where the pond is.
     let colour = surface(lit, shadow, 1.0);
-    return vec4<f32>(colour.rgb, colour.a * FLUID_ALPHA);
+    // `slot` IS the material id — the atlas is indexed by it (see
+    // `unpack_vertex`) — which is what lets the opacity ride in the tint row
+    // without the fluid vertex carrying anything new.
+    return vec4<f32>(colour.rgb, colour.a * fluid_opacity(input.slot));
 }
 
 // One camera-facing sprite: grass, a fern, a flower. Contract §8.4.
