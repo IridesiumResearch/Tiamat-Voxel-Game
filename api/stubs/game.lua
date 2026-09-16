@@ -2262,6 +2262,7 @@ function game.register_on_punch(callback) end
 ---@field block string? The blocking block's id, or nil if nothing registered it.
 ---@field occupancy integer 27-bit mask of which of the blocking block's sub-nodes are filled.
 ---@field units integer How many of the 27 are filled — `occupancy`'s popcount.
+---@field meets string? The OTHER fluid in `into`, e.g. `"my_mod:water"`, when a fluid rather than terrain is in the way; nil for terrain.
 
 ---Registers a listener for flows that could not happen.
 ---
@@ -2289,6 +2290,15 @@ function game.register_on_punch(callback) end
 ---DROPPED rather than queued — so a shoreline a thousand blocks long is sampled
 ---across several ticks rather than delivered at once. Write the callback so that
 ---missing one is harmless: the same shoreline is still there next tick.
+---
+---# Another fluid is in the way
+---
+---Two fluids never share a block, so a flow into a block of a DIFFERENT fluid is
+---reported too — beside it, and also straight down, where anything else below is
+---a floor and is not. `meets` names that fluid, and `block` is whatever terrain
+---shares the block with it, usually air. This is how
+---lava learns it has met water. The same fluid beside it is one body, not a
+---blocked flow.
 ---
 ---Nothing fires for a settled world at all. The solver only examines blocks an
 ---edit woke or a flow is moving through, so a pond nobody has touched costs

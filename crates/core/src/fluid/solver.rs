@@ -62,6 +62,8 @@ use super::{Fluid, FluidId, capacity};
 /// Down is handled separately and first, because falling beats spreading. Up is
 /// never a flow direction — this fluid does not climb — and is absent.
 const LATERAL: [[i32; 3]; 4] = [[-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1]];
+/// The block under, for the one case [`record_blocked`] looks down.
+const BELOW: [i32; 3] = [0, -1, 0];
 
 /// The world, as the fluid solver needs to see it.
 ///
@@ -201,6 +203,9 @@ pub struct Blocked {
     pub fluid: FluidId,
     /// How much it was pressing with, in cells.
     pub volume: u32,
+    /// The OTHER fluid in `into`, when that is what stopped it; `None` for
+    /// terrain. Two fluids never share a block, so this is a meeting.
+    pub meets: Option<FluidId>,
 }
 
 /// One block soaking up fluid.
@@ -618,9 +623,19 @@ fn evaporates(tuning: Tuning, pos: BlockPos, seed: u64, fluid_tick: u64) -> bool
 /// every solid block adjacent to any milk anywhere would generate an event every
 /// time the pond was examined.
 ///
-/// The block BELOW is not considered. Fluid stopped by a floor is not blocked,
-/// it is resting; that is the ordinary case and a mod hearing about it would
-/// hear about every pond in the world having a bottom.
+/// The block BELOW is not considered unless it holds a DIFFERENT fluid. Fluid
+/// stopped by a floor is not blocked, it is resting; that is the ordinary case
+/// and a mod hearing about it would hear about every pond in the world having a
+/// bottom. But lava come down onto a lake has met water, not a floor, and that
+/// meeting is the one thing a mod cannot see any other way.
+///
+/// **Another fluid is reported** wherever it is met (2026-09-16: "lava needs to
+/// create blocks that are a mix of lava rock, stone, obsidian and metal when
+/// they come into contact"). Two fluids never mix — [`accepts`] gives the space
+/// to whichever got there first — so until now a flow into a block of another
+/// fluid was neither a flow nor a blocked one, and lava could lie against a sea
+/// for ever with nothing told. The event's `into` holds the other fluid; the
+/// same fluid in `into` is still a meeting of one body, not a blocked flow.
 fn record_blocked(
     world: &impl Neighbourhood,
     tuning: Tuning,
@@ -632,7 +647,7 @@ fn record_blocked(
         return;
     }
 
-    for offset in &LATERAL {
+    for offset in LATERAL.iter().chain(std::iter::once(&BELOW)) {
         let into = BlockPos::new(pos.x + offset[0], pos.y + offset[1], pos.z + offset[2]);
         // Unloaded is not blocked. A flow reaching the edge of the loaded world
         // is a flow nobody can answer for yet, and reporting it would tell a mod
@@ -640,19 +655,28 @@ fn record_blocked(
         if world.occupancy(into).is_none() {
             continue;
         }
-        // Somewhere it could go is not somewhere it was stopped.
-        if accepts(world, tuning, into, here.fluid()) > 0 {
-            continue;
-        }
-        // Already holding this fluid means it is not blocked, it is met.
-        if !world.fluid(into).is_empty() {
-            continue;
+        let there = world.fluid(into);
+        let meets_another = !there.is_empty() && there.fluid() != here.fluid();
+        if !meets_another {
+            // Below, anything but another fluid is the floor it rests on.
+            if offset == &BELOW {
+                continue;
+            }
+            // Somewhere it could go is not somewhere it was stopped.
+            if accepts(world, tuning, into, here.fluid()) > 0 {
+                continue;
+            }
+            // Already holding this fluid means it is not blocked, it is met.
+            if !there.is_empty() {
+                continue;
+            }
         }
         out.push(Blocked {
             from: pos,
             into,
             fluid: here.fluid(),
             volume: here.volume(),
+            meets: meets_another.then(|| there.fluid()),
         });
     }
 }
@@ -1024,6 +1048,54 @@ mod tests {
             solver.tick(scene, tuning, usize::MAX, seed, tick);
         }
         solver.take_sinks()
+    }
+
+    #[test]
+    fn a_fluid_against_another_is_reported_beside_and_below_but_its_own_is_not() {
+        // Two fluids never mix, so lava beside or on top of water is stuck
+        // there for good — and a mod turning the meeting into rock can only
+        // learn of it here. A floor under it, and more of itself beside it,
+        // are still not blocked flows.
+        const LAVA: FluidId = FluidId(2);
+        let mut scene = Scene::sealed(4);
+        for x in -3..=3 {
+            for z in -3..=3 {
+                scene.make_solid(x, -3, z);
+            }
+        }
+        // Water at the bottom; lava in the block beside it and the one above.
+        scene.pour(BlockPos::new(0, -2, 0), MAX_VOLUME);
+        scene.pour(BlockPos::new(1, -2, 0), MAX_VOLUME);
+        scene.fluid.insert((0, -1, 0), Fluid::new(LAVA, MAX_VOLUME));
+        scene
+            .fluid
+            .insert((-1, -2, 0), Fluid::new(LAVA, MAX_VOLUME));
+        let mut out = Vec::new();
+        record_blocked(&scene, Tuning::DEFAULT, BlockPos::new(0, -1, 0), &mut out);
+        assert!(
+            out.iter().any(|b| b.into == BlockPos::new(0, -2, 0)
+                && b.fluid == LAVA
+                && b.meets == Some(MILK)),
+            "lava resting on water was not reported: {out:?}"
+        );
+        let mut beside = Vec::new();
+        record_blocked(
+            &scene,
+            Tuning::DEFAULT,
+            BlockPos::new(-1, -2, 0),
+            &mut beside,
+        );
+        assert!(
+            beside.iter().any(|b| b.into == BlockPos::new(0, -2, 0)),
+            "lava beside water was not reported: {beside:?}"
+        );
+        let mut own = Vec::new();
+        record_blocked(&scene, Tuning::DEFAULT, BlockPos::new(1, -2, 0), &mut own);
+        assert!(
+            own.iter()
+                .all(|b| b.into != BlockPos::new(0, -2, 0) && b.into != BlockPos::new(1, -3, 0)),
+            "water beside water, or on its floor, was reported: {own:?}"
+        );
     }
 
     #[test]

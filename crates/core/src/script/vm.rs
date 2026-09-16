@@ -964,6 +964,9 @@ pub struct FluidFlowEvent {
     /// count. A mod deciding whether to swap in a waterlogged block wants the
     /// count; a mod carving a channel wants the shape.
     pub occupancy: u32,
+    /// The other fluid in `into`, by its registered string id, when a fluid
+    /// rather than terrain is what is in the way; `None` for terrain.
+    pub meets: Option<String>,
 }
 
 /// What a round of cancellable hooks decided.

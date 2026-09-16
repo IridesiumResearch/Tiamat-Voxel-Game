@@ -2455,6 +2455,9 @@ impl ScriptVm for MluaVm {
                 .find(|(_, id)| *id == event.blocked_by)
                 .map(|(name, _)| name);
             table.set("block", name)?;
+            // The other fluid, when that is what is in the way: two fluids
+            // never share a block, so this is how lava learns it met water.
+            table.set("meets", event.meets.as_deref())?;
             Ok(table)
         }) else {
             return HookOutcome::allow();
@@ -9566,6 +9569,7 @@ mod tests {
             blocked_by: rock,
             // Three cells filled, which is what `units` must come to.
             occupancy: 0b111,
+            meets: None,
         });
         assert!(outcome.faults.is_empty(), "{:?}", outcome.faults);
 
@@ -9603,6 +9607,7 @@ mod tests {
             volume: 27,
             blocked_by: MaterialId::UNKNOWN,
             occupancy: crate::block::OCCUPANCY_FULL,
+            meets: None,
         });
         assert_eq!(outcome.faults.len(), 1, "the mod should have been faulted");
         assert_eq!(outcome.faults[0].0, "broken");

@@ -4819,6 +4819,13 @@ impl ServerHandle {
                                     // can be listening for it by name.
                                     continue;
                                 };
+                                let meets = event.meets.and_then(|other| {
+                                    fluidics
+                                        .read()
+                                        .expect("fluid lock")
+                                        .name_of(other)
+                                        .map(str::to_owned)
+                                });
                                 let cells = world
                                     .block_cells(&domain, event.into, &mut source)
                                     .unwrap_or(tiamot_core::block::EMPTY_CELLS);
@@ -4847,6 +4854,7 @@ impl ServerHandle {
                                         volume: event.volume,
                                         blocked_by: material,
                                         occupancy,
+                                        meets,
                                     });
                                 for (mod_id, err) in &verdict.faults {
                                     error!(mod_id = %mod_id, "mod disabled after an on_fluid_flow failure: {err}");
