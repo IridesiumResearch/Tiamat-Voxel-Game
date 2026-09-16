@@ -1012,6 +1012,70 @@ the whole generation path), `core_tools` (118, tools and actions), `core_gear`
 
 ---
 
+## Limits worth knowing before you design around them
+
+Everything here is true as of 2026-09-16 and is the kind of thing that is
+cheaper to read than to discover. None of it is a rule the engine wants; each is
+work that has not been done, and each will move.
+
+**Fluid physics is one setting for the whole world.** `tick_rate`,
+`waterlogs_at` and `evaporates` are read from whichever fluid registered first —
+alphabetically by qualified id, across every loaded mod — and applied to every
+fluid in the world. `core_milk:milk` sorts before `my_mod:water`, so a
+reference mod you never thought about can be setting your sea's speed. Do not
+design a viscous fluid beside a quick one, or a puddle that evaporates beside a
+sea that must not.
+
+**Two fluids never mix, and the first one there keeps the space.** A block holds
+one fluid and a volume of it, so a move into a block holding a different fluid
+is refused: nothing merges, nothing is displaced, nothing is destroyed. Lava
+running into water does not hiss, harden or vanish on its own — it stops. The
+meeting IS reported to `register_on_fluid_flow`, beside or below, with `meets`
+naming the other fluid, so what it MEANS — steam, obsidian, a hiss — is yours to
+write from there.
+
+**Ground drinks any fluid.** `absorbs` is a property of the material and nothing
+asks what is touching it, so the bed that soaks a puddle also drains the river
+it is the bed of.
+
+**`everywhere = true` on a loop means every connected player, in every domain.**
+A storm you start for one valley plays inside somebody's ship. There is no way
+to address a sound to one player, no fades, and starting a loop that is already
+running restarts the clip from its beginning — so a loop whose gain you nudge
+every tick never gets past its first second. A positioned loop is panned once,
+where the listener stood when it started, and does not follow them.
+
+**The sky is registration-only.** `register_sky` takes its keyframes in the
+registration window and the client interpolates them from the clock. Nothing a
+mod does afterwards can darken the sky, close the horizon, or change the sun:
+there is no runtime sky call. A storm has to be expressible in particles,
+sounds, fog and tint, or wait for the engine.
+
+**A place's fog and tint are asked when a chunk is SERVED, and never again.**
+Change what your callback returns and only chunks a player has not loaded yet
+will show it — which means the change appears at the edge of the view distance
+and never where the player is standing. Good for a world that varies by place,
+useless for weather crossing a world somebody is already in.
+
+**There is no surface query.** Nothing keeps a per-column "top" — sunlight asks
+one block at a time and caches nothing — so finding the ground under a point
+means `game.get_block` down a column, one VM crossing per block. `noise_heightmap`
+and `Density:at` are cheap and describe the terrain as GENERATED, which is a
+different question the moment somebody digs. If you need the real surface at
+runtime, keep the scan short (start just above where you expect ground) and do a
+few columns a tick, not a field of them.
+
+**Particles are decoration and are dropped under load.** A burst goes to every
+player within `radius` in that domain — you cannot send one to a single player,
+so a per-player "particles off" setting in your own mod cannot be honoured — and
+a client that falls behind loses bursts rather than queuing them. Anything that
+must be seen every tick is something to make smaller.
+
+**A mod cannot read another mod's state.** Each mod gets a fresh sandbox and
+`game.storage` is private, so `depends` guarantees load order and nothing else.
+Sharing a field or a table between two mods means copying constants, which goes
+quietly wrong the day the other mod retunes them.
+
 ## Before you say it works
 
 - `--check-mods` passes and your mod is listed.
@@ -1023,6 +1087,8 @@ the whole generation path), `core_tools` (118, tools and actions), `core_gear`
 - Quantities in units, and `count` never confused with `units`.
 - A hook that can refuse returns the right thing — check the stub, because
   `false`, `nil` and a table mean different things per hook.
+- Nothing in your design rests on something in "Limits worth knowing" above —
+  or if it does, you know it does and have said so.
 
 ## Licensing
 
