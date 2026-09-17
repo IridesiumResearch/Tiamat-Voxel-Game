@@ -121,6 +121,7 @@ fn start(name: &str) -> (ServerHandle, PathBuf) {
     let root = scratch(name);
     let mods = write_pourer(&root);
     let server = ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: root.clone(),
         identity_path: None,

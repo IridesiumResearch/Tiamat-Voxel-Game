@@ -392,6 +392,7 @@ fn bench_mode(
     // p99 while the physics itself costs microseconds.
     let mods = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../game");
     let server = match ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: world,
         identity_path: None,

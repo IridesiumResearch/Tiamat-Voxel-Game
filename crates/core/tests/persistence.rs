@@ -1481,3 +1481,44 @@ fn saving_a_chunk_forgets_the_summaries_that_described_it() {
         "the batch save left summaries describing chunks it replaced"
     );
 }
+
+#[test]
+fn a_worlds_options_survive_a_reopen_and_can_be_peeked_before_the_mods_load() {
+    // **A world option is fixed at creation like the seed**, so it lives in the
+    // same `meta` table and is read the same two ways: through an open world,
+    // and BEFORE one is open — the mods have to see the choices before
+    // `init.lua` runs, and `WorldDb::open` needs the registry the mods have not
+    // built yet, which is what the peek is for.
+    // `scratch` hands back the FILE, cleared of any WAL sidecars.
+    let path = scratch("world-options");
+
+    // A file that is not there is a world about to be made: nothing chosen,
+    // and not an error.
+    assert_eq!(
+        WorldDb::peek_world_options(&path).expect("peek a missing file"),
+        Vec::<(String, String)>::new()
+    );
+
+    let chosen = vec![
+        ("biomes:biome".to_owned(), "taiga".to_owned()),
+        ("biomes:rivers".to_owned(), "false".to_owned()),
+    ];
+    {
+        let mut registry = registry_with(&["stone"]);
+        let db = WorldDb::open(&path, &mut registry).expect("open");
+        assert_eq!(
+            db.world_options().expect("read"),
+            Vec::<(String, String)>::new()
+        );
+        db.set_world_options(&chosen).expect("write");
+        assert_eq!(db.world_options().expect("read back"), chosen);
+    }
+
+    // Peeked, read-only, with no registry and no open world.
+    assert_eq!(WorldDb::peek_world_options(&path).expect("peek"), chosen);
+
+    // And still there for whoever opens it properly afterwards.
+    let mut registry = registry_with(&["stone"]);
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(db.world_options().expect("read after reopen"), chosen);
+}

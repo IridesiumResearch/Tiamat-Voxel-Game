@@ -53,6 +53,7 @@ fn start_with_mods(name: &str) -> ServerHandle {
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
         identity_path: None,
@@ -75,6 +76,7 @@ fn start(name: &str) -> ServerHandle {
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
         identity_path: None,

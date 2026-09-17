@@ -52,6 +52,11 @@ pub enum Action {
         name: String,
         /// The world seed, or `None` for a fresh random one.
         seed: Option<u64>,
+        /// What the player chose for each enabled mod's world options, as
+        /// `(qualified id, value text)` — every option, defaults included, so
+        /// the world file says what it was made with. See
+        /// `tiamot_core::modload::WorldOption`.
+        world_options: Vec<(String, String)>,
     },
     /// Keep this entry in the list. A server somebody typed an address for.
     ///
@@ -110,6 +115,12 @@ pub struct Front {
     /// something to remember for them — this is a per-session choice, made
     /// beside the button that acts on it.
     pub host_on_lan: bool,
+    /// The player's answers to the enabled mods' world options, by qualified
+    /// id: `0`/`1` for a toggle, a one-based index for a choice. An option not
+    /// in here is at its declared default. Per screen, not remembered: a
+    /// choice belongs to the world it makes, and the next world starts from
+    /// the defaults exactly as the seed box starts empty.
+    pub world_options: std::collections::BTreeMap<String, u32>,
 }
 
 impl Front {
@@ -132,7 +143,76 @@ impl Front {
             catalogue_dirty: false,
             scale_draft: None,
             host_on_lan: false,
+            world_options: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// What a world made now would be made with: every enabled mod's world
+    /// options, each as the text the mod will read back.
+    ///
+    /// Defaults included, not only what was touched, so the world file records
+    /// what its terrain was generated with even for options nobody looked at —
+    /// a mod that later changes a default must not change an existing world.
+    #[must_use]
+    pub fn chosen_world_options(&self) -> Vec<(String, String)> {
+        let mut chosen = Vec::new();
+        for listing in self.catalogue.mods.iter().filter(|listing| listing.enabled) {
+            for option in &listing.world_options {
+                let id = option.qualified(&listing.id);
+                let picked = self
+                    .world_options
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(option.default);
+                let value = if option.is_toggle() {
+                    tiamot_core::modload::WorldOptionValue::Toggle(picked != 0)
+                } else {
+                    let index = usize::try_from(picked.saturating_sub(1)).unwrap_or(0);
+                    match option.options.get(index) {
+                        Some(text) => tiamot_core::modload::WorldOptionValue::Choice(text.clone()),
+                        None => option.default_value(),
+                    }
+                };
+                chosen.push((id, value.as_text()));
+            }
+        }
+        chosen
+    }
+
+    /// Draws the enabled mods' world options under the seed box.
+    ///
+    /// **Only for mods that are on**, because an option for a mod that will
+    /// not load is a question with no one to answer it — and only here, on
+    /// creation, because these are fixed once the world exists.
+    fn world_option_rows(&mut self, ui: &mut egui::Ui) {
+        let mut chosen = std::mem::take(&mut self.world_options);
+        for listing in self.catalogue.mods.iter().filter(|listing| listing.enabled) {
+            for option in &listing.world_options {
+                let id = option.qualified(&listing.id);
+                let picked = chosen.entry(id.clone()).or_insert(option.default);
+                ui.horizontal(|ui| {
+                    if option.is_toggle() {
+                        let mut on = *picked != 0;
+                        ui.checkbox(&mut on, &option.name)
+                            .on_hover_text(&option.description);
+                        *picked = u32::from(on);
+                    } else {
+                        ui.label(&option.name).on_hover_text(&option.description);
+                        let index = usize::try_from(picked.saturating_sub(1)).unwrap_or(0);
+                        let showing = option.options.get(index).map_or("", String::as_str);
+                        egui::ComboBox::from_id_salt(&id)
+                            .selected_text(showing)
+                            .show_ui(ui, |ui| {
+                                for (at, text) in option.options.iter().enumerate() {
+                                    let one_based = u32::try_from(at + 1).unwrap_or(1);
+                                    ui.selectable_value(picked, one_based, text);
+                                }
+                            });
+                    }
+                });
+            }
+        }
+        self.world_options = chosen;
     }
 
     /// Draws a frame and returns what the player asked for.
@@ -335,6 +415,7 @@ impl Front {
                 action = Action::Create {
                     name,
                     seed: crate::launcher::seed_from(&self.seed),
+                    world_options: self.chosen_world_options(),
                 };
             }
         });
@@ -356,6 +437,8 @@ impl Front {
                      one. Only used when the world is NEW — an existing world keeps its own.",
             );
         });
+        // The mods' own choices about a world, beside the engine's one.
+        self.world_option_rows(ui);
         ui.horizontal(|ui| {
             ui.label("Server");
             ui.text_edit_singleline(&mut self.address);
@@ -775,6 +858,7 @@ mod tests {
 
     fn listing(id: &str) -> crate::launcher::Listing {
         crate::launcher::Listing {
+            world_options: Vec::new(),
             id: id.to_owned(),
             name: id.to_owned(),
             description: String::new(),
@@ -913,6 +997,65 @@ mod tests {
         assert_eq!(screen.remember_typed(), Action::None);
         assert!(screen.library.entries.is_empty());
         assert!(screen.notice.is_some());
+    }
+
+    #[test]
+    fn a_world_option_is_offered_for_mods_that_are_on_and_answers_its_text() {
+        // **Asked for from the window: a start-screen setting that makes the
+        // whole world one biome.** What the screen hands the server is every
+        // enabled mod's world options as text — defaults included, so the
+        // world file records what it was made with — and nothing for a mod
+        // that is off, because there is nobody to answer.
+        let option = |id: &str, options: &[&str]| tiamot_core::modload::WorldOption {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            description: String::new(),
+            options: options.iter().map(|text| (*text).to_owned()).collect(),
+            default: 1,
+        };
+        let mut biomes = listing("biomes");
+        biomes.world_options = vec![
+            option("biome", &["spindle", "savanna", "taiga"]),
+            option("rivers", &[]),
+        ];
+        let mut off = listing("weather");
+        off.enabled = false;
+        off.world_options = vec![option("storms", &["calm", "wild"])];
+        let mut screen = Front::new(
+            Library {
+                entries: Vec::new(),
+            },
+            Catalogue {
+                mods: vec![biomes, off],
+                problem: None,
+            },
+        );
+
+        // Untouched: the defaults, and only the enabled mod's.
+        assert_eq!(
+            screen.chosen_world_options(),
+            vec![
+                ("biomes:biome".to_owned(), "spindle".to_owned()),
+                ("biomes:rivers".to_owned(), "true".to_owned()),
+            ]
+        );
+
+        // Chosen: the third biome and rivers off, as the widgets record them —
+        // a one-based index for a choice, 0 or 1 for a toggle — and handed on
+        // as the text the mod compares against.
+        screen.world_options.insert("biomes:biome".to_owned(), 3);
+        screen.world_options.insert("biomes:rivers".to_owned(), 0);
+        assert_eq!(
+            screen.chosen_world_options(),
+            vec![
+                ("biomes:biome".to_owned(), "taiga".to_owned()),
+                ("biomes:rivers".to_owned(), "false".to_owned()),
+            ]
+        );
+
+        // And the rows draw without panicking, with the options on screen.
+        let ctx = egui::Context::default();
+        let _ = frame(&mut screen, &ctx, Vec::new());
     }
 
     #[test]

@@ -45,6 +45,7 @@ fn settings(dir: &std::path::Path) -> Settings {
         seed: Some(11),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     }
 }
 

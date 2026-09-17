@@ -65,6 +65,7 @@ fn reference_mods() -> PathBuf {
 
 fn start(name: &str) -> ServerHandle {
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: scratch(&format!("{name}-world")),
         identity_path: None,

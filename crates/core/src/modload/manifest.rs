@@ -13,6 +13,167 @@ pub const MANIFEST_FILE: &str = "mod.toml";
 /// The entry script every mod must have.
 pub const ENTRY_FILE: &str = "init.lua";
 
+/// A choice a mod offers at WORLD CREATION, fixed for the life of the world.
+///
+/// **Declared in `mod.toml` and not in Lua, and that is the whole reason it
+/// exists.** A `game.register_setting` arrives with a player, after the world
+/// is made, so it cannot shape terrain — and the front screen has to be able
+/// to show a world's options before any mod has run. A manifest is read
+/// without a VM, so the launcher can draw these beside the seed box, and the
+/// answer travels with the world exactly as the seed does: chosen once,
+/// stored in the world file, handed to every VM that generates or ticks it.
+///
+/// ```toml
+/// [[world_option]]
+/// id = "biome"
+/// name = "Biome"
+/// description = "One biome everywhere, or the whole spindle."
+/// options = ["spindle", "savanna", "taiga"]
+/// default = 1
+/// ```
+///
+/// No `options` is a toggle, with `default` 0 or 1. With them it is a choice,
+/// and `default` is a ONE-BASED index into them — the same convention
+/// `register_setting` uses, so a mod author never learns two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldOption {
+    /// Unqualified id, `snake_case`. Qualified against the mod as `mod:id`.
+    pub id: String,
+    /// What the screen calls it.
+    pub name: String,
+    /// One line under it.
+    #[serde(default)]
+    pub description: String,
+    /// The choices, or none for a toggle.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// The answer a world made without choosing gets: `0`/`1` for a toggle, a
+    /// one-based index for a choice.
+    #[serde(default = "WorldOption::default_default")]
+    pub default: u32,
+}
+
+/// What a world chose for one option, as a mod reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldOptionValue {
+    /// A toggle's answer.
+    Toggle(bool),
+    /// A choice's answer: the option's TEXT, never its index, so a mod that
+    /// inserts an option above it keeps comparing against the same string.
+    Choice(String),
+}
+
+impl WorldOptionValue {
+    /// The value as the world file and the wire carry it.
+    ///
+    /// Text either way — `"true"`/`"false"` for a toggle, the option's own text
+    /// for a choice — so a world file is readable by a person and a renamed
+    /// option is visibly a mismatch rather than an index pointing at the wrong
+    /// thing.
+    #[must_use]
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Toggle(on) => if *on { "true" } else { "false" }.to_owned(),
+            Self::Choice(text) => text.clone(),
+        }
+    }
+}
+
+impl WorldOption {
+    fn default_default() -> u32 {
+        1
+    }
+
+    /// Whether this is a checkbox rather than a dropdown.
+    #[must_use]
+    pub fn is_toggle(&self) -> bool {
+        self.options.is_empty()
+    }
+
+    /// The id as it is stored and asked for: `mod:id`.
+    #[must_use]
+    pub fn qualified(&self, mod_id: &str) -> String {
+        format!("{mod_id}:{}", self.id)
+    }
+
+    /// The declared default, as a value.
+    #[must_use]
+    pub fn default_value(&self) -> WorldOptionValue {
+        if self.is_toggle() {
+            WorldOptionValue::Toggle(self.default != 0)
+        } else {
+            let index = usize::try_from(self.default.saturating_sub(1)).unwrap_or(0);
+            WorldOptionValue::Choice(
+                self.options
+                    .get(index)
+                    .or_else(|| self.options.first())
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        }
+    }
+
+    /// What a world with `stored` as its answer chose, or the default where
+    /// the stored text is missing or names nothing this declaration has.
+    ///
+    /// **A stored value that no longer matches is the default, not an error.**
+    /// A mod that renames an option leaves every world made before the rename
+    /// holding the old text; refusing to start those worlds would be worse
+    /// than generating them with the mod's own fallback, and the mod can tell
+    /// from `game.world_option` that it got the default.
+    #[must_use]
+    pub fn resolve(&self, stored: Option<&str>) -> WorldOptionValue {
+        let Some(stored) = stored else {
+            return self.default_value();
+        };
+        if self.is_toggle() {
+            return match stored {
+                "true" => WorldOptionValue::Toggle(true),
+                "false" => WorldOptionValue::Toggle(false),
+                _ => self.default_value(),
+            };
+        }
+        if self.options.iter().any(|option| option == stored) {
+            WorldOptionValue::Choice(stored.to_owned())
+        } else {
+            self.default_value()
+        }
+    }
+
+    /// Checks one declaration.
+    fn validate(&self, mod_id: &str) -> Result<(), ManifestError> {
+        let bad = |reason: &str| ManifestError::BadWorldOption {
+            id: mod_id.to_owned(),
+            option: self.id.clone(),
+            reason: reason.to_owned(),
+        };
+        if !is_valid_id(&self.id) {
+            return Err(bad(
+                "ids must be lowercase, start with a letter, and contain only letters, digits \
+                 and underscores",
+            ));
+        }
+        if self.name.trim().is_empty() {
+            return Err(bad("it needs a `name` for the screen to show"));
+        }
+        if self.options.iter().any(|option| option.trim().is_empty()) {
+            return Err(bad("an option's text cannot be empty"));
+        }
+        if self.is_toggle() {
+            if self.default > 1 {
+                return Err(bad("a toggle's `default` is 0 or 1"));
+            }
+        } else if self.default == 0 || self.default as usize > self.options.len() {
+            return Err(bad(
+                "`default` is a one-based index into `options`, so it must be at least 1 and \
+                 at most their count",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A mod's declared identity and dependencies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +214,10 @@ pub struct ModManifest {
     /// SPDX licence expression.
     #[serde(default)]
     pub license: String,
+
+    /// Choices offered when a world is made. See [`WorldOption`].
+    #[serde(default, rename = "world_option")]
+    pub world_options: Vec<WorldOption>,
 }
 
 /// A manifest could not be read or is not valid.
@@ -88,6 +253,17 @@ pub enum ManifestError {
         path: PathBuf,
         /// The offending id.
         id: String,
+    },
+
+    /// A `[[world_option]]` is malformed.
+    #[error("mod `{id}` declares world option `{option}` wrongly: {reason}")]
+    BadWorldOption {
+        /// The mod.
+        id: String,
+        /// The option's own id, or what it had for one.
+        option: String,
+        /// What is wrong with it.
+        reason: String,
     },
 
     /// A version is not valid semver.
@@ -198,6 +374,18 @@ impl ModManifest {
                 return Err(ManifestError::BadId {
                     path: dir.to_path_buf(),
                     id: alias.clone(),
+                });
+            }
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for option in &self.world_options {
+            option.validate(&self.id)?;
+            if !seen.insert(option.id.as_str()) {
+                return Err(ManifestError::BadWorldOption {
+                    id: self.id.clone(),
+                    option: option.id.clone(),
+                    reason: "declared twice".to_owned(),
                 });
             }
         }
@@ -322,6 +510,87 @@ mod tests {
         assert!(!requirement.matches(&semver::Version::parse("0.9.0").expect("v")));
         assert!(requirement.matches(&semver::Version::parse("1.5.0").expect("v")));
         assert!(!requirement.matches(&semver::Version::parse("2.0.0").expect("v")));
+    }
+
+    #[test]
+    fn a_world_option_parses_and_is_checked() {
+        let manifest: ModManifest = toml::from_str(
+            r#"
+id = "biomes"
+name = "Biomes"
+version = "1.0.0"
+
+[[world_option]]
+id = "biome"
+name = "Biome"
+options = ["spindle", "savanna"]
+default = 2
+
+[[world_option]]
+id = "rivers"
+name = "Rivers"
+"#,
+        )
+        .expect("parses");
+        assert_eq!(manifest.world_options.len(), 2);
+        let biome = &manifest.world_options[0];
+        assert!(!biome.is_toggle());
+        assert_eq!(biome.qualified("biomes"), "biomes:biome");
+        assert_eq!(
+            biome.default_value(),
+            WorldOptionValue::Choice("savanna".into())
+        );
+        assert_eq!(
+            biome.resolve(Some("spindle")),
+            WorldOptionValue::Choice("spindle".into())
+        );
+        // A value the option no longer has is the default, not an error.
+        assert_eq!(
+            biome.resolve(Some("tundra")),
+            WorldOptionValue::Choice("savanna".into())
+        );
+        let rivers = &manifest.world_options[1];
+        assert!(rivers.is_toggle());
+        assert_eq!(rivers.default_value(), WorldOptionValue::Toggle(true));
+        assert_eq!(
+            rivers.resolve(Some("false")),
+            WorldOptionValue::Toggle(false)
+        );
+        assert_eq!(
+            rivers.resolve(Some("maybe")),
+            WorldOptionValue::Toggle(true)
+        );
+
+        // And the checks, each the one a mod author would trip over.
+        for (body, reason) in [
+            ("id = \"Biome\"\nname = \"x\"", "capitals"),
+            (
+                "id = \"biome\"\nname = \"x\"\noptions = [\"a\"]\ndefault = 0",
+                "a zero default",
+            ),
+            (
+                "id = \"biome\"\nname = \"x\"\noptions = [\"a\"]\ndefault = 2",
+                "a default past the end",
+            ),
+            (
+                "id = \"biome\"\nname = \"x\"\ndefault = 2",
+                "a toggle default of 2",
+            ),
+            ("id = \"biome\"\nname = \"\"", "an empty name"),
+        ] {
+            let text = format!(
+                "id = \"m\"\nname = \"m\"\nversion = \"1.0.0\"\n[[world_option]]\n{body}\n"
+            );
+            let manifest: ModManifest = toml::from_str(&text).expect("parses");
+            let dir = std::env::temp_dir();
+            assert!(
+                matches!(
+                    manifest.validate(&dir),
+                    Err(ManifestError::BadWorldOption { .. })
+                ),
+                "{reason} should be refused"
+            );
+        }
     }
 
     #[test]

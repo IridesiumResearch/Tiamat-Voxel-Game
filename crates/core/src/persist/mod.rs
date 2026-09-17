@@ -86,6 +86,11 @@ pub mod meta_keys {
     pub const CREATED_AT: &str = "created_at";
     /// Human-readable world name.
     pub const WORLD_NAME: &str = "world_name";
+    /// What the world chose for each mod's world options, as `id\tvalue`
+    /// lines, qualified ids. Chosen when the world is made and never changed
+    /// after — the same rule the seed follows, for the same reason: terrain
+    /// generated later has to agree with terrain generated before.
+    pub const WORLD_OPTIONS: &str = "world_options";
     /// Domain instances created at runtime, as `instance\ttemplate` lines.
     ///
     /// Which instances exist has to survive a restart or a ship somebody built
@@ -318,6 +323,68 @@ impl WorldDb {
 
         let conn = Connection::open(&path)?;
         Self::from_connection(conn, path, registry)
+    }
+
+    /// Reads what an EXISTING world chose for its mods' world options, without
+    /// opening it.
+    ///
+    /// **Before the mods load, which is why this is not [`Self::open`].** A
+    /// mod may register differently for one world than another, so the
+    /// choices have to be in the VM before `init.lua` runs — and `open` needs
+    /// the material registry, which the mods have not built yet. Read-only, no
+    /// schema work, no pragmas: it looks at one row of `meta` and leaves.
+    ///
+    /// Empty for a file that is not there (a world about to be made), for one
+    /// with no `meta` table, and for a world that chose nothing. None of those
+    /// is an error a caller could act on differently.
+    ///
+    /// **An ordinary open, not a read-only one, and that is deliberate.** The
+    /// world is in WAL mode, so a row written by the last connection may still
+    /// be in the `-wal` sidecar rather than the main file; a connection opened
+    /// `READ_ONLY` cannot create the `-shm` index it needs to read that
+    /// sidecar, and on some hosts it then sees the main file alone — a world
+    /// with no `meta` table yet, which this function honestly reports as
+    /// "nothing chosen". That is a world generated with the wrong options,
+    /// silently. The file's existence is checked first, so nothing is created;
+    /// no schema is applied and no pragma set, so nothing is changed.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure on a file that IS there and does open.
+    pub fn peek_world_options(path: impl AsRef<Path>) -> Result<Vec<(String, String)>, WorldError> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open(path)?;
+        let text: Option<Vec<u8>> = match conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![meta_keys::WORLD_OPTIONS],
+                |row| row.get(0),
+            )
+            .optional()
+        {
+            Ok(found) => found,
+            // No `meta` table is a file that is not a world yet; the same
+            // answer as no file.
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("no such table") =>
+            {
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
+        Ok(text
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|text| {
+                text.lines()
+                    .filter_map(|line| line.split_once('\t'))
+                    .filter(|(id, _)| !id.is_empty())
+                    .map(|(id, value)| (id.to_owned(), value.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Opens an in-memory world. Test and singleplayer-preview use only.
@@ -1763,6 +1830,45 @@ impl WorldDb {
     /// Any SQL failure.
     pub fn set_world_seed(&self, seed: u64) -> Result<(), WorldError> {
         self.set_meta(meta_keys::WORLD_SEED, &seed.to_le_bytes())
+    }
+
+    /// Reads what this world chose for its mods' world options, as
+    /// `(qualified id, value text)`. Empty for a world that chose nothing,
+    /// which includes every world made before options existed.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn world_options(&self) -> Result<Vec<(String, String)>, WorldError> {
+        let Some(bytes) = self.meta(meta_keys::WORLD_OPTIONS)? else {
+            return Ok(Vec::new());
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok(Vec::new());
+        };
+        Ok(text
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(id, _)| !id.is_empty())
+            .map(|(id, value)| (id.to_owned(), value.to_owned()))
+            .collect())
+    }
+
+    /// Writes what this world chose for its mods' world options.
+    ///
+    /// Text, one option a line, for the reason the domain instances are: a
+    /// person debugging a world should be able to read what it was made with.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn set_world_options(&self, options: &[(String, String)]) -> Result<(), WorldError> {
+        let text = options
+            .iter()
+            .map(|(id, value)| format!("{id}\t{value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.set_meta(meta_keys::WORLD_OPTIONS, text.as_bytes())
     }
 
     /// Reads the domain instances this world has, as `(instance, template)`.

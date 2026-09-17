@@ -54,6 +54,7 @@ fn start(world: &Path, mods: Option<PathBuf>) -> ServerHandle {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }
@@ -252,6 +253,7 @@ fn an_unresolvable_mod_set_refuses_to_start() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     });
 
     let err = result
@@ -364,6 +366,7 @@ fn a_mod_left_out_of_the_selection_does_not_load() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
 
@@ -410,6 +413,7 @@ fn a_selection_that_breaks_a_dependency_refuses_to_start() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     });
     assert!(
         result.is_err(),
@@ -438,6 +442,7 @@ fn a_mod_directory_that_is_not_there_is_refused_rather_than_hosted_empty() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     });
     assert!(
         started.is_err(),
@@ -479,6 +484,7 @@ fn a_world_with_every_mod_disabled_starts_empty_and_says_so() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("a world with no mods enabled should still start");
 

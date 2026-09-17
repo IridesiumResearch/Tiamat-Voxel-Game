@@ -92,6 +92,7 @@ fn start(name: &str) -> ServerHandle {
         seed: Some(3),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }
@@ -199,6 +200,7 @@ fn start_reference(name: &str) -> ServerHandle {
         seed: Some(9),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }

@@ -93,6 +93,7 @@ fn embedded_with_view(name: &str, view: ViewDistance) -> ServerHandle {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("the embedded server must start")
 }
@@ -116,6 +117,7 @@ fn embedded_operated(name: &str, operator: &str) -> ServerHandle {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("the embedded server must start")
 }
@@ -145,6 +147,7 @@ fn embedded_for(name: &str, max_players: u32) -> ServerHandle {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("the embedded server must start")
 }
@@ -738,6 +741,7 @@ fn an_empty_hand_on_a_block_is_a_use_the_mods_hear() {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("the embedded server must start");
     let mut app = client("use", &server, gpu);
@@ -818,6 +822,7 @@ fn a_mods_spray_reaches_the_window_and_is_handed_to_the_renderer() {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("the embedded server must start");
     let mut app = client("spray", &server, gpu);

@@ -52,6 +52,7 @@ fn start(name: &str) -> ServerHandle {
     std::fs::create_dir_all(&dir).expect("world dir");
 
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
         identity_path: None,
@@ -309,6 +310,7 @@ fn a_mod_can_read_the_light_where_something_happened() {
     std::fs::create_dir_all(&dir).expect("world dir");
 
     let server = ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
         identity_path: None,

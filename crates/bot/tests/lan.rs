@@ -62,6 +62,7 @@ fn start(name: &str, bind: &str, max_players: u32) -> ServerHandle {
         seed: Some(3),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }

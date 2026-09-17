@@ -1960,6 +1960,53 @@ Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ---@param spec Tiamot.FluidSpec
 function game.register_fluid(spec) end
 
+---What this world chose for one of its mods' WORLD options, or `nil`.
+---
+---A world option is declared in `mod.toml`, not here, because the start screen
+---has to show it before any mod has run:
+---
+---```toml
+---[[world_option]]
+---id = "biome"
+---name = "Biome"
+---description = "One biome everywhere, or the whole spindle."
+---options = ["spindle", "savanna", "taiga"]
+---default = 1
+---
+---[[world_option]]
+---id = "rivers"
+---name = "Rivers"
+---default = 1        -- no `options` is a checkbox; default 0 or 1
+---```
+---
+---The player picks when they make the world, beside the seed box; the answer
+---is stored in the world file and **never changes for that world**, exactly as
+---the seed does not — terrain generated later has to agree with terrain
+---generated before. Every VM that runs the world answers the same: the tick's
+---and every generation worker's, from the first line of `init.lua` onward, so
+---you may register differently for one world than for another.
+---
+---Answers the option's TEXT for a choice (never its index, so inserting an
+---option above it keeps your comparisons working), a boolean for a toggle, the
+---declared default for a world that chose nothing or chose something you no
+---longer offer, and `nil` for an id no loaded mod declares.
+---
+---```lua
+---local biome = game.world_option("tiamot_default_world:biome")
+---game.register_on_generate(function(buf, pos)
+---    if biome == "spindle" then
+---        return generate_spindle(buf, pos)
+---    end
+---    return generate_one_biome(buf, pos, biome)
+---end)
+---```
+---
+---Do not confuse it with `game.register_setting`, which is a PLAYER's choice,
+---arrives after the world exists, and cannot shape terrain.
+---@param id string The qualified id, `"your_mod:option"`.
+---@return string|boolean|nil
+function game.world_option(id) end
+
 ---Registers a simulation space, or a template for making them.
 ---**Registration window only.**
 ---

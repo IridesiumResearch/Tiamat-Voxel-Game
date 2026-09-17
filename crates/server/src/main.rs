@@ -134,6 +134,11 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
         allowlist: Allowlist::open(),
         operators: config.operators.clone(),
         seed: config.seed,
+        world_options: config
+            .world_options
+            .iter()
+            .map(|(id, value)| (id.clone(), value.clone()))
+            .collect(),
         mods_path: config.mods_path.clone(),
         enabled_mods: config.enabled_mods.clone(),
         view_distance: tiamot_core::interest::ViewDistance::clamped(

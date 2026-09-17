@@ -74,6 +74,20 @@ pub struct Config {
     #[serde(default)]
     pub seed: Option<u64>,
 
+    /// What a NEW world chooses for its mods' world options, by qualified id.
+    ///
+    /// ```toml
+    /// [world_options]
+    /// "tiamot_default_world:biome" = "savanna"
+    /// ```
+    ///
+    /// The value is the option's text, or `"true"`/`"false"` for a toggle —
+    /// what the mod's `mod.toml` lists under `[[world_option]]`. Ignored once
+    /// a world exists, exactly as `seed` is, and for the same reason; an
+    /// option not named here gets its declared default.
+    #[serde(default)]
+    pub world_options: std::collections::BTreeMap<String, String>,
+
     /// Who may use admin powers, as hex UUIDs.
     ///
     /// **Flight is the only one today**, and it is a permission rather than a
@@ -238,6 +252,7 @@ impl Default for Config {
             world_path: Self::default_world_path(),
             max_players: Self::default_max_players(),
             seed: None,
+            world_options: std::collections::BTreeMap::new(),
             mods_path: None,
             enabled_mods: None,
             view_distance: Self::default_view_distance(),

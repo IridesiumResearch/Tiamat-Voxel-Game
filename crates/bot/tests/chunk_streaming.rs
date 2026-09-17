@@ -56,6 +56,7 @@ fn reference_mods() -> PathBuf {
 /// finished.
 fn start(name: &str, view: ViewDistance) -> ServerHandle {
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: world_dir(name),
         identity_path: None,
@@ -81,6 +82,7 @@ fn start(name: &str, view: ViewDistance) -> ServerHandle {
 )]
 fn start_without_ground(name: &str, view: ViewDistance) -> ServerHandle {
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: world_dir(name),
         identity_path: None,
@@ -331,6 +333,7 @@ fn a_mods_chunk_tint_reaches_the_client() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
     // The whole neighbourhood, not the first chunk: the ground and the rock
@@ -407,6 +410,7 @@ fn a_mods_fog_reaches_the_client_by_both_paths() {
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
     let check = |who: &str, fogs: Vec<(ChunkPos, Option<tiamot_core::proto::ChunkFog>)>| {
@@ -734,6 +738,7 @@ fn a_streamed_chunk_carries_generated_terrain() {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
 
@@ -812,6 +817,7 @@ fn generated_terrain_is_the_same_after_a_restart() {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     };
 
     // First run: generate and store the neighbourhood.

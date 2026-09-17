@@ -72,6 +72,7 @@ fn start(name: &str, mods: PathBuf) -> ServerHandle {
         seed: Some(11),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }

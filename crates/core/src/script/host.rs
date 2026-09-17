@@ -78,6 +78,9 @@ pub struct ModHost<V: ScriptVm> {
     phase: Phase,
     /// Mods that failed to load. They are skipped, not fatal.
     failed: Vec<(String, ScriptError)>,
+    /// What every loaded mod's world options resolved to. See
+    /// [`Self::world_options`].
+    world_options: Vec<(String, crate::modload::WorldOptionValue)>,
 }
 
 impl<V: ScriptVm> ModHost<V> {
@@ -115,6 +118,29 @@ impl<V: ScriptVm> ModHost<V> {
         limits: VmLimits,
         only: Option<&[String]>,
     ) -> Result<Self, HostError> {
+        Self::load_selected_with_options(root, limits, only, &[])
+    }
+
+    /// The same, for a world that chose these world options.
+    ///
+    /// `chosen` is what the world file holds — `(qualified id, value text)` —
+    /// or what the screen chose for a world that does not exist yet. Each
+    /// enabled mod's declarations (`[[world_option]]` in its manifest) are
+    /// resolved against it here, so an option no world chose answers its
+    /// declared default and a value a renamed option no longer has falls back
+    /// to it too. **Installed before any `init.lua` runs**, because a mod may
+    /// register differently for one world than for another, and a worker VM
+    /// loaded with the same `chosen` resolves to exactly the same list.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError`] if scanning, resolution, or VM creation fails.
+    pub fn load_selected_with_options(
+        root: &Path,
+        limits: VmLimits,
+        only: Option<&[String]>,
+        chosen: &[(String, String)],
+    ) -> Result<Self, HostError> {
         let mut discovered = scan_directory(root).map_err(|source| HostError::Scan {
             root: root.display().to_string(),
             source: Box::new(source),
@@ -124,7 +150,29 @@ impl<V: ScriptVm> ModHost<V> {
         }
         let resolved = resolve(&discovered).map_err(Box::new)?;
 
+        // Resolved in LOAD ORDER, so the list is the same on every VM that
+        // loads this set — a worker and the tick must agree on it as they do
+        // on material ids.
+        let mut world_options = Vec::new();
+        for entry in &resolved.order {
+            let Some(found) = discovered
+                .iter()
+                .find(|found| found.manifest.id == entry.id)
+            else {
+                continue;
+            };
+            for option in &found.manifest.world_options {
+                let id = option.qualified(&entry.id);
+                let stored = chosen
+                    .iter()
+                    .find(|(name, _)| *name == id)
+                    .map(|(_, value)| value.as_str());
+                world_options.push((id, option.resolve(stored)));
+            }
+        }
+
         let mut vm = V::create(limits)?;
+        vm.set_world_options(&world_options);
         let mut failed = Vec::new();
 
         for entry in &resolved.order {
@@ -150,7 +198,18 @@ impl<V: ScriptVm> ModHost<V> {
             resolved,
             phase: Phase::Registration,
             failed,
+            world_options,
         })
+    }
+
+    /// What this world's mods' world options resolved to, in load order.
+    ///
+    /// Qualified ids and values — every option every loaded mod declares, with
+    /// the world's choice or the declared default. This is what a worker VM is
+    /// handed, and what a server persists for a world that has just been made.
+    #[must_use]
+    pub fn world_options(&self) -> &[(String, crate::modload::WorldOptionValue)] {
+        &self.world_options
     }
 
     /// Closes the registration window.

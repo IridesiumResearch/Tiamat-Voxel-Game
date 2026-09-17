@@ -29,6 +29,7 @@ fn world_dir(name: &str) -> PathBuf {
 
 fn settings(dir: &std::path::Path) -> Settings {
     Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("valid loopback address"),
         world_path: dir.to_path_buf(),
         identity_path: None,
@@ -58,6 +59,7 @@ fn reference_mods() -> PathBuf {
 
 fn settings_with_mods(dir: &std::path::Path) -> Settings {
     Settings {
+        world_options: Vec::new(),
         mods_path: Some(reference_mods()),
         enabled_mods: None,
         ..settings(dir)

@@ -98,6 +98,7 @@ fn twenty_bots_churning_lamps_keep_the_tick_inside_its_budget() {
         seed: Some(31),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
 

@@ -83,6 +83,7 @@ fn write_mod(name: &str, extra: &str) -> PathBuf {
 /// right for a fresh fixture and fatal for a round trip.
 fn restart_at(world: PathBuf, mods: PathBuf) -> ServerHandle {
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: world,
         identity_path: None,
@@ -101,6 +102,7 @@ fn restart_at(world: PathBuf, mods: PathBuf) -> ServerHandle {
 
 fn start(name: &str, mods: PathBuf) -> ServerHandle {
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: scratch(&format!("{name}-world")),
         identity_path: None,

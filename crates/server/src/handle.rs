@@ -1423,6 +1423,15 @@ pub struct Settings {
     /// not a smaller mod set.
     pub enabled_mods: Option<Vec<String>>,
 
+    /// What a **new** world chooses for its mods' world options, as
+    /// `(qualified id, value text)`.
+    ///
+    /// Ignored if the world already exists — its choices are in its file and
+    /// fixed at creation, for the seed's reason: terrain generated later has
+    /// to agree with terrain generated before. A world made with none gets
+    /// every option's declared default. See `modload::WorldOption`.
+    pub world_options: Vec<(String, String)>,
+
     /// Extra material ids to register, on top of whatever mods register.
     ///
     /// Charter rule 9's lifecycle is register → FREEZE → world load, so these
@@ -1473,11 +1482,28 @@ impl ServerHandle {
         let mut content_index = tiamot_core::content::ContentIndex::new();
         let mut mods: Vec<ModEntry> = Vec::new();
 
+        // **What this world chose, before its mods run.** An existing world's
+        // choices are in its file; a new one's arrive in `settings`. Read here,
+        // ahead of the mods, because a mod may register differently for one
+        // world than another and the choices have to be on `game` from the
+        // first line of `init.lua` — and `WorldDb::open` needs the registry the
+        // mods have not built yet, which is why this is a peek.
+        let world_file = settings.world_path.join(WORLD_FILE);
+        let chosen_options: Vec<(String, String)> = if world_file.is_file() {
+            WorldDb::peek_world_options(&world_file).map_err(|source| StartError::World {
+                path: world_file.clone(),
+                source: Box::new(source),
+            })?
+        } else {
+            settings.world_options.clone()
+        };
+
         if let Some(mods_path) = &settings.mods_path {
-            match ModHost::<MluaVm>::load_selected(
+            match ModHost::<MluaVm>::load_selected_with_options(
                 mods_path,
                 VmLimits::default(),
                 settings.enabled_mods.as_deref(),
+                &chosen_options,
             ) {
                 Ok(mut loaded) => {
                     // FREEZE. After this `register_*` is a hard error.
@@ -2017,6 +2043,7 @@ impl ServerHandle {
                 let spec = crate::worldgen::WorkerSpec {
                     mods_root: mods_root.clone(),
                     enabled: settings.enabled_mods.clone(),
+                    world_options: chosen_options.clone(),
                     limits: VmLimits::default(),
                     fluid_ids: fluid_ids.clone(),
                     maps: world.all_maps().unwrap_or_else(|err| {
@@ -2376,6 +2403,38 @@ impl ServerHandle {
                         }
                     };
                     info!(seed = world.seed(), "world seed");
+                    // **Written once, when the world is made.** The rule the
+                    // seed follows: an existing world keeps what it chose, and
+                    // what the launcher sent for it is ignored. Stored as the
+                    // RESOLVED list — every declared option with its answer —
+                    // so a world file says what its terrain was generated
+                    // with even for options nobody touched.
+                    let source_options: Vec<(String, tiamot_core::modload::WorldOptionValue)> =
+                        host.as_ref()
+                            .map(|loaded| loaded.world_options().to_vec())
+                            .unwrap_or_default();
+                    match world.db().world_options() {
+                        Ok(stored) if stored.is_empty() => {
+                            let resolved: Vec<(String, String)> = source_options
+                                .iter()
+                                .map(|(id, value)| (id.clone(), value.as_text()))
+                                .collect();
+                            if !resolved.is_empty()
+                                && let Err(err) = world.db().set_world_options(&resolved)
+                            {
+                                error!("could not store the world options: {err}");
+                            }
+                            for (id, value) in &resolved {
+                                info!(option = %id, value = %value, "world option");
+                            }
+                        }
+                        Ok(stored) => {
+                            for (id, value) in &stored {
+                                info!(option = %id, value = %value, "world option");
+                            }
+                        }
+                        Err(err) => error!("could not read the world options: {err}"),
+                    }
                     // **The authoritative answer, now that it is known.** An
                     // existing world keeps the seed it was created with, so the
                     // candidate above may not be what this world actually uses.
@@ -5072,6 +5131,7 @@ impl ServerHandle {
             // control of the process.
             rcon: None,
             materials: Vec::new(),
+            world_options: Vec::new(),
         })
     }
 

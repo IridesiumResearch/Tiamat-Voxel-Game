@@ -60,6 +60,7 @@ fn start_in(world: &Path) -> ServerHandle {
         seed: Some(4),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }

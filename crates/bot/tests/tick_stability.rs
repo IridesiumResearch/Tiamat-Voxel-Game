@@ -85,6 +85,7 @@ fn two_hundred_ticks_under_four_bots_stays_within_budget() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
     let server = ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("valid loopback address"),
         world_path: dir.clone(),
         identity_path: None,
@@ -268,6 +269,7 @@ fn worldgen_under_a_joining_player_stays_inside_the_tick_budget() {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
 
@@ -373,6 +375,7 @@ fn four_bots_all_see_a_fourth_bots_edit() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
     let server = ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("valid loopback address"),
         world_path: dir,
         identity_path: None,

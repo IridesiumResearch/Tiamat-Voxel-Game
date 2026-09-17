@@ -389,6 +389,7 @@ mod tests {
                 provides: Vec::new(),
                 description: String::new(),
                 license: String::new(),
+                world_options: Vec::new(),
             },
             dir: PathBuf::from(format!("/mods/{id}")),
         }

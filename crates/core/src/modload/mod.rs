@@ -26,7 +26,10 @@
 mod manifest;
 mod resolve;
 
-pub use manifest::{DiscoveredMod, ENTRY_FILE, ManifestError, ModManifest, scan_directory};
+pub use manifest::{
+    DiscoveredMod, ENTRY_FILE, ManifestError, ModManifest, WorldOption, WorldOptionValue,
+    scan_directory,
+};
 
 /// The entry script filename every mod must have.
 #[must_use]

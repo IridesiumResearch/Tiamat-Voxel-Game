@@ -56,6 +56,7 @@ fn start(name: &str) -> ServerHandle {
         seed: Some(4242),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }
@@ -98,6 +99,7 @@ fn start_without(name: &str, omit: &str) -> ServerHandle {
         seed: Some(4242),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }
@@ -909,6 +911,7 @@ end)
         seed: Some(4242),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start")
 }

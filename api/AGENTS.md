@@ -412,9 +412,39 @@ rule the mod selection follows and for the same reason.
 has already happened by the time anybody joins — for chunks made before the
 first player, it happened with nobody to ask. A setting cannot decide how your
 terrain is generated, and one that tried would give a world whose shape depended
-on who logged in first. **Options that shape a world are yours to configure**,
-read when your mod loads, and the engine deliberately offers no way to put them
-on a player's screen.
+on who logged in first.
+
+**Options that shape a world are WORLD options**, and they live in `mod.toml`
+rather than in Lua — the start screen has to show them before any mod has run:
+
+```toml
+[[world_option]]
+id = "biome"
+name = "Biome"
+description = "One biome everywhere, or the whole spindle."
+options = ["spindle", "savanna", "taiga"]
+default = 1
+
+[[world_option]]
+id = "rivers"
+name = "Rivers"
+default = 1          # no `options` is a checkbox; default 0 or 1
+```
+
+The player picks beside the seed box when they make a world. The answer is
+stored in the world file and **never changes for that world**, for the seed's
+reason: terrain generated later has to agree with terrain generated before.
+Every VM that runs the world — the tick's and every generation worker's —
+answers `game.world_option("your_mod:biome")` the same, **from the first line
+of `init.lua`**, so you may register differently for one world than another. A
+choice answers its TEXT, a toggle a boolean, and a world that chose nothing (or
+chose something you have since renamed) gets your declared default. A dedicated
+server sets them in `server.toml` under `[world_options]`.
+
+Two things follow: read the option ONCE at load into a local, not per chunk,
+because a VM crossing per chunk is the cost the whole design avoids; and design
+the defaults to be the world you would ship, because a player who does not
+open the dropdown gets them.
 
 Key on the UUID, never the display name (charter rule 13).
 

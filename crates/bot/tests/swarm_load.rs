@@ -68,6 +68,7 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
     let server = ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
         identity_path: None,

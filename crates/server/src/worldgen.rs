@@ -76,6 +76,10 @@ pub struct WorkerSpec {
     pub mods_root: PathBuf,
     /// Which of them, or all of them.
     pub enabled: Option<Vec<String>>,
+    /// What the world chose for its mods' world options, exactly as the tick
+    /// loaded its own VM with, so both resolve to the same list — a generator
+    /// that read one answer here and another there would be two worlds.
+    pub world_options: Vec<(String, String)>,
     /// The VM limits the tick's VM was built with.
     pub limits: VmLimits,
     /// Fluid ids as the world assigned them, so an ocean is the same liquid.
@@ -395,9 +399,13 @@ fn worker(
 
 /// Builds and checks one worker's VM.
 fn load(spec: &WorkerSpec) -> Result<ModHost<MluaVm>, String> {
-    let mut host =
-        ModHost::<MluaVm>::load_selected(&spec.mods_root, spec.limits, spec.enabled.as_deref())
-            .map_err(|err| format!("could not load the mods: {err}"))?;
+    let mut host = ModHost::<MluaVm>::load_selected_with_options(
+        &spec.mods_root,
+        spec.limits,
+        spec.enabled.as_deref(),
+        &spec.world_options,
+    )
+    .map_err(|err| format!("could not load the mods: {err}"))?;
     host.freeze()
         .map_err(|err| format!("could not freeze the mods: {err}"))?;
     // **The same materials, in the same order, with the same numbers.** The
@@ -529,6 +537,7 @@ mod tests {
             host.failed()
         );
         let spec = WorkerSpec {
+            world_options: Vec::new(),
             mods_root: root.to_path_buf(),
             enabled: None,
             limits: VmLimits::default(),

@@ -181,6 +181,7 @@ impl Diver {
             seed: Some(11),
             rcon: None,
             materials: Vec::new(),
+            world_options: Vec::new(),
         })
         .expect("start");
         let home = scratch(&format!("{name}-home"));

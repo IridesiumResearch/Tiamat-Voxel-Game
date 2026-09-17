@@ -56,6 +56,7 @@ fn settings(dir: &std::path::Path, allowlist: Allowlist) -> Settings {
         enabled_mods: None,
         seed: Some(1),
         materials: Vec::new(),
+        world_options: Vec::new(),
     }
 }
 

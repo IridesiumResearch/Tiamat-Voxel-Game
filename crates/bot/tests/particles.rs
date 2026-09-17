@@ -72,6 +72,7 @@ fn a_spray_reaches_the_player_beside_it_and_nobody_out_of_reach_or_elsewhere() {
         seed: Some(4),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("start");
 

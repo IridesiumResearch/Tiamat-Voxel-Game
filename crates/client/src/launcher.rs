@@ -300,6 +300,10 @@ pub struct Listing {
     pub description: String,
     /// Whether it loads.
     pub enabled: bool,
+    /// The choices it offers when a world is made — see
+    /// `tiamot_core::modload::WorldOption`. Drawn beside the seed box, and
+    /// only for mods that are on.
+    pub world_options: Vec<tiamot_core::modload::WorldOption>,
 }
 
 /// Every mod installed on this machine, and which are ticked.
@@ -360,6 +364,7 @@ impl Catalogue {
                     id: discovered.manifest.id,
                     name: discovered.manifest.name,
                     description: discovered.manifest.description,
+                    world_options: discovered.manifest.world_options,
                 })
                 .collect(),
         }

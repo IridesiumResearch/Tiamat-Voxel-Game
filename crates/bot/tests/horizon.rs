@@ -43,6 +43,7 @@ fn start_wide(name: &str) -> ServerHandle {
 
 fn start(name: &str, view: ViewDistance) -> ServerHandle {
     ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: world_dir(name),
         identity_path: None,

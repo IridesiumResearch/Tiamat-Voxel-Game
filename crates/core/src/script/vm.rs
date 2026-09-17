@@ -1289,6 +1289,16 @@ pub trait ScriptVm: Sized {
     /// sample it with. The same number `pos.seed` carries.
     fn set_world_seed(&mut self, _seed: u64) {}
 
+    /// Puts what the world chose for its mods' world options where
+    /// `game.world_option(id)` can answer it.
+    ///
+    /// **Before any mod runs, and again is harmless.** The choices are fixed
+    /// for the life of the world, so they are installed by the loader ahead of
+    /// `init.lua` — a mod may register differently for one world than
+    /// another — and a worker VM installs the same list the tick's VM did.
+    /// Qualified ids, resolved values: what is not in the list answers `nil`.
+    fn set_world_options(&mut self, _options: &[(String, crate::modload::WorldOptionValue)]) {}
+
     /// Runs every registered `on_tick` callback once.
     ///
     /// `dt_ticks` is how many simulation steps this call covers — normally 1,

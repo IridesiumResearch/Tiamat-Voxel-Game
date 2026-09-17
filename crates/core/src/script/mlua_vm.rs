@@ -1864,6 +1864,36 @@ impl ScriptVm for MluaVm {
         }
     }
 
+    fn set_world_options(&mut self, options: &[(String, crate::modload::WorldOptionValue)]) {
+        // One registry table, read by `game.world_option` at call time, so
+        // installing before any mod has a `game` table — which is when the
+        // loader calls this — works exactly as installing afterwards does.
+        let table = match self.lua.create_table() {
+            Ok(table) => table,
+            Err(err) => {
+                tracing::error!("could not record the world options: {err}");
+                return;
+            }
+        };
+        for (id, value) in options {
+            let written = match value {
+                crate::modload::WorldOptionValue::Toggle(on) => table.set(id.as_str(), *on),
+                crate::modload::WorldOptionValue::Choice(text) => {
+                    table.set(id.as_str(), text.as_str())
+                }
+            };
+            if let Err(err) = written {
+                tracing::error!(%id, "could not record a world option: {err}");
+            }
+        }
+        if let Err(err) = self
+            .lua
+            .set_named_registry_value("tiamot.world_options", table)
+        {
+            tracing::error!("could not install the world options: {err}");
+        }
+    }
+
     fn set_world_seed(&mut self, seed: u64) {
         // Every mod's own table: `game` is per mod (see `build_game_table`),
         // so there is no one table to set it on. Set with the same conversion
@@ -2932,7 +2962,30 @@ impl MluaVm {
         self.install_logging(mod_id, &game)?;
         self.install_registration(mod_id, &game)?;
         self.install_frozen_api(mod_id, &game)?;
+        self.install_world_options(&game)?;
         Ok(game)
+    }
+
+    /// `game.world_option(id)`: what this world chose, fixed for its life.
+    ///
+    /// Usable from the first line of `init.lua` — the loader installs the
+    /// answers before any mod runs (`ScriptVm::set_world_options`) — and in
+    /// every VM alike, tick and generation workers, so a generator and a tick
+    /// hook cannot disagree about which world they are in. Answers `nil` for an
+    /// id no loaded mod declares: a mod asking about another mod's option that
+    /// is not installed gets the same nothing `game.setting` would.
+    fn install_world_options(&self, game: &Table) -> Result<(), ScriptError> {
+        let world_option = self
+            .lua
+            .create_function(|lua, id: String| {
+                let Ok(table) = lua.named_registry_value::<Table>("tiamot.world_options") else {
+                    return Ok(Value::Nil);
+                };
+                table.get::<Value>(id)
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("world_option", world_option)
+            .map_err(|err| self.vm_error(&err))
     }
 
     /// `game.log`.

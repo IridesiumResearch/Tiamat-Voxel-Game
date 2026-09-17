@@ -25,6 +25,7 @@ fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
     drop(listener);
 
     let server = ServerHandle::start(&Settings {
+        world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
         identity_path: None,

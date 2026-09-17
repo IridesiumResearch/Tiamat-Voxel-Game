@@ -1239,6 +1239,121 @@ end)
 }
 
 #[test]
+fn a_world_option_is_on_game_before_init_lua_runs_and_in_every_vm_alike() {
+    // **Asked for from the window: a setting on the start screen that makes
+    // the whole world one biome.** `game.register_setting` cannot be it — an
+    // answer arrives with a PLAYER, after the world is made — so this is a
+    // WORLD option: declared in `mod.toml`, chosen once when the world is
+    // made, stored with it like the seed, and on `game` from the first line
+    // of `init.lua`, which is what lets a mod register differently for one
+    // world than for another.
+    let root = scratch("world-options");
+    write_mod(
+        &root,
+        "biomes",
+        r#"
+[[world_option]]
+id = "biome"
+name = "Biome"
+options = ["spindle", "savanna", "taiga"]
+default = 1
+
+[[world_option]]
+id = "rivers"
+name = "Rivers"
+default = 1
+"#,
+        r#"
+-- Read during REGISTRATION, deliberately: a block named after the choice is
+-- how the test sees the answer without a generator.
+local biome = game.world_option("biomes:biome")
+local rivers = game.world_option("biomes:rivers")
+game.register_block{ id = "chose_" .. tostring(biome) }
+game.register_block{ id = "rivers_" .. tostring(rivers) }
+game.register_block{ id = "unknown_" .. tostring(game.world_option("biomes:nothing")) }
+"#,
+    );
+
+    let names = |host: &EngineHost| -> Vec<String> {
+        host.vm()
+            .registered_blocks()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
+
+    // Chosen: the second biome and rivers off.
+    let chosen = vec![
+        ("biomes:biome".to_owned(), "savanna".to_owned()),
+        ("biomes:rivers".to_owned(), "false".to_owned()),
+    ];
+    let host = ModHost::<tiamot_core::script::MluaVm>::load_selected_with_options(
+        &root,
+        VmLimits::default(),
+        None,
+        &chosen,
+    )
+    .expect("load mods");
+    assert!(
+        host.failed().is_empty(),
+        "the mod should load: {:?}",
+        host.failed()
+    );
+    let registered = names(&host);
+    assert!(
+        registered.contains(&"biomes:chose_savanna".to_owned()),
+        "the choice was not on `game` when init.lua ran: {registered:?}"
+    );
+    assert!(
+        registered.contains(&"biomes:rivers_false".to_owned()),
+        "a toggle answers a boolean: {registered:?}"
+    );
+    assert!(
+        registered.contains(&"biomes:unknown_nil".to_owned()),
+        "an id nobody declares answers nil: {registered:?}"
+    );
+    // And the loader's own record of what it resolved, which is what a worker
+    // is handed and what a new world file stores.
+    let resolved: Vec<(String, String)> = host
+        .world_options()
+        .iter()
+        .map(|(id, value)| (id.clone(), value.as_text()))
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![
+            ("biomes:biome".to_owned(), "savanna".to_owned()),
+            ("biomes:rivers".to_owned(), "false".to_owned()),
+        ]
+    );
+
+    // Nothing chosen: the declared defaults, so a world made without looking
+    // is the mod's own idea of a world.
+    let host = host_for(&root);
+    let registered = names(&host);
+    assert!(
+        registered.contains(&"biomes:chose_spindle".to_owned())
+            && registered.contains(&"biomes:rivers_true".to_owned()),
+        "a world that chose nothing should get the defaults: {registered:?}"
+    );
+
+    // A stored value the mod no longer offers — an option it renamed — is the
+    // default, not a refusal to start the world.
+    let stale = vec![("biomes:biome".to_owned(), "tundra".to_owned())];
+    let host = ModHost::<tiamot_core::script::MluaVm>::load_selected_with_options(
+        &root,
+        VmLimits::default(),
+        None,
+        &stale,
+    )
+    .expect("load mods");
+    assert!(
+        names(&host).contains(&"biomes:chose_spindle".to_owned()),
+        "a stale choice should fall back to the default"
+    );
+}
+
+#[test]
 fn a_structure_crosses_a_chunk_edge_and_does_not_care_which_chunk_was_made_first() {
     // **The order-independent shape, which is the only correct one.** The
     // obvious way to build a structure across an edge is to let a generator

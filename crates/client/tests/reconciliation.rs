@@ -86,6 +86,7 @@ fn embedded(name: &str) -> ServerHandle {
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
+        world_options: Vec::new(),
     })
     .expect("the embedded server must start")
 }
