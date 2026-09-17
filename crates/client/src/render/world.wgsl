@@ -56,7 +56,8 @@ struct Globals {
     // Where each cascade ends, in blocks, in xyz; one shadow texel in UV in w.
     cascade_far: vec4<f32>,
     // The direction the sun's light TRAVELS, in xyz — so a surface faces the
-    // sun when its normal opposes this. Unit length. w unused.
+    // sun when its normal opposes this. Unit length. In w, where fog is total
+    // straight up or down, in blocks — see `fog_amount`.
     sun_direction: vec4<f32>,
     // The world size of one shadow texel, in blocks, per cascade in xyz. The
     // normal-offset bias is measured in these: a bias smaller than a texel
@@ -536,9 +537,20 @@ fn vertex_main(input: VertexIn) -> VertexOut {
 // leaving a faint edge exactly where the loaded world stops — the one place
 // this fog exists to hide. `t^k` reaches exactly 1 at the far distance and
 // keeps that guarantee.
-fn fog_amount(distance: f32) -> f32 {
+//
+// **An ellipsoid, not a sphere.** The loaded world is a box — the view
+// distance sideways, a smaller vertical view distance up and down — and fog by
+// distance alone left a hill cut flat at the top of the box in clear air. The
+// reach straight up or down (`sun_direction.w`) is that height, so the haze
+// arrives at the sky at the top of the box exactly as it does at the far edge;
+// a level ray is what it always was.
+fn fog_amount(relative: vec3<f32>) -> f32 {
     let far = max(globals.sky_colour.w, 0.001);
-    return pow(clamp(distance / far, 0.0, 1.0), globals.fog_curve);
+    let up = max(globals.sun_direction.w, 0.001);
+    let sideways = length(relative.xz) / far;
+    let vertical = abs(relative.y) / up;
+    let reach = sqrt(sideways * sideways + vertical * vertical);
+    return pow(clamp(reach, 0.0, 1.0), globals.fog_curve);
 }
 
 // What one fragment's light comes to, as a colour multiplier.
@@ -1024,7 +1036,7 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     // the edge of the loaded world, and a forest's mist does not get to be in
     // front of that.
     let misted = place_fog(lit, input.world, input.distance);
-    let haze = fog_amount(input.distance);
+    let haze = fog_amount(input.world);
     return vec4<f32>(mix(misted, globals.sky_colour.rgb, haze), texel.a);
 }
 

@@ -51,6 +51,8 @@ pub struct Frame {
     pub sky: [f32; 3],
     /// See `sky`.
     pub fog_end: f32,
+    /// Where the fog is total straight up or down.
+    pub fog_up: f32,
     /// The fog curve's exponent.
     pub fog_curve: f32,
     /// Whether this pass fogs particles, which is every mode without a post
@@ -164,7 +166,9 @@ impl Pass {
                 frame.sky[0],
                 frame.sky[1],
                 frame.sky[2],
-                f32::from(u8::from(frame.fogs)),
+                // The vertical reach when this pass fogs, and a negative
+                // number when the post chain does: one slot, two facts.
+                if frame.fogs { frame.fog_up } else { -1.0 },
             ],
         };
         gpu.queue

@@ -41,7 +41,8 @@ struct Post {
     // that grades nothing, because an eight-bit table of the identity is not
     // exactly the identity — see `render::grade`.
     graded: f32,
-    _pad: f32,
+    // Where fog is total straight up or down, in blocks; `sky.w` is sideways.
+    fog_up: f32,
     // Every place's fog, as the world shader's globals carry it — see
     // `render::place_fog`. Colour and density at the camera; the grid's corner,
     // the camera's fog top and height; cells per side, any, daylight.
@@ -351,16 +352,19 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // depth is what lets it reach the sky and take the sun's colour with it;
     // the world shader's own fog is per-surface and cannot do either. The world
     // shader skips its fog in this mode so the two do not stack.
-    let distance = scene_distance(vec2<i32>(input.clip.xy), input.uv);
     // A place's fog first, and the sky's over it — the order `world.wgsl`
     // applies them in, for the reason it gives.
     let point = scene_point(vec2<i32>(input.clip.xy), input.uv);
     let misted = place_fog(lit, point, length(point));
-    // The same power curve `world.wgsl` uses, and it has to be the same or a
-    // player switching lighting mode would watch the weather change with it.
-    // `sun_direction.w` carries the exponent; `sky.w` carries the far distance.
+    // The same ellipsoid and power curve `world.wgsl` uses, and it has to be
+    // the same or a player switching lighting mode would watch the weather
+    // change with it. `sun_direction.w` carries the exponent; `sky.w` the
+    // sideways reach; `fog_up` the reach straight up or down.
     let curve = post.sun_direction.w;
-    let haze = pow(clamp(distance / max(post.sky.w, 0.001), 0.0, 1.0), curve);
+    let sideways = length(point.xz) / max(post.sky.w, 0.001);
+    let vertical = abs(point.y) / max(post.fog_up, 0.001);
+    let reach = sqrt(sideways * sideways + vertical * vertical);
+    let haze = pow(clamp(reach, 0.0, 1.0), curve);
     let fogged = mix(misted, scattered_fog(input.uv), haze);
 
     // Graded last, on the display-referred result. The table's domain is 0..1

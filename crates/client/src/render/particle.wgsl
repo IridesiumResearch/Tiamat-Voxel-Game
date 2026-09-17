@@ -28,8 +28,9 @@ struct View {
     right: vec4<f32>,
     // The camera's up in xyz, and the fog curve's exponent in w.
     up: vec4<f32>,
-    // The sky's colour in xyz; in w, 1 when this pass fogs (modes 1 and 2) and
-    // 0 when the post chain does (mode 3).
+    // The sky's colour in xyz; in w, where the fog is total straight up or
+    // down when this pass fogs (modes 1 and 2), and negative when the post
+    // chain does (mode 3).
     sky: vec4<f32>,
 };
 
@@ -46,7 +47,9 @@ struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) local: vec2<f32>,
     @location(1) colour: vec4<f32>,
-    @location(2) distance: f32,
+    // How far along the fog's ellipsoid the centre sits, 0 at the eye and 1
+    // where the fog is total — `world.wgsl`'s `fog_amount` before the curve.
+    @location(2) reach: f32,
 };
 
 @vertex
@@ -67,7 +70,9 @@ fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexO
     out.clip = view.view_projection * vec4<f32>(at, 1.0);
     out.local = corner;
     out.colour = instance.colour;
-    out.distance = length(instance.centre.xyz);
+    let sideways = length(instance.centre.xz) / max(view.right.w, 0.001);
+    let vertical = abs(instance.centre.y) / max(abs(view.sky.w), 0.001);
+    out.reach = sqrt(sideways * sideways + vertical * vertical);
     return out;
 }
 
@@ -81,10 +86,10 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
     var colour = input.colour.rgb;
-    if (view.sky.w > 0.5) {
+    if (view.sky.w > 0.0) {
         // The sky fog's power curve, as `world.wgsl` has it: a spray at the
         // edge of the view fades with the terrain behind it.
-        let haze = pow(clamp(input.distance / max(view.right.w, 0.001), 0.0, 1.0), view.up.w);
+        let haze = pow(clamp(input.reach, 0.0, 1.0), view.up.w);
         colour = mix(colour, view.sky.rgb, haze);
     }
     return vec4<f32>(colour, alpha);

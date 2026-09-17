@@ -646,6 +646,50 @@ fn distant_terrain_fades_into_the_sky() {
 }
 
 #[test]
+fn fog_reaches_up_and_down_as_far_as_the_loaded_world_does() {
+    // **The loaded world is a box, and the fog was a sphere.** A client is
+    // sent chunks to the view distance sideways and to a smaller vertical
+    // view distance up and down, so a hill climbing past that height was cut
+    // flat and the cut stood in clear air: fog by distance alone had not
+    // reached it. Now the fog has a reach straight up or down as well, and
+    // the two make an ellipsoid. Sideways fog is pushed past everything here,
+    // so any haze on the floor — which lies more than two blocks under the
+    // eye — is the vertical reach alone; and a reach pushed past everything
+    // is the frame exactly as it was, which is what keeps every other test
+    // in this file honest.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    renderer.set_sky(client::render::sky_colour(), 100_000.0);
+    let untouched = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+    renderer.set_fog_height(100_000.0);
+    let clear = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+    assert_eq!(
+        untouched, clear,
+        "a vertical reach past everything must leave the frame exactly as it was"
+    );
+
+    renderer.set_fog_height(2.0);
+    let hazy = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+    let near_hazy = average(&hazy, 0, HEIGHT * 7 / 8, WIDTH, HEIGHT);
+    let near_clear = average(&clear, 0, HEIGHT * 7 / 8, WIDTH, HEIGHT);
+    let blueness = |colour: [f32; 3]| colour[2] - colour[0];
+    assert!(
+        blueness(near_hazy) > blueness(near_clear) + 0.004,
+        "ground under the eye did not fog with a vertical reach of two blocks and no sideways \
+         fog at all: {near_hazy:?} against {near_clear:?}"
+    );
+}
+
+#[test]
 fn a_frame_of_the_fixed_scene_has_sky_above_and_world_below() {
     // The structural assertion that catches almost every real regression: a
     // world that stopped drawing is all sky, a camera pointing the wrong way

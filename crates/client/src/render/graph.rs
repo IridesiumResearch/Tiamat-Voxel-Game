@@ -91,7 +91,9 @@ struct Uniforms {
     /// identity is not exactly the identity and an ungraded world has to be
     /// untouched — see [`super::grade`].
     graded: f32,
-    _pad: f32,
+    /// Where fog is total straight up or down, in blocks. Took the padding
+    /// slot, so nothing after it moved.
+    fog_up: f32,
     /// Every place's fog, as the world shader's globals carry it.
     ///
     /// **Appended**, so every field above stays where `post.wgsl` reads it.
@@ -117,6 +119,8 @@ pub struct Frame {
     pub fog_curve: f32,
     /// Where it is total, in blocks.
     pub fog_end: f32,
+    /// Where it is total straight up or down, in blocks.
+    pub fog_up: f32,
     /// How the finished frame is graded, already interpolated and sanitised by
     /// `crate::sky`.
     pub grade: tiamot_core::proto::SkyGrade,
@@ -767,7 +771,7 @@ impl Post {
                 // [`super::grade`] for why "nearly unchanged" is not good
                 // enough for an ungraded world.
                 graded: f32::from(u8::from(frame.grade != tiamot_core::proto::SkyGrade::NONE)),
-                _pad: 0.0,
+                fog_up: frame.fog_up,
                 place_fog: frame.place_fog,
             }),
         );

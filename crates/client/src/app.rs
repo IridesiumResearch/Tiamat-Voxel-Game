@@ -4781,8 +4781,12 @@ impl App {
         // behind it is not something anybody down there can see.
         self.renderer
             .set_place_fog_visible(self.submerged_in().is_none());
-        let (sky, far) = match self.submerged_in() {
-            Some(fluid) => (self.store.fluid_colour(fluid), UNDERWATER_VISIBILITY),
+        let (sky, far, up) = match self.submerged_in() {
+            Some(fluid) => (
+                self.store.fluid_colour(fluid),
+                UNDERWATER_VISIBILITY,
+                UNDERWATER_VISIBILITY,
+            ),
             // **The HORIZON, not the detail radius, and inside it.** Since
             // Task 15b the world carries on past the chunks a client is sent
             // in full, drawn from summaries — and fog at the detail radius
@@ -4799,9 +4803,20 @@ impl App {
                 f32::from(self.config.fog_chunks)
                     * tiamot_core::CHUNK_BLOCKS as f32
                     * modifier.fog_distance,
+                // **And straight up or down, the GRANTED vertical view
+                // distance.** The loaded world is a box: chunks reach the
+                // view distance sideways and only this far up and down, and
+                // a hill climbing past it was cut flat in clear air. Fog
+                // that is total there hides the cut as it hides the far
+                // edge. There is no horizon of summaries above the box to
+                // leave room for, so this is the box itself.
+                f32::from(self.granted_view.vertical)
+                    * tiamot_core::CHUNK_BLOCKS as f32
+                    * modifier.fog_distance,
             ),
         };
         self.renderer.set_sky(sky, far);
+        self.renderer.set_fog_height(up);
         self.renderer.set_grade(moment.grade);
 
         let sensitivity = self.config.mouse_sensitivity;
@@ -6942,5 +6957,8 @@ pub fn apply_to_renderer(config: &Config, renderer: &mut Renderer) {
     renderer.set_sky(
         crate::render::sky_colour(),
         f32::from(config.view_distance) * tiamot_core::CHUNK_BLOCKS as f32,
+    );
+    renderer.set_fog_height(
+        f32::from(config.vertical_view_distance) * tiamot_core::CHUNK_BLOCKS as f32,
     );
 }

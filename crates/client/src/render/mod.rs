@@ -195,6 +195,8 @@ struct Globals {
     /// reason `light_view_projection` documents above: every field after an
     /// insertion moves, and the shader finds out by reading the wrong sixteen
     /// bytes.
+    /// `w` is where fog is total straight up or down, in blocks — see
+    /// `fog_up`.
     sun_direction: [f32; 4],
     /// The world size of one shadow texel, in blocks, per cascade.
     ///
@@ -946,6 +948,17 @@ pub struct Renderer {
     /// Where fog begins and where it is total, in blocks.
     fog_curve: f32,
     fog_end: f32,
+    /// Where fog is total straight up or down, in blocks.
+    ///
+    /// **The loaded world is a box, and the fog was a sphere.** A client is
+    /// sent chunks to the view distance sideways and to a smaller vertical
+    /// view distance up and down, so a hill climbing past that height was cut
+    /// flat, and the cut stood in clear air: fog by distance alone had not
+    /// reached it. This is the vertical reach; the haze is an ellipsoid of the
+    /// two and reaches the sky at the top of the box as it does at the far
+    /// edge. Infinite until told, so a caller that never says is exactly as
+    /// it was.
+    fog_up: f32,
     /// How many chunks the last frame actually drew.
     drawn: usize,
     /// How many chunks the last frame drew into the cascades.
@@ -1137,6 +1150,7 @@ impl Renderer {
             // scenes assert on.
             fog_curve: FOG_CURVE,
             fog_end: f32::MAX,
+            fog_up: f32::MAX,
             place_fog,
             particles,
             fog_here: place_fog::Uniforms::NONE,
@@ -1181,6 +1195,13 @@ impl Renderer {
         self.sky_colour = colour;
         self.fog_end = far.max(1.0);
         self.fog_curve = FOG_CURVE;
+    }
+
+    /// Sets where fog is total straight up or down, in blocks — normally the
+    /// vertical view distance, which is where the loaded world stops. See
+    /// [`Self::set_sky`] for the sideways reach; the two make an ellipsoid.
+    pub fn set_fog_height(&mut self, up: f32) {
+        self.fog_up = up.max(1.0);
     }
 
     /// Sets how the finished frame is graded, for the frames that follow.
@@ -1482,6 +1503,7 @@ impl Renderer {
                 view_projection,
                 sky: self.sky_colour,
                 fog_end: self.fog_end,
+                fog_up: self.fog_up,
                 fog_curve: self.fog_curve,
                 fogs: self.post.is_none(),
             },
@@ -1980,7 +2002,7 @@ impl Renderer {
                 self.sun_direction[0],
                 self.sun_direction[1],
                 self.sun_direction[2],
-                0.0,
+                self.fog_up,
             ],
             shadow_texel: {
                 // A block per texel until a cascade has been fitted, which is
@@ -2246,6 +2268,7 @@ impl Renderer {
                 sun_direction: self.sun_direction,
                 fog_curve: self.fog_curve,
                 fog_end: self.fog_end,
+                fog_up: self.fog_up,
                 grade: self.grade,
                 place_fog: self.fog_here,
             },
