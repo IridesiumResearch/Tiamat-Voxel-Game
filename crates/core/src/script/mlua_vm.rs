@@ -3078,10 +3078,7 @@ impl ScriptVm for MluaVm {
 impl MluaVm {
     /// Whether a mod has been disabled by a fault.
     fn is_faulted(&self, mod_id: &str) -> bool {
-        self.faulted
-            .lock()
-            .map(|set| set.contains(mod_id))
-            .unwrap_or(false)
+        self.faulted.lock().is_ok_and(|set| set.contains(mod_id))
     }
 
     /// Disables a mod. Charter rule 10: its hooks stop running, the tick does
@@ -3207,7 +3204,7 @@ impl MluaVm {
                 if !declared {
                     return Ok(Value::Nil);
                 }
-                if faulted.lock().map(|set| set.contains(&id)).unwrap_or(false) {
+                if faulted.lock().is_ok_and(|set| set.contains(&id)) {
                     // A disabled mod is gone, exports and all.
                     return Ok(Value::Nil);
                 }
