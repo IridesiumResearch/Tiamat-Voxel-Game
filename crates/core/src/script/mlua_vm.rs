@@ -1022,6 +1022,9 @@ pub struct MluaVm {
     plans: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::plan::Access>>>>,
     /// Where `game.set_hud` sends a mod's own HUD values.
     hud: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::hud::Access>>>>,
+    /// Where `game.set_sky_modifier` reaches a player's sky.
+    atmosphere:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::atmosphere::Access>>>>,
     /// Where the container calls reach the world's chests.
     containers:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::inventory::Containers>>>>,
@@ -1419,6 +1422,40 @@ fn loop_player(spec: &Table, what: &str) -> mlua::Result<Option<crate::identity:
             })
         })
         .transpose()
+}
+
+/// A sky modifier from a mod's table. See `install_atmosphere`.
+fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier> {
+    let number = |name: &str, fallback: f32| -> mlua::Result<f32> {
+        Ok(spec.get::<Option<f32>>(name)?.unwrap_or(fallback))
+    };
+    let sky = spec.get::<Option<Table>>("sky")?;
+    let colour = match &sky {
+        Some(table) => {
+            let channel = |name: &str, index: i64| -> mlua::Result<f32> {
+                Ok(table
+                    .get::<Option<f32>>(name)?
+                    .or(table.get::<Option<f32>>(index)?)
+                    .unwrap_or(0.0))
+            };
+            [channel("r", 1)?, channel("g", 2)?, channel("b", 3)?]
+        }
+        None => [0.0; 3],
+    };
+    let saturation = match spec.get::<Option<Table>>("grade")? {
+        Some(grade) => grade.get::<Option<f32>>("saturation")?.unwrap_or(1.0),
+        None => number("saturation", 1.0)?,
+    };
+    Ok(crate::atmosphere::sanitise(
+        crate::atmosphere::SkyModifier {
+            intensity: number("intensity", 1.0)?,
+            sky: colour,
+            sky_mix: number("sky_mix", if sky.is_some() { 1.0 } else { 0.0 })?,
+            fog_distance: number("fog_distance", 1.0)?,
+            saturation,
+            ease_ticks: spec.get::<Option<u32>>("ease_ticks")?.unwrap_or(0),
+        },
+    ))
 }
 
 /// The player a mod named, as raw UUID bytes.
@@ -1904,6 +1941,7 @@ impl ScriptVm for MluaVm {
             storage: std::sync::Arc::new(std::sync::Mutex::new(None)),
             plans: std::sync::Arc::new(std::sync::Mutex::new(None)),
             hud: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            atmosphere: std::sync::Arc::new(std::sync::Mutex::new(None)),
             containers: std::sync::Arc::new(std::sync::Mutex::new(None)),
             sight: std::sync::Arc::new(std::sync::Mutex::new(None)),
             paths: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -2091,6 +2129,12 @@ impl ScriptVm for MluaVm {
 
     fn set_hud_access(&mut self, access: std::sync::Arc<dyn crate::hud::Access>) {
         if let Ok(mut slot) = self.hud.lock() {
+            *slot = Some(access);
+        }
+    }
+
+    fn set_atmosphere_access(&mut self, access: std::sync::Arc<dyn crate::atmosphere::Access>) {
+        if let Ok(mut slot) = self.atmosphere.lock() {
             *slot = Some(access);
         }
     }
@@ -5782,6 +5826,33 @@ impl MluaVm {
         Ok((give, take))
     }
 
+    /// Puts `game.set_sky_modifier` on the `game` table.
+    ///
+    /// Wrong types are errors and wrong numbers are clamped, as
+    /// `emit_particles` has it. `sky` may be `{ r, g, b }` or `{ r, g, b }`
+    /// positional; `sky_mix` defaults to 1 when a `sky` is given and 0 when
+    /// not, so naming a colour means it. `nil` for the modifier puts the
+    /// plain sky back, eased over the ticks the last modifier had.
+    fn install_atmosphere(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.atmosphere);
+        let set = self
+            .lua
+            .create_function(move |_, (uuid, spec): (String, Option<Table>)| {
+                let player =
+                    crate::identity::PlayerUuid::from_bytes(player_of(&uuid, "set_sky_modifier")?);
+                let modifier = spec.map(|spec| sky_modifier_of(&spec)).transpose()?;
+                let told = slot.lock().ok().and_then(|slot| {
+                    slot.as_ref()
+                        .map(|access| access.set_sky_modifier(player, modifier))
+                });
+                Ok(told.unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_sky_modifier", set)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     /// Puts `game.set_hud` on the `game` table.
     ///
     /// **The mod id is captured, never passed**, exactly as `game.storage`'s
@@ -6441,6 +6512,7 @@ impl MluaVm {
         self.install_storage_api(mod_id, game)?;
         self.install_plan_api(mod_id, game)?;
         self.install_hud_api(mod_id, game)?;
+        self.install_atmosphere(game)?;
         self.install_container_api(game)?;
         self.install_heading(game)?;
 
@@ -9348,6 +9420,78 @@ mod tests {
             None,
             "the faulted mod was asked again"
         );
+    }
+
+    /// Records every sky modifier a mod set.
+    #[derive(Default)]
+    struct Weather {
+        set: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::SkyModifier>)>>,
+    }
+
+    impl crate::atmosphere::Access for Weather {
+        fn set_sky_modifier(
+            &self,
+            player: crate::identity::PlayerUuid,
+            modifier: Option<crate::atmosphere::SkyModifier>,
+        ) -> bool {
+            self.set
+                .lock()
+                .expect("weather lock")
+                .push((player.to_hex(), modifier));
+            true
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_mod_changes_a_players_sky_and_puts_it_back() {
+        // **Weather ask W1.** The shape reaches the seam with the ask's own
+        // spelling — a positional `sky`, `grade = { saturation }` — a careless
+        // number is clamped, a bad player is an error, and nil is the plain
+        // sky again.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([7; 32]).to_hex();
+        load(
+            &mut host,
+            "storm",
+            &format!(
+                "told = game.set_sky_modifier('{uuid}', {{ intensity = 0.55, sky = {{ 0.55, 0.58, 0.62 }},\n\
+                 \x20   sky_mix = 0.7, fog_distance = 9, grade = {{ saturation = 0.7 }}, ease_ticks = 400 }})\n\
+                 game.set_sky_modifier('{uuid}', nil)\n\
+                 ok, err = pcall(game.set_sky_modifier, 'nobody', nil)"
+            ),
+        )
+        .expect("load");
+        let env = host.environment("storm").expect("env");
+        assert!(env.get::<bool>("told").expect("told"));
+        assert!(
+            !env.get::<bool>("ok").expect("ok"),
+            "a bad player is an error"
+        );
+        let set = weather.set.lock().expect("lock").clone();
+        assert_eq!(set.len(), 2);
+        let (who, first) = &set[0];
+        assert_eq!(who, &uuid);
+        let first = first.expect("a modifier");
+        assert_eq!(first.intensity, 0.55);
+        assert_eq!(first.sky, [0.55, 0.58, 0.62], "a positional colour is read");
+        assert_eq!(first.sky_mix, 0.7);
+        assert_eq!(
+            first.fog_distance,
+            crate::atmosphere::MAX_FOG_DISTANCE,
+            "a number out of range is clamped"
+        );
+        assert_eq!(
+            first.saturation, 0.7,
+            "the grade table's saturation is read"
+        );
+        assert_eq!(first.ease_ticks, 400);
+        assert_eq!(set[1].1, None, "nil is the plain sky");
     }
 
     /// Records every burst a mod asked for.

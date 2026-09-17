@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 57;
+pub const PROTOCOL_VERSION: u32 = 58;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,8 @@ pub const PROTOCOL_VERSION: u32 = 57;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v58 (weather W1): appended `ServerMessage::SkyModifier`, a mod's standing
+// change to one player's sky, eased on the client over the keyframes.
 // v57 (weather W5): `fade_ticks` appended to `StartLoop` and `StopLoop` — a
 // fade in, a fade out, and a running loop moved rather than restarted.
 // v54 (post-15b): appended `ServerMessage::Particles`, bursts a mod scattered
@@ -2044,6 +2046,17 @@ pub enum ServerMessage {
         /// At most [`crate::particle::MAX_BURSTS_PER_MESSAGE`].
         bursts: Vec<crate::particle::Burst>,
     },
+    /// A mod's standing change to this player's sky, or `None` for the plain
+    /// keyframes again.
+    ///
+    /// **Appended at the end** (protocol v58). Latest state, not an event: a
+    /// mod that sets it sixty times between two network passes costs one
+    /// message. The client eases towards it over the modifier's own ticks.
+    /// See [`crate::atmosphere`].
+    SkyModifier {
+        /// The modifier, or `None` to clear it.
+        modifier: Option<crate::atmosphere::SkyModifier>,
+    },
 }
 
 /// An entity as a client is first told about it.
@@ -2464,6 +2477,21 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
 
 /// Rejects a particle message outside the ranges `particle::sanitise` keeps a
 /// well-behaved server inside.
+/// A sky modifier's numbers are the client's to trust only in range.
+fn check_sky_modifier(
+    modifier: Option<&crate::atmosphere::SkyModifier>,
+) -> Result<(), ProtocolError> {
+    if modifier.is_none_or(crate::atmosphere::SkyModifier::is_valid) {
+        Ok(())
+    } else {
+        Err(ProtocolError::FieldTooLarge {
+            field: "sky_modifier",
+            len: 0,
+            limit: 0,
+        })
+    }
+}
+
 fn check_particles(bursts: &[crate::particle::Burst]) -> Result<(), ProtocolError> {
     check_len(
         "particles",
@@ -2872,6 +2900,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
+        ServerMessage::SkyModifier { modifier } => check_sky_modifier(modifier.as_ref())?,
         // A domain id is a string a server chose, and it reaches a loading
         // screen the client draws. Capped like every other id on the wire
         // (charter rule 14: a server is not trusted for being the server).
@@ -4058,6 +4087,9 @@ mod tests {
         // Protocol v54.
         let particles = encode(&ServerMessage::Particles { bursts: Vec::new() }).expect("encode");
         assert_eq!(particles[0], 43);
+        // Protocol v58.
+        let sky = encode(&ServerMessage::SkyModifier { modifier: None }).expect("encode");
+        assert_eq!(sky[0], 44);
     }
 
     #[test]

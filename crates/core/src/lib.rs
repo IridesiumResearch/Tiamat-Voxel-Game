@@ -59,6 +59,7 @@
     clippy::cast_sign_loss
 )]
 
+pub mod atmosphere;
 pub mod bitpack;
 pub mod block;
 pub mod chunk;

@@ -326,6 +326,12 @@ pub struct Shared {
         std::collections::BTreeMap<PlayerUuid, std::collections::BTreeMap<String, HudSlot>>,
     >,
 
+    /// Each player's sky modifier, and whether they have been told it.
+    ///
+    /// The HUD values' shape, for the HUD values' reason: latest state, so a
+    /// mod that sets it every tick costs one message and nothing overflows.
+    pub sky_modifiers: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, SkySlot>>,
+
     /// Every distributable file the loaded mods supply, by hash.
     ///
     /// Built once at startup and immutable thereafter. Rebuilding it while the
@@ -392,6 +398,15 @@ pub struct Shared {
 }
 
 /// One mod's HUD values for one player, and whether they have been sent.
+/// One player's sky modifier as a mod last set it, and whether it was sent.
+#[derive(Debug, Clone, Default)]
+pub struct SkySlot {
+    /// The modifier, or none.
+    pub modifier: Option<tiamot_core::atmosphere::SkyModifier>,
+    /// Whether the player has been told this version.
+    pub sent: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct HudSlot {
     /// What the mod last asked for.
@@ -1077,6 +1092,7 @@ impl Shared {
         // sets them again when they come back, because it is the mod that
         // knows what they should say.
         self.forget_hud_values(uuid);
+        self.forget_sky_modifier(uuid);
     }
 
     /// Files an input against the tick it belongs to.
@@ -2105,6 +2121,43 @@ impl Shared {
         }
     }
 
+    /// Replaces one player's sky modifier; unchanged and already sent is a no-op.
+    pub fn set_sky_modifier(
+        &self,
+        uuid: &PlayerUuid,
+        modifier: Option<tiamot_core::atmosphere::SkyModifier>,
+    ) {
+        let Ok(mut all) = self.sky_modifiers.lock() else {
+            return;
+        };
+        let slot = all.entry(*uuid).or_default();
+        if slot.modifier == modifier && slot.sent {
+            return;
+        }
+        slot.modifier = modifier;
+        slot.sent = false;
+    }
+
+    /// Takes the sky modifier one player has not been told yet.
+    pub fn unsent_sky_modifier(&self, uuid: &PlayerUuid) -> Option<ServerMessage> {
+        let mut all = self.sky_modifiers.lock().ok()?;
+        let slot = all.get_mut(uuid)?;
+        if slot.sent {
+            return None;
+        }
+        slot.sent = true;
+        Some(ServerMessage::SkyModifier {
+            modifier: slot.modifier,
+        })
+    }
+
+    /// Forgets a player's sky modifier, when they leave.
+    pub fn forget_sky_modifier(&self, uuid: &PlayerUuid) {
+        if let Ok(mut all) = self.sky_modifiers.lock() {
+            all.remove(uuid);
+        }
+    }
+
     pub fn tell(&self, uuid: &PlayerUuid, text: String) {
         if let Ok(mut notices) = self.notices.lock() {
             let queue = notices.entry(*uuid).or_default();
@@ -2515,6 +2568,10 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     // only when it differs from what they were last told, so a
                     // mod recomputing the same health every tick costs nothing.
                     for message in shared.unsent_hud_values(&uuid) {
+                        frame::write(&mut send, &message).await?;
+                    }
+                    // And what a mod has done to their sky, when it changes.
+                    if let Some(message) = shared.unsent_sky_modifier(&uuid) {
                         frame::write(&mut send, &message).await?;
                     }
                     // Why the last thing they asked for did not happen. Sent
@@ -3192,6 +3249,7 @@ mod tests {
             particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             bodies: Arc::default(),

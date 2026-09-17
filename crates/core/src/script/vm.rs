@@ -1192,6 +1192,14 @@ pub trait ScriptVm: Sized {
     /// and does not read.
     fn set_hud_access(&mut self, access: std::sync::Arc<dyn crate::hud::Access>);
 
+    /// Points `game.set_sky_modifier` at the connected players.
+    ///
+    /// Defaulted, because a VM with no players — a worker, a test — has
+    /// nobody's sky to change; see [`crate::atmosphere::Access`].
+    fn set_atmosphere_access(&mut self, access: std::sync::Arc<dyn crate::atmosphere::Access>) {
+        let _ = access;
+    }
+
     /// Points `game.line_of_sight` at the world.
     ///
     /// **Unlike every other setter here, what is behind this handle appears and

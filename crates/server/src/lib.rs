@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 pub mod announce;
+pub mod atmosphere;
 pub mod cert;
 pub mod checkmods;
 pub mod config;

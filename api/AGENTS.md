@@ -1140,11 +1140,14 @@ loudness and pan follow the listener every frame; its treble is set once, at the
 start. A player who joins after a loop started is not told about it — start it
 again for them from `register_on_player_join`.
 
-**The sky is registration-only.** `register_sky` takes its keyframes in the
-registration window and the client interpolates them from the clock. Nothing a
-mod does afterwards can darken the sky, close the horizon, or change the sun:
-there is no runtime sky call. A storm has to be expressible in particles,
-sounds, fog and tint, or wait for the engine.
+**The sky's keyframes are registration-only; the weather over them is not.**
+`register_sky` takes its keyframes in the registration window and the client
+interpolates them from the clock. `game.set_sky_modifier(uuid, { intensity,
+sky, sky_mix, fog_distance, saturation, ease_ticks })` lays a per-player change
+over them at any time — a storm darkens the sun, closes the horizon in and
+greys the grade, eased on that player's client — and `nil` puts the plain sky
+back. It multiplies and mixes rather than replacing, so it is right at every
+hour. The sun's direction and the keyframes themselves cannot be moved.
 
 **A place's fog and tint are asked when a chunk is SERVED, and never again.**
 Change what your callback returns and only chunks a player has not loaded yet

@@ -19,7 +19,103 @@
 //! doing the presenting. What the server owns is the *clock*, because two
 //! players standing together must see the same sky.
 
+use tiamot_core::atmosphere::SkyModifier;
 use tiamot_core::proto::{SkyFrame, SkyGrade};
+
+/// A mod's sky modifier on its way to where the mod put it.
+///
+/// **The server sends a target and a time; the client fills the gap**, as
+/// it does for the keyframes. A modifier set while another is still easing
+/// starts from wherever that one had got to, so a front that arrives and is
+/// then called off never snaps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Eased {
+    from: SkyModifier,
+    to: SkyModifier,
+    /// Seconds since `to` was set.
+    elapsed: f32,
+    /// Seconds the move takes; zero is at once.
+    duration: f32,
+}
+
+impl Default for Eased {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl Eased {
+    /// The plain sky, going nowhere.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            from: SkyModifier::NONE,
+            to: SkyModifier::NONE,
+            elapsed: 0.0,
+            duration: 0.0,
+        }
+    }
+
+    /// Sets where to go: a modifier, or `None` for the plain sky, eased over
+    /// the ticks the LAST modifier had — "back to normal" takes as long as
+    /// the storm took to arrive.
+    pub fn set(&mut self, target: Option<SkyModifier>) {
+        let ticks = target.map_or(self.to.ease_ticks, |target| target.ease_ticks);
+        self.from = self.current();
+        self.to = target.unwrap_or(SkyModifier::NONE);
+        self.elapsed = 0.0;
+        self.duration = tiamot_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
+    }
+
+    /// Advances by a frame.
+    pub fn advance(&mut self, dt: f32) {
+        self.elapsed += dt.max(0.0);
+    }
+
+    /// Where the modifier stands now.
+    ///
+    /// Exactly `to` once arrived — not nearly: a modifier at its identity
+    /// must leave the sky bit-identical, or every ungraded world would start
+    /// paying for a grading LUT (see [`SkyGrade::is_none`]).
+    #[must_use]
+    pub fn current(&self) -> SkyModifier {
+        if self.duration <= 0.0 || self.elapsed >= self.duration {
+            return self.to;
+        }
+        let blend = self.elapsed / self.duration;
+        let scalar = |from: f32, to: f32| from + (to - from) * blend;
+        SkyModifier {
+            intensity: scalar(self.from.intensity, self.to.intensity),
+            sky: mix(self.from.sky, self.to.sky, blend),
+            sky_mix: scalar(self.from.sky_mix, self.to.sky_mix),
+            fog_distance: scalar(self.from.fog_distance, self.to.fog_distance),
+            saturation: scalar(self.from.saturation, self.to.saturation),
+            ease_ticks: self.to.ease_ticks,
+        }
+    }
+}
+
+/// A moment with a mod's modifier laid over it.
+///
+/// Every term is a multiply or a lerp whose identity leaves the value
+/// exactly as it was: `x * 1.0`, `x + (y - x) * 0.0`. The grade is touched
+/// only when the modifier says something about it, so [`SkyGrade::NONE`]
+/// stays `NONE` under a modifier that has nothing to say — which is what
+/// keeps an ungraded world off the LUT.
+#[must_use]
+#[expect(clippy::float_cmp, reason = "an identity is exact or it is not one")]
+pub fn modified(moment: Moment, modifier: &SkyModifier) -> Moment {
+    let mut grade = moment.grade;
+    if modifier.saturation != 1.0 {
+        grade.saturation = (grade.saturation * modifier.saturation).clamp(0.0, GRADE_MAX);
+    }
+    Moment {
+        sky: mix(moment.sky, modifier.sky, modifier.sky_mix),
+        intensity: moment.intensity * modifier.intensity,
+        grade,
+        ..moment
+    }
+}
 
 /// A sky's colours, and the clock that walks them.
 #[derive(Debug, Clone, PartialEq)]
@@ -589,5 +685,61 @@ mod tests {
                 "{direction:?} against {from_moment:?}"
             );
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_modifier_eases_from_where_it_is_and_arrives_exactly() {
+        // **Weather ask W1.** Set at once, it is there; set over a second, it
+        // is halfway at half a second; called off, it goes back over the
+        // same time from wherever it had got to; and at its identity it
+        // leaves a moment bit-identical.
+        let storm = SkyModifier {
+            intensity: 0.5,
+            sky: [0.5, 0.5, 0.5],
+            sky_mix: 1.0,
+            fog_distance: 0.5,
+            saturation: 0.5,
+            ease_ticks: 20,
+        };
+        let mut eased = Eased::none();
+        eased.set(Some(SkyModifier {
+            ease_ticks: 0,
+            ..storm
+        }));
+        assert_eq!(eased.current().intensity, 0.5, "no ease is at once");
+
+        let mut eased = Eased::none();
+        eased.set(Some(storm));
+        assert_eq!(eased.current().intensity, 1.0, "it starts where it was");
+        eased.advance(0.5);
+        let half = eased.current();
+        assert!((half.intensity - 0.75).abs() < 1e-6, "{half:?}");
+        assert!((half.fog_distance - 0.75).abs() < 1e-6);
+        eased.set(None);
+        assert!(
+            (eased.current().intensity - 0.75).abs() < 1e-6,
+            "called off from where it was"
+        );
+        eased.advance(1.0);
+        assert_eq!(
+            eased.current(),
+            SkyModifier::NONE,
+            "and back to the plain sky, exactly"
+        );
+
+        let plain = Sky::none().moment();
+        assert_eq!(
+            modified(plain, &SkyModifier::NONE),
+            plain,
+            "the identity is bit-identical"
+        );
+        let dim = modified(plain, &storm);
+        assert_eq!(dim.intensity, 0.5);
+        assert_eq!(dim.sky, [0.5, 0.5, 0.5]);
+        assert_eq!(dim.grade.saturation, 0.5);
     }
 }

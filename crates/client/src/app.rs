@@ -1128,6 +1128,8 @@ pub struct App {
     /// replaced when the server sends one. That default is not a placeholder:
     /// it is what a world whose mods register no sky legitimately looks like.
     sky: crate::sky::Sky,
+    /// A mod's standing change to this player's sky, on its way there.
+    sky_modifier: crate::sky::Eased,
     /// The server's tick when it last said so.
     tick: u64,
     /// Whether the camera sits behind the player rather than in their eyes.
@@ -1406,6 +1408,7 @@ impl App {
             pacing: Pacing::default(),
             last_phases: Phases::default(),
             sky: crate::sky::Sky::none(),
+            sky_modifier: crate::sky::Eased::none(),
             tick: 0,
             third_person: false,
             time_override: false,
@@ -4405,6 +4408,8 @@ impl App {
                     self.hud_values.insert(mod_id, values);
                 }
 
+                Event::SkyModifier(modifier) => self.sky_modifier.set(modifier),
+
                 Event::SoundBindings { bindings } => self.adopt_bindings(bindings),
 
                 Event::View { view, slots, held } => self.adopt_view(view, slots, held),
@@ -4749,7 +4754,12 @@ impl App {
         // reads it. Presentation, so it runs on frame time rather than being
         // pinned to the simulation.
         self.renderer.advance_clock(dt);
-        let moment = self.sky.moment();
+        // The weather over the keyframes, easing towards where the mod put
+        // it — applied here, before the underwater case below, so a storm's
+        // horizon does not tint the view from under the water.
+        self.sky_modifier.advance(dt);
+        let modifier = self.sky_modifier.current();
+        let moment = crate::sky::modified(self.sky.moment(), &modifier);
         self.renderer
             .set_sun(moment.intensity, moment.sun, moment.sun_direction);
         // **Under the milk, the milk IS the sky.**
@@ -4780,7 +4790,9 @@ impl App {
                 // **Straight from the setting, in chunks.** It used to be a
                 // share of the horizon, which made the number three
                 // indirections away from anything a player could see.
-                f32::from(self.config.fog_chunks) * tiamot_core::CHUNK_BLOCKS as f32,
+                f32::from(self.config.fog_chunks)
+                    * tiamot_core::CHUNK_BLOCKS as f32
+                    * modifier.fog_distance,
             ),
         };
         self.renderer.set_sky(sky, far);

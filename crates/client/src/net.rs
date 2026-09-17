@@ -448,6 +448,9 @@ pub enum Event {
     /// The sky a mod registered, sent once on join.
     Sky(crate::sky::Sky),
 
+    /// A mod's standing change to this player's sky, or none.
+    SkyModifier(Option<tiamot_core::atmosphere::SkyModifier>),
+
     /// Where the server's clock stands in the day, `0.0..1.0`.
     TimeOfDay(f32),
 
@@ -1552,6 +1555,9 @@ async fn session(
                     mod_id,
                     values: values.into_iter().collect(),
                 });
+            }
+            ServerMessage::SkyModifier { modifier } => {
+                let _ = events.send(Event::SkyModifier(modifier));
             }
             ServerMessage::FontTable { fonts } => {
                 // The same pipeline as a sound: by hash, after the join, and a

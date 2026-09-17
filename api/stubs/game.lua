@@ -573,6 +573,39 @@ function game.register_block(spec) end
 ---@param spec Tiamot.SkySpec
 function game.register_sky(spec) end
 
+---Lays weather over one player's sky: a standing change to the keyframes,
+---eased on their client. Returns whether the player is here.
+---
+---**Why this exists.** `register_sky` is registration-only, and a storm that
+---arrives under a noon sky reads as a sprinkler. This multiplies and mixes the
+---keyframes rather than replacing them, so it is right at every hour: the
+---intensity is scaled, the horizon and fog colour move `sky_mix` of the way
+---to `sky`, the distance fog's reach is scaled by `fog_distance` (under 1 is
+---closer), and the grade's saturation by `saturation` (mode 3). Per player,
+---because two players in one domain can stand under different weather.
+---Presentation only — stored sunlight is scaled at draw time, no relight.
+---
+---```lua
+---game.set_sky_modifier(uuid, {
+---    intensity = 0.55,             -- multiplies the keyframe's intensity
+---    sky = { 0.55, 0.58, 0.62 },   -- or { r =, g =, b = }
+---    sky_mix = 0.7,                -- how far toward it; 1 when `sky` is given, else 0
+---    fog_distance = 0.6,
+---    grade = { saturation = 0.7 }, -- or `saturation = 0.7` at the top level
+---    ease_ticks = 400,             -- how long the client takes to get there
+---})
+---game.set_sky_modifier(uuid, nil)  -- the plain sky again, eased over the last ease_ticks
+---```
+---
+---Set it as often as you like: the server sends one message when it CHANGES.
+---A player who joins is on the plain sky until you set theirs. Wrong types
+---are errors; wrong numbers are clamped (intensity 0..2, sky channels 0..2,
+---sky_mix 0..1, fog_distance 0.05..4, saturation 0..4, ease_ticks up to 2400).
+---@param player string A player's UUID in hex, as a hook event reports one.
+---@param modifier { intensity?: number, sky?: number[]|{ r: number, g: number, b: number }, sky_mix?: number, fog_distance?: number, saturation?: number, grade?: { saturation?: number }, ease_ticks?: integer }|nil
+---@return boolean here
+function game.set_sky_modifier(player, modifier) end
+
 ---Registers a tool.
 ---
 ---**Registration window only**, like `game.register_block`.

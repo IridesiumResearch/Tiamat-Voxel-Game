@@ -619,6 +619,18 @@ impl Bot {
             .collect()
     }
 
+    /// Every sky modifier received so far, in arrival order.
+    #[must_use]
+    pub fn sky_modifiers_received(&self) -> Vec<Option<tiamot_core::atmosphere::SkyModifier>> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::SkyModifier { modifier } => Some(modifier),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every particle burst received so far, in arrival order.
     #[must_use]
     pub fn particles_received(&self) -> Vec<tiamot_core::particle::Burst> {
