@@ -62,6 +62,13 @@ pub struct Lease {
     /// tick refills it — which makes the cost of navigation a property of the
     /// engine rather than of how carefully every installed mod was written.
     allowance: Arc<std::sync::atomic::AtomicU32>,
+    /// The passable materials, sorted, in the id space the chunks hold — for
+    /// `surface_at` to look through a tuft.
+    passable: Arc<Vec<u16>>,
+    /// The world's fluid, for `surface_at` to find a pond's surface or look
+    /// through it. Read under the lease, which is the order the tick already
+    /// takes them in.
+    fluid: Option<Arc<std::sync::RwLock<crate::fluid::Ponds>>>,
 }
 
 impl Default for Lease {
@@ -77,7 +84,24 @@ impl Lease {
         Self {
             slot: Arc::new(Mutex::new(None)),
             allowance: Arc::new(std::sync::atomic::AtomicU32::new(path::TICK_BUDGET)),
+            passable: Arc::new(Vec::new()),
+            fluid: None,
         }
+    }
+
+    /// What `surface_at` looks through: the passable materials, and the fluid.
+    ///
+    /// Set once at startup, before [`Self::handle`] is taken. `passable` is
+    /// sorted here; ids are in the space the chunks in memory hold.
+    pub fn with_terrain(
+        mut self,
+        mut passable: Vec<u16>,
+        fluid: Arc<std::sync::RwLock<crate::fluid::Ponds>>,
+    ) -> Self {
+        passable.sort_unstable();
+        self.passable = Arc::new(passable);
+        self.fluid = Some(fluid);
+        self
     }
 
     /// Refills the tick's pathfinding pool.
@@ -98,6 +122,8 @@ impl Lease {
         Shared {
             slot: Arc::clone(&self.slot),
             allowance: Arc::clone(&self.allowance),
+            passable: Arc::clone(&self.passable),
+            fluid: self.fluid.clone(),
         }
     }
 
@@ -140,6 +166,8 @@ impl Lease {
 pub struct Shared {
     slot: Arc<Mutex<Option<World>>>,
     allowance: Arc<std::sync::atomic::AtomicU32>,
+    passable: Arc<Vec<u16>>,
+    fluid: Option<Arc<std::sync::RwLock<crate::fluid::Ponds>>>,
 }
 
 impl Shared {
@@ -235,6 +263,104 @@ impl sight::Access for Shared {
                 sight::Reading::Mixed(Box::new(std::array::from_fn(|index| runtime(cells[index]))))
             }
         }
+    }
+
+    fn surface_at(
+        &self,
+        domain: &str,
+        column: [i32; 2],
+        from: i32,
+        depth: u32,
+        skip: sight::Skip,
+    ) -> Option<sight::Surface> {
+        let slot = self.slot.lock().ok()?;
+        let world = slot.as_ref()?;
+        let terrain = world.solid(domain);
+        // The fluid, only if a fluid surface is an answer — and read under
+        // the lease, which is the order every mod call already takes them in.
+        let ponds = if skip.fluid {
+            None
+        } else {
+            self.fluid.as_ref().and_then(|fluid| fluid.read().ok())
+        };
+        let fluidics = ponds.as_ref().and_then(|ponds| ponds.get(domain));
+        let depth = i32::try_from(depth.min(sight::MAX_SURFACE_DEPTH)).unwrap_or(i32::MAX);
+        let passable =
+            |material: tiamot_core::MaterialId| self.passable.binary_search(&material.0).is_ok();
+
+        // **One chunk resolved per sixteen rows.** `resident` hands back a
+        // reference tied to the world, not to the borrow, so a column is
+        // walked with a lookup per chunk and not per block — the pattern
+        // lighting uses. An unloaded chunk ends the walk with no answer:
+        // never generated to find out, as `block_at` has it.
+        let mut held: Option<(tiamot_core::ChunkPos, &tiamot_core::Chunk)> = None;
+        for y in (from.saturating_sub(depth - 1)..=from).rev() {
+            let pos = tiamot_core::BlockPos::new(column[0], y, column[1]);
+            let chunk = match held {
+                Some((at, chunk)) if at == pos.chunk() => chunk,
+                _ => {
+                    let chunk = terrain.resident(pos.chunk())?;
+                    held = Some((pos.chunk(), chunk));
+                    chunk
+                }
+            };
+            let (material, occupancy) = match chunk.get_block_local(pos.local()) {
+                tiamot_core::BlockView::Uniform(material) if material.is_air() => {
+                    (tiamot_core::MaterialId::AIR, 0)
+                }
+                tiamot_core::BlockView::Uniform(material) => {
+                    (material, tiamot_core::block::OCCUPANCY_FULL)
+                }
+                tiamot_core::BlockView::Partial {
+                    material,
+                    occupancy,
+                } => (material, occupancy & tiamot_core::block::OCCUPANCY_FULL),
+                tiamot_core::BlockView::Mixed(cells) => {
+                    // The first cell that would stop the fall names the block;
+                    // failing one, the first that is there at all.
+                    let mut occupancy = 0u32;
+                    let mut named = None;
+                    let mut solid = None;
+                    for (index, cell) in cells.iter().enumerate() {
+                        if cell.is_air() {
+                            continue;
+                        }
+                        occupancy |= 1 << index;
+                        named.get_or_insert(*cell);
+                        if !passable(*cell) {
+                            solid.get_or_insert(*cell);
+                        }
+                    }
+                    (
+                        solid.or(named).unwrap_or(tiamot_core::MaterialId::AIR),
+                        occupancy,
+                    )
+                }
+            };
+            if occupancy != 0 {
+                if skip.passable && passable(material) {
+                    continue;
+                }
+                return Some(sight::Surface {
+                    y,
+                    material,
+                    occupancy,
+                    fluid: None,
+                });
+            }
+            if let Some(fluidics) = fluidics {
+                let fluid = fluidics.at(pos);
+                if !fluid.is_empty() {
+                    return Some(sight::Surface {
+                        y,
+                        material: tiamot_core::MaterialId::AIR,
+                        occupancy: 0,
+                        fluid: Some(fluid),
+                    });
+                }
+            }
+        }
+        None
     }
 }
 
@@ -530,5 +656,92 @@ mod tests {
             )
         });
         assert_eq!(seen, Sighting::Blocked);
+    }
+
+    #[test]
+    fn the_top_of_a_column_is_found_in_one_call_and_looks_through_what_it_is_told_to() {
+        // **Weather ask W6.** The room's floor is at y = 0 and its pillar
+        // reaches y = 3. A tuft of a passable material on the floor is the
+        // surface unless the caller looks through it; a pond's surface is an
+        // answer unless the caller looks through that too; an unloaded chunk
+        // is no answer, and so is a column with nothing in reach.
+        let stone = MaterialId(1);
+        let grass = MaterialId(2);
+        let mut world = room();
+        place(&mut world, tiamot_core::BlockPos::new(1, 1, 1), grass);
+
+        let fluid = std::sync::Arc::new(std::sync::RwLock::new(crate::fluid::Ponds::new(
+            tiamot_core::fluid::Fluids::new(),
+            tiamot_core::fluid::Absorbency::default(),
+        )));
+        let milk = tiamot_core::fluid::Fluid::new(tiamot_core::fluid::FluidId(1), 27);
+        fluid
+            .write()
+            .expect("fluid")
+            .of(tiamot_core::domain::OVERWORLD)
+            .set(tiamot_core::BlockPos::new(3, 1, 3), milk);
+
+        let lease = Lease::new().with_terrain(vec![grass.0], fluid);
+        let handle = lease.handle();
+        let domain = tiamot_core::domain::OVERWORLD;
+        let look = |handle: &Shared, x: i32, z: i32, from: i32, depth: u32, skip: sight::Skip| {
+            handle.surface_at(domain, [x, z], from, depth, skip)
+        };
+        let nothing = sight::Skip::default();
+        let through_tufts = sight::Skip {
+            passable: true,
+            fluid: false,
+        };
+        let through_ponds = sight::Skip {
+            passable: false,
+            fluid: true,
+        };
+
+        assert_eq!(
+            look(&handle, 8, 8, 15, 16, nothing),
+            None,
+            "outside a lend there is no world to read"
+        );
+        let (_, seen) = lease.lending(world, || {
+            (
+                look(&handle, 8, 8, 15, 16, nothing),
+                look(&handle, 5, 5, 15, 16, nothing),
+                look(&handle, 1, 1, 15, 16, nothing),
+                look(&handle, 1, 1, 15, 16, through_tufts),
+                look(&handle, 3, 3, 15, 16, nothing),
+                look(&handle, 3, 3, 15, 16, through_ponds),
+                look(&handle, 5, 5, 15, 3, nothing),
+                look(&handle, 40, 5, 15, 16, nothing),
+            )
+        });
+        let full = tiamot_core::block::OCCUPANCY_FULL;
+        assert_eq!(
+            seen.0.map(|s| (s.y, s.material, s.occupancy)),
+            Some((3, stone, full)),
+            "the pillar's top"
+        );
+        assert_eq!(seen.1.map(|s| s.y), Some(0), "the floor");
+        assert_eq!(
+            seen.2.map(|s| (s.y, s.material)),
+            Some((1, grass)),
+            "a tuft is a surface"
+        );
+        assert_eq!(
+            seen.3.map(|s| (s.y, s.material)),
+            Some((0, stone)),
+            "unless it is looked through, and then the floor under it is"
+        );
+        let pond = seen.4.expect("the pond's surface");
+        assert_eq!(
+            (pond.y, pond.material, pond.fluid),
+            (1, MaterialId::AIR, Some(milk))
+        );
+        assert_eq!(
+            seen.5.map(|s| s.y),
+            Some(0),
+            "looked through, the pond's bed"
+        );
+        assert_eq!(seen.6, None, "nothing within three blocks of y = 15");
+        assert_eq!(seen.7, None, "a column in a chunk that is not loaded");
     }
 }

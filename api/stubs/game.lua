@@ -1105,10 +1105,40 @@ function game.register_on_tick(callback) end
 ---asks about that space; leaving `domain` out asks about the overworld, which
 ---is what every mod written before domains existed meant. The same field works
 ---on `game.set_block`, `game.get_light`, `game.get_fluid`, `game.set_fluid`,
----`game.line_of_sight`, `game.find_path` and `game.steer_entity` — a position
----names a place only with a space to be in, because every domain has a block at
----each coordinate.
+---`game.surface_at`, `game.line_of_sight`, `game.find_path` and
+---`game.steer_entity` — a position names a place only with a space to be in,
+---because every domain has a block at each coordinate.
 function game.get_block(position) end
+
+---The top of a column: the first occupied block at or below `from`, looking
+---down at most `depth` blocks (default 64, at most 256), in one call.
+---
+---**Why this and not a loop over `get_block`.** Snow lands on the surface, and
+---the surface is what players have built and dug since the terrain was made —
+---which `noise_heightmap` and a density's `at` cannot know. A loop scanning
+---down paid a VM crossing per block, forty-eight of them per column; this is
+---one, and the engine resolves each chunk once on the way down.
+---
+---`skip_passable = true` looks through blocks whose occupied cells are all a
+---passable material (grass, ferns), so snow lands on the ground under a tuft.
+---`skip_fluid = true` looks through a block holding fluid and nothing solid,
+---so rain reaches a pond's bed; without it a pond's surface is the answer, with
+---`fluid` (its numeric id) and `volume` (cells, 0..27) set and `material` air.
+---
+---`nil` when the column runs into a chunk that is not loaded — never GENERATED
+---to answer, as `get_block` has it — when nothing is occupied within `depth`,
+---or when you asked from `register_on_generate`. Each is "nothing to land on
+---here" to a weather mod, which is why they are one answer.
+---
+---```lua
+---local top = game.surface_at{ x = 120, z = -40, from = 200, depth = 64, skip_passable = true }
+---if top then
+---    game.set_block({ x = 120, y = top.y + 1, z = -40 }, "snow:snow")
+---end
+---```
+---@param spec { x: integer, z: integer, from: integer, depth?: integer, skip_passable?: boolean, skip_fluid?: boolean, domain?: string }
+---@return { y: integer, material: integer, occupancy: integer, fluid: integer|nil, volume: integer|nil }|nil
+function game.surface_at(spec) end
 
 ---The light at a block, right now.
 ---

@@ -1935,6 +1935,23 @@ impl ServerHandle {
             ids
         };
 
+        // The same materials in the id space the chunks in memory hold, for
+        // `game.surface_at` to look through a tuft: `lease.rs` reads chunks
+        // without translation and says why.
+        let passable_runtime: Vec<u16> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+            .iter()
+            .filter(|rule| rule.passable)
+            .filter_map(|rule| {
+                registry
+                    .iter()
+                    .find(|(_, name)| *name == rule.block)
+                    .map(|(id, _)| id.0)
+            })
+            .collect();
+
         // The domains the mods registered. Read here, with everything else the
         // freeze made final, and handed to the simulation thread that owns the
         // registry they go into.
@@ -2552,7 +2569,8 @@ impl ServerHandle {
                     // holds the world mutably through generation and every edit,
                     // so the only safe handle is one that is empty except while
                     // it is deliberately lent.
-                    let sight = crate::lease::Lease::new();
+                    let sight = crate::lease::Lease::new()
+                        .with_terrain(passable_runtime, std::sync::Arc::clone(&fluidics));
 
                     // Plans a mod has asked to stamp, and has not seen land
                     // yet. Owned here rather than by the VM because the tick is

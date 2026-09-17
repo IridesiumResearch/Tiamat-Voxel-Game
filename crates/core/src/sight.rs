@@ -105,7 +105,63 @@ pub trait Access: Send + Sync {
     /// block at each coordinate, so a reading without one is a reading of
     /// whichever space the implementation happened to be looking at.
     fn block_at(&self, domain: &str, pos: crate::coords::BlockPos) -> Reading;
+
+    /// The top of a column: the first occupied block at or below `from`,
+    /// looking down at most `depth` blocks, through loaded chunks only.
+    ///
+    /// **One crossing into the engine per column, instead of one per
+    /// block.** Snow has to land on the surface, and the surface is what
+    /// players have built and dug since the terrain was generated — which
+    /// `noise_heightmap` cannot know. A mod scanning down with `get_block`
+    /// paid a VM crossing per block, forty-eight of them per column; the
+    /// engine walks the column natively and resolves each chunk once.
+    ///
+    /// `None` when the column runs into a chunk that is not loaded (never
+    /// generated to answer, as [`Self::block_at`] has it), when nothing is
+    /// occupied within `depth`, or when there is no world to read. Weather
+    /// ask W6. Defaulted, because a VM with no world has no column.
+    fn surface_at(
+        &self,
+        domain: &str,
+        column: [i32; 2],
+        from: i32,
+        depth: u32,
+        skip: Skip,
+    ) -> Option<Surface> {
+        let _ = (domain, column, from, depth, skip);
+        None
+    }
 }
+
+/// What [`Access::surface_at`] looks past on its way down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Skip {
+    /// Whether a block whose every occupied cell is a passable material —
+    /// grass, ferns — is looked through, so snow lands on the ground under a
+    /// tuft rather than on it.
+    pub passable: bool,
+    /// Whether a block holding fluid and nothing solid is looked through, so
+    /// rain falls to the bed of a pond rather than stopping at its surface.
+    pub fluid: bool,
+}
+
+/// The top of a column, from [`Access::surface_at`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Surface {
+    /// The block's world y.
+    pub y: i32,
+    /// What it is made of: the material of its first occupied cell that was
+    /// not looked past, or [`crate::MaterialId::AIR`] for a fluid surface.
+    pub material: crate::MaterialId,
+    /// Which of its 27 cells are filled, indexed `x + 3y + 9z`; empty for a
+    /// fluid surface.
+    pub occupancy: u32,
+    /// The fluid in it, when the surface is a fluid's and not a block's.
+    pub fluid: Option<crate::fluid::Fluid>,
+}
+
+/// The furthest down a column is walked: sixteen chunks.
+pub const MAX_SURFACE_DEPTH: u32 = 256;
 
 /// What the engine can tell a mod about one block.
 ///

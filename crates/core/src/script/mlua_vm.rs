@@ -4799,6 +4799,64 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))
     }
 
+    /// `game.get_block`, `game.get_light` and `game.surface_at`: the world,
+    /// read. Split from `install_frozen_api`, which is at the line limit.
+    fn install_readers(&self, game: &Table) -> Result<(), ScriptError> {
+        game.set("get_block", self.block_reader()?)
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("get_light", self.light_reader()?)
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("surface_at", self.surface_reader()?)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
+    /// The `game.surface_at` function, built once per mod environment.
+    ///
+    /// `nil` on the same terms as `get_block`'s — the column ran into a chunk
+    /// that is not loaded, or there is no world — and also for a column with
+    /// nothing occupied within `depth`, which is the same answer to a mod:
+    /// nothing to land on here. See [`crate::sight::Access::surface_at`].
+    fn surface_reader(&self) -> Result<mlua::Function, ScriptError> {
+        let sight = std::sync::Arc::clone(&self.sight);
+        self.lua
+            .create_function(move |lua, spec: Table| {
+                let x: i32 = spec.get("x")?;
+                let z: i32 = spec.get("z")?;
+                let from: i32 = spec.get("from")?;
+                let depth: u32 = spec.get::<Option<u32>>("depth")?.unwrap_or(64);
+                let skip = crate::sight::Skip {
+                    passable: spec.get::<Option<bool>>("skip_passable")?.unwrap_or(false),
+                    fluid: spec.get::<Option<bool>>("skip_fluid")?.unwrap_or(false),
+                };
+                let domain = domain_of(&spec)?;
+
+                let surface = sight
+                    .lock()
+                    .map_err(|_| {
+                        mlua::Error::external(
+                            "the world lease is poisoned; the simulation thread panicked",
+                        )
+                    })?
+                    .as_ref()
+                    .and_then(|access| access.surface_at(&domain, [x, z], from, depth, skip));
+
+                let Some(surface) = surface else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let out = lua.create_table()?;
+                out.set("y", surface.y)?;
+                out.set("material", surface.material.0)?;
+                out.set("occupancy", surface.occupancy)?;
+                if let Some(fluid) = surface.fluid {
+                    out.set("fluid", fluid.fluid().0)?;
+                    out.set("volume", fluid.volume())?;
+                }
+                Ok(mlua::Value::Table(out))
+            })
+            .map_err(|err| self.vm_error(&err))
+    }
+
     /// The `game.line_of_sight` function, built once per mod environment.
     ///
     /// # Three answers, not two
@@ -6569,12 +6627,7 @@ impl MluaVm {
         game.set("set_fluid", set_fluid)
             .map_err(|err| self.vm_error(&err))?;
 
-        let get_light = self.light_reader()?;
-        let get_block = self.block_reader()?;
-        game.set("get_block", get_block)
-            .map_err(|err| self.vm_error(&err))?;
-        game.set("get_light", get_light)
-            .map_err(|err| self.vm_error(&err))?;
+        self.install_readers(game)?;
 
         self.install_perception(mod_id, game)?;
 
@@ -9170,7 +9223,13 @@ mod tests {
         /// What `block_at` should answer, and where it was asked.
         block: std::sync::Mutex<Option<crate::sight::Reading>>,
         blocks_asked: std::sync::Mutex<Vec<crate::BlockPos>>,
+        /// What `surface_at` should answer, and what it was asked.
+        surface: std::sync::Mutex<Option<crate::sight::Surface>>,
+        columns_asked: std::sync::Mutex<Vec<ColumnAsk>>,
     }
+
+    /// What `surface_at` was asked: domain, column, from, depth, skip.
+    type ColumnAsk = (String, [i32; 2], i32, u32, crate::sight::Skip);
 
     impl crate::sight::Access for Eye {
         fn line_of_sight(
@@ -9189,6 +9248,20 @@ mod tests {
                 .unwrap_or(crate::sight::Sighting::Unavailable)
         }
 
+        fn surface_at(
+            &self,
+            domain: &str,
+            column: [i32; 2],
+            from: i32,
+            depth: u32,
+            skip: crate::sight::Skip,
+        ) -> Option<crate::sight::Surface> {
+            if let Ok(mut asked) = self.columns_asked.lock() {
+                asked.push((domain.to_owned(), column, from, depth, skip));
+            }
+            self.surface.lock().ok().and_then(|reply| *reply)
+        }
+
         fn block_at(&self, _domain: &str, pos: crate::BlockPos) -> crate::sight::Reading {
             if let Ok(mut asked) = self.blocks_asked.lock() {
                 asked.push(pos);
@@ -9199,6 +9272,95 @@ mod tests {
                 .and_then(|reply| reply.clone())
                 .unwrap_or(crate::sight::Reading::Unavailable)
         }
+    }
+
+    #[test]
+    fn a_mod_asks_for_the_top_of_a_column_in_one_crossing() {
+        // **Weather ask W6.** The table's shape reaches the seam with its
+        // defaults — sixty-four blocks, skipping nothing, the overworld — and
+        // the answer comes back as `get_block` would spell it, with the fluid
+        // named only when the surface is one. Nothing found is nil.
+        let mut host = vm();
+        let eye = std::sync::Arc::new(Eye::default());
+        host.set_sight_access(eye.clone());
+        *eye.surface.lock().expect("lock") = Some(crate::sight::Surface {
+            y: 71,
+            material: crate::MaterialId(3),
+            occupancy: 0b111,
+            fluid: None,
+        });
+        load(
+            &mut host,
+            "snow",
+            "top = game.surface_at{ x = 120, z = -40, from = 200 }\n\
+             deep = game.surface_at{ x = 1, z = 2, from = 30, depth = 12, skip_passable = true,\n\
+             \x20   skip_fluid = true, domain = 'snow:ship' }",
+        )
+        .expect("load");
+        let env = host.environment("snow").expect("env");
+        let top: Table = env.get("top").expect("top");
+        assert_eq!(top.get::<i32>("y").expect("y"), 71);
+        assert_eq!(top.get::<u16>("material").expect("material"), 3);
+        assert_eq!(top.get::<u32>("occupancy").expect("occupancy"), 0b111);
+        assert!(top.get::<Option<u8>>("fluid").expect("fluid").is_none());
+        let asked = eye.columns_asked.lock().expect("lock").clone();
+        assert_eq!(
+            asked[0],
+            (
+                crate::domain::OVERWORLD.to_owned(),
+                [120, -40],
+                200,
+                64,
+                crate::sight::Skip::default()
+            )
+        );
+        assert_eq!(
+            asked[1],
+            (
+                "snow:ship".to_owned(),
+                [1, 2],
+                30,
+                12,
+                crate::sight::Skip {
+                    passable: true,
+                    fluid: true
+                }
+            )
+        );
+
+        *eye.surface.lock().expect("lock") = Some(crate::sight::Surface {
+            y: -3,
+            material: crate::MaterialId::AIR,
+            occupancy: 0,
+            fluid: Some(crate::fluid::Fluid::new(crate::fluid::FluidId(2), 9)),
+        });
+        load(
+            &mut host,
+            "pond",
+            "top = game.surface_at{ x = 0, z = 0, from = 0 }",
+        )
+        .expect("load");
+        let env = host.environment("pond").expect("env");
+        let top: Table = env.get("top").expect("top");
+        assert_eq!(
+            top.get::<u8>("fluid").expect("fluid"),
+            2,
+            "a fluid surface names its fluid"
+        );
+        assert_eq!(top.get::<u32>("volume").expect("volume"), 9);
+
+        *eye.surface.lock().expect("lock") = None;
+        load(
+            &mut host,
+            "dry",
+            "top = game.surface_at{ x = 0, z = 0, from = 0 }",
+        )
+        .expect("load");
+        let env = host.environment("dry").expect("env");
+        assert!(
+            env.get::<Option<Table>>("top").expect("top").is_none(),
+            "nothing found is nil"
+        );
     }
 
     /// A pathfinder that answers whatever a test told it to.

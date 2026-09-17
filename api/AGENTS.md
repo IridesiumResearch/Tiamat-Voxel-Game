@@ -121,6 +121,14 @@ it, and returning `""` says you handled it. Return `nil` for blocks that are not
 yours, so the next mod — and in the end the engine's own "nothing selected"
 warning — gets its turn.
 
+**The top of a column is one call: `game.surface_at{ x, z, from, depth,
+skip_passable, skip_fluid }`.** Snow, rain, a spawn point, anything that has to
+find the ground as it is NOW — built on and dug since worldgen, which no
+heightmap knows — asks the engine, which walks the column natively and resolves
+each chunk once. Do not loop `game.get_block` down a column; that is a VM
+crossing per block. `nil` means an unloaded chunk, nothing within `depth`, or
+no world (worldgen), which are all "nothing to land on here".
+
 ### 5. Worldgen: describe the field, never sample it
 
 The rule above says no per-sample maths. That does not mean no 3D terrain — it
