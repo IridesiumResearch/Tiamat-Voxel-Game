@@ -4885,3 +4885,154 @@ fn a_frame_with_particles_and_a_selection_in_it_draws_at_all() {
     );
     renderer.set_lighting_mode(LightingMode::Classic);
 }
+
+#[test]
+fn a_pond_against_the_sky_is_still_drawn_in_mode_3() {
+    // **Reported from the window: "in beautiful lighting mode the ocean only
+    // renders on top of the loaded materials behind it. If sky is behind it,
+    // it is transparent."**
+    //
+    // Mode 3 fogs the finished scene from the DEPTH buffer, and the fluid pass
+    // wrote no depth. Wherever sky was behind a surface of water, the composite
+    // read the sky's depth, fogged the pixel all the way to sky and painted the
+    // water out; wherever terrain was behind it, it read the terrain's depth
+    // and the water survived. So a sea read as a sheet laid over the seabed
+    // with nothing at the horizon.
+    //
+    // The scene is a pond on a floor that ENDS: beyond the chunk there is no
+    // terrain and the absent policy is air, so the far half of the surface is
+    // seen against open sky from a camera low over the near shore. Measured
+    // against the same frame with the pond taken away, so no absolute colour
+    // is asserted; mode 2 is the control that says the framing is right.
+    let Some(gpu) = gpu() else { return };
+    use client::world::ABSENT_POLICY;
+
+    const MILK: MaterialId = MaterialId(3);
+
+    /// A pond filling one block layer over the floor.
+    struct Pond;
+    impl client::mesher::FluidFill for Pond {
+        fn fill(&self, _x: i32, y: i32, _z: i32) -> Option<(u16, u8)> {
+            (y == 9).then_some((MILK.get(), 24))
+        }
+    }
+
+    let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+    for x in 0..16 {
+        for z in 0..16 {
+            chunk
+                .set_block(BlockPos::new(x, 8, z), BlockValue::Uniform(STONE))
+                .expect("in chunk");
+        }
+    }
+
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    let atlas = Atlas::build(&[
+        None,
+        None,
+        Some(Image::solid(16, 16, [120, 120, 120, 255])),
+        Some(Image::solid(16, 16, [40, 90, 200, 255])),
+    ]);
+    renderer.set_atlas(&atlas);
+    // **Fog at a real distance, or the composite never fogs anything.** A
+    // fresh renderer's fog ends at `f32::MAX`, so sky-depth pixels come out
+    // with no haze at all and the report cannot be seen; the client sets a few
+    // chunks, and at that distance a pixel with the sky's depth behind it is
+    // fogged all the way.
+    renderer.set_sky([0.53, 0.70, 0.90], 96.0);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // Over the near shore looking down the pond at a shallow angle. A ray
+    // through the far half of the surface carries on under it past the end of
+    // the floor at z = 16 into open sky, which is exactly the pixel the
+    // composite got wrong: water in front, sky's depth behind.
+    let mut camera = Camera {
+        position: Position::from_world(8.0, 12.0, -2.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, -0.3);
+
+    let frame_with = |renderer: &mut Renderer, pond: bool| {
+        let mesh = if pond {
+            mesher::mesh_chunk(
+                &chunk,
+                &Neighbours::none(),
+                ABSENT_POLICY,
+                &DAY,
+                &Pond,
+                &mesher::NoGlass,
+            )
+        } else {
+            mesher::mesh_chunk(
+                &chunk,
+                &Neighbours::none(),
+                ABSENT_POLICY,
+                &DAY,
+                &mesher::NoFluid,
+                &mesher::NoGlass,
+            )
+        };
+        renderer.set_chunk(ChunkPos::new(0, 0, 0), &mesh);
+        target.capture(renderer, &camera).expect("capture")
+    };
+
+    // **The pixels are found, not guessed.** In mode 2 — which draws water
+    // over sky correctly — a pixel that is sky without the pond and something
+    // else with it is water with nothing but sky behind it. That set is where
+    // the report says mode 3 goes wrong, and the frame's own top-left corner
+    // says what sky looks like.
+    let close =
+        |a: [u8; 4], b: [u8; 4]| (0..3).all(|c| (i32::from(a[c]) - i32::from(b[c])).abs() <= 6);
+    renderer.set_lighting_mode(LightingMode::Classic);
+    let bare = frame_with(&mut renderer, false);
+    let pond = frame_with(&mut renderer, true);
+    let sky = bare.pixel(2, 2).expect("pixel");
+    let mut over_sky = Vec::new();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let without = bare.pixel(x, y).expect("pixel");
+            let with = pond.pixel(x, y).expect("pixel");
+            if close(without, sky) && !close(with, without) {
+                over_sky.push((x, y));
+            }
+        }
+    }
+    assert!(
+        over_sky.len() > 200,
+        "only {} pixels show water against the sky in mode 2, so the scene is not framed to \
+         see the report and the mode 3 assertion would prove nothing",
+        over_sky.len()
+    );
+
+    // Mode 3, on exactly those pixels: how much the pond changes them, as a
+    // share of how much it changed them in mode 2.
+    let change = |bare: &Image, pond: &Image| -> f32 {
+        let total: f32 = over_sky
+            .iter()
+            .map(|&(x, y)| {
+                let a = bare.pixel(x, y).expect("pixel");
+                let b = pond.pixel(x, y).expect("pixel");
+                (0..3)
+                    .map(|c| (f32::from(a[c]) - f32::from(b[c])).abs() / 255.0)
+                    .fold(0.0_f32, f32::max)
+            })
+            .sum();
+        total / over_sky.len() as f32
+    };
+    let classic = change(&bare, &pond);
+
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let bare = frame_with(&mut renderer, false);
+    let pond = frame_with(&mut renderer, true);
+    let beautiful = change(&bare, &pond);
+    println!(
+        "water over sky: {} pixels, mode 2 changes them by {classic:.3}, mode 3 by {beautiful:.3}",
+        over_sky.len()
+    );
+    assert!(
+        beautiful > classic * 0.5,
+        "mode 3 changes the water-over-sky pixels by {beautiful:.3} where mode 2 changes them \
+         by {classic:.3}: the composite is painting the sky over water with only sky behind it"
+    );
+    renderer.set_lighting_mode(LightingMode::Classic);
+}

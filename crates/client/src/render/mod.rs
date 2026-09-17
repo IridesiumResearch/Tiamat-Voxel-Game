@@ -3772,7 +3772,7 @@ fn build_terrain_pipelines(
 ) -> TerrainPipelines {
     TerrainPipelines {
         pipeline: build_pipeline(gpu, shader, bind_layout, mode, target),
-        fluid_pipeline: build_fluid_pipeline(gpu, shader, &[Some(bind_layout)], target),
+        fluid_pipeline: build_fluid_pipeline(gpu, shader, &[Some(bind_layout)], target, false),
         glass_pipeline: build_glass_pipeline(
             gpu,
             shader,
@@ -4034,11 +4034,22 @@ fn build_glass_pipeline(
 /// against what is already in the target, and that is `ColorTargetState::blend`,
 /// which is fixed when the pipeline is built.
 ///
-/// **Depth writes are off.** Milk still TESTS against the depth buffer — a pond
-/// behind a hill is hidden by the hill — but it must not write, or the nearer
-/// face of a pond would occlude its own far face and a swimmer would see a hole
-/// where the bottom should be. This is why the fluid pass runs after all the
-/// opaque geometry rather than interleaved with it.
+/// **Depth writes are off in modes 1 and 2.** Milk still TESTS against the
+/// depth buffer — a pond behind a hill is hidden by the hill — but it does not
+/// write, so the nearer face of a pond cannot occlude its own far face. This is
+/// why the fluid pass runs after all the opaque geometry rather than
+/// interleaved with it.
+///
+/// **And ON in mode 3, because the composite needs them.** Mode 3 draws the
+/// world into a float scene and fogs it afterwards from the DEPTH buffer:
+/// `haze = (distance / far)^curve`, where the distance is read back from
+/// depth. A surface that wrote no depth left the sky's depth behind it, so
+/// wherever sky was behind the water the composite read "infinitely far",
+/// fogged the pixel all the way to sky and painted the water out — reported
+/// from the window as "the ocean only renders on top of loaded materials
+/// behind it; if sky is behind it, it is transparent". Writing depth is what
+/// tells the composite where the surface is, so it fogs the water at the
+/// water's distance and leaves the sky for the sky. `writes_depth` says which.
 ///
 /// **The vertex is wider.** A fluid vertex carries where the surface really sits
 /// and which way it is running (see `mesher::FluidVertex`), which terrain has no
@@ -4052,6 +4063,7 @@ fn build_fluid_pipeline(
     shader: &wgpu::ShaderModule,
     bind_layouts: &[Option<&wgpu::BindGroupLayout>],
     format: wgpu::TextureFormat,
+    writes_depth: bool,
 ) -> wgpu::RenderPipeline {
     let layout = gpu
         .device
@@ -4092,7 +4104,7 @@ fn build_fluid_pipeline(
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
+                depth_write_enabled: Some(writes_depth),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),

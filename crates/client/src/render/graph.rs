@@ -517,11 +517,15 @@ impl Post {
                 uniform("post-composite-uniforms"),
             ],
             world: world_pipeline_for(gpu, world_shader, world_layout, shadows.as_ref(), mode),
+            // **Writing depth, and only here.** The composite fogs from the
+            // depth buffer, so a surface that leaves the sky's depth behind it
+            // is fogged to sky and lost — see `build_fluid_pipeline`.
             fluid: super::build_fluid_pipeline(
                 gpu,
                 world_shader,
                 &[Some(world_layout)],
                 HDR_FORMAT,
+                true,
             ),
             glass: super::glass_pipeline_for(
                 gpu,
