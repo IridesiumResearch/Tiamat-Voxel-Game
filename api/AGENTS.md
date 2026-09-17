@@ -656,6 +656,55 @@ with your mod.
 
 ---
 
+## Sharing with other mods
+
+Each mod runs in a sealed environment: your globals are yours, and another
+mod's `tdl` or `inv` is simply not there. `depends` orders loading and nothing
+else. The channel between two mods is an EXPORT:
+
+```lua
+-- in tiamot_default_life, in the registration window, once
+game.export{
+    version = 1,
+    humidity = HUMIDITY,                       -- a compiled density: passes through
+    biome_under = function(x, z) return biome_at(x, z) end,
+}
+
+-- in tiamot_weather, whose mod.toml lists tiamot_default_life in depends
+local life = game.exports("tiamot_default_life")   -- nil if absent, or not a dependency
+if life then
+    local wet = life.humidity:at(x, 0, z, game.world_seed)
+    local biome = life.biome_under(x, z)
+end
+```
+
+What to design around:
+
+- **Only declared dependencies.** `game.exports(id)` answers `nil` unless `id`
+  is in your `depends` or `optional_depends`, so load order guarantees the
+  table exists when you read it — from the first line of your `init.lua`. It
+  is also `nil` for a mod that exported nothing or has been disabled, and the
+  four cases are deliberately one answer: handle "not there" and you have
+  handled all of them.
+- **Read-only, all the way down.** Writing into another mod's exports is an
+  error; the tables you get back are views that hand out views. Iterating
+  works (`pairs`, `#`).
+- **Functions run in their OWNER's sandbox, and faults land on the owner.** An
+  exported function that errors disables the mod that wrote it, the call
+  answers `nil`, and you carry on — so check for `nil` from any call across
+  the boundary. A callback you pass INTO another mod's function is yours: if
+  it errors when they call it, you are the one disabled, and they get `nil`.
+  Write both sides to be called by code you did not write.
+- **This is how one mod adds to another's screen.** Dialog events go only to
+  the mod that opened the dialog, and that does not change. The screen's owner
+  exports an `add_button(label, on_click)`; the other mod calls it and passes
+  a callback; the owner draws the button and, on the event, calls the
+  callback — which runs in the caller's sandbox, with the caller's `game`.
+  Nobody has to see anybody's globals.
+- **One export per mod, built before you call it.** A second call is an
+  error, so gather what you offer into one table. `version = 1` in it costs
+  nothing and lets a reader refuse a shape it does not understand.
+
 ## Machines: containers a mod can fill
 
 A chest is a container a player drags things into. A **furnace** is one your mod
@@ -1101,10 +1150,11 @@ so a per-player "particles off" setting in your own mod cannot be honoured — a
 a client that falls behind loses bursts rather than queuing them. Anything that
 must be seen every tick is something to make smaller.
 
-**A mod cannot read another mod's state.** Each mod gets a fresh sandbox and
-`game.storage` is private, so `depends` guarantees load order and nothing else.
-Sharing a field or a table between two mods means copying constants, which goes
-quietly wrong the day the other mod retunes them.
+**A mod reaches another mod only through what it exports.** Each mod gets a
+fresh sandbox and `game.storage` is private; `game.export` / `game.exports`
+(below, under "Sharing with other mods") is the channel, and `depends` is what
+opens it. There is no other way in, and copying another mod's constants is the
+thing that goes quietly wrong the day they are retuned.
 
 ## Before you say it works
 

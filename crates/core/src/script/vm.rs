@@ -1076,6 +1076,15 @@ pub trait ScriptVm: Sized {
     /// compile or errors while running.
     fn load_mod(&mut self, mod_id: &str, source: &str, dir: &Path) -> Result<(), ScriptError>;
 
+    /// Tells the VM which mods `mod_id` declared it loads after.
+    ///
+    /// **Called before `load_mod`, by the loader, from the resolved set** — so
+    /// it is the declared `depends` and `optional_depends`, aliases resolved,
+    /// and only the ones that are present. It is what `game.exports(id)`
+    /// consults: a mod may read the exports of a mod it declared, and nothing
+    /// else, so load order always guarantees the table exists when read.
+    fn note_dependencies(&mut self, _mod_id: &str, _after: &[String]) {}
+
     /// Closes the registration window and freezes the registries.
     ///
     /// Charter rule 9's lifecycle: after this, `register_*` is a hard error.

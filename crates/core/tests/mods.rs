@@ -1354,6 +1354,156 @@ game.register_block{ id = "unknown_" .. tostring(game.world_option("biomes:nothi
 }
 
 #[test]
+fn a_mod_reads_what_a_dependency_exported_and_faults_stay_with_whoever_wrote_the_code() {
+    // **Reported from an inventory mod under construction**: "Life shares
+    // code between its files through a global called tdl, but Inventory
+    // can't see that global... There is no way for one mod to call another."
+    // `game.export` / `game.exports` is the way, and these are its rules.
+    let root = scratch("exports");
+    // The exporter: a table with data, a function that works, a function that
+    // errors, and a function that calls a callback it was handed.
+    write_mod(
+        &root,
+        "life",
+        "",
+        r#"
+local buttons = {}
+game.export{
+    version = 1,
+    colours = { grass = "green", sky = "blue" },
+    greet = function(name) return "hello " .. name end,
+    explode = function() error("life's own bug") end,
+    add_button = function(label, on_click)
+        table.insert(buttons, { label = label, on_click = on_click })
+    end,
+    press = function(index, player)
+        -- What an owner does on a dialog event: call the guest's callback.
+        return buttons[index].on_click(player)
+    end,
+    button_count = function() return #buttons end,
+}
+"#,
+    );
+    // The importer, which depends on life and reads the exports at
+    // REGISTRATION — the first line of init.lua is allowed.
+    write_mod(
+        &root,
+        "inventory",
+        "depends = [\"life\"]",
+        r#"
+local life = game.exports("life")
+assert(life ~= nil, "a declared dependency's exports were nil")
+assert(life.version == 1)
+assert(life.colours.grass == "green", "a nested table did not read through")
+assert(life.greet("inventory") == "hello inventory", "a function did not call through")
+
+-- Read-only, all the way down.
+local wrote = pcall(function() life.colours.grass = "red" end)
+assert(not wrote, "writing into another mod's exports was allowed")
+local wrote_top = pcall(function() life.version = 2 end)
+assert(not wrote_top, "writing into another mod's export table was allowed")
+
+-- Iteration sees the keys.
+local seen = 0
+for _ in pairs(life.colours) do seen = seen + 1 end
+assert(seen == 2, "pairs over an export saw " .. seen)
+
+-- A callback handed across: the owner calls it and gets its answer.
+life.add_button("Wardrobe", function(player) return "wardrobe for " .. player end)
+assert(life.button_count() == 1)
+assert(life.press(1, "alice") == "wardrobe for alice", "a callback did not call back")
+
+-- A callback that ERRORS is the guest's fault, and the owner gets nil.
+life.add_button("Broken", function() error("inventory's own bug") end)
+game.register_block{ id = "loaded" }
+"#,
+    );
+    // A bystander that does NOT depend on life: nothing to read.
+    write_mod(
+        &root,
+        "bystander",
+        "",
+        r#"
+assert(game.exports("life") == nil, "exports leaked to a mod that declared no dependency")
+game.register_block{ id = "loaded" }
+"#,
+    );
+
+    let mut host = host_for(&root);
+    assert!(
+        host.failed().is_empty(),
+        "every mod should load: {:?}",
+        host.failed()
+    );
+    let registered: Vec<String> = host
+        .vm()
+        .registered_blocks()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(registered.contains(&"inventory:loaded".to_owned()));
+    assert!(registered.contains(&"bystander:loaded".to_owned()));
+    host.freeze().expect("freeze");
+
+    // **The fault rules, after freeze, through a hook.** A tick hook in
+    // inventory calls life's exploding function. Life is disabled, inventory
+    // is not, the call answered nil, and on the next tick life's exports are
+    // gone. Observed through faults alone — a bare host has no storage — so
+    // inventory raises if anything is other than expected, and the assertion
+    // is that it never does.
+    let root2 = scratch("exports-faults");
+    write_mod(
+        &root2,
+        "life",
+        "",
+        r#"
+game.export{
+    explode = function() error("life's own bug") end,
+}
+"#,
+    );
+    write_mod(
+        &root2,
+        "inventory",
+        "depends = [\"life\"]",
+        r#"
+local life = game.exports("life")
+local ticks = 0
+game.register_on_tick(function()
+    ticks = ticks + 1
+    if ticks == 1 then
+        local answer = life.explode()
+        if answer ~= nil then error("the owner's failing function answered something") end
+    elseif ticks == 2 then
+        if game.exports("life") ~= nil then error("a disabled mod's exports were still there") end
+    end
+end)
+"#,
+    );
+    let mut host = host_for(&root2);
+    assert!(host.failed().is_empty(), "{:?}", host.failed());
+    host.freeze().expect("freeze");
+    let first = host.vm_mut().tick(1).expect("tick");
+    assert!(
+        host.vm().faulted_mods().contains(&"life".to_owned()),
+        "life's exported function errored and life was not disabled: {first:?}"
+    );
+    assert!(
+        !first.iter().any(|(id, _)| id == "inventory"),
+        "the CALLER was disabled for the exporter's bug: {first:?}"
+    );
+    let second = host.vm_mut().tick(1).expect("tick");
+    assert!(
+        !second.iter().any(|(id, _)| id == "inventory"),
+        "inventory raised on its second tick: {second:?}"
+    );
+    assert!(
+        !host.vm().faulted_mods().contains(&"inventory".to_owned()),
+        "inventory ended up disabled"
+    );
+}
+
+#[test]
 fn a_structure_crosses_a_chunk_edge_and_does_not_care_which_chunk_was_made_first() {
     // **The order-independent shape, which is the only correct one.** The
     // obvious way to build a structure across an edge is to let a generator

@@ -2007,6 +2007,55 @@ function game.register_fluid(spec) end
 ---@return string|boolean|nil
 function game.world_option(id) end
 
+---Publishes a table for the mods that depend on you to read.
+---
+---**The one channel between sandboxes.** Each mod runs sealed: your globals are
+---yours alone, and until this existed a mod that wanted another mod's climate
+---field, biome table or "add a button" function could only copy its constants
+---and hope. Export once, in the registration window, and every mod that names
+---you in its `depends` or `optional_depends` can read it with `game.exports`.
+---
+---Anything may go in: numbers, strings, tables, functions, and the opaque
+---handles — a compiled density, a map, a schematic — pass through as they are.
+---What a reader gets is READ-ONLY: writing into it is an error, and functions
+---run in YOUR environment with your `game` table, so a registration or a
+---storage write inside one is yours and is attributed to you.
+---
+---**An error inside a function you exported disables YOU, not the caller.**
+---The call answers `nil` to them and they carry on (charter rule 10). The same
+---the other way round: a callback they pass into your function is theirs, and
+---if it errors when you call it, they are disabled and you get `nil` back.
+---Write exported functions to be called by code you did not write.
+---
+---```lua
+---game.export{
+---    version = 1,
+---    humidity = HUMIDITY,                          -- a density handle
+---    biome_under = function(x, z) return biome_at(x, z) end,
+---    add_button = function(label, on_click) table.insert(buttons, { label, on_click }) end,
+---}
+---```
+---@param exports table
+function game.export(exports) end
+
+---Another mod's exports, or `nil`.
+---
+---`nil` when the mod is not installed, when it is not in YOUR `depends` or
+---`optional_depends`, when it exported nothing, or when it has been disabled by
+---a fault — one answer for all four, so you handle the one case. Load order
+---guarantees a dependency exported before you read, so this works from the
+---first line of `init.lua`.
+---
+---```lua
+---local life = game.exports("tiamot_default_life")
+---if life then
+---    life.add_button("Wardrobe", function(player) open_wardrobe(player) end)
+---end
+---```
+---@param mod_id string
+---@return table|nil
+function game.exports(mod_id) end
+
 ---Registers a simulation space, or a template for making them.
 ---**Registration window only.**
 ---

@@ -182,6 +182,8 @@ impl<V: ScriptVm> ModHost<V> {
                 source,
             })?;
 
+            // What this mod may read from — see `game.exports`.
+            vm.note_dependencies(&entry.id, &entry.after);
             if let Err(err) = vm.load_mod(&entry.id, &source, &entry.dir) {
                 tracing::error!(
                     mod_id = %entry.id,

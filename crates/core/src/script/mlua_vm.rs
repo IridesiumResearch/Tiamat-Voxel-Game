@@ -125,6 +125,10 @@ const CHATTERS: &str = "tiamot.chatters";
 
 /// Mods that registered a `chunk_tint` callback.
 const CHUNK_TINTERS: &str = "tiamot.chunk_tinters";
+/// Each mod's declared dependencies, `mod_id -> { dep_id = true }`.
+const DEPENDENCIES: &str = "tiamot.deps";
+/// Each mod's exported table, `mod_id -> table`, as `game.export` left it.
+const EXPORTS: &str = "tiamot.exports";
 
 /// Registry key holding the mods that registered `register_chunk_fog`, in load
 /// order — the order that decides whose fog a place has.
@@ -934,7 +938,10 @@ pub struct MluaVm {
     lua: Lua,
     limits: VmLimits,
     frozen: bool,
-    faulted: BTreeSet<String>,
+    /// Mods disabled by a fault. Shared with the cross-mod boundary wrappers
+    /// (`game.exports`), which record a fault from inside a Lua call where
+    /// `self` is not to be had — see [`Self::fault`].
+    faulted: std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
     /// Per-mod sandbox environments, by mod id.
     environments: BTreeMap<String, Table>,
     /// Next numeric id to hand out. 0 and 1 are reserved (charter rule 8).
@@ -1124,7 +1131,7 @@ impl MluaVm {
             .unwrap_or_default();
 
         for mod_id in owners {
-            if self.faulted.contains(&mod_id) {
+            if self.is_faulted(&mod_id) {
                 continue;
             }
             let Ok(callback) = self
@@ -1157,7 +1164,7 @@ impl MluaVm {
                     // Charter rule 10: the mod is disabled and the world keeps
                     // its looks rather than the tick dying over a paint job.
                     let error = Self::classify(&err, &mod_id, context);
-                    self.faulted.insert(mod_id.clone());
+                    self.fault(&mod_id);
                     Err(error)
                 }
             };
@@ -1480,6 +1487,121 @@ fn fill_detail_of(options: Option<&Table>) -> mlua::Result<Option<crate::detgen:
 /// nothing: the client tests for absence before it samples anything, and a
 /// zero-strength tint that reached it would cost every fragment a branch to
 /// discover it had nothing to do.
+/// A value crossing from `owner`'s sandbox into `guest`'s.
+///
+/// See `MluaVm::install_exports`. Tables become read-only proxies that wrap
+/// what they hand out; functions become boundary calls that fault their owner
+/// on error and answer `nil`; everything else passes through unchanged.
+fn crossing(
+    lua: &Lua,
+    value: Value,
+    owner: &str,
+    guest: &str,
+    faulted: &std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
+) -> mlua::Result<Value> {
+    match value {
+        Value::Table(raw) => {
+            let proxy = lua.create_table()?;
+            let meta = lua.create_table()?;
+            let (index_raw, index_owner, index_guest, index_faulted) = (
+                raw.clone(),
+                owner.to_owned(),
+                guest.to_owned(),
+                std::sync::Arc::clone(faulted),
+            );
+            meta.set(
+                "__index",
+                lua.create_function(move |lua, (_, key): (Value, Value)| {
+                    let inner: Value = index_raw.get(key)?;
+                    crossing(lua, inner, &index_owner, &index_guest, &index_faulted)
+                })?,
+            )?;
+            let write_owner = owner.to_owned();
+            meta.set(
+                "__newindex",
+                lua.create_function(
+                    move |_, (_, key, _): (Value, Value, Value)| -> mlua::Result<()> {
+                        Err(mlua::Error::external(format!(
+                            "the exports of `{write_owner}` are read-only (writing {key:?})"
+                        )))
+                    },
+                )?,
+            )?;
+            let len_raw = raw.clone();
+            meta.set(
+                "__len",
+                lua.create_function(move |_, _: Value| Ok(len_raw.raw_len()))?,
+            )?;
+            // Iteration sees the raw table's keys and crossed values, so a
+            // guest can walk an exported list without being able to change it.
+            let (pairs_raw, pairs_owner, pairs_guest, pairs_faulted) = (
+                raw,
+                owner.to_owned(),
+                guest.to_owned(),
+                std::sync::Arc::clone(faulted),
+            );
+            meta.set(
+                "__pairs",
+                lua.create_function(move |lua, _: Value| {
+                    let snapshot = lua.create_table()?;
+                    for pair in pairs_raw.clone().pairs::<Value, Value>() {
+                        let (key, inner) = pair?;
+                        let crossed =
+                            crossing(lua, inner, &pairs_owner, &pairs_guest, &pairs_faulted)?;
+                        snapshot.set(key, crossed)?;
+                    }
+                    let next: mlua::Function = lua.globals().get("next")?;
+                    Ok((next, snapshot, Value::Nil))
+                })?,
+            )?;
+            meta.set("__metatable", "exports are read-only")?;
+            proxy.set_metatable(Some(meta))?;
+            Ok(Value::Table(proxy))
+        }
+        Value::Function(function) => {
+            let (owner, guest, faulted) = (
+                owner.to_owned(),
+                guest.to_owned(),
+                std::sync::Arc::clone(faulted),
+            );
+            let wrapped = lua.create_function(move |lua, args: mlua::MultiValue| {
+                // Arguments the guest hands over cross the other way: a callback
+                // that errors is the guest's error, not the owner's.
+                let mut handed = mlua::MultiValue::new();
+                for arg in args {
+                    handed.push_back(crossing(lua, arg, &guest, &owner, &faulted)?);
+                }
+                match function.call::<mlua::MultiValue>(handed) {
+                    Ok(answered) => {
+                        let mut out = mlua::MultiValue::new();
+                        for value in answered {
+                            out.push_back(crossing(lua, value, &owner, &guest, &faulted)?);
+                        }
+                        Ok(out)
+                    }
+                    Err(err) => {
+                        // Charter rule 10, at the boundary: the mod whose code
+                        // failed is the one disabled, and the caller gets a
+                        // `nil` it has to be ready for anyway.
+                        tracing::error!(
+                            mod_id = %owner,
+                            caller = %guest,
+                            error = %err,
+                            "disabling mod after a failure in a function it exported"
+                        );
+                        if let Ok(mut set) = faulted.lock() {
+                            set.insert(owner.clone());
+                        }
+                        Ok(mlua::MultiValue::new())
+                    }
+                }
+            })?;
+            Ok(Value::Function(wrapped))
+        }
+        other => Ok(other),
+    }
+}
+
 fn tint_of(table: &Table) -> Option<crate::proto::Tint> {
     /// Both colour ends at this is no hue shift at all — see `proto::Tint`.
     const WHITE: [u8; 3] = [128; 3];
@@ -1612,7 +1734,7 @@ impl ScriptVm for MluaVm {
             lua,
             limits,
             frozen: false,
-            faulted: BTreeSet::new(),
+            faulted: std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new())),
             environments: BTreeMap::new(),
             next_material: 2,
             light: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1864,6 +1986,29 @@ impl ScriptVm for MluaVm {
         }
     }
 
+    fn note_dependencies(&mut self, mod_id: &str, after: &[String]) {
+        let deps: Table = match self.lua.named_registry_value::<Table>(DEPENDENCIES) {
+            Ok(table) => table,
+            Err(_) => match self.lua.create_table() {
+                Ok(table) => table,
+                Err(err) => {
+                    tracing::error!("could not record dependencies: {err}");
+                    return;
+                }
+            },
+        };
+        let Ok(mine) = self.lua.create_table() else {
+            return;
+        };
+        for id in after {
+            let _ = mine.set(id.as_str(), true);
+        }
+        let _ = deps.set(mod_id, mine);
+        if let Err(err) = self.lua.set_named_registry_value(DEPENDENCIES, deps) {
+            tracing::error!(%mod_id, "could not record dependencies: {err}");
+        }
+    }
+
     fn set_world_options(&mut self, options: &[(String, crate::modload::WorldOptionValue)]) {
         // One registry table, read by `game.world_option` at call time, so
         // installing before any mod has a `game` table — which is when the
@@ -1952,7 +2097,7 @@ impl ScriptVm for MluaVm {
         Self::fog_of(&table).map(Some).map_err(|detail| {
             // A malformed answer is the mod's bug, and charter rule 10's answer
             // to a bug is the same whether Lua raised it or the engine found it.
-            self.faulted.insert(mod_id.clone());
+            self.fault(&mod_id);
             ScriptError::Runtime {
                 mod_id,
                 context: "chunk_fog".to_owned(),
@@ -2028,7 +2173,7 @@ impl ScriptVm for MluaVm {
         };
 
         for (mod_id, key) in generators {
-            if self.faulted.contains(&mod_id) {
+            if self.is_faulted(&mod_id) {
                 continue;
             }
 
@@ -2058,7 +2203,7 @@ impl ScriptVm for MluaVm {
             if let Err(err) = result {
                 // Charter rule 10: the mod is disabled, the tick continues.
                 let error = Self::classify(&err, &mod_id, "on_generate");
-                self.faulted.insert(mod_id.clone());
+                self.fault(&mod_id);
                 tracing::error!(mod_id = %mod_id, error = %error, "disabling mod after generation failure");
                 return Err(error);
             }
@@ -2081,7 +2226,7 @@ impl ScriptVm for MluaVm {
 
         let mut faults = Vec::new();
         for mod_id in owners {
-            if self.faulted.contains(&mod_id) {
+            if self.is_faulted(&mod_id) {
                 continue;
             }
             let callback: mlua::Function = self
@@ -2100,7 +2245,7 @@ impl ScriptVm for MluaVm {
 
             if let Err(err) = result {
                 let error = Self::classify(&err, &mod_id, "on_world_init");
-                self.faulted.insert(mod_id.clone());
+                self.fault(&mod_id);
                 tracing::error!(mod_id = %mod_id, error = %error, "disabling mod after a world pre-pass failure");
                 faults.push((mod_id, error));
             }
@@ -2155,7 +2300,7 @@ impl ScriptVm for MluaVm {
 
         let mut faults = Vec::new();
         for mod_id in tickers {
-            if self.faulted.contains(&mod_id) {
+            if self.is_faulted(&mod_id) {
                 continue;
             }
 
@@ -2174,7 +2319,7 @@ impl ScriptVm for MluaVm {
                 // every mod registered after it — and the symptom would be
                 // "my mod stopped working" with nothing pointing at the cause.
                 let error = Self::classify(&err, &mod_id, "on_tick");
-                self.faulted.insert(mod_id.clone());
+                self.fault(&mod_id);
                 tracing::error!(mod_id = %mod_id, error = %error, "disabling mod after tick failure");
                 faults.push((mod_id, error));
             }
@@ -2188,7 +2333,7 @@ impl ScriptVm for MluaVm {
         entities: &[u64],
         dt_ticks: u32,
     ) -> Result<Option<(String, ScriptError)>, ScriptError> {
-        if entities.is_empty() || self.faulted.contains(mod_id) {
+        if entities.is_empty() || self.is_faulted(mod_id) {
             return Ok(None);
         }
         let callback: mlua::Function = match self
@@ -2216,7 +2361,7 @@ impl ScriptVm for MluaVm {
                 // entity, and reporting two hundred identical faults would bury
                 // the one that matters.
                 let error = Self::classify(&err, mod_id, "on_entity_step");
-                self.faulted.insert(mod_id.to_owned());
+                self.fault(mod_id);
                 tracing::error!(
                     mod_id = %mod_id,
                     error = %error,
@@ -2370,7 +2515,7 @@ impl ScriptVm for MluaVm {
             .ok()
             .and_then(|owners| owners.get::<String>(event.material.0).ok())
             .unwrap_or_default();
-        if self.faulted.contains(&owner) {
+        if self.is_faulted(&owner) {
             return outcome;
         }
 
@@ -2393,7 +2538,7 @@ impl ScriptVm for MluaVm {
 
         if let Err(err) = result {
             let error = Self::classify(&err, &owner, "random_tick");
-            self.faulted.insert(owner.clone());
+            self.fault(&owner);
             tracing::error!(
                 mod_id = %owner,
                 error = %error,
@@ -2922,15 +3067,39 @@ impl ScriptVm for MluaVm {
     }
 
     fn faulted_mods(&self) -> Vec<String> {
-        self.faulted.iter().cloned().collect()
+        self.faulted_list()
     }
 
     fn mark_faulted(&mut self, mod_id: &str) {
-        self.faulted.insert(mod_id.to_owned());
+        self.fault(mod_id);
     }
 }
 
 impl MluaVm {
+    /// Whether a mod has been disabled by a fault.
+    fn is_faulted(&self, mod_id: &str) -> bool {
+        self.faulted
+            .lock()
+            .map(|set| set.contains(mod_id))
+            .unwrap_or(false)
+    }
+
+    /// Disables a mod. Charter rule 10: its hooks stop running, the tick does
+    /// not.
+    fn fault(&self, mod_id: &str) {
+        if let Ok(mut set) = self.faulted.lock() {
+            set.insert(mod_id.to_owned());
+        }
+    }
+
+    /// Every disabled mod, sorted.
+    fn faulted_list(&self) -> Vec<String> {
+        self.faulted
+            .lock()
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// `game.emit_particles`.
     fn install_particles(&self, game: &Table) -> Result<(), ScriptError> {
         let slot = std::sync::Arc::clone(&self.particles);
@@ -2963,7 +3132,96 @@ impl MluaVm {
         self.install_registration(mod_id, &game)?;
         self.install_frozen_api(mod_id, &game)?;
         self.install_world_options(&game)?;
+        self.install_exports(mod_id, &game)?;
         Ok(game)
+    }
+
+    /// `game.export` and `game.exports`: the one channel between sandboxes.
+    ///
+    /// Each mod runs in a sealed environment, so two mods that want to share
+    /// code — a world mod's climate field, an inventory mod's "add a button"
+    /// — could until now only copy each other's constants, which goes quietly
+    /// wrong the day one of them is retuned. `game.export(table)` publishes a
+    /// table in the registration window, once; `game.exports(id)` hands a mod
+    /// that declared `id` in its `depends` or `optional_depends` a READ-ONLY
+    /// view of it. Load order already guarantees the exporter ran first.
+    ///
+    /// **Everything that crosses is wrapped**, and the wrapping is what keeps
+    /// charter rule 10: a function called through the boundary runs in its
+    /// owner's environment (it is its owner's closure), and if it errors, the
+    /// OWNER is faulted, the call answers `nil`, and the caller carries on.
+    /// A function handed the other way — a callback passed as an argument —
+    /// is wrapped with the roles swapped, so an error in it faults the mod
+    /// that wrote it and not the mod that called it. A table is a proxy that
+    /// refuses writes and wraps what it hands out; a density, map or
+    /// schematic handle passes through as the opaque thing it already is.
+    ///
+    /// Cycles cannot form: `depends` is a DAG the resolver has already
+    /// ordered, and a mod can only reach the exports of what loaded before it.
+    fn install_exports(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        let owner = mod_id.to_owned();
+        let export = self
+            .lua
+            .create_function(move |lua, table: Table| {
+                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: game.export is for the registration window; the \
+                         registries are frozen"
+                    )));
+                }
+                let exports: Table = match lua.named_registry_value::<Table>(EXPORTS) {
+                    Ok(table) => table,
+                    Err(_) => lua.create_table()?,
+                };
+                if exports.contains_key(owner.as_str())? {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: game.export was already called; export one table, \
+                         built before you call it"
+                    )));
+                }
+                exports.set(owner.as_str(), table)?;
+                lua.set_named_registry_value(EXPORTS, exports)?;
+                Ok(())
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("export", export)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let guest = mod_id.to_owned();
+        let faulted = std::sync::Arc::clone(&self.faulted);
+        let exports = self
+            .lua
+            .create_function(move |lua, id: String| {
+                // Only a declared dependency. Anything else is `nil` — the
+                // same nothing a mod gets asking about a mod that is not
+                // installed, so a caller cannot tell "not a dependency" from
+                // "absent" and has to handle the one case either way.
+                let declared = lua
+                    .named_registry_value::<Table>(DEPENDENCIES)
+                    .and_then(|deps| deps.get::<Option<Table>>(guest.as_str()))
+                    .ok()
+                    .flatten()
+                    .and_then(|mine| mine.get::<Option<bool>>(id.as_str()).ok().flatten())
+                    .unwrap_or(false);
+                if !declared {
+                    return Ok(Value::Nil);
+                }
+                if faulted.lock().map(|set| set.contains(&id)).unwrap_or(false) {
+                    // A disabled mod is gone, exports and all.
+                    return Ok(Value::Nil);
+                }
+                let Ok(exports) = lua.named_registry_value::<Table>(EXPORTS) else {
+                    return Ok(Value::Nil);
+                };
+                let Some(table) = exports.get::<Option<Table>>(id.as_str())? else {
+                    return Ok(Value::Nil);
+                };
+                crossing(lua, Value::Table(table), &id, &guest, &faulted)
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("exports", exports)
+            .map_err(|err| self.vm_error(&err))
     }
 
     /// `game.world_option(id)`: what this world chose, fixed for its life.
@@ -6281,7 +6539,7 @@ impl MluaVm {
     /// exactly like one that throws anywhere else, rather than through a second
     /// copy of that logic which would drift.
     fn run_owner_hook(&mut self, hook: &str, mod_id: &str, event: &Table) -> HookOutcome {
-        if self.faulted.contains(mod_id) {
+        if self.is_faulted(mod_id) {
             return HookOutcome::allow();
         }
         let Ok(callback) = self
@@ -6300,7 +6558,7 @@ impl MluaVm {
         self.disarm_budget();
         if let Err(err) = result {
             let error = Self::classify(&err, mod_id, hook);
-            self.faulted.insert(mod_id.to_owned());
+            self.fault(mod_id);
             tracing::error!(
                 mod_id = %mod_id,
                 error = %error,
@@ -6324,7 +6582,7 @@ impl MluaVm {
 
         let mut outcome = HookOutcome::allow();
         for mod_id in mods {
-            if self.faulted.contains(&mod_id) {
+            if self.is_faulted(&mod_id) {
                 continue;
             }
             let Ok(callback) = self
@@ -6348,7 +6606,7 @@ impl MluaVm {
                 // server from digging.
                 Err(err) => {
                     let error = Self::classify(&err, &mod_id, hook);
-                    self.faulted.insert(mod_id.clone());
+                    self.fault(&mod_id);
                     tracing::error!(
                         mod_id = %mod_id,
                         error = %error,
