@@ -70,10 +70,22 @@ pub struct Layer {
     pub material: MaterialId,
 }
 
+/// The terrain and the codes of one [`ChunkBuffer::fill_layers`] call, both
+/// over the padded region, terrain first.
+type LayerFields = (Vec<f32>, Vec<f32>);
+
 impl Layer {
     /// The code that matches every block: for the body's own bands, laid
     /// after the coded ones. `to` may be infinite.
     pub const ANY: i32 = -1;
+
+    /// The code a field's value names: rounded the deterministic way
+    /// (charter rule 4 bans `round`), the floor of the value plus a half, in
+    /// integer arithmetic.
+    #[must_use]
+    pub fn code_of(value: f32) -> i32 {
+        super::floor_to_i32(value + 0.5)
+    }
 }
 
 /// How much resolution a density fill gives the surface.
@@ -996,6 +1008,47 @@ impl ChunkBuffer {
         }
     }
 
+    /// The two fields of [`Self::fill_layers`] — terrain, then codes — or
+    /// `None` when no layer could paint, in which case the terrain was never
+    /// evaluated.
+    ///
+    /// **The code before the terrain, and the terrain only if a code can
+    /// match.** A generator paints its surfaces biome by biome, and a biome's
+    /// call is a handful of layers under codes its mask makes; over most
+    /// chunks that mask is zero everywhere and no layer's code ever comes up.
+    /// The terrain is the expensive field — octaves of 3D noise a sample —
+    /// and it was evaluated in full before any of that was looked at. Now
+    /// the code's bound is asked first, free; then the code itself, cheap;
+    /// and the terrain only when some block's code is one a layer names. A
+    /// layer under [`Layer::ANY`] matches every block, so it is the one
+    /// thing that skips the question. Same cells either way: a block no
+    /// layer claims is left as it was.
+    fn layer_fields(
+        depth: &super::density::Density,
+        code: &super::density::Density,
+        seed: u64,
+        region: &super::noise::Region3d,
+        layers: &[Layer],
+    ) -> Result<Option<LayerFields>, BufferError> {
+        let any = layers.iter().any(|layer| layer.code == Layer::ANY);
+        let named = |code: i32| layers.iter().any(|layer| layer.code == code);
+        if !any {
+            let codes = code.bounds(seed, region);
+            if !(Layer::code_of(codes.low)..=Layer::code_of(codes.high)).any(named) {
+                return Ok(None);
+            }
+        }
+        let mut codes = vec![0.0f32; region.len()];
+        let mut scratch = super::density::Scratch::default();
+        code.evaluate_with(seed, region, &mut codes, &mut scratch)?;
+        if !any && !codes.iter().any(|value| named(Layer::code_of(*value))) {
+            return Ok(None);
+        }
+        let mut field = vec![0.0f32; region.len()];
+        depth.evaluate_with(seed, region, &mut field, &mut scratch)?;
+        Ok(Some((field, codes)))
+    }
+
     /// Paints the surface's layers from ONE depth field and ONE code field.
     ///
     /// # Why this is not several `fill_density_detail` calls
@@ -1058,18 +1111,13 @@ impl ChunkBuffer {
             return Ok(());
         }
 
-        let mut field = vec![0.0f32; region.len()];
-        let mut codes = vec![0.0f32; region.len()];
-        let mut scratch = super::density::Scratch::default();
-        depth.evaluate_with(seed, &region, &mut field, &mut scratch)?;
-        code.evaluate_with(seed, &region, &mut codes, &mut scratch)?;
+        let Some((field, codes)) = Self::layer_fields(depth, code, seed, &region, layers)? else {
+            return Ok(());
+        };
 
         let at = |x: usize, y: usize, z: usize| field[x + padded * (y + padded * z)];
-        let code_at = |x: usize, y: usize, z: usize| {
-            // Rounded the deterministic way (charter rule 4 bans `round`):
-            // the floor of the value plus a half, in integer arithmetic.
-            super::floor_to_i32(codes[x + padded * (y + padded * z)] + 0.5)
-        };
+        let code_at =
+            |x: usize, y: usize, z: usize| Layer::code_of(codes[x + padded * (y + padded * z)]);
         // **A layer with code [`Layer::ANY`] takes every block**, so the body
         // itself — the soil to a depth and the stone below, to no depth at
         // all — can be laid by this one evaluation, after the coded bands,
@@ -3064,6 +3112,66 @@ mod tests {
             MaterialId::AIR,
             "the air above is left alone"
         );
+    }
+
+    #[test]
+    fn layers_never_evaluate_the_terrain_where_no_code_of_theirs_occurs() {
+        // **Engine ask 34.** A generator paints biome by biome, and over most
+        // chunks a biome's mask is zero everywhere; the terrain — octaves of
+        // 3D noise a sample — was evaluated in full before that was looked
+        // at. The terrain here is `0 / 0`: its bound decides nothing, and
+        // evaluating it makes a NaN, which the evaluator refuses in a debug
+        // build. A call that returns is a call that never evaluated it.
+        use super::super::density::{Axis, Density, Op};
+        const TURF: MaterialId = MaterialId(11);
+        let terrain = Density::compile(vec![Op::Constant(0.0), Op::Constant(0.0), Op::Divide])
+            .expect("compile");
+        let layers = [Layer {
+            code: 1,
+            from: 0.0,
+            to: 2.0,
+            material: TURF,
+        }];
+        let untouched = ChunkBuffer::new(origin(), STONE);
+
+        // A code whose bound alone rules the layer out.
+        let never = Density::compile(vec![Op::Constant(0.0)]).expect("compile");
+        let mut buffer = untouched.clone();
+        buffer
+            .fill_layers(&terrain, &never, 7, &layers)
+            .expect("nothing to paint");
+        assert_same_cells(&buffer, &untouched, "a code the bound rules out");
+
+        // A code whose bound cannot: `0.2 / (x - 5.5)` runs to both
+        // infinities over a box that straddles x = 5.5, but at the sample
+        // points it is never past 0.4 in magnitude and so never rounds to 1.
+        let nearly = Density::compile(vec![
+            Op::Constant(0.2),
+            Op::Coordinate(Axis::X),
+            Op::Constant(5.5),
+            Op::Subtract,
+            Op::Divide,
+        ])
+        .expect("compile");
+        let mut buffer = untouched.clone();
+        buffer
+            .fill_layers(&terrain, &nearly, 7, &layers)
+            .expect("nothing to paint");
+        assert_same_cells(&buffer, &untouched, "a code only the evaluation rules out");
+
+        // And the proof the terrain is what was skipped: a code that matches
+        // makes the same call evaluate it, and the NaN is caught.
+        if cfg!(debug_assertions) {
+            let always = Density::compile(vec![Op::Constant(1.0)]).expect("compile");
+            let mut buffer = untouched.clone();
+            let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                buffer.fill_layers(&terrain, &always, 7, &layers)
+            }));
+            assert!(
+                evaluated.is_err(),
+                "a matching code did not evaluate the terrain, so the test above proves nothing"
+            );
+        }
     }
 
     #[test]

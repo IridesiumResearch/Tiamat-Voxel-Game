@@ -188,6 +188,13 @@ function ChunkBuffer:fill_layers(depth, code, layers) end
 --- no depth — and the one evaluation lays the whole chunk, so the generator
 --- need not evaluate the same terrain for its body fill and again for its
 --- stone. Three evaluations a chunk were one.
+---
+--- **The terrain is evaluated only where a code can match.** The code's
+--- bound is asked first, then the code itself, and the terrain only when
+--- some block's code is one the layers name — so painting biome by biome
+--- costs the cheap code field alone over every chunk that biome's mask
+--- misses. (A layer under code -1 matches everywhere and so always
+--- evaluates.) Nothing to design around; the cells are the same either way.
 
 ---Stands a run of cells on every surface the buffer already holds: ground
 ---cover — grass, ferns, anything that grows UP from the ground.
