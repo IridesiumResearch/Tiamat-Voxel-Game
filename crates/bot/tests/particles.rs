@@ -213,12 +213,6 @@ fn a_burst_addressed_to_one_player_reaches_that_player_alone() {
                 bot.join(name).await.expect("join");
                 bot
             };
-            let mut first = connect("First").await;
-            let mut second = connect("Second").await;
-
-            // Until the addressed player has three blue bursts, or long enough
-            // that a missing colour is missing rather than late.
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             let blue = |bot: &Bot| {
                 bot.particles_received()
                     .iter()
@@ -231,6 +225,24 @@ fn a_burst_addressed_to_one_player_reaches_that_player_alone() {
                     .filter(|b| b.colour == [255, 0, 0, 255])
                     .count()
             };
+
+            let mut first = connect("First").await;
+            // **The mod must have seen this player join before the other one
+            // does.** The server derives arrivals from a per-tick diff of who
+            // is present, in UUID order, so two bots that join within one tick
+            // arrive together and "first" is whichever random UUID sorts
+            // lower. The mod sprays nothing until it has a first player, so a
+            // red burst here proves it is this one.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while tokio::time::Instant::now() < deadline && red(&first) == 0 {
+                let _ = tokio::time::timeout(Duration::from_millis(100), first.recv()).await;
+            }
+            assert!(red(&first) > 0, "the scene never sprayed at all");
+            let mut second = connect("Second").await;
+
+            // Until the addressed player has three blue bursts, or long enough
+            // that a missing colour is missing rather than late.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             while tokio::time::Instant::now() < deadline && (blue(&first) < 3 || red(&second) < 3) {
                 let _ = tokio::time::timeout(Duration::from_millis(100), first.recv()).await;
                 let _ = tokio::time::timeout(Duration::from_millis(100), second.recv()).await;
