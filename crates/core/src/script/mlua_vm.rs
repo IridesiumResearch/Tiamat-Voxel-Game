@@ -8415,6 +8415,19 @@ fn particle_request(spec: &Table) -> mlua::Result<crate::particle::EmitRequest> 
         },
         domain: domain_of(&pos)?,
         radius: spec.get::<Option<f32>>("radius")?.unwrap_or(32.0),
+        // A UUID in hex, as every other per-player call takes one. A bad one
+        // is an error rather than a silent broadcast: a mod that wrote
+        // `player = name` would otherwise spray everybody and never learn why.
+        player: spec
+            .get::<Option<String>>("player")?
+            .map(|uuid| {
+                crate::identity::PlayerUuid::from_hex(&uuid).map_err(|_| {
+                    mlua::Error::external(format!(
+                        "emit_particles: `player` is a player's UUID in hex, not `{uuid}`"
+                    ))
+                })
+            })
+            .transpose()?,
     })
 }
 

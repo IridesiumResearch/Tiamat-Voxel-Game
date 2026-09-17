@@ -5547,6 +5547,11 @@ impl tiamot_core::particle::Access for Sprayer {
             if player.domain != request.domain {
                 continue;
             }
+            // Addressed to one player: everyone else is skipped, and that one
+            // still has to be in the domain and in reach.
+            if request.player.is_some_and(|only| only != *uuid) {
+                continue;
+            }
             let at =
                 tiamot_core::ent::Transform::at(player.origin, player.body.position).to_world();
             let offset = [

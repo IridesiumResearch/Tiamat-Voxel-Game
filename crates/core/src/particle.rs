@@ -111,6 +111,15 @@ pub struct EmitRequest {
     pub domain: String,
     /// How far away a player may be and still be sent it, in blocks.
     pub radius: f32,
+    /// One player to send it to, or everyone in reach.
+    ///
+    /// **Narrows, never widens.** The domain and the radius still apply; this
+    /// takes the players they admit down to one. It is what lets a mod honour
+    /// its own "particles off" setting — a burst everybody in reach receives
+    /// cannot be turned off for one of them — and what lets rain be emitted
+    /// per player rather than per patch of ground, without two players beside
+    /// each other each seeing the other's.
+    pub player: Option<crate::identity::PlayerUuid>,
 }
 
 /// Clamps a mod's numbers into ranges every client accepts.
@@ -201,6 +210,7 @@ mod tests {
             },
             domain: "overworld".to_owned(),
             radius: f32::NAN,
+            player: None,
         };
         assert!(
             !wild.burst.is_valid(),
@@ -230,6 +240,7 @@ mod tests {
             burst: burst(),
             domain: "overworld".to_owned(),
             radius: 48.0,
+            player: None,
         };
         assert_eq!(sanitise(request.clone()), request);
         assert!(request.burst.is_valid());
