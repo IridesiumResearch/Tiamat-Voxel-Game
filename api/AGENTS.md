@@ -695,6 +695,15 @@ What to design around:
   the boundary. A callback you pass INTO another mod's function is yours: if
   it errors when they call it, you are the one disabled, and they get `nil`.
   Write both sides to be called by code you did not write.
+- **A value handed back to its owner is the owner's own.** If you pass a
+  table into another mod's function and it later hands it back — as a return
+  value, or as an argument to your callback — you get the very table you gave,
+  mutable and iterable, not a view of a view. A third mod that receives it
+  gets a read-only view of YOUR table, however many hands it passed through.
+- **A disabled mod's functions stop answering, even ones you are holding.** A
+  function you took from `exports` yesterday answers `nil` the moment its owner
+  is disabled, and its code does not run. If it matters whether the other mod
+  is still there, ask `game.exports(id)` again — `nil` means it is not.
 - **This is how one mod adds to another's screen.** Dialog events go only to
   the mod that opened the dialog, and that does not change. The screen's owner
   exports an `add_button(label, on_click)`; the other mod calls it and passes

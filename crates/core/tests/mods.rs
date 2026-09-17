@@ -1504,6 +1504,169 @@ end)
 }
 
 #[test]
+fn a_value_handed_back_across_the_boundary_is_the_owners_own_and_a_disabled_mods_code_stays_off() {
+    // **Two reports from an inventory mod using `game.exports`.**
+    //
+    // One: "a table handed back to the mod that owns it can't be iterated —
+    // the engine wraps it twice, and then pairs and # see nothing." An
+    // inventory keeps a widget table a world mod passed in and later hands it
+    // back; the second crossing wrapped the first proxy, whose entries are
+    // empty. The owner must get its own table back, and a third mod a proxy on
+    // the original.
+    //
+    // Two: "a disabled mod's callbacks still run" — a button whose owner had
+    // errored kept working when pressed again, because the caller still held
+    // the wrapped function. A disabled mod's code must not run through a
+    // function somebody else is holding.
+    let root = scratch("exports-roundtrip");
+    write_mod(
+        &root,
+        "inventory",
+        "",
+        r#"
+local tabs = {}
+game.export{
+    add_tab = function(widget) table.insert(tabs, widget) end,
+    give_back = function() return tabs[1] end,
+    pass_on = function() return tabs[1] end,   -- what a third mod would read
+    tab_count = function() return #tabs end,
+}
+"#,
+    );
+    write_mod(
+        &root,
+        "life",
+        "depends = [\"inventory\"]",
+        r#"
+local inventory = game.exports("inventory")
+local widget = { slots = { "hat", "coat", "boots" }, title = "Wardrobe" }
+inventory.add_tab(widget)
+
+-- Handed back: the very table, mutable, iterable.
+local back = inventory.give_back()
+assert(rawequal(back, widget), "the owner did not get its own table back")
+assert(#back.slots == 3, "the length of a handed-back table was " .. #back.slots)
+local seen = 0
+for _ in pairs(back) do seen = seen + 1 end
+assert(seen == 2, "pairs on a handed-back table saw " .. seen)
+back.title = "Cupboard"      -- the owner may write to its own table
+assert(widget.title == "Cupboard")
+game.register_block{ id = "loaded" }
+"#,
+    );
+    // A third mod reads the same widget through the inventory: a proxy on
+    // LIFE's table, read-only, iterable.
+    write_mod(
+        &root,
+        "spectator",
+        "depends = [\"inventory\"]",
+        r#"
+local inventory = game.exports("inventory")
+local widget = inventory.pass_on()
+assert(widget ~= nil, "a third mod got nothing")
+assert(#widget.slots == 3, "the length through two hands was " .. #widget.slots)
+local seen = 0
+for _ in pairs(widget) do seen = seen + 1 end
+assert(seen == 2, "pairs through two hands saw " .. seen)
+assert(widget.title == "Cupboard", "a third mod read a stale copy rather than the owner's table")
+local wrote = pcall(function() widget.title = "Mine" end)
+assert(not wrote, "a third mod could write into the owner's table")
+game.register_block{ id = "loaded" }
+"#,
+    );
+    let host = host_for(&root);
+    assert!(
+        host.failed().is_empty(),
+        "every mod should load: {:?}",
+        host.failed()
+    );
+    let registered: Vec<String> = host
+        .vm()
+        .registered_blocks()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(registered.contains(&"life:loaded".to_owned()));
+    assert!(registered.contains(&"spectator:loaded".to_owned()));
+
+    // **The second report.** Life gives inventory a button whose callback
+    // errors on its first press; inventory keeps pressing it. After the first
+    // press life is disabled, and the second press must not run life's code —
+    // which inventory sees as `nil` back and no call into its own counter,
+    // because life's callback is what would have called it.
+    let root2 = scratch("exports-disabled");
+    write_mod(
+        &root2,
+        "inventory",
+        "",
+        r#"
+local button
+local presses_seen = 0
+game.export{
+    add_button = function(on_click) button = on_click end,
+    press = function()
+        -- The owner's side of "did their code run": their callback is given
+        -- a function of ours to call, and we count.
+        return button(function() presses_seen = presses_seen + 1 end)
+    end,
+    seen = function() return presses_seen end,
+}
+"#,
+    );
+    write_mod(
+        &root2,
+        "life",
+        "depends = [\"inventory\"]",
+        r#"
+local inventory = game.exports("inventory")
+local first = true
+inventory.add_button(function(tell)
+    tell()
+    if first then
+        first = false
+        error("life's button is broken")
+    end
+end)
+"#,
+    );
+    write_mod(
+        &root2,
+        "presser",
+        "depends = [\"inventory\"]",
+        r#"
+local inventory = game.exports("inventory")
+local ticks = 0
+game.register_on_tick(function()
+    ticks = ticks + 1
+    inventory.press()
+    if ticks == 2 and inventory.seen() ~= 1 then
+        error("a disabled mod's button ran again: seen " .. inventory.seen())
+    end
+end)
+"#,
+    );
+    let mut host = host_for(&root2);
+    assert!(host.failed().is_empty(), "{:?}", host.failed());
+    host.freeze().expect("freeze");
+    let first = host.vm_mut().tick(1).expect("tick");
+    assert!(
+        host.vm().faulted_mods().contains(&"life".to_owned()),
+        "life's button errored and life was not disabled: {first:?}"
+    );
+    let second = host.vm_mut().tick(1).expect("tick");
+    assert!(
+        !second.iter().any(|(id, _)| id == "presser"),
+        "pressing a disabled mod's button ran its code again: {second:?}"
+    );
+    assert!(
+        !host.vm().faulted_mods().contains(&"inventory".to_owned())
+            && !host.vm().faulted_mods().contains(&"presser".to_owned()),
+        "a mod other than the one whose code failed was disabled: {:?}",
+        host.vm().faulted_mods()
+    );
+}
+
+#[test]
 fn a_structure_crosses_a_chunk_edge_and_does_not_care_which_chunk_was_made_first() {
     // **The order-independent shape, which is the only correct one.** The
     // obvious way to build a structure across an edge is to let a generator

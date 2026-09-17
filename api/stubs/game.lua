@@ -2027,6 +2027,11 @@ function game.world_option(id) end
 ---if it errors when you call it, they are disabled and you get `nil` back.
 ---Write exported functions to be called by code you did not write.
 ---
+---A value handed BACK to its owner — returned, or passed to their callback —
+---is the owner's own table again, not a view of a view; a third mod that
+---receives it gets a read-only view of the original. And a function taken from
+---`exports` answers `nil` and runs nothing once its owner has been disabled.
+---
 ---```lua
 ---game.export{
 ---    version = 1,

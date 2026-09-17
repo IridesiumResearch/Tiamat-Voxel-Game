@@ -1487,11 +1487,58 @@ fn fill_detail_of(options: Option<&Table>) -> mlua::Result<Option<crate::detgen:
 /// nothing: the client tests for absence before it samples anything, and a
 /// zero-strength tint that reached it would cost every fragment a branch to
 /// discover it had nothing to do.
+/// The weak map from a boundary proxy back to what it stands for.
+///
+/// **A value that crosses twice must not be wrapped twice.** An inventory mod
+/// exports `add_tab(widget)`; a world mod passes a table in; the inventory
+/// keeps it and later hands it back — through a callback, or as a return
+/// value. Without this map the second crossing wrapped the first proxy, whose
+/// own entries are empty (its data lives behind `__index`), so `pairs` and `#`
+/// on the result saw nothing at all. Reported from the window as exactly
+/// that. Keyed weakly on the proxy so a proxy nobody holds is collected with
+/// everything else.
+const CROSSED: &str = "tiamot.crossed";
+
+/// What a proxy stands for, or `None` for a value that is not one.
+fn uncross(lua: &Lua, value: &Value) -> mlua::Result<Option<(Value, String)>> {
+    let Ok(map) = lua.named_registry_value::<Table>(CROSSED) else {
+        return Ok(None);
+    };
+    let Some(entry) = map.get::<Option<Table>>(value.clone())? else {
+        return Ok(None);
+    };
+    Ok(Some((entry.get("raw")?, entry.get("owner")?)))
+}
+
+/// Records that `proxy` stands for `raw`, which belongs to `owner`.
+fn remember_crossing(lua: &Lua, proxy: &Value, raw: &Value, owner: &str) -> mlua::Result<()> {
+    let map = if let Ok(map) = lua.named_registry_value::<Table>(CROSSED) {
+        map
+    } else {
+        let map = lua.create_table()?;
+        let meta = lua.create_table()?;
+        meta.set("__mode", "k")?;
+        map.set_metatable(Some(meta))?;
+        lua.set_named_registry_value(CROSSED, map.clone())?;
+        map
+    };
+    let entry = lua.create_table()?;
+    entry.set("raw", raw.clone())?;
+    entry.set("owner", owner)?;
+    map.set(proxy.clone(), entry)
+}
+
 /// A value crossing from `owner`'s sandbox into `guest`'s.
 ///
 /// See `MluaVm::install_exports`. Tables become read-only proxies that wrap
 /// what they hand out; functions become boundary calls that fault their owner
 /// on error and answer `nil`; everything else passes through unchanged.
+///
+/// **A proxy crossing again is unwrapped first.** Handed back to the mod that
+/// owns what it stands for, the owner gets its own value — mutable, iterable,
+/// the very table it passed in. Handed on to a third mod, the third mod gets a
+/// fresh proxy on the ORIGINAL owner's value, so a write is refused and a
+/// fault lands on whoever wrote the code, however many hands it passed through.
 fn crossing(
     lua: &Lua,
     value: Value,
@@ -1499,107 +1546,146 @@ fn crossing(
     guest: &str,
     faulted: &std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
 ) -> mlua::Result<Value> {
+    if let Some((raw, original)) = uncross(lua, &value)? {
+        if original == guest {
+            return Ok(raw);
+        }
+        return crossing(lua, raw, &original, guest, faulted);
+    }
     match value {
-        Value::Table(raw) => {
-            let proxy = lua.create_table()?;
-            let meta = lua.create_table()?;
-            let (index_raw, index_owner, index_guest, index_faulted) = (
-                raw.clone(),
-                owner.to_owned(),
-                guest.to_owned(),
-                std::sync::Arc::clone(faulted),
-            );
-            meta.set(
-                "__index",
-                lua.create_function(move |lua, (_, key): (Value, Value)| {
-                    let inner: Value = index_raw.get(key)?;
-                    crossing(lua, inner, &index_owner, &index_guest, &index_faulted)
-                })?,
-            )?;
-            let write_owner = owner.to_owned();
-            meta.set(
-                "__newindex",
-                lua.create_function(
-                    move |_, (_, key, _): (Value, Value, Value)| -> mlua::Result<()> {
-                        Err(mlua::Error::external(format!(
-                            "the exports of `{write_owner}` are read-only (writing {key:?})"
-                        )))
-                    },
-                )?,
-            )?;
-            let len_raw = raw.clone();
-            meta.set(
-                "__len",
-                lua.create_function(move |_, _: Value| Ok(len_raw.raw_len()))?,
-            )?;
-            // Iteration sees the raw table's keys and crossed values, so a
-            // guest can walk an exported list without being able to change it.
-            let (pairs_raw, pairs_owner, pairs_guest, pairs_faulted) = (
-                raw,
-                owner.to_owned(),
-                guest.to_owned(),
-                std::sync::Arc::clone(faulted),
-            );
-            meta.set(
-                "__pairs",
-                lua.create_function(move |lua, _: Value| {
-                    let snapshot = lua.create_table()?;
-                    for pair in pairs_raw.clone().pairs::<Value, Value>() {
-                        let (key, inner) = pair?;
-                        let crossed =
-                            crossing(lua, inner, &pairs_owner, &pairs_guest, &pairs_faulted)?;
-                        snapshot.set(key, crossed)?;
-                    }
-                    let next: mlua::Function = lua.globals().get("next")?;
-                    Ok((next, snapshot, Value::Nil))
-                })?,
-            )?;
-            meta.set("__metatable", "exports are read-only")?;
-            proxy.set_metatable(Some(meta))?;
-            Ok(Value::Table(proxy))
-        }
-        Value::Function(function) => {
-            let (owner, guest, faulted) = (
-                owner.to_owned(),
-                guest.to_owned(),
-                std::sync::Arc::clone(faulted),
-            );
-            let wrapped = lua.create_function(move |lua, args: mlua::MultiValue| {
-                // Arguments the guest hands over cross the other way: a callback
-                // that errors is the guest's error, not the owner's.
-                let mut handed = mlua::MultiValue::new();
-                for arg in args {
-                    handed.push_back(crossing(lua, arg, &guest, &owner, &faulted)?);
-                }
-                match function.call::<mlua::MultiValue>(handed) {
-                    Ok(answered) => {
-                        let mut out = mlua::MultiValue::new();
-                        for value in answered {
-                            out.push_back(crossing(lua, value, &owner, &guest, &faulted)?);
-                        }
-                        Ok(out)
-                    }
-                    Err(err) => {
-                        // Charter rule 10, at the boundary: the mod whose code
-                        // failed is the one disabled, and the caller gets a
-                        // `nil` it has to be ready for anyway.
-                        tracing::error!(
-                            mod_id = %owner,
-                            caller = %guest,
-                            error = %err,
-                            "disabling mod after a failure in a function it exported"
-                        );
-                        if let Ok(mut set) = faulted.lock() {
-                            set.insert(owner.clone());
-                        }
-                        Ok(mlua::MultiValue::new())
-                    }
-                }
-            })?;
-            Ok(Value::Function(wrapped))
-        }
+        Value::Table(raw) => cross_table(lua, raw, owner, guest, faulted),
+        Value::Function(function) => cross_function(lua, function, owner, guest, faulted),
         other => Ok(other),
     }
+}
+
+/// A table crossing: a read-only proxy that wraps what it hands out.
+fn cross_table(
+    lua: &Lua,
+    raw: Table,
+    owner: &str,
+    guest: &str,
+    faulted: &std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
+) -> mlua::Result<Value> {
+    let proxy = lua.create_table()?;
+    let meta = lua.create_table()?;
+    let (index_raw, index_owner, index_guest, index_faulted) = (
+        raw.clone(),
+        owner.to_owned(),
+        guest.to_owned(),
+        std::sync::Arc::clone(faulted),
+    );
+    meta.set(
+        "__index",
+        lua.create_function(move |lua, (_, key): (Value, Value)| {
+            let inner: Value = index_raw.get(key)?;
+            crossing(lua, inner, &index_owner, &index_guest, &index_faulted)
+        })?,
+    )?;
+    let write_owner = owner.to_owned();
+    meta.set(
+        "__newindex",
+        lua.create_function(
+            move |_, (_, key, _): (Value, Value, Value)| -> mlua::Result<()> {
+                Err(mlua::Error::external(format!(
+                    "the exports of `{write_owner}` are read-only (writing {key:?})"
+                )))
+            },
+        )?,
+    )?;
+    let len_raw = raw.clone();
+    meta.set(
+        "__len",
+        lua.create_function(move |_, _: Value| Ok(len_raw.raw_len()))?,
+    )?;
+    // Iteration sees the raw table's keys and crossed values, so a
+    // guest can walk an exported list without being able to change it.
+    let (pairs_raw, pairs_owner, pairs_guest, pairs_faulted) = (
+        raw.clone(),
+        owner.to_owned(),
+        guest.to_owned(),
+        std::sync::Arc::clone(faulted),
+    );
+    meta.set(
+        "__pairs",
+        lua.create_function(move |lua, _: Value| {
+            let snapshot = lua.create_table()?;
+            for pair in pairs_raw.clone().pairs::<Value, Value>() {
+                let (key, inner) = pair?;
+                let crossed = crossing(lua, inner, &pairs_owner, &pairs_guest, &pairs_faulted)?;
+                snapshot.set(key, crossed)?;
+            }
+            let next: mlua::Function = lua.globals().get("next")?;
+            Ok((next, snapshot, Value::Nil))
+        })?,
+    )?;
+    meta.set("__metatable", "exports are read-only")?;
+    proxy.set_metatable(Some(meta))?;
+    let proxy = Value::Table(proxy);
+    remember_crossing(lua, &proxy, &Value::Table(raw), owner)?;
+    Ok(proxy)
+}
+
+/// A function crossing: a call that faults its owner on error, answers `nil`,
+/// and refuses to run once its owner is disabled.
+fn cross_function(
+    lua: &Lua,
+    function: mlua::Function,
+    owner: &str,
+    guest: &str,
+    faulted: &std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
+) -> mlua::Result<Value> {
+    let original = function.clone();
+    let (owner_id, guest_id, faulted) = (
+        owner.to_owned(),
+        guest.to_owned(),
+        std::sync::Arc::clone(faulted),
+    );
+    let wrapped = lua.create_function(move |lua, args: mlua::MultiValue| {
+        let (owner, guest): (&str, &str) = (&owner_id, &guest_id);
+        // **A disabled mod's code does not run**, however long ago the
+        // caller took hold of the function. Charter rule 10 disables a
+        // mod; a wrapper that kept calling into it would be the one
+        // door the fault did not close. Reported from the window: a
+        // button whose owner had errored kept working when pressed
+        // again. `nil`, the same answer as a failed call.
+        if faulted.lock().is_ok_and(|set| set.contains(owner)) {
+            return Ok(mlua::MultiValue::new());
+        }
+        // Arguments the guest hands over cross the other way: a callback
+        // that errors is the guest's error, not the owner's.
+        let mut handed = mlua::MultiValue::new();
+        for arg in args {
+            handed.push_back(crossing(lua, arg, guest, owner, &faulted)?);
+        }
+        match function.call::<mlua::MultiValue>(handed) {
+            Ok(answered) => {
+                let mut out = mlua::MultiValue::new();
+                for value in answered {
+                    out.push_back(crossing(lua, value, owner, guest, &faulted)?);
+                }
+                Ok(out)
+            }
+            Err(err) => {
+                // Charter rule 10, at the boundary: the mod whose code
+                // failed is the one disabled, and the caller gets a
+                // `nil` it has to be ready for anyway.
+                tracing::error!(
+                    mod_id = %owner,
+                    caller = %guest,
+                    error = %err,
+                    "disabling mod after a failure in a function it exported"
+                );
+                if let Ok(mut set) = faulted.lock() {
+                    set.insert(owner.to_owned());
+                }
+                Ok(mlua::MultiValue::new())
+            }
+        }
+    })?;
+    let wrapped = Value::Function(wrapped);
+    remember_crossing(lua, &wrapped, &Value::Function(original), owner)?;
+    Ok(wrapped)
 }
 
 fn tint_of(table: &Table) -> Option<crate::proto::Tint> {
