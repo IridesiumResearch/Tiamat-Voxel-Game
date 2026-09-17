@@ -453,7 +453,7 @@ fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<
             };
         let tint = host
             .chunk_tint(&job.domain, job.seed, job.pos)
-            .unwrap_or([u8::MAX; 3]);
+            .unwrap_or(tiamot_core::proto::Tint::NEUTRAL);
         let fog = host
             .chunk_fog(&job.domain, job.seed, job.pos)
             .ok()
@@ -467,7 +467,7 @@ fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<
             (
                 Chunk::new(job.pos, MaterialId::AIR),
                 tiamot_core::fluid::FluidLayer::default(),
-                [u8::MAX; 3],
+                tiamot_core::proto::Tint::NEUTRAL,
                 None,
             )
         }

@@ -573,9 +573,13 @@ Three things worth knowing before you design around it:
   used to be in the ground behind the player. It costs one call per chunk, so
   keep it to a lookup — this is not the place to run your generator again.
 
-One per mod. Two mods with an opinion about what colour a place is cannot be
-averaged into a third opinion either of them meant, so the first that answers,
-in load order, is the one that does.
+One per mod. Every mod with one is asked, in load order; returning `nil` (or
+nothing) is no opinion, and where more than one mod answers, the LAST wins. A
+mod that depends on the world loads after it, so it colours over the world
+where it has something to say and leaves the world's colour everywhere else.
+Two opinions are never averaged into a third neither mod meant. (Until
+2026-09-17 the first mod to answer at all, `nil` included, decided — a world
+mod with a callback silenced every mod after it.)
 
 **Fog by place: `register_chunk_fog`, on the same terms.** The sky's keyframes
 set one distance fog for the whole world; a place's own fog — ground mist under

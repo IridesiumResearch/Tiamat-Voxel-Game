@@ -125,13 +125,35 @@ const CHATTERS: &str = "tiamot.chatters";
 
 /// Mods that registered a `chunk_tint` callback.
 const CHUNK_TINTERS: &str = "tiamot.chunk_tinters";
+
+/// One of the two per-place callbacks: where its owners are listed, where a
+/// mod's callback is kept, and what it is called in an error.
+#[derive(Clone, Copy)]
+struct PlaceHook {
+    list: &'static str,
+    key: fn(&str) -> String,
+    context: &'static str,
+}
+
+impl PlaceHook {
+    const TINT: Self = Self {
+        list: CHUNK_TINTERS,
+        key: MluaVm::tint_key,
+        context: "chunk_tint",
+    };
+    const FOG: Self = Self {
+        list: CHUNK_FOGGERS,
+        key: MluaVm::fog_key,
+        context: "chunk_fog",
+    };
+}
 /// Each mod's declared dependencies, `mod_id -> { dep_id = true }`.
 const DEPENDENCIES: &str = "tiamot.deps";
 /// Each mod's exported table, `mod_id -> table`, as `game.export` left it.
 const EXPORTS: &str = "tiamot.exports";
 
 /// Registry key holding the mods that registered `register_chunk_fog`, in load
-/// order — the order that decides whose fog a place has.
+/// order — the order that decides whose fog a place has: the last to answer.
 const CHUNK_FOGGERS: &str = "tiamot.chunk_foggers";
 /// What an `on_action` hook is called in errors.
 const HOOK_ACTION: &str = "on_action";
@@ -1108,28 +1130,40 @@ impl MluaVm {
         })
     }
 
-    /// The first answer to a per-place callback — a chunk's tint or its fog —
-    /// with the mod that gave it.
+    /// The answer to a per-place callback — a chunk's tint or its fog — with
+    /// every registered mod asked, in load order.
     ///
-    /// **The first mod that answers wins, in load order.** Two mods with an
-    /// opinion about what a place looks like cannot be averaged into a third
-    /// opinion either of them meant, and load order is already the resolution
-    /// for every other registry conflict. `None` when no mod registered one.
-    fn place_answer<R: mlua::FromLuaMulti>(
+    /// **`nil` is no opinion, and the last opinion wins.** A mod that answers
+    /// `nil` has not spoken for the place, so the next mod is asked; a mod
+    /// that answers has, and a mod loaded after it — which is what a mod that
+    /// depends on it is — may answer over it. That is how a weather mod lays
+    /// its storm's fog over a world mod's mist: it depends on the world, so it
+    /// loads later, and it answers only where the storm is. Two opinions are
+    /// never averaged into a third neither mod meant; one of them is taken.
+    /// (It used to be that the first mod to answer at all, `nil` included,
+    /// decided, so a world mod with a fog callback silenced every mod after
+    /// it.)
+    ///
+    /// A mod whose callback errors, or answers something that is not what
+    /// `parse` wants, is faulted (charter rule 10) and the others are still
+    /// asked: the world keeps its looks rather than one mod's paint job
+    /// taking the rest down with it. `None` when no mod had an opinion.
+    fn place_answer<R>(
         &mut self,
-        list: &str,
-        key: fn(&str) -> String,
-        context: &str,
+        hook: PlaceHook,
         domain: &str,
         world_seed: u64,
         pos: ChunkPos,
-    ) -> Result<Option<(String, R)>, ScriptError> {
+        parse: impl Fn(&Lua, mlua::MultiValue) -> Result<R, String>,
+    ) -> Result<Option<R>, ScriptError> {
+        let PlaceHook { list, key, context } = hook;
         let owners: Vec<String> = self
             .lua
             .named_registry_value::<Table>(list)
             .map(|table| table.sequence_values::<String>().flatten().collect())
             .unwrap_or_default();
 
+        let mut answer = None;
         for mod_id in owners {
             if self.is_faulted(&mod_id) {
                 continue;
@@ -1155,21 +1189,41 @@ impl MluaVm {
                 .map_err(|err| self.vm_error(&err))?;
 
             self.arm_budget(self.limits.instructions_per_call)?;
-            let answer = callback.call::<R>(position);
+            let values = callback.call::<mlua::MultiValue>(position);
             self.disarm_budget();
 
-            return match answer {
-                Ok(answer) => Ok(Some((mod_id, answer))),
+            let values = match values {
+                Ok(values) => values,
                 Err(err) => {
-                    // Charter rule 10: the mod is disabled and the world keeps
-                    // its looks rather than the tick dying over a paint job.
                     let error = Self::classify(&err, &mod_id, context);
                     self.fault(&mod_id);
-                    Err(error)
+                    tracing::error!(
+                        mod_id = %mod_id,
+                        error = %error,
+                        "disabling mod after a {context} failure; the place keeps its looks"
+                    );
+                    continue;
                 }
             };
+            if values.front().is_none_or(mlua::Value::is_nil) {
+                continue;
+            }
+            match parse(&self.lua, values) {
+                Ok(parsed) => answer = Some(parsed),
+                Err(detail) => {
+                    // A malformed answer is the mod's bug, and charter rule
+                    // 10's answer to a bug is the same whether Lua raised it
+                    // or the engine found it.
+                    self.fault(&mod_id);
+                    tracing::error!(
+                        mod_id = %mod_id,
+                        error = %detail,
+                        "disabling mod after a {context} answer that is not one; the place keeps its looks"
+                    );
+                }
+            }
         }
-        Ok(None)
+        Ok(answer)
     }
 
     /// Where one DOMAIN's generator callback lives. See the free function of
@@ -2145,17 +2199,14 @@ impl ScriptVm for MluaVm {
         world_seed: u64,
         pos: ChunkPos,
     ) -> Result<[u8; 3], ScriptError> {
-        let answer = self.place_answer::<(f32, f32, f32)>(
-            CHUNK_TINTERS,
-            Self::tint_key,
-            "chunk_tint",
-            domain,
-            world_seed,
-            pos,
-        )?;
-        Ok(answer.map_or(crate::proto::Tint::NEUTRAL, |(_, colour)| {
-            Self::tint_bytes(colour)
-        }))
+        let answer =
+            self.place_answer(PlaceHook::TINT, domain, world_seed, pos, |lua, values| {
+                let (r, g, b) =
+                    <(f32, f32, f32) as mlua::FromLuaMulti>::from_lua_multi(values, lua)
+                        .map_err(|err| format!("a tint is three numbers, r, g, b: {err}"))?;
+                Ok(Self::tint_bytes((r, g, b)))
+            })?;
+        Ok(answer.unwrap_or(crate::proto::Tint::NEUTRAL))
     }
 
     fn chunk_fog(
@@ -2164,32 +2215,16 @@ impl ScriptVm for MluaVm {
         world_seed: u64,
         pos: ChunkPos,
     ) -> Result<Option<crate::proto::ChunkFog>, ScriptError> {
-        let Some((mod_id, answer)) = self.place_answer::<Option<Table>>(
-            CHUNK_FOGGERS,
-            Self::fog_key,
-            "chunk_fog",
+        self.place_answer(
+            PlaceHook::FOG,
             domain,
             world_seed,
             pos,
-        )?
-        else {
-            return Ok(None);
-        };
-        // `nil` is an answer — "no fog here" — and a mod that answered it has
-        // spoken for the place, so the next mod is not asked.
-        let Some(table) = answer else {
-            return Ok(None);
-        };
-        Self::fog_of(&table).map(Some).map_err(|detail| {
-            // A malformed answer is the mod's bug, and charter rule 10's answer
-            // to a bug is the same whether Lua raised it or the engine found it.
-            self.fault(&mod_id);
-            ScriptError::Runtime {
-                mod_id,
-                context: "chunk_fog".to_owned(),
-                detail,
-            }
-        })
+            |_, values| match values.front() {
+                Some(Value::Table(table)) => Self::fog_of(table),
+                _ => Err("a fog is a table with a `visibility`, or nil for none".to_owned()),
+            },
+        )
     }
 
     fn generate_chunk(
@@ -9204,11 +9239,12 @@ mod tests {
     }
 
     #[test]
-    fn a_mod_gives_a_place_its_own_fog_and_nil_means_none() {
-        // `game.register_chunk_fog`: a table is a fog, nil is clear air, and a
-        // table that is not a fog is the mod's bug — disabled under charter
-        // rule 10 rather than drawn as a guess. The pos is the same one the
-        // tint is asked with, so a mod picks its fog from the same biome field.
+    fn a_mod_gives_a_place_its_own_fog_and_nil_is_no_opinion() {
+        // `game.register_chunk_fog`: a table is a fog, nil is no opinion (clear
+        // air, with one mod), and a table that is not a fog is the mod's bug —
+        // disabled under charter rule 10 rather than drawn as a guess, and the
+        // place keeps its looks. The pos is the same one the tint is asked
+        // with, so a mod picks its fog from the same biome field.
         let mut host = vm();
         load(
             &mut host,
@@ -9259,10 +9295,14 @@ mod tests {
             "nil is clear air"
         );
 
-        let broken = host.chunk_fog(crate::domain::OVERWORLD, 7, at(2));
+        assert!(!host.is_faulted("forest"));
+        let broken = host
+            .chunk_fog(crate::domain::OVERWORLD, 7, at(2))
+            .expect("asked");
+        assert_eq!(broken, None, "a fog with no visibility is not a fog");
         assert!(
-            matches!(&broken, Err(ScriptError::Runtime { detail, .. }) if detail.contains("visibility")),
-            "a fog with no visibility should fault and say what is missing: {broken:?}"
+            host.is_faulted("forest"),
+            "a fog with no visibility should fault the mod that answered it"
         );
         assert_eq!(
             host.chunk_fog(crate::domain::OVERWORLD, 7, at(0))

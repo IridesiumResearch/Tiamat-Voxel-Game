@@ -1263,7 +1263,8 @@ pub trait ScriptVm: Sized {
     /// The fog a mod gives one chunk's column, or `None` for the sky's alone.
     ///
     /// Asked beside [`Self::chunk_tint`], for the same reasons and on the same
-    /// terms: when the chunk is served, never stored, first mod to answer wins.
+    /// terms: when the chunk is served, never stored, nil is no opinion, the last
+    /// mod to answer wins.
     ///
     /// # Errors
     ///

@@ -838,9 +838,11 @@ function game.register_on_generate(callback) end
 ---the ground behind the player. One call per chunk, so make it a lookup — this
 ---is not the place to run your generator again.
 ---
----One per mod, and the first to answer in load order wins: two mods with an
----opinion about what colour a place is cannot be averaged into a third opinion
----either of them meant.
+---One per mod. Every mod with one is asked, in load order; `nil` (or returning
+---nothing) is no opinion, and where more than one mod answers the LAST wins —
+---a mod that depends on the world loads after it and may colour over it where
+---it has something to say. Two opinions are never averaged into a third that
+---neither mod meant.
 ---
 ---Channels are 0..1 and are clamped. `pos` carries `x`, `y`, `z`, `seed` and
 ---`domain`.
@@ -871,17 +873,21 @@ function game.register_chunk_tint(callback) end
 ---  blocks — thick in the valley, clear on the hill, and a layer seen from
 ---  above. Leave it out for fog at every height.
 ---
----Return `nil` for no fog of your own. Answering at all speaks for the place, so
----a later mod is not asked. A table with no `visibility`, or anything that is
----not a table, is a bug and disables your mod the way an error would.
+---Return `nil` for no fog of your own — no opinion, so the next mod's answer
+---stands. Every mod with a callback is asked, in load order, and the last that
+---answers wins: a weather mod that depends on the world loads after it and lays
+---its storm over the world's mist only where the storm is. A table with no
+---`visibility`, or anything that is not a table, is a bug and disables your mod
+---the way an error would; the other mods' fogs are unaffected.
 ---
 ---**Per COLUMN, and blended.** Every chunk column's fog is filtered with its
 ---neighbours', so a foggy biome thins over a chunk's width rather than ending
 ---in a wall — and it is seen from outside as well as within: looking at a
 ---misty forest from a clear hill, the forest is misty.
 ---
----Asked every time a chunk is served, never stored, one per mod, first answer
----wins — exactly the terms `game.register_chunk_tint` has, and for its reasons.
+---Asked every time a chunk is served, never stored, one per mod, nil is no
+---opinion and the last answer wins — exactly the terms `game.register_chunk_tint`
+---has, and for its reasons.
 ---Presentation only: nothing in the simulation sees through fog any worse.
 ---
 ---**Limits, stated.** The horizon past the detail radius is drawn from summaries

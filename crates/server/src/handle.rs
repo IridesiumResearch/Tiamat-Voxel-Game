@@ -1168,7 +1168,7 @@ fn serve_one_chunk(
             report.generating += at.elapsed();
             (colour, fog)
         }
-        (_, false) => ([u8::MAX; 3], None),
+        (_, false) => (tiamot_core::proto::Tint::NEUTRAL, None),
     };
 
     // A failed send means the connection went away between asking and being

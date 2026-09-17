@@ -117,7 +117,7 @@ pub trait ChunkSource {
     /// colour it used to be in the ground behind the player.
     fn tint(&mut self, domain: &str, pos: ChunkPos, world_seed: u64) -> [u8; 3] {
         let _ = (domain, pos, world_seed);
-        [u8::MAX; 3]
+        tiamot_core::proto::Tint::NEUTRAL
     }
 
     /// This chunk's column's own fog, or `None` for only the sky's.
@@ -189,12 +189,14 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
     }
 
     fn tint(&mut self, domain: &str, pos: ChunkPos, world_seed: u64) -> [u8; 3] {
-        // A faulted mod has already been disabled (charter rule 10); white is
-        // the honest answer, and a world losing its colours is a great deal
-        // better than a world losing its terrain.
+        // A faulted mod has already been disabled (charter rule 10); the
+        // neutral tint is the honest answer, and a world losing its colours is
+        // a great deal better than a world losing its terrain. NEUTRAL, not
+        // `[u8::MAX; 3]`: since the scale put 1.0 at 128, all-ones is twice
+        // as bright, and a faulted palette blew the world out white.
         self.host
             .chunk_tint(domain, world_seed, pos)
-            .unwrap_or([u8::MAX; 3])
+            .unwrap_or(tiamot_core::proto::Tint::NEUTRAL)
     }
 
     fn fog(

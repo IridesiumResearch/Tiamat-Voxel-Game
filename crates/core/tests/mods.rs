@@ -1181,6 +1181,95 @@ end)
 }
 
 #[test]
+fn a_later_mod_paints_over_an_earlier_ones_place_only_where_it_has_an_opinion() {
+    // **Weather ask W8, the half that was a bug.** The first mod with a fog
+    // callback decided every place, and `nil` counted as deciding — so a world
+    // mod that registered one silenced a weather mod loaded after it, and the
+    // weather could not give any chunk fog at all. Now every mod is asked in
+    // load order, `nil` is no opinion, and the last opinion wins: the weather
+    // depends on the world, loads after it, and lays its storm over the
+    // world's mist only where the storm is. Same for the tint. A mod that
+    // errors is faulted and the others' answers stand.
+    let root = scratch("place_layers");
+    write_mod(
+        &root,
+        "world",
+        "",
+        r#"
+game.register_chunk_tint(function(pos) return 0.5, 1.0, 0.5 end)
+game.register_chunk_fog(function(pos)
+    return { r = 0.8, g = 0.9, b = 0.8, visibility = 40 }
+end)
+"#,
+    );
+    write_mod(
+        &root,
+        "weather",
+        "depends = [\"world\"]",
+        r#"
+-- A storm east of the origin; nothing to say anywhere else.
+game.register_chunk_tint(function(pos)
+    if pos.x >= 0 then return 0.6, 0.6, 0.7 end
+end)
+game.register_chunk_fog(function(pos)
+    if pos.x >= 0 then return { r = 0.4, g = 0.4, b = 0.45, visibility = 12 } end
+    return nil
+end)
+"#,
+    );
+    write_mod(
+        &root,
+        "broken",
+        "depends = [\"weather\"]",
+        r#"
+game.register_chunk_fog(function(pos) error("the sky fell") end)
+game.register_chunk_tint(function(pos) return "not a colour" end)
+"#,
+    );
+
+    let mut host = host_for(&root);
+    assert!(host.failed().is_empty(), "{:?}", host.failed());
+    host.freeze().expect("freeze");
+
+    let mut fog = |x: i32| {
+        host.chunk_fog(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+            .expect("asked")
+    };
+    let calm = fog(-3).expect("the world's mist");
+    assert_eq!(
+        calm.visibility, 40,
+        "west of the storm the world's fog stands"
+    );
+    let storm = fog(3).expect("the storm");
+    assert_eq!(
+        storm.visibility, 12,
+        "in the storm the weather's fog is laid over the world's"
+    );
+
+    let mut tint = |x: i32| {
+        host.chunk_tint(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+            .expect("asked")
+    };
+    let calm = tint(-3);
+    let storm = tint(3);
+    assert!(
+        calm[1] > storm[1],
+        "the storm's tint is greyer than the world's: {calm:?} vs {storm:?}"
+    );
+    assert_eq!(
+        calm[1],
+        tiamot_core::proto::Tint::quantise(1.0),
+        "west of the storm the world's tint stands"
+    );
+
+    assert_eq!(
+        host.disabled(),
+        vec!["broken".to_owned()],
+        "the erroring mod alone is disabled; the answers it was asked after still stand"
+    );
+}
+
+#[test]
 fn a_biome_colour_may_be_brighter_than_the_texture_it_multiplies() {
     // **Engine ask 33, from a mod author writing biomes.** A chunk tint was
     // clamped to 0..1 over the whole byte, so a biome could darken a colour or
