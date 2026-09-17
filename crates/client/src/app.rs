@@ -4411,6 +4411,7 @@ impl App {
 
                 Event::SkyModifier(modifier) => self.weather.modifier.set(modifier),
                 Event::Flash(flash) => self.weather.flashes.strike(flash),
+                Event::Precipitation(precipitation) => self.weather.rain.set(precipitation),
 
                 Event::SoundBindings { bindings } => self.adopt_bindings(bindings),
 
@@ -5141,6 +5142,21 @@ impl App {
     /// A colliding particle dies in a cell that stops a body — solid and not
     /// passable — so a drip stops at the ground and falls through a fern.
     fn place_particles(&mut self, dt: f32) {
+        // The rain first, so this frame's drops are in the frame. Spawned
+        // only while the budget leaves a mod's bursts their share.
+        let (x, y, z) = self.camera.position.to_world();
+        if let Some(burst) = self.weather.rain.advance(dt, [x, y, z]) {
+            let room =
+                crate::particles::PRECIPITATION_SHARE.saturating_sub(self.particles.live().len());
+            let burst = tiamot_core::particle::Burst {
+                count: burst.count.min(u16::try_from(room).unwrap_or(u16::MAX)),
+                ..burst
+            };
+            if burst.count > 0 {
+                let light = self.particle_light(burst.pos);
+                self.particles.spawn(&burst, light);
+            }
+        }
         let store = &self.store;
         let passable = &self.passable;
         self.particles.advance(dt, |at| {

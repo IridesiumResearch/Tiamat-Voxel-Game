@@ -454,6 +454,9 @@ pub enum Event {
     /// A flash of light: lightning, seen.
     Flash(tiamot_core::atmosphere::Flash),
 
+    /// The rain around this player, or none.
+    Precipitation(Option<tiamot_core::atmosphere::Precipitation>),
+
     /// Where the server's clock stands in the day, `0.0..1.0`.
     TimeOfDay(f32),
 
@@ -1564,6 +1567,9 @@ async fn session(
             }
             ServerMessage::Flash { flash } => {
                 let _ = events.send(Event::Flash(flash));
+            }
+            ServerMessage::Precipitation { precipitation } => {
+                let _ = events.send(Event::Precipitation(precipitation));
             }
             ServerMessage::FontTable { fonts } => {
                 // The same pipeline as a sound: by hash, after the join, and a

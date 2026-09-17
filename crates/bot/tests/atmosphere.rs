@@ -52,8 +52,11 @@ game.register_on_tick(function()
         if ticks < 20 then
             game.set_sky_modifier(player, { intensity = 0.55, sky = { 0.55, 0.58, 0.62 },
                                             sky_mix = 0.7, fog_distance = 0.6, ease_ticks = 400 })
+            game.set_precipitation(player, { rate = 900, size = 0.06, velocity = { x = 3, y = -22, z = 0 },
+                                             area = { x = 16, y = 3, z = 16 }, above = 18, ease_ticks = 200 })
         elseif ticks == 20 then
             game.set_sky_modifier(player, nil)
+            game.set_precipitation(player, nil)
         end
     end
 end)
@@ -123,6 +126,19 @@ fn a_mods_weather_reaches_the_players_sky_once_per_change_and_clears_and_lightni
             assert_eq!(storm.fog_distance, 0.6);
             assert_eq!(storm.ease_ticks, 400);
             assert_eq!(received[1], None, "nil clears it");
+
+            let rain = bot.precipitation_received();
+            assert_eq!(
+                rain.len(),
+                2,
+                "rain set twenty times is one message, and its end one more: {rain:?}"
+            );
+            let storm = rain[0].expect("the rain");
+            assert_eq!(storm.rate, 900.0);
+            assert_eq!(storm.above, 18.0);
+            assert_eq!(storm.ease_ticks, 200);
+            assert_eq!(storm.burst.velocity, [3.0, -22.0, 0.0]);
+            assert_eq!(rain[1], None, "nil stops it");
 
             let flashes = bot.flashes_received();
             assert_eq!(

@@ -31,6 +31,9 @@ pub struct Weather {
     pub modifier: Eased,
     /// Lightning, seen.
     pub flashes: Flashes,
+    /// The rain around this client, spawned here from the shape the server
+    /// sent.
+    pub rain: crate::particles::Emitter,
 }
 
 /// A mod's sky modifier on its way to where the mod put it.

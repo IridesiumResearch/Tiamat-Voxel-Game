@@ -5957,6 +5957,23 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("flash", flash)
             .map_err(|err| self.vm_error(&err))?;
+
+        let slot = std::sync::Arc::clone(&self.atmosphere);
+        let set = self
+            .lua
+            .create_function(move |_, (uuid, spec): (String, Option<Table>)| {
+                let player =
+                    crate::identity::PlayerUuid::from_bytes(player_of(&uuid, "set_precipitation")?);
+                let precipitation = spec.map(|spec| precipitation_of(&spec)).transpose()?;
+                let told = slot.lock().ok().and_then(|slot| {
+                    slot.as_ref()
+                        .map(|access| access.set_precipitation(player, precipitation))
+                });
+                Ok(told.unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_precipitation", set)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -8625,53 +8642,12 @@ fn particle_request(spec: &Table) -> mlua::Result<crate::particle::EmitRequest> 
     let pos: Table = spec
         .get("pos")
         .map_err(|_| mlua::Error::external("emit_particles needs a `pos` table"))?;
-    let triple = |name: &str, fallback: f32| -> mlua::Result<[f32; 3]> {
-        let Some(table) = spec.get::<Option<Table>>(name).map_err(|_| {
-            mlua::Error::external(format!("emit_particles: `{name}` is a table {{ x, y, z }}"))
-        })?
-        else {
-            return Ok([fallback; 3]);
-        };
-        Ok([
-            table.get::<Option<f32>>("x")?.unwrap_or(fallback),
-            table.get::<Option<f32>>("y")?.unwrap_or(fallback),
-            table.get::<Option<f32>>("z")?.unwrap_or(fallback),
-        ])
-    };
-    let channel = |value: Option<f32>| {
-        let value = value.unwrap_or(1.0);
-        if value.is_nan() {
-            u8::MAX
-        } else {
-            (value.clamp(0.0, 1.0) * 255.0) as u8
-        }
-    };
-    let colour = match spec
-        .get::<Option<Table>>("colour")
-        .map_err(|_| mlua::Error::external("emit_particles: `colour` is a table { r, g, b, a }"))?
-    {
-        Some(colour) => [
-            channel(colour.get("r")?),
-            channel(colour.get("g")?),
-            channel(colour.get("b")?),
-            channel(colour.get("a")?),
-        ],
-        None => [u8::MAX; 4],
-    };
+    let mut burst = burst_of(spec, "emit_particles")?;
+    burst.pos = [pos.get("x")?, pos.get("y")?, pos.get("z")?];
     let count = spec.get::<Option<i64>>("count")?.unwrap_or(8);
+    burst.count = u16::try_from(count.max(0)).unwrap_or(u16::MAX);
     Ok(crate::particle::EmitRequest {
-        burst: crate::particle::Burst {
-            pos: [pos.get("x")?, pos.get("y")?, pos.get("z")?],
-            count: u16::try_from(count.max(0)).unwrap_or(u16::MAX),
-            colour,
-            size: spec.get::<Option<f32>>("size")?.unwrap_or(0.1),
-            lifetime: spec.get::<Option<f32>>("lifetime")?.unwrap_or(1.0),
-            velocity: triple("velocity", 0.0)?,
-            spread: spec.get::<Option<f32>>("spread")?.unwrap_or(0.0),
-            area: triple("area", 0.0)?,
-            gravity: spec.get::<Option<f32>>("gravity")?.unwrap_or(0.0),
-            collide: spec.get::<Option<bool>>("collide")?.unwrap_or(true),
-        },
+        burst,
         domain: domain_of(&pos)?,
         radius: spec.get::<Option<f32>>("radius")?.unwrap_or(32.0),
         // A UUID in hex, as every other per-player call takes one. A bad one
@@ -8688,6 +8664,77 @@ fn particle_request(spec: &Table) -> mlua::Result<crate::particle::EmitRequest> 
             })
             .transpose()?,
     })
+}
+
+/// The shape of a particle from a mod's table — everything but where and how
+/// many, which `emit_particles` and `set_precipitation` fill differently.
+/// `what` names the call in errors.
+fn burst_of(spec: &Table, what: &str) -> mlua::Result<crate::particle::Burst> {
+    let triple = |name: &str, fallback: [f32; 3]| -> mlua::Result<[f32; 3]> {
+        let Some(table) = spec.get::<Option<Table>>(name).map_err(|_| {
+            mlua::Error::external(format!("{what}: `{name}` is a table {{ x, y, z }}"))
+        })?
+        else {
+            return Ok(fallback);
+        };
+        Ok([
+            table.get::<Option<f32>>("x")?.unwrap_or(fallback[0]),
+            table.get::<Option<f32>>("y")?.unwrap_or(fallback[1]),
+            table.get::<Option<f32>>("z")?.unwrap_or(fallback[2]),
+        ])
+    };
+    let channel = |value: Option<f32>| {
+        let value = value.unwrap_or(1.0);
+        if value.is_nan() {
+            u8::MAX
+        } else {
+            (value.clamp(0.0, 1.0) * 255.0) as u8
+        }
+    };
+    let colour = match spec.get::<Option<Table>>("colour").map_err(|_| {
+        mlua::Error::external(format!("{what}: `colour` is a table {{ r, g, b, a }}"))
+    })? {
+        Some(colour) => [
+            channel(colour.get("r")?),
+            channel(colour.get("g")?),
+            channel(colour.get("b")?),
+            channel(colour.get("a")?),
+        ],
+        None => [u8::MAX; 4],
+    };
+    Ok(crate::particle::Burst {
+        pos: [0.0; 3],
+        count: 0,
+        colour,
+        size: spec.get::<Option<f32>>("size")?.unwrap_or(0.1),
+        lifetime: spec.get::<Option<f32>>("lifetime")?.unwrap_or(1.0),
+        velocity: triple("velocity", [0.0; 3])?,
+        spread: spec.get::<Option<f32>>("spread")?.unwrap_or(0.0),
+        area: triple("area", [0.0; 3])?,
+        gravity: spec.get::<Option<f32>>("gravity")?.unwrap_or(0.0),
+        collide: spec.get::<Option<bool>>("collide")?.unwrap_or(true),
+    })
+}
+
+/// Precipitation from a mod's table: a burst's shape plus `rate`, `above`
+/// and `ease_ticks`. Rain by default: a wide, low box sixteen blocks up,
+/// falling; a mod that wants snow slows it and makes it bigger.
+fn precipitation_of(spec: &Table) -> mlua::Result<crate::atmosphere::Precipitation> {
+    let mut burst = burst_of(spec, "set_precipitation")?;
+    if spec.get::<Option<Table>>("velocity")?.is_none() {
+        burst.velocity = [0.0, -16.0, 0.0];
+    }
+    if spec.get::<Option<Table>>("area")?.is_none() {
+        burst.area = [16.0, 3.0, 16.0];
+    }
+    Ok(crate::atmosphere::sanitise_precipitation(
+        crate::atmosphere::Precipitation {
+            burst,
+            rate: spec.get::<Option<f32>>("rate")?.unwrap_or(0.0),
+            above: spec.get::<Option<f32>>("above")?.unwrap_or(16.0),
+            ease_ticks: spec.get::<Option<u32>>("ease_ticks")?.unwrap_or(0),
+        },
+    ))
 }
 
 /// Reads a `noise` node's options into an operation.
@@ -9650,6 +9697,7 @@ mod tests {
     struct Weather {
         set: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::SkyModifier>)>>,
         flashed: std::sync::Mutex<Vec<crate::atmosphere::FlashRequest>>,
+        rained: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Precipitation>)>>,
     }
 
     impl crate::atmosphere::Access for Weather {
@@ -9672,6 +9720,71 @@ mod tests {
                 .push(request.clone());
             2
         }
+
+        fn set_precipitation(
+            &self,
+            player: crate::identity::PlayerUuid,
+            precipitation: Option<crate::atmosphere::Precipitation>,
+        ) -> bool {
+            self.rained
+                .lock()
+                .expect("weather lock")
+                .push((player.to_hex(), precipitation));
+            true
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_mod_sets_the_rain_around_a_player_and_stops_it() {
+        // **Weather ask W4(b).** The ask's own table reaches the seam: the
+        // burst's shape, the rate, the height and the ease; rain's defaults
+        // fall and fill a wide low box when a field is left out; nil stops it.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([9; 32]).to_hex();
+        load(
+            &mut host,
+            "storm",
+            &format!(
+                "told = game.set_precipitation('{uuid}', {{ rate = 900, size = 0.06,\n\
+                 \x20   colour = {{ r = 0.7, g = 0.75, b = 0.85, a = 0.55 }},\n\
+                 \x20   velocity = {{ x = 3, y = -22, z = 0 }}, spread = 0.3, gravity = 0,\n\
+                 \x20   lifetime = 1.0, area = {{ x = 16, y = 3, z = 16 }}, above = 18, ease_ticks = 200 }})\n\
+                 game.set_precipitation('{uuid}', {{ rate = 99999 }})\n\
+                 game.set_precipitation('{uuid}', nil)"
+            ),
+        )
+        .expect("load");
+        let env = host.environment("storm").expect("env");
+        assert!(env.get::<bool>("told").expect("told"));
+        let rained = weather.rained.lock().expect("lock").clone();
+        assert_eq!(rained.len(), 3);
+        let rain = rained[0].1.expect("rain");
+        assert_eq!(rained[0].0, uuid);
+        assert_eq!(rain.rate, 900.0);
+        assert_eq!(rain.above, 18.0);
+        assert_eq!(rain.ease_ticks, 200);
+        assert_eq!(rain.burst.velocity, [3.0, -22.0, 0.0]);
+        assert_eq!(rain.burst.colour[3], 140, "alpha is a byte");
+        assert_eq!(rain.burst.area, [16.0, 3.0, 16.0]);
+        let bare = rained[1].1.expect("rain");
+        assert_eq!(
+            bare.rate,
+            crate::atmosphere::MAX_RATE,
+            "a wild rate is clamped"
+        );
+        assert_eq!(
+            bare.burst.velocity,
+            [0.0, -16.0, 0.0],
+            "rain falls by default"
+        );
+        assert_eq!(bare.burst.area, [16.0, 3.0, 16.0], "in a wide low box");
+        assert_eq!(rained[2].1, None, "nil stops it");
     }
 
     #[test]

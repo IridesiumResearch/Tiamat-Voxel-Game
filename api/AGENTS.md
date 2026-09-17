@@ -1177,10 +1177,12 @@ few columns a tick, not a field of them.
 
 **Particles are decoration and are dropped under load.** A burst goes to every
 player within `radius` in that domain, or to the one named in `player` — so a
-per-player "particles off" setting in your own mod can be honoured, and rain
-can be emitted per player rather than per patch of ground. A client that falls
-behind loses bursts rather than queuing them, so anything that must be seen
-every tick is something to make smaller.
+per-player "particles off" setting in your own mod can be honoured. A client
+that falls behind loses bursts rather than queuing them, so anything that must
+be seen every tick is something to make smaller — and rain is not a burst at
+all: `game.set_precipitation(uuid, { rate, size, colour, velocity, area, above,
+ease_ticks })` sends the shape once and the player's client spawns it around
+its own camera until you send `nil`.
 
 **A mod reaches another mod only through what it exports.** Each mod gets a
 fresh sandbox and `game.storage` is private; `game.export` / `game.exports`

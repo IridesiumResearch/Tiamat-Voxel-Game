@@ -631,6 +631,18 @@ impl Bot {
             .collect()
     }
 
+    /// Every precipitation received so far, in arrival order.
+    #[must_use]
+    pub fn precipitation_received(&self) -> Vec<Option<tiamot_core::atmosphere::Precipitation>> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Precipitation { precipitation } => Some(precipitation),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every flash received so far, in arrival order.
     #[must_use]
     pub fn flashes_received(&self) -> Vec<tiamot_core::atmosphere::Flash> {

@@ -20,6 +20,7 @@
 //! fit and no more — the oldest are not evicted, because a spray that has
 //! already started is what the player is looking at.
 
+use tiamot_core::atmosphere::Precipitation;
 use tiamot_core::particle::Burst;
 
 /// The most particles alive at once.
@@ -192,6 +193,91 @@ impl System {
     }
 }
 
+/// The rain around this client, spawned here from the shape the server sent.
+///
+/// **The client runs the emitter** — see [`Precipitation`]'s docs for why the
+/// server sends one message and not a stream of bursts. The rate eases over
+/// the ticks the mod asked for, and `None` eases it to nothing over the last
+/// ease before the shape is forgotten. A fractional particle is carried from
+/// frame to frame against the frame's own `dt`, not the clamped one the
+/// system integrates with, so a hitch neither doubles nor drops the rain.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Emitter {
+    /// The shape, kept through the fade to nothing.
+    shape: Option<Precipitation>,
+    rate_from: f32,
+    rate_to: f32,
+    elapsed: f32,
+    duration: f32,
+    /// The fraction of a particle owed from the last frame.
+    carry: f32,
+}
+
+/// The most of the budget precipitation may hold, so a mod's bursts always
+/// have room: a storm never silences a splash.
+pub const PRECIPITATION_SHARE: usize = MAX_LIVE * 3 / 4;
+
+impl Emitter {
+    /// Sets the rain, or `None` to let it die away.
+    pub fn set(&mut self, precipitation: Option<Precipitation>) {
+        let ticks = precipitation.map_or(
+            self.shape.map_or(0, |shape| shape.ease_ticks),
+            |precipitation| precipitation.ease_ticks,
+        );
+        self.rate_from = self.rate();
+        self.rate_to = precipitation.map_or(0.0, |precipitation| precipitation.rate);
+        if precipitation.is_some() {
+            self.shape = precipitation;
+        }
+        self.elapsed = 0.0;
+        self.duration = tiamot_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
+    }
+
+    /// Particles a second, now.
+    #[must_use]
+    pub fn rate(&self) -> f32 {
+        if self.duration <= 0.0 || self.elapsed >= self.duration {
+            return self.rate_to;
+        }
+        self.rate_from + (self.rate_to - self.rate_from) * (self.elapsed / self.duration)
+    }
+
+    /// Advances by a frame and says how many particles are owed for it, and
+    /// what they look like — or `None` when there is no rain.
+    ///
+    /// `centre` is where the camera is; the box is lifted `above` from it.
+    pub fn advance(&mut self, dt: f32, centre: [f64; 3]) -> Option<Burst> {
+        let shape = self.shape?;
+        self.elapsed += dt.max(0.0);
+        self.carry += self.rate() * dt.max(0.0);
+        // The engine's own floor: `f32::floor` is on the banned list for
+        // the crates the determinism rules cover, and one floor is the same
+        // everywhere.
+        let owed = tiamot_core::detgen::floor_to_i32(self.carry).max(0);
+        self.carry -= owed as f32;
+        if self.rate() <= 0.0 && self.elapsed >= self.duration {
+            // Died away: forget the shape, so a later `None` eases nothing.
+            self.shape = None;
+            self.carry = 0.0;
+        }
+        if owed < 1 {
+            return None;
+        }
+        let count = u16::try_from(owed).unwrap_or(u16::MAX);
+        Some(Burst {
+            pos: [centre[0], centre[1] + f64::from(shape.above), centre[2]],
+            count,
+            ..shape.burst
+        })
+    }
+
+    /// Whether there is any rain, falling or fading.
+    #[must_use]
+    pub fn is_raining(&self) -> bool {
+        self.shape.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +413,70 @@ mod tests {
         assert_eq!(system.live().len(), MAX_LIVE);
         system.clear();
         assert!(system.live().is_empty());
+    }
+
+    #[test]
+    fn rain_is_owed_at_its_rate_eases_and_dies_away() {
+        // **Weather ask W4(b).** Nine hundred a second at sixty frames a second
+        // is fifteen a frame, and a fraction carried; eased over a second it
+        // is half way at half a second; told to stop it fades over the same
+        // time and is then gone.
+        let shape = Precipitation {
+            burst: Burst {
+                pos: [0.0; 3],
+                count: 0,
+                colour: [255; 4],
+                size: 0.06,
+                lifetime: 1.0,
+                velocity: [0.0, -22.0, 0.0],
+                spread: 0.3,
+                area: [16.0, 3.0, 16.0],
+                gravity: 0.0,
+                collide: true,
+            },
+            rate: 900.0,
+            above: 18.0,
+            ease_ticks: 0,
+        };
+        let mut emitter = Emitter::default();
+        assert!(
+            emitter.advance(1.0 / 60.0, [0.0; 3]).is_none(),
+            "no rain yet"
+        );
+        emitter.set(Some(shape));
+        let mut spawned = 0u32;
+        for _ in 0..60 {
+            if let Some(burst) = emitter.advance(1.0 / 60.0, [0.0, 10.0, 0.0]) {
+                spawned += u32::from(burst.count);
+                assert!(
+                    (burst.pos[1] - 28.0).abs() < 1e-9,
+                    "lifted above the camera"
+                );
+                assert!((burst.velocity[1] + 22.0).abs() < f32::EPSILON);
+            }
+        }
+        assert!(
+            (899..=901).contains(&spawned),
+            "{spawned} in a second at 900/s"
+        );
+
+        let mut emitter = Emitter::default();
+        emitter.set(Some(Precipitation {
+            ease_ticks: 20,
+            ..shape
+        }));
+        assert!(emitter.rate().abs() < f32::EPSILON, "starts from nothing");
+        let _ = emitter.advance(0.5, [0.0; 3]);
+        assert!((emitter.rate() - 450.0).abs() < 1.0, "{}", emitter.rate());
+        emitter.set(None);
+        assert!(
+            (emitter.rate() - 450.0).abs() < 1.0,
+            "fades from where it was"
+        );
+        let _ = emitter.advance(0.5, [0.0; 3]);
+        assert!((emitter.rate() - 225.0).abs() < 1.0);
+        let _ = emitter.advance(1.0, [0.0; 3]);
+        assert!(emitter.rate().abs() < f32::EPSILON);
+        assert!(!emitter.is_raining(), "and then it is gone");
     }
 }

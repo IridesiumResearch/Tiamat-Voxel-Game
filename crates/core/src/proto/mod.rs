@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 59;
+pub const PROTOCOL_VERSION: u32 = 60;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,8 @@ pub const PROTOCOL_VERSION: u32 = 59;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v60 (weather W4b): appended `ServerMessage::Precipitation`, the shape of the
+// rain around one player, which their client spawns itself.
 // v59 (weather W3): appended `ServerMessage::Flash`, lightning seen: a moment's
 // light added to the sun on the client, no relight.
 // v58 (weather W1): appended `ServerMessage::SkyModifier`, a mod's standing
@@ -2069,6 +2071,15 @@ pub enum ServerMessage {
         /// The flash.
         flash: crate::atmosphere::Flash,
     },
+    /// The precipitation around this player, or `None` for none.
+    ///
+    /// **Appended at the end** (protocol v60). Latest state, as the sky
+    /// modifier is: one message when the weather changes, and the client
+    /// spawns the rain itself. See [`crate::atmosphere::Precipitation`].
+    Precipitation {
+        /// The shape of the rain, or `None` to stop it.
+        precipitation: Option<crate::atmosphere::Precipitation>,
+    },
 }
 
 /// An entity as a client is first told about it.
@@ -2489,6 +2500,30 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
 
 /// Rejects a particle message outside the ranges `particle::sanitise` keeps a
 /// well-behaved server inside.
+/// Bounds a server's settings list. Its own function because
+/// `validate_server_message` is at clippy's line ceiling.
+fn check_mod_settings(settings: &[SettingDef]) -> Result<(), ProtocolError> {
+    check_len("mod_settings", settings.len(), MAX_MOD_SETTINGS)?;
+    for setting in settings {
+        check_len("setting_id", setting.id.len(), MAX_ID_BYTES)?;
+        check_len("setting_mod", setting.mod_id.len(), MAX_ID_BYTES)?;
+        check_len("setting_name", setting.name.len(), MAX_NAME_BYTES)?;
+        check_len(
+            "setting_description",
+            setting.description.len(),
+            MAX_CHAT_BYTES,
+        )?;
+        // A dropdown with hundreds of entries is not a dropdown. The same
+        // bound the list itself gets, which is generous for a control a
+        // person reads.
+        check_len("setting_options", setting.options.len(), MAX_MOD_SETTINGS)?;
+        for option in &setting.options {
+            check_len("setting_option", option.len(), MAX_NAME_BYTES)?;
+        }
+    }
+    Ok(())
+}
+
 /// The weather messages: a sky modifier's and a flash's numbers are the
 /// client's to trust only in range. One function for both, because
 /// `validate_server_message` is at clippy's line ceiling.
@@ -2498,6 +2533,9 @@ fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
             .as_ref()
             .is_none_or(crate::atmosphere::SkyModifier::is_valid),
         ServerMessage::Flash { flash } => flash.is_valid(),
+        ServerMessage::Precipitation { precipitation } => precipitation
+            .as_ref()
+            .is_none_or(crate::atmosphere::Precipitation::is_valid),
         _ => true,
     };
     if valid {
@@ -2847,26 +2885,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         }
         // **A server's own list, and a server is not trusted** (charter rule
         // 14). Every string here is drawn on a screen and kept for the session.
-        ServerMessage::ModSettings { settings } => {
-            check_len("mod_settings", settings.len(), MAX_MOD_SETTINGS)?;
-            for setting in settings {
-                check_len("setting_id", setting.id.len(), MAX_ID_BYTES)?;
-                check_len("setting_mod", setting.mod_id.len(), MAX_ID_BYTES)?;
-                check_len("setting_name", setting.name.len(), MAX_NAME_BYTES)?;
-                check_len(
-                    "setting_description",
-                    setting.description.len(),
-                    MAX_CHAT_BYTES,
-                )?;
-                // A dropdown with hundreds of entries is not a dropdown. The
-                // same bound the list itself gets, which is generous for a
-                // control a person reads.
-                check_len("setting_options", setting.options.len(), MAX_MOD_SETTINGS)?;
-                for option in &setting.options {
-                    check_len("setting_option", option.len(), MAX_NAME_BYTES)?;
-                }
-            }
-        }
+        ServerMessage::ModSettings { settings } => check_mod_settings(settings)?,
         // **A held stack is a shape, and a server is not trusted** (charter
         // rule 14). The same check the spawn's item gets, for the same reason:
         // a mask with bits above the block would index past the cells a
@@ -2919,7 +2938,9 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
-        ServerMessage::SkyModifier { .. } | ServerMessage::Flash { .. } => check_atmosphere(message)?,
+        ServerMessage::SkyModifier { .. }
+        | ServerMessage::Flash { .. }
+        | ServerMessage::Precipitation { .. } => check_atmosphere(message)?,
         // A domain id is a string a server chose, and it reaches a loading
         // screen the client draws. Capped like every other id on the wire
         // (charter rule 14: a server is not trusted for being the server).
@@ -4106,10 +4127,14 @@ mod tests {
         // Protocol v54.
         let particles = encode(&ServerMessage::Particles { bursts: Vec::new() }).expect("encode");
         assert_eq!(particles[0], 43);
-        // Protocol v58.
+    }
+
+    #[test]
+    fn pin_the_weather_variants() {
+        // Protocol v58, v59 and v60: the weather, appended in that order.
+        // Its own test because `pin_the_later_variants` is at the line limit.
         let sky = encode(&ServerMessage::SkyModifier { modifier: None }).expect("encode");
         assert_eq!(sky[0], 44);
-        // Protocol v59.
         let flash = encode(&ServerMessage::Flash {
             flash: crate::atmosphere::Flash {
                 intensity: 1.0,
@@ -4120,6 +4145,11 @@ mod tests {
         })
         .expect("encode");
         assert_eq!(flash[0], 45);
+        let rain = encode(&ServerMessage::Precipitation {
+            precipitation: None,
+        })
+        .expect("encode");
+        assert_eq!(rain[0], 46);
     }
 
     #[test]

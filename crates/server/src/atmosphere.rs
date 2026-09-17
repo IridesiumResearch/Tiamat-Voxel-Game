@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tiamot_core::atmosphere::SkyModifier;
+use tiamot_core::atmosphere::{Precipitation, SkyModifier};
 use tiamot_core::identity::PlayerUuid;
 
 /// The atmosphere seam over the connection state, as [`crate::hud::Shared`].
@@ -67,5 +67,13 @@ impl tiamot_core::atmosphere::Access for Shared {
             told += 1;
         }
         told
+    }
+
+    fn set_precipitation(&self, player: PlayerUuid, precipitation: Option<Precipitation>) -> bool {
+        if !self.endpoint.is_online(&player) {
+            return false;
+        }
+        self.endpoint.set_precipitation(&player, precipitation);
+        true
     }
 }

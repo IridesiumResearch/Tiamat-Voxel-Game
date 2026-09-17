@@ -183,6 +183,71 @@ pub fn sanitise_flash(mut request: FlashRequest) -> FlashRequest {
     request
 }
 
+/// Precipitation: an emitter the client runs around its own camera.
+///
+/// **One message when the weather changes, not a stream of bursts.** Rain is
+/// continuous and `emit_particles` is a burst; keeping rain alive around a
+/// player from the server meant a burst of hundreds every few ticks per
+/// player, for as long as the storm lasted — thousands of messages a minute
+/// for something whose parameters change every forty seconds, and the first
+/// thing to stutter under load. So the server sends the SHAPE of the rain
+/// and the client spawns it: `rate` particles a second, in a box `area`
+/// around the camera lifted `above` blocks, each shaped by `burst` (whose
+/// `pos` and `count` are the client's to fill). The client eases the rate
+/// over `ease_ticks`, and honours its own budget. Weather ask W4(b).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Precipitation {
+    /// What each particle is: colour, size, lifetime, velocity, spread,
+    /// gravity, collision, and the box (`area`, half extents) it spawns in.
+    pub burst: crate::particle::Burst,
+    /// Particles a second.
+    pub rate: f32,
+    /// How far above the camera the box is centred, in blocks.
+    pub above: f32,
+    /// How long the client takes to bring the rate to this, in ticks.
+    pub ease_ticks: u32,
+}
+
+/// The most particles a second a mod may ask for.
+pub const MAX_RATE: f32 = 4000.0;
+/// The highest above the camera the box may be centred.
+pub const MAX_ABOVE: f32 = 64.0;
+
+impl Precipitation {
+    /// Whether every number is finite and in range (charter rule 14).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.burst.is_valid()
+            && (0.0..=MAX_RATE).contains(&self.rate)
+            && (0.0..=MAX_ABOVE).contains(&self.above)
+            && self.ease_ticks <= MAX_EASE_TICKS
+    }
+}
+
+/// Clamps a precipitation's numbers into range, the burst through the
+/// particle module's own sanitiser.
+#[must_use]
+pub fn sanitise_precipitation(mut precipitation: Precipitation) -> Precipitation {
+    let clamp = |value: f32, low: f32, high: f32, fallback: f32| {
+        if value.is_finite() {
+            value.clamp(low, high)
+        } else {
+            fallback
+        }
+    };
+    precipitation.burst = crate::particle::sanitise(crate::particle::EmitRequest {
+        burst: precipitation.burst,
+        domain: String::new(),
+        radius: 0.0,
+        player: None,
+    })
+    .burst;
+    precipitation.rate = clamp(precipitation.rate, 0.0, MAX_RATE, 0.0);
+    precipitation.above = clamp(precipitation.above, 0.0, MAX_ABOVE, 16.0);
+    precipitation.ease_ticks = precipitation.ease_ticks.min(MAX_EASE_TICKS);
+    precipitation
+}
+
 /// Where `game.set_sky_modifier` and `game.flash` reach.
 ///
 /// The same seam shape as [`crate::hud::Access`], and for the same reason:
@@ -195,6 +260,11 @@ pub trait Access: Send + Sync {
 
     /// Shows a flash to everyone in reach, returning how many were told.
     fn flash(&self, request: &FlashRequest) -> u32;
+
+    /// Replaces one player's precipitation, or clears it with `None`.
+    ///
+    /// Returns whether the player was there to tell.
+    fn set_precipitation(&self, player: PlayerUuid, precipitation: Option<Precipitation>) -> bool;
 }
 
 #[cfg(test)]
@@ -226,6 +296,36 @@ mod tests {
         assert_eq!(tame.fog_distance, MIN_FOG_DISTANCE);
         assert!(SkyModifier::NONE.is_valid());
         assert_eq!(sanitise(SkyModifier::NONE), SkyModifier::NONE);
+    }
+
+    #[test]
+    fn precipitation_is_clamped_into_the_same_ranges_it_is_checked_against() {
+        let wild = Precipitation {
+            burst: crate::particle::Burst {
+                pos: [0.0; 3],
+                count: 0,
+                colour: [255; 4],
+                size: 99.0,
+                lifetime: f32::NAN,
+                velocity: [0.0, -900.0, 0.0],
+                spread: 0.0,
+                area: [16.0, 3.0, 16.0],
+                gravity: 0.0,
+                collide: true,
+            },
+            rate: f32::INFINITY,
+            above: -4.0,
+            ease_ticks: u32::MAX,
+        };
+        assert!(!wild.is_valid());
+        let tame = sanitise_precipitation(wild);
+        assert!(tame.is_valid(), "{tame:?}");
+        assert!(
+            tame.rate.abs() < f32::EPSILON,
+            "a rate that is not a number is none"
+        );
+        assert!(tame.above.abs() < f32::EPSILON);
+        assert!(tame.burst.velocity[1] >= -crate::particle::MAX_SPEED);
     }
 
     #[test]

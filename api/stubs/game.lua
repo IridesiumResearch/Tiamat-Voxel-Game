@@ -630,6 +630,38 @@ function game.set_sky_modifier(player, modifier) end
 ---@return integer told
 function game.flash(spec) end
 
+---Sets the rain around one player: an emitter their client runs. Returns
+---whether the player is here.
+---
+---**One message when the weather changes, not a stream of bursts.** Rain is
+---continuous and `emit_particles` is a burst; keeping rain alive from the
+---server meant hundreds of particles every few ticks per player for as long
+---as the storm lasted, and bursts are the first thing dropped under load. So
+---you send the SHAPE of the rain and the client spawns it: `rate` particles a
+---second in a box of `area` (half extents) around its own camera, lifted
+---`above` blocks, each with the burst fields `emit_particles` takes (`size`,
+---`colour`, `lifetime`, `velocity`, `spread`, `gravity`, `collide`). The
+---client eases the rate over `ease_ticks`, and `nil` fades it out over the
+---last ease. Defaults are rain: falling at 16, a 32×6×32 box 16 blocks up.
+---
+---```lua
+---game.set_precipitation(uuid, {
+---    rate = 900, size = 0.06, colour = { r = 0.7, g = 0.75, b = 0.85, a = 0.55 },
+---    velocity = { x = 3, y = -22, z = 0 }, spread = 0.3, gravity = 0,
+---    lifetime = 1.0, area = { x = 16, y = 3, z = 16 }, above = 18, ease_ticks = 200,
+---})
+---game.set_precipitation(uuid, nil)
+---```
+---
+---Set it as often as you like; it is sent when it changes. The client keeps a
+---quarter of its particle budget free of rain, so your bursts still show in a
+---storm. Wrong types are errors; wrong numbers are clamped (`rate` up to 4000,
+---`above` up to 64, the burst's own limits, `ease_ticks` up to 2400).
+---@param player string A player's UUID in hex.
+---@param precipitation { rate?: number, size?: number, colour?: { r: number, g: number, b: number, a: number }, lifetime?: number, velocity?: { x: number, y: number, z: number }, spread?: number, gravity?: number, collide?: boolean, area?: { x: number, y: number, z: number }, above?: number, ease_ticks?: integer }|nil
+---@return boolean here
+function game.set_precipitation(player, precipitation) end
+
 ---Registers a tool.
 ---
 ---**Registration window only**, like `game.register_block`.
