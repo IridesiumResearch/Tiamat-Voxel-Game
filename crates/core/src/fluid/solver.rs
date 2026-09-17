@@ -155,6 +155,104 @@ impl Tuning {
     };
 }
 
+/// Every fluid's tuning, by id.
+///
+/// **One set of settings per FLUID, which for a long time it was not.** The
+/// solver took one `Tuning` for the whole tick, read from whichever fluid had
+/// registered first — alphabetically by qualified id, across every loaded mod
+/// — so `core_milk:milk`'s `tick_rate = 4` governed a world's water and lava
+/// too, and "rainwater evaporates, the sea does not" was not expressible. Now
+/// every question the solver asks about a block is asked of the tuning of the
+/// fluid IN that block, which is the only reading that makes a registration
+/// mean something.
+///
+/// Indexed by [`FluidId`], with [`Tuning::DEFAULT`] for the ids nobody has
+/// registered — a placeholder's rules left with the mod that knew them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tunings {
+    by_id: Vec<Tuning>,
+    /// Which ids a mod actually registered. The gate in [`Tunings::any_due`]
+    /// looks only at these: the defaulted slots run at rate one and would
+    /// otherwise make every tick "due" for a world whose only fluid is slow.
+    registered: Vec<bool>,
+}
+
+impl Default for Tunings {
+    /// Every fluid at [`Tuning::DEFAULT`]: a store built before any registry.
+    fn default() -> Self {
+        Self::uniform(Tuning::DEFAULT)
+    }
+}
+
+impl Tunings {
+    /// The same tuning for every fluid: a one-fluid world, or a test.
+    #[must_use]
+    pub fn uniform(tuning: Tuning) -> Self {
+        Self {
+            by_id: vec![tuning; super::MAX_FLUIDS + 1],
+            registered: vec![true; super::MAX_FLUIDS + 1],
+        }
+    }
+
+    /// Builds the table from `(id, tuning)` pairs; anything unnamed is the
+    /// default.
+    #[must_use]
+    pub fn from_pairs(entries: impl IntoIterator<Item = (FluidId, Tuning)>) -> Self {
+        let mut by_id = vec![Tuning::DEFAULT; super::MAX_FLUIDS + 1];
+        let mut registered = vec![false; super::MAX_FLUIDS + 1];
+        for (id, tuning) in entries {
+            if let Some(slot) = by_id.get_mut(usize::from(id.0)) {
+                *slot = tuning;
+                registered[usize::from(id.0)] = true;
+            }
+        }
+        Self { by_id, registered }
+    }
+
+    /// One fluid's tuning.
+    #[must_use]
+    pub fn of(&self, fluid: FluidId) -> Tuning {
+        self.by_id
+            .get(usize::from(fluid.0))
+            .copied()
+            .unwrap_or(Tuning::DEFAULT)
+    }
+
+    /// Whether any fluid is due to move on this fluid tick.
+    ///
+    /// The gate the server keeps in front of the whole pass: a world whose
+    /// every fluid runs at rate four does nothing on three ticks in four, and
+    /// should not pay for the queue walk to find that out.
+    #[must_use]
+    pub fn any_due(&self, fluid_tick: u64) -> bool {
+        let mut any_registered = false;
+        for (tuning, registered) in self.by_id.iter().zip(&self.registered) {
+            if !registered {
+                continue;
+            }
+            any_registered = true;
+            if fluid_tick.is_multiple_of(u64::from(tuning.tick_rate.max(1))) {
+                return true;
+            }
+        }
+        // Nothing registered at all: a world with no fluid, or a placeholder's
+        // orphaned milk. Let the pass run; it has nothing to do and says so.
+        !any_registered
+    }
+
+    /// Whether every registered fluid is due on this fluid tick — a *full*
+    /// tick, on which the queue is worked exactly as a one-fluid world works
+    /// it. See the empty-block rule in [`Solver::tick`].
+    #[must_use]
+    pub fn all_due(&self, fluid_tick: u64) -> bool {
+        self.by_id
+            .iter()
+            .zip(&self.registered)
+            .filter(|(_, registered)| **registered)
+            .all(|(tuning, _)| fluid_tick.is_multiple_of(u64::from(tuning.tick_rate.max(1))))
+    }
+}
+
 /// One block's worth of change, for whoever needs to hear about it.
 ///
 /// The server broadcasts these and the client applies them; both also use them
@@ -388,7 +486,7 @@ impl Solver {
     pub fn tick(
         &mut self,
         world: &mut impl Neighbourhood,
-        tuning: Tuning,
+        tunings: &Tunings,
         budget: usize,
         seed: u64,
         fluid_tick: u64,
@@ -399,10 +497,38 @@ impl Solver {
         let mut pending = std::mem::take(&mut self.carried);
         pending.extend(std::mem::take(&mut self.active));
 
+        let full_tick = tunings.all_due(fluid_tick);
         let mut visited = 0;
         let mut woken = BTreeSet::new();
         for pos in pending {
             if visited >= budget {
+                self.carried.insert(pos);
+                continue;
+            }
+            // **A fluid's own rate.** A block holding a fluid whose tick this
+            // is not is put back for the tick that is, still active — a
+            // viscous fluid is slow, not stopped.
+            //
+            // **Before the visit is counted, and that is not tidiness.** A
+            // deferral is one lookup, and counting it as a visit starved a
+            // puddle: on a slow fluid's off-ticks the pending set does not
+            // shrink, so the same blocks spent the same budget every tick and
+            // a block past the budget line was never looked at on the tick
+            // that mattered. One cell of milk stood on open ground for ever.
+            //
+            // **An empty block waits for a full tick.** A block woken empty —
+            // a neighbour of something that moved — is kept in the queue until
+            // every fluid is due, because on that tick it may be FILLED by a
+            // neighbour settled before it and then settled itself in the same
+            // pass. That same-tick cascade is what a one-fluid world always
+            // had, since its off-ticks ran nothing at all; a mixed world that
+            // looked at the empties on a fast fluid's ticks dropped them, lost
+            // the cascade, and left one cell of a slow fluid standing on
+            // level soaked ground where nothing would ever wake it again.
+            let held = world.fluid(pos);
+            let due = held.is_empty()
+                || fluid_tick.is_multiple_of(u64::from(tunings.of(held.fluid()).tick_rate.max(1)));
+            if !due || (held.is_empty() && !full_tick) {
                 self.carried.insert(pos);
                 continue;
             }
@@ -412,12 +538,12 @@ impl Solver {
             // settled pond against a wall changes nothing every tick and is
             // exactly the case a waterlogging mod cares about.
             if self.blocked.len() < BLOCKED_PER_TICK {
-                record_blocked(world, tuning, pos, &mut self.blocked);
+                record_blocked(world, tunings, pos, &mut self.blocked);
             }
             let before = changes.len();
             settle_one(
                 world,
-                tuning,
+                tunings,
                 pos,
                 seed,
                 fluid_tick,
@@ -470,12 +596,16 @@ const FACES: [[i32; 3]; 6] = [
 ///
 /// `false` for a block that is not loaded, which is the conservative answer:
 /// what cannot be read cannot be counted on.
-fn brims<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: BlockPos) -> bool {
+fn brims<N: Neighbourhood + ?Sized>(world: &N, tunings: &Tunings, at: BlockPos) -> bool {
     let Some(occupancy) = world.occupancy(at) else {
         return false;
     };
-    let room = capacity(occupancy, tuning.waterlogs_at);
-    room > 0 && world.fluid(at).volume() >= room
+    let held = world.fluid(at);
+    if held.is_empty() {
+        return false;
+    }
+    let room = capacity(occupancy, tunings.of(held.fluid()).waterlogs_at);
+    room > 0 && held.volume() >= room
 }
 
 /// Whether `at` is part of a body: [`BODY_BLOCKS`] brimming blocks that touch.
@@ -498,8 +628,8 @@ fn brims<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: BlockPos) -> 
 /// Nothing is allocated and the answer does not depend on the order the
 /// neighbours are visited, which charter rule 4 requires of anything the
 /// simulation acts on.
-pub fn in_a_body<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: BlockPos) -> bool {
-    if !brims(world, tuning, at) {
+pub fn in_a_body<N: Neighbourhood + ?Sized>(world: &N, tunings: &Tunings, at: BlockPos) -> bool {
+    if !brims(world, tunings, at) {
         return false;
     }
     let step = |from: BlockPos, [dx, dy, dz]: [i32; 3]| {
@@ -513,7 +643,7 @@ pub fn in_a_body<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: Block
     let mut only = None;
     for offset in FACES {
         let next = step(at, offset);
-        if brims(world, tuning, next) {
+        if brims(world, tunings, next) {
             found += 1;
             if found >= BODY_BLOCKS {
                 return true;
@@ -528,14 +658,14 @@ pub fn in_a_body<N: Neighbourhood + ?Sized>(world: &N, tuning: Tuning, at: Block
     FACES
         .into_iter()
         .map(|offset| step(only, offset))
-        .any(|next| next != at && brims(world, tuning, next))
+        .any(|next| next != at && brims(world, tunings, next))
 }
 
 /// How much more fluid a block will take of `fluid`, in cells.
 ///
 /// Zero for a block already holding a different fluid: two fluids do not mix,
 /// and the one that got there first keeps the space.
-fn accepts(world: &impl Neighbourhood, tuning: Tuning, pos: BlockPos, fluid: FluidId) -> u32 {
+fn accepts(world: &impl Neighbourhood, tunings: &Tunings, pos: BlockPos, fluid: FluidId) -> u32 {
     let Some(occupancy) = world.occupancy(pos) else {
         // Not loaded. Sub-Node Contract §4.2: unloaded is solid, or a flood
         // runs off the edge of the world.
@@ -545,7 +675,7 @@ fn accepts(world: &impl Neighbourhood, tuning: Tuning, pos: BlockPos, fluid: Flu
     if !here.is_empty() && here.fluid() != fluid {
         return 0;
     }
-    capacity(occupancy, tuning.waterlogs_at).saturating_sub(here.volume())
+    capacity(occupancy, tunings.of(fluid).waterlogs_at).saturating_sub(here.volume())
 }
 
 /// Moves `cells` of `fluid` from one block to another, recording both ends.
@@ -638,7 +768,7 @@ fn evaporates(tuning: Tuning, pos: BlockPos, seed: u64, fluid_tick: u64) -> bool
 /// same fluid in `into` is still a meeting of one body, not a blocked flow.
 fn record_blocked(
     world: &impl Neighbourhood,
-    tuning: Tuning,
+    tunings: &Tunings,
     pos: BlockPos,
     out: &mut Vec<Blocked>,
 ) {
@@ -663,7 +793,7 @@ fn record_blocked(
                 continue;
             }
             // Somewhere it could go is not somewhere it was stopped.
-            if accepts(world, tuning, into, here.fluid()) > 0 {
+            if accepts(world, tunings, into, here.fluid()) > 0 {
                 continue;
             }
             // Already holding this fluid means it is not blocked, it is met.
@@ -684,7 +814,7 @@ fn record_blocked(
 /// Applies the whole rule to one block, appending what changed.
 fn settle_one(
     world: &mut impl Neighbourhood,
-    tuning: Tuning,
+    tunings: &Tunings,
     pos: BlockPos,
     seed: u64,
     fluid_tick: u64,
@@ -700,12 +830,12 @@ fn settle_one(
     // **Terrain arriving in a flooded block.** Somebody placed stone where milk
     // was, so the block now holds more than fits. Pushed out below and sideways
     // first; only what nothing will take is destroyed, and it is counted.
-    let room = world
-        .occupancy(pos)
-        .map_or(0, |occupancy| capacity(occupancy, tuning.waterlogs_at));
+    let room = world.occupancy(pos).map_or(0, |occupancy| {
+        capacity(occupancy, tunings.of(fluid).waterlogs_at)
+    });
     if here.volume() > room {
         let excess = here.volume() - room;
-        let spilled = spill(world, tuning, pos, fluid, excess, out);
+        let spilled = spill(world, tunings, pos, fluid, excess, out);
         if spilled < excess {
             let lost = excess - spilled;
             let now = world.fluid(pos);
@@ -723,7 +853,7 @@ fn settle_one(
     // Rule 1 — down first.
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     let mine = world.fluid(pos).volume();
-    let falling = accepts(world, tuning, below, fluid).min(mine);
+    let falling = accepts(world, tunings, below, fluid).min(mine);
     if falling > 0 {
         transfer(world, pos, below, fluid, falling, out);
         if world.fluid(pos).is_empty() {
@@ -755,7 +885,7 @@ fn settle_one(
             continue;
         }
         let half = (mine - theirs) / 2;
-        let moved = half.min(accepts(world, tuning, at, fluid));
+        let moved = half.min(accepts(world, tunings, at, fluid));
         if moved > 0 {
             transfer(world, pos, at, fluid, moved, out);
         }
@@ -768,13 +898,13 @@ fn settle_one(
         for index in 0..LATERAL.len() {
             let offset = LATERAL[(index + turn) % LATERAL.len()];
             let at = BlockPos::new(pos.x + offset[0], pos.y + offset[1], pos.z + offset[2]);
-            if !world.fluid(at).is_empty() || accepts(world, tuning, at, fluid) < mine {
+            if !world.fluid(at).is_empty() || accepts(world, tunings, at, fluid) < mine {
                 continue;
             }
             // Only downhill. A droplet that moved sideways onto level ground
             // would wander for ever, and two of them would swap places.
             let under = BlockPos::new(at.x, at.y - 1, at.z);
-            if accepts(world, tuning, under, fluid) == 0 {
+            if accepts(world, tunings, under, fluid) == 0 {
                 continue;
             }
             transfer(world, pos, at, fluid, mine, out);
@@ -792,7 +922,7 @@ fn settle_one(
         && world
             .occupancy(above)
             .is_some_and(|occupancy| occupancy == 0)
-        && evaporates(tuning, pos, seed, fluid_tick)
+        && evaporates(tunings.of(fluid), pos, seed, fluid_tick)
     {
         let was = world.fluid(pos);
         let now = was.with_volume(was.volume() - 1);
@@ -806,7 +936,7 @@ fn settle_one(
 /// found somewhere to go.
 fn spill(
     world: &mut impl Neighbourhood,
-    tuning: Tuning,
+    tunings: &Tunings,
     pos: BlockPos,
     fluid: FluidId,
     cells: u32,
@@ -823,7 +953,7 @@ fn spill(
         if left == 0 {
             break;
         }
-        let moved = accepts(world, tuning, at, fluid).min(left);
+        let moved = accepts(world, tunings, at, fluid).min(left);
         if moved > 0 {
             transfer(world, pos, at, fluid, moved, out);
             left -= moved;
@@ -1044,8 +1174,9 @@ mod tests {
         ticks: u64,
         seed: u64,
     ) -> Sinks {
+        let tunings = Tunings::uniform(tuning);
         for tick in 0..ticks {
-            solver.tick(scene, tuning, usize::MAX, seed, tick);
+            solver.tick(scene, &tunings, usize::MAX, seed, tick);
         }
         solver.take_sinks()
     }
@@ -1071,7 +1202,12 @@ mod tests {
             .fluid
             .insert((-1, -2, 0), Fluid::new(LAVA, MAX_VOLUME));
         let mut out = Vec::new();
-        record_blocked(&scene, Tuning::DEFAULT, BlockPos::new(0, -1, 0), &mut out);
+        record_blocked(
+            &scene,
+            &Tunings::uniform(Tuning::DEFAULT),
+            BlockPos::new(0, -1, 0),
+            &mut out,
+        );
         assert!(
             out.iter().any(|b| b.into == BlockPos::new(0, -2, 0)
                 && b.fluid == LAVA
@@ -1081,7 +1217,7 @@ mod tests {
         let mut beside = Vec::new();
         record_blocked(
             &scene,
-            Tuning::DEFAULT,
+            &Tunings::uniform(Tuning::DEFAULT),
             BlockPos::new(-1, -2, 0),
             &mut beside,
         );
@@ -1090,7 +1226,12 @@ mod tests {
             "lava beside water was not reported: {beside:?}"
         );
         let mut own = Vec::new();
-        record_blocked(&scene, Tuning::DEFAULT, BlockPos::new(1, -2, 0), &mut own);
+        record_blocked(
+            &scene,
+            &Tunings::uniform(Tuning::DEFAULT),
+            BlockPos::new(1, -2, 0),
+            &mut own,
+        );
         assert!(
             own.iter()
                 .all(|b| b.into != BlockPos::new(0, -2, 0) && b.into != BlockPos::new(1, -3, 0)),
@@ -1374,6 +1515,132 @@ mod tests {
     }
 
     #[test]
+    fn each_fluid_runs_on_its_own_settings() {
+        // **The defect a weather mod's asks turned up.** The solver took one
+        // `Tuning` for the whole tick, from whichever fluid registered first —
+        // alphabetically — so a puddle that dries beside a sea that must not,
+        // or a slow lava beside a quick river, could not be expressed, and
+        // `core_milk:milk`'s rate governed a world's water. Two fluids, two
+        // settings, one scene.
+        const LAVA: FluidId = FluidId(2);
+        let mut scene = Scene::default();
+        // Two open-topped cups on a floor, walled from each other.
+        for x in -1..=5 {
+            scene.solid.insert((x, 0, 0));
+            for dz in [-1, 1] {
+                scene.solid.insert((x, 1, dz));
+            }
+        }
+        for x in [-1, 1, 3, 5] {
+            scene.solid.insert((x, 1, 0));
+        }
+        scene.pour(BlockPos::new(0, 1, 0), 10);
+        scene.fluid.insert((4, 1, 0), Fluid::new(LAVA, 10));
+        let mut solver = Solver::new();
+        solver.touch(BlockPos::new(0, 1, 0));
+        solver.touch(BlockPos::new(4, 1, 0));
+
+        // Milk dries; lava does not.
+        let tunings = Tunings::from_pairs([
+            (
+                MILK,
+                Tuning {
+                    evaporates: 1,
+                    ..Tuning::DEFAULT
+                },
+            ),
+            (LAVA, Tuning::DEFAULT),
+        ]);
+        for tick in 0..8 {
+            solver.tick(&mut scene, &tunings, usize::MAX, SEED, tick);
+        }
+        assert!(
+            scene.at(BlockPos::new(0, 1, 0)) < 10,
+            "milk with `evaporates = 1` lost nothing over eight ticks"
+        );
+        assert_eq!(
+            scene.at(BlockPos::new(4, 1, 0)),
+            10,
+            "lava with `evaporates = 0` evaporated, so the milk's setting leaked onto it"
+        );
+
+        // And a rate of its own: lava at one tick in four moves on a quarter
+        // of the ticks milk does. Two open shafts, a full block dropped into
+        // each; count the flows per fluid over four ticks.
+        let mut scene = Scene::default();
+        for x in [0, 4] {
+            for y in -8..=0 {
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    scene.solid.insert((x + dx, y, dz));
+                }
+            }
+            scene.solid.insert((x, -9, 0));
+        }
+        scene.pour(BlockPos::new(0, 0, 0), MAX_VOLUME);
+        scene.fluid.insert((4, 0, 0), Fluid::new(LAVA, MAX_VOLUME));
+        let mut solver = Solver::new();
+        solver.touch(BlockPos::new(0, 0, 0));
+        solver.touch(BlockPos::new(4, 0, 0));
+        let tunings = Tunings::from_pairs([
+            (MILK, Tuning::DEFAULT),
+            (
+                LAVA,
+                Tuning {
+                    tick_rate: 4,
+                    ..Tuning::DEFAULT
+                },
+            ),
+        ]);
+        let (mut milk_flows, mut lava_flows) = (0, 0);
+        for tick in 0..4 {
+            for flow in solver.tick(&mut scene, &tunings, usize::MAX, SEED, tick) {
+                let fluid = if flow.now.is_empty() {
+                    flow.was
+                } else {
+                    flow.now
+                };
+                if fluid.fluid() == LAVA {
+                    lava_flows += 1;
+                } else {
+                    milk_flows += 1;
+                }
+            }
+        }
+        assert!(
+            milk_flows > lava_flows && lava_flows > 0,
+            "milk at rate 1 flowed {milk_flows} times and lava at rate 4 flowed {lava_flows}: \
+             the slow fluid is not slower, or is stopped"
+        );
+    }
+
+    #[test]
+    fn a_last_cell_on_thirsty_ground_is_taken_at_a_slow_fluids_own_rate() {
+        // A one-cell droplet on absorbent ground, for a fluid that moves one
+        // tick in four: it must still be drunk within a few of its own ticks.
+        let mut scene = Scene::default();
+        scene.solid.insert((0, 0, 0));
+        scene.make_absorbent(0, 0, 0, 9);
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            scene.solid.insert((dx, 1, dz));
+        }
+        scene.pour(BlockPos::new(0, 1, 0), 1);
+        let mut solver = Solver::new();
+        solver.touch(BlockPos::new(0, 1, 0));
+        let slow = Tunings::uniform(Tuning {
+            tick_rate: 4,
+            ..Tuning::DEFAULT
+        });
+        for tick in 0..16 {
+            solver.tick(&mut scene, &slow, usize::MAX, SEED, tick);
+        }
+        assert_eq!(
+            scene.at(BlockPos::new(0, 1, 0)),
+            0,
+            "a droplet at rate 4 was never absorbed over sixteen ticks"
+        );
+    }
+
+    #[test]
     fn evaporation_only_takes_from_blocks_open_to_the_air() {
         // A wide shallow pool goes before a deep narrow one, because more of it
         // is exposed — which only holds if a covered block is exempt.
@@ -1477,7 +1744,7 @@ mod tests {
             }
         }
         let queued = solver.active();
-        solver.tick(&mut scene, Tuning::DEFAULT, 4, SEED, 0);
+        solver.tick(&mut scene, &Tunings::uniform(Tuning::DEFAULT), 4, SEED, 0);
         assert!(
             solver.active() > 0,
             "a tick with a budget of four retired all {queued} blocks"
@@ -1495,7 +1762,13 @@ mod tests {
         scene.pour(BlockPos::new(0, 1, 0), MAX_VOLUME);
         solver.touch(BlockPos::new(0, 1, 0));
 
-        let changes = solver.tick(&mut scene, Tuning::DEFAULT, usize::MAX, SEED, 0);
+        let changes = solver.tick(
+            &mut scene,
+            &Tunings::uniform(Tuning::DEFAULT),
+            usize::MAX,
+            SEED,
+            0,
+        );
 
         let gave: Vec<&Flow> = changes
             .iter()
@@ -1527,7 +1800,11 @@ mod tests {
         }
 
         fn is_body(scene: &Scene, at: (i32, i32, i32)) -> bool {
-            in_a_body(scene, Tuning::DEFAULT, BlockPos::new(at.0, at.1, at.2))
+            in_a_body(
+                scene,
+                &Tunings::uniform(Tuning::DEFAULT),
+                BlockPos::new(at.0, at.1, at.2),
+            )
         }
 
         #[test]
@@ -1707,7 +1984,7 @@ mod properties {
                         // counting it as one would make the property fail for
                         // the fixture's arithmetic rather than the solver's.
                         let at = BlockPos::new(x, y, z);
-                        let room = accepts(&scene, Tuning::DEFAULT, at, MILK);
+                        let room = accepts(&scene, &Tunings::uniform(Tuning::DEFAULT), at, MILK);
                         let took = volume.min(room);
                         if took > 0 {
                             let now = scene.volume_at(at) + took;

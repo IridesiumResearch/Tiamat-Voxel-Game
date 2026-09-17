@@ -319,6 +319,8 @@ pub struct Fluidics {
     /// without the distinction.
     loaded: std::collections::BTreeSet<ChunkPos>,
     fluids: Fluids,
+    /// Each registered fluid's own settings, built once from `fluids`.
+    tunings: tiamot_core::fluid::Tunings,
     absorbency: Absorbency,
     solver: Solver,
     /// Writes a MOD made, waiting to go out with the next tick's changes.
@@ -340,11 +342,32 @@ impl Fluidics {
             layers: HashMap::new(),
             dirty: std::collections::BTreeSet::new(),
             loaded: std::collections::BTreeSet::new(),
+            tunings: Self::tunings_of(&fluids),
             fluids,
             absorbency: Absorbency::default(),
             solver: Solver::new(),
             written: Vec::new(),
         }
+    }
+
+    /// Every registered fluid's own settings, by id.
+    ///
+    /// Built once: the registry is frozen with everything else (charter rule
+    /// 9), so this cannot change for the life of the world. Placeholders — ids
+    /// standing in for a fluid whose mod is gone — are not registered and get
+    /// the default, which treats everything as floor and never evaporates:
+    /// their rules left with the mod that knew them.
+    fn tunings_of(fluids: &Fluids) -> tiamot_core::fluid::Tunings {
+        tiamot_core::fluid::Tunings::from_pairs(fluids.iter_registered().map(|(id, f)| {
+            (
+                id,
+                Tuning {
+                    waterlogs_at: f.waterlogs_at,
+                    tick_rate: f.tick_rate,
+                    evaporates: f.evaporates,
+                },
+            )
+        }))
     }
 
     /// Takes the chunks whose fluid needs writing, and what to write.
@@ -519,7 +542,6 @@ impl Fluidics {
         // The layer goes in FIRST: `in_a_body` asks the world what a block
         // holds, and this chunk's own water is most of the answer for every
         // block in it.
-        let tuning = self.tuning();
         let filled: Vec<BlockPos> = layer
             .blocks()
             .enumerate()
@@ -531,6 +553,7 @@ impl Fluidics {
             layers,
             solver,
             absorbency,
+            tunings,
             ..
         } = self;
         let view = Wet {
@@ -539,7 +562,7 @@ impl Fluidics {
             absorbency,
         };
         for block in filled {
-            if !tiamot_core::fluid::in_a_body(&view, tuning, block) {
+            if !tiamot_core::fluid::in_a_body(&view, tunings, block) {
                 solver.touch(block);
             }
         }
@@ -608,8 +631,10 @@ impl Fluidics {
         // does not know which fluid a block holds until it looks, and a queue
         // partitioned by fluid would be four data structures to make a puddle
         // slower. Ships one fluid; the shape is here for when that changes.
-        let tuning = self.tuning();
-        if !fluid_tick.is_multiple_of(u64::from(tuning.tick_rate.max(1))) {
+        // **Nothing due, nothing walked.** Each fluid's own rate is applied
+        // block by block inside the solver; this is the cheap gate in front of
+        // it for a tick on which no fluid at all is due.
+        if !self.tunings.any_due(fluid_tick) {
             return changes;
         }
         // Taken apart so the solver can borrow the store mutably while the world
@@ -620,7 +645,7 @@ impl Fluidics {
             layers: &mut self.layers,
             absorbency: &self.absorbency,
         };
-        changes.extend(solver.tick(&mut view, tuning, VISITS_PER_TICK, seed, fluid_tick));
+        changes.extend(solver.tick(&mut view, &self.tunings, VISITS_PER_TICK, seed, fluid_tick));
         self.solver = solver;
         changes
     }
@@ -655,30 +680,6 @@ impl Fluidics {
     #[must_use]
     pub fn touched_chunks(changes: &[Flow]) -> BTreeSet<ChunkPos> {
         changes.iter().map(|change| change.pos.chunk()).collect()
-    }
-
-    /// What the solver runs with.
-    ///
-    /// The first registered fluid's settings, or the defaults where nothing is
-    /// registered. Honest about its own limit: with several fluids this takes
-    /// the first one's rate for all of them, which is wrong and is a smaller
-    /// wrong than silently ignoring the field, which is what it did before.
-    fn tuning(&self) -> Tuning {
-        // **`iter_registered`, and this is not tidiness.** A world that has ever
-        // held a fluid whose mod is now gone registers an inert placeholder for
-        // it (charter rule 8, see `persist::fluidmap`), and placeholders are
-        // numbered alongside real fluids — so one could land ahead of milk and
-        // hand the solver an inert fluid's rules for the whole world. Milk would
-        // stop spreading, and the cause would be a mod somebody removed months
-        // earlier.
-        self.fluids
-            .iter_registered()
-            .next()
-            .map_or(Tuning::DEFAULT, |(_, f)| Tuning {
-                waterlogs_at: f.waterlogs_at,
-                tick_rate: f.tick_rate,
-                evaporates: f.evaporates,
-            })
     }
 
     fn write(&mut self, pos: BlockPos, value: Fluid) -> bool {

@@ -133,7 +133,13 @@ fn settle(scene: &mut Scene, solver: &mut Solver) {
         if solver.is_settled() {
             return;
         }
-        solver.tick(scene, Tuning::DEFAULT, usize::MAX, SEED, 0);
+        solver.tick(
+            scene,
+            &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+            usize::MAX,
+            SEED,
+            0,
+        );
     }
 }
 
@@ -148,7 +154,13 @@ fn bench_settled(c: &mut Criterion) {
 
     c.bench_function("fluid_tick/settled", |b| {
         b.iter(|| {
-            let changes = solver.tick(&mut scene, Tuning::DEFAULT, VISITS, SEED, 0);
+            let changes = solver.tick(
+                &mut scene,
+                &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+                VISITS,
+                SEED,
+                0,
+            );
             assert!(changes.is_empty());
         });
     });
@@ -199,7 +211,13 @@ fn bench_spreading(c: &mut Criterion) {
                     solver.touch(BlockPos::new(x, 1, z));
                 }
             }
-            solver.tick(&mut scene, Tuning::DEFAULT, VISITS, SEED, 0);
+            solver.tick(
+                &mut scene,
+                &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+                VISITS,
+                SEED,
+                0,
+            );
         });
     });
 
@@ -270,7 +288,13 @@ fn bench_sinks(c: &mut Criterion) {
                 if solver.is_settled() {
                     break;
                 }
-                solver.tick(&mut scene, thirsty, usize::MAX, SEED, tick);
+                solver.tick(
+                    &mut scene,
+                    &tiamot_core::fluid::Tunings::uniform(thirsty),
+                    usize::MAX,
+                    SEED,
+                    tick,
+                );
             }
         });
     });

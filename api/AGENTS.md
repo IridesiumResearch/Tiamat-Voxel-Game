@@ -599,7 +599,8 @@ in the generation workers.
 canopy, mist drifting over a floor. You describe a burst — where, how many,
 colour, size, lifetime, starting velocity, random `spread`, spawn `area`,
 `gravity`, whether it stops at solid ground — and the server sends it to every
-player nearby in that domain; each client animates it alone. It is decoration:
+player nearby in that domain — or to the one you name in `player` — and each
+client animates it alone. It is decoration:
 nothing reads a particle back, and bursts are dropped rather than queued for
 ever, so a spray that must be seen every tick is a spray to make smaller. Emit
 from a tick or a hook, near players (the call returns how many were told), and
@@ -1106,13 +1107,13 @@ Everything here is true as of 2026-09-16 and is the kind of thing that is
 cheaper to read than to discover. None of it is a rule the engine wants; each is
 work that has not been done, and each will move.
 
-**Fluid physics is one setting for the whole world.** `tick_rate`,
-`waterlogs_at` and `evaporates` are read from whichever fluid registered first —
-alphabetically by qualified id, across every loaded mod — and applied to every
-fluid in the world. `core_milk:milk` sorts before `my_mod:water`, so a
-reference mod you never thought about can be setting your sea's speed. Do not
-design a viscous fluid beside a quick one, or a puddle that evaporates beside a
-sea that must not.
+**Fluid physics is per fluid.** `tick_rate`, `waterlogs_at` and `evaporates`
+are read from the fluid IN a block, so a slow lava beside a quick river and a
+puddle that dries beside a sea that does not are both expressible. This was not
+so until 2026-09-17: the solver took one set from whichever fluid registered
+first, alphabetically, so a reference mod you never thought about could be
+setting your sea's speed. Nothing to design around now; it is here so that a
+world made before then is understood if its water seems to have changed pace.
 
 **Two fluids never mix, and the first one there keeps the space.** A block holds
 one fluid and a volume of it, so a move into a block holding a different fluid
@@ -1154,10 +1155,11 @@ runtime, keep the scan short (start just above where you expect ground) and do a
 few columns a tick, not a field of them.
 
 **Particles are decoration and are dropped under load.** A burst goes to every
-player within `radius` in that domain — you cannot send one to a single player,
-so a per-player "particles off" setting in your own mod cannot be honoured — and
-a client that falls behind loses bursts rather than queuing them. Anything that
-must be seen every tick is something to make smaller.
+player within `radius` in that domain, or to the one named in `player` — so a
+per-player "particles off" setting in your own mod can be honoured, and rain
+can be emitted per player rather than per patch of ground. A client that falls
+behind loses bursts rather than queuing them, so anything that must be seen
+every tick is something to make smaller.
 
 **A mod reaches another mod only through what it exports.** Each mod gets a
 fresh sandbox and `game.storage` is private; `game.export` / `game.exports`

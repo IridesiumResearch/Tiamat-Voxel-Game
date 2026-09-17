@@ -750,3 +750,99 @@ fn a_generated_river_with_no_banks_stays_where_worldgen_put_it() {
     check(&server, "Paddler", "after a restart");
     assert!(server.stop());
 }
+
+/// The reference mods plus one more fluid that moves every tick.
+///
+/// **The case per-fluid tuning had to be tested in.** With milk alone at
+/// `tick_rate = 4`, the whole pass skips three ticks in four and nothing ever
+/// runs on milk's off-ticks. Register a fluid at rate one beside it and the
+/// solver runs every tick, deferring milk's blocks on the ticks that are not
+/// theirs — which is the situation a world with water, milk and lava is in.
+fn reference_mods_plus_a_quick_fluid(name: &str) -> PathBuf {
+    let mods = scratch(&format!("{name}-mods"));
+    for entry in std::fs::read_dir(repo().join("game")).expect("read game/") {
+        let entry = entry.expect("entry");
+        let file_name = entry.file_name();
+        if !entry.path().is_dir() || !file_name.to_string_lossy().starts_with("core_") {
+            continue;
+        }
+        let target = mods.join(&file_name);
+        std::fs::create_dir_all(&target).expect("mod dir");
+        for file in std::fs::read_dir(entry.path()).expect("read mod") {
+            let file = file.expect("entry");
+            if file.path().is_file() {
+                std::fs::copy(file.path(), target.join(file.file_name())).expect("copy");
+            }
+        }
+    }
+    let quick = mods.join("quick");
+    std::fs::create_dir_all(&quick).expect("mod dir");
+    std::fs::write(
+        quick.join("mod.toml"),
+        "id = \"quick\"\nname = \"Quick\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        quick.join("init.lua"),
+        "game.register_block{ id = \"quick\" }\n\
+         game.register_fluid{ id = \"quick\", material = \"quick:quick\", tick_rate = 1 }\n",
+    )
+    .expect("script");
+    mods
+}
+
+#[test]
+fn a_puddle_still_soaks_away_beside_a_fluid_that_runs_every_tick() {
+    // Per-fluid tuning's first version stalled the last cell of a puddle when
+    // the solver ran on milk's off-ticks. Milk alone never has the solver run
+    // on its off-ticks; a second fluid at rate one does, every tick. This is
+    // the puddle test in that world.
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("mixed-rates"),
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(reference_mods_plus_a_quick_fluid("mixed-rates")),
+        enabled_mods: None,
+        seed: Some(7),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start");
+    block_on(async {
+        let mut bot = join(&server, "Pourer").await;
+        let milk = milk_id(&bot).await;
+        stock_up(&server, &mut bot, milk, 1).await;
+        let at = BlockPos::new(2, 0, 2);
+        bot.move_to(2.0, 0.0, 4.0).await.expect("walk to the pour");
+        pour_at(&mut bot, at, milk).await;
+        assert!(
+            until(&mut bot, Duration::from_secs(30), |bot| {
+                bot.fluid_at(at).volume() > 0
+            })
+            .await,
+            "the pour never landed"
+        );
+        let footprint: Vec<BlockPos> = (-4..=4)
+            .flat_map(|dx| (-4..=4).map(move |dz| BlockPos::new(at.x + dx, at.y, at.z + dz)))
+            .collect();
+        assert!(
+            until(&mut bot, Duration::from_secs(60), |bot| {
+                footprint.iter().all(|pos| bot.fluid_at(*pos).is_empty())
+            })
+            .await,
+            "beside a fluid that runs every tick, milk is still standing on open ground: {:?}",
+            footprint
+                .iter()
+                .map(|pos| bot.fluid_at(*pos).volume())
+                .filter(|volume| *volume > 0)
+                .collect::<Vec<_>>()
+        );
+        bot.disconnect().await;
+    });
+    server.stop();
+}

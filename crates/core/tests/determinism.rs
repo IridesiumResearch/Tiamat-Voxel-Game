@@ -788,7 +788,13 @@ fn fluid_fingerprint() -> u64 {
         tuning: Tuning,
     ) {
         for tick in 0..ticks {
-            solver.tick(&mut scene, tuning, usize::MAX, SEED, tick as u64);
+            solver.tick(
+                &mut scene,
+                &tiamot_core::fluid::Tunings::uniform(tuning),
+                usize::MAX,
+                SEED,
+                tick as u64,
+            );
         }
         // Sorted by construction — a `BTreeMap` — so the hash does not depend
         // on the order the blocks happened to be written in.
@@ -855,7 +861,13 @@ fn fluid_fingerprint() -> u64 {
     scene.set_fluid(BlockPos::new(0, 1, 0), Fluid::new(MILK, MAX_VOLUME));
     solver.touch(BlockPos::new(0, 1, 0));
     for _ in 0..60 {
-        solver.tick(&mut scene, Tuning::DEFAULT, usize::MAX, SEED, 0);
+        solver.tick(
+            &mut scene,
+            &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+            usize::MAX,
+            SEED,
+            0,
+        );
     }
     scene.set_fluid(BlockPos::new(0, 1, 0), Fluid::EMPTY);
     solver.touch(BlockPos::new(0, 1, 0));
@@ -882,7 +894,13 @@ fn fluid_fingerprint() -> u64 {
         }
     }
     for tick in 0..30u64 {
-        solver.tick(&mut scene, EVAPORATING, usize::MAX, SEED, tick);
+        solver.tick(
+            &mut scene,
+            &tiamot_core::fluid::Tunings::uniform(EVAPORATING),
+            usize::MAX,
+            SEED,
+            tick,
+        );
     }
     scene.set_fluid(BlockPos::new(0, 1, 0), Fluid::EMPTY);
     solver.touch(BlockPos::new(0, 1, 0));
@@ -977,7 +995,13 @@ fn the_fluid_scenarios_actually_hold_milk() {
         poured += MAX_VOLUME;
     }
     for tick in 0..120u64 {
-        solver.tick(&mut scene, Tuning::DEFAULT, usize::MAX, SEED, tick);
+        solver.tick(
+            &mut scene,
+            &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+            usize::MAX,
+            SEED,
+            tick,
+        );
     }
 
     assert!(

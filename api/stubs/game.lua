@@ -1822,6 +1822,7 @@ function game.play_sound(spec) end
 ---@field gravity number? How fast they fall, blocks per second per second. Default 0 (they drift); negative rises, like steam.
 ---@field collide boolean? Whether one vanishes on reaching a solid cell — a drip stops at the floor. Default true. Passable blocks do not stop them.
 ---@field radius number? How far away a player may be and still be sent it. Default 32, at most 128.
+---@field player? string A player's UUID in hex. Sends the burst to that one player and nobody else, provided they are in the domain and within `radius` — it narrows, never widens. How a mod honours its own "particles off" setting, and how rain is emitted per player rather than per patch of ground.
 
 ---Scatters a burst of short-lived sprites — sea spray, a drip, mist.
 ---
@@ -1927,14 +1928,12 @@ Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ---fluid, so whatever should happen when two of your fluids meet is your mod's
 ---to write from there.
 ---
----**`tick_rate`, `waterlogs_at` and `evaporates` are NOT per fluid yet.** The
----solver takes one set of settings for the whole world, from whichever fluid
----was registered first — and registration order is alphabetical by qualified
----id, across every loaded mod. So `core_milk:milk` sorts before
----`my_mod:water`, and its `tick_rate` governs your water too. Until this is
----fixed: expect a world's fluids to share one speed and one absorption
----threshold, and do not design a fast fluid beside a slow one, or a puddle
----that evaporates beside a sea that must not.
+---**`tick_rate`, `waterlogs_at` and `evaporates` are each fluid's own.** A
+---slow lava beside a quick river, a puddle that dries beside a sea that never
+---does: every question the solver asks about a block is asked of the fluid IN
+---that block. (For a while they were read from whichever fluid registered
+---first — alphabetically — and applied to all; if a fluid's speed ever seems to
+---be another mod's, that is what to suspect and it is fixed.)
 ---
 ---**Fluid is conserved.** Volume moves between blocks and is never created;
 ---there are no source blocks, because an infinite spring is a conservation
