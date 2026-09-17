@@ -11,7 +11,7 @@
 //! a generator can read it. This drives all of that through a real server and
 //! reads the answer off the wire as terrain.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
@@ -58,16 +58,16 @@ fn write_mod(name: &str) -> PathBuf {
     root
 }
 
-fn start(world: &PathBuf, mods: &PathBuf, chosen: &[(&str, &str)]) -> ServerHandle {
+fn start(world: &Path, mods: &Path, chosen: &[(&str, &str)]) -> ServerHandle {
     ServerHandle::start(&Settings {
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
-        world_path: world.clone(),
+        world_path: world.to_path_buf(),
         identity_path: None,
         max_players: 2,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
-        mods_path: Some(mods.clone()),
+        mods_path: Some(mods.to_path_buf()),
         enabled_mods: None,
         seed: Some(5),
         rcon: None,
