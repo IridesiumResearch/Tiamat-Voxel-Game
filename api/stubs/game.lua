@@ -1599,25 +1599,24 @@ function game.cue(spec) end
 ---panning, full gain wherever the player stands. Without it the loop sits at
 ---`pos` and attenuates over `radius` like anything else.
 ---
----**Starting a loop that is already running replaces it**, so the natural thing
----to write — making sure the night loop is on, every tick — does not end up
----with a tick's worth of overlapping copies.
+---**Starting a loop that is already running replaces it** — and if it is
+---running the SAME sound, it is moved rather than restarted: the gain and
+---place glide to the new values over `fade_ticks` and the clip keeps going. So
+---the natural thing to write — making sure the storm is on, at today's
+---intensity, every second — neither stacks copies nor restarts the rain.
 ---
----Four limits, because designing around them is easier than discovering them:
+---* `player`: a UUID in hex, as a hook event reports one. The loop is heard by
+---  that player alone — `everywhere` for them, or within `radius` of `pos` if
+---  they are — and nobody else. It narrows, never widens. Without it an
+---  `everywhere` loop reaches every connected player in every domain: a storm
+---  you start for one valley plays inside somebody's ship.
+---* `fade_ticks`: how long the client takes to bring a fresh loop in from
+---  silence, or to move a running one; 0 is at once. Up to 1200 (a minute).
 ---
----* **`everywhere` means every connected player, in every domain.** Not the
----  domain, not a radius — everyone on the server, including somebody inside a
----  ship or in a space your mod has never heard of. There is no way to address
----  a loop to one player today.
----* **Replacing restarts the clip from its beginning.** So a loop whose `gain`
----  you change every tick is a loop that never gets past its first second. Pick
----  a gain and leave it, or accept the restart.
----* **No fades.** A loop starts at full gain and stops over a fixed quarter of
----  a second. Crossfading two ambiences is not expressible.
----* **A positioned loop is panned once, where the listener stood when it
----  started.** It does not re-pan or re-attenuate as they walk, so a loop meant
----  to sit in one place wants a `radius` wide enough that a player crossing it
----  does not notice, or a `stop`/`start` when they have moved far.
+---Two limits still: a positioned loop's TREBLE is set by distance when it
+---starts and does not move (its loudness and pan follow the listener every
+---frame), and a player who joins after a loop started is not told about it —
+---start it again for them from `register_on_player_join`.
 ---
 ---```lua
 ---game.register_on_tick(function()
@@ -1628,7 +1627,7 @@ function game.cue(spec) end
 ---    end
 ---end)
 ---```
----@param spec { id: string, sound: string, pos?: { x: number, y: number, z: number }, radius?: number, gain?: number, everywhere?: boolean }
+---@param spec { id: string, sound: string, pos?: { x: number, y: number, z: number }, radius?: number, gain?: number, everywhere?: boolean, player?: string, fade_ticks?: integer }
 ---@return integer told
 function game.play_loop(spec) end
 
@@ -1682,7 +1681,11 @@ function game.time_of_day() end
 ---
 ---Stopping one that is not running is not an error, so tidying up on shutdown
 ---does not mean remembering what you started.
----@param id string
+---
+---The id alone stops it for everyone over the client's own short fade. A table
+---stops it over `fade_ticks` (up to 1200), and `player` — a UUID in hex —
+---stops it for that one player: `game.stop_loop{ id = "storm", fade_ticks = 100, player = uuid }`.
+---@param id string|{ id: string, fade_ticks?: integer, player?: string }
 ---@return integer told
 function game.stop_loop(id) end
 

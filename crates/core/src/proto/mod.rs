@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 56;
+pub const PROTOCOL_VERSION: u32 = 57;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,8 @@ pub const PROTOCOL_VERSION: u32 = 56;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v57 (weather W5): `fade_ticks` appended to `StartLoop` and `StopLoop` — a
+// fade in, a fade out, and a running loop moved rather than restarted.
 // v54 (post-15b): appended `ServerMessage::Particles`, bursts a mod scattered
 // near this player. Presentation the client animates alone; see `particle`.
 // v53 (post-15b): `ChunkData` carries `fog`, a place's own fog from
@@ -1878,6 +1880,12 @@ pub enum ServerMessage {
         /// What makes ambience expressible: a night loop is not somewhere, it
         /// is simply on.
         everywhere: bool,
+        /// How long the client takes to bring it in, in ticks; 0 is at once.
+        /// For a loop already running the same sound, how long its gain and
+        /// place take to move — the clip is not restarted.
+        ///
+        /// **Appended at the end** (protocol v57). Weather ask W5.
+        fade_ticks: u32,
     },
 
     /// Stop a looping sound.
@@ -1888,6 +1896,9 @@ pub enum ServerMessage {
     StopLoop {
         /// The id the mod gave it.
         id: String,
+        /// How long the client takes to fade it out, in ticks; 0 is the
+        /// client's own short fade. **Appended at the end** (protocol v57).
+        fade_ticks: u32,
     },
 
     /// What entities in view are holding, when it changes.
@@ -2585,7 +2596,7 @@ fn check_cue_message(message: &ServerMessage) -> Result<(), ProtocolError> {
             check_len("loop_id", id.len(), MAX_ID_BYTES)?;
             check_len("loop_sound", sound.len(), MAX_ID_BYTES)
         }
-        ServerMessage::StopLoop { id } => check_len("loop_id", id.len(), MAX_ID_BYTES),
+        ServerMessage::StopLoop { id, .. } => check_len("loop_id", id.len(), MAX_ID_BYTES),
         _ => Ok(()),
     }
 }
@@ -4009,6 +4020,7 @@ mod tests {
             radius: 1.0,
             gain: 1.0,
             everywhere: false,
+            fade_ticks: 0,
         })
         .expect("encode");
         assert_eq!(start[0], 34);
@@ -4023,7 +4035,11 @@ mod tests {
         })
         .expect("encode");
         assert_eq!(values[0], 37);
-        let stop = encode(&ServerMessage::StopLoop { id: String::new() }).expect("encode");
+        let stop = encode(&ServerMessage::StopLoop {
+            id: String::new(),
+            fade_ticks: 0,
+        })
+        .expect("encode");
         assert_eq!(stop[0], 35);
         // Protocol v32. Appended at the END, which this test is what enforces:
         // the first version of it sat beside `EntityState`, where it belonged

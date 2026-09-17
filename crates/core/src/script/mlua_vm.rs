@@ -1406,6 +1406,21 @@ fn material_of(lua: &mlua::Lua, value: &mlua::Value) -> mlua::Result<crate::mate
     }
 }
 
+/// A loop's optional `player`: a UUID in hex, as every other per-player call
+/// takes one. A bad one is an error rather than a silent broadcast, because
+/// `player = name` would otherwise play to everybody and never learn why.
+fn loop_player(spec: &Table, what: &str) -> mlua::Result<Option<crate::identity::PlayerUuid>> {
+    spec.get::<Option<String>>("player")?
+        .map(|uuid| {
+            crate::identity::PlayerUuid::from_hex(&uuid).map_err(|_| {
+                mlua::Error::external(format!(
+                    "{what}: `player` is a player's UUID in hex, not `{uuid}`"
+                ))
+            })
+        })
+        .transpose()
+}
+
 /// The player a mod named, as raw UUID bytes.
 fn player_of(uuid: &str, what: &str) -> mlua::Result<[u8; 32]> {
     crate::identity::PlayerUuid::from_hex(uuid)
@@ -3811,6 +3826,8 @@ impl MluaVm {
                     radius: spec.get::<Option<f32>>("radius")?.unwrap_or(16.0),
                     gain: spec.get::<Option<f32>>("gain")?.unwrap_or(1.0),
                     everywhere,
+                    player: loop_player(&spec, "play_loop")?,
+                    fade_ticks: spec.get::<Option<u32>>("fade_ticks")?.unwrap_or(0),
                 });
                 let told = slot
                     .lock()
@@ -3826,12 +3843,33 @@ impl MluaVm {
         let slot = std::sync::Arc::clone(&self.sounds);
         let stop_loop = self
             .lua
-            .create_function(move |_, id: String| {
+            .create_function(move |_, spec: Value| {
+                // The id alone, as it always was, or a table when the stop has
+                // a fade or a listener of its own.
+                let (id, fade_ticks, player) = match spec {
+                    Value::String(id) => (id.to_str()?.to_owned(), 0, None),
+                    Value::Table(spec) => (
+                        spec.get::<String>("id")?,
+                        spec.get::<Option<u32>>("fade_ticks")?.unwrap_or(0),
+                        loop_player(&spec, "stop_loop")?,
+                    ),
+                    _ => {
+                        return Err(mlua::Error::external(
+                            "stop_loop takes the loop's id, or a table with `id`, \
+                             `fade_ticks` and `player`",
+                        ));
+                    }
+                };
                 let id = qualify_id(&owner, &id).map_err(mlua::Error::external)?;
+                let request = crate::sound::sanitise_stop(crate::sound::StopRequest {
+                    id,
+                    fade_ticks,
+                    player,
+                });
                 let told = slot
                     .lock()
                     .ok()
-                    .and_then(|slot| slot.as_ref().map(|access| access.stop_loop(&id)));
+                    .and_then(|slot| slot.as_ref().map(|access| access.stop_loop(&request)));
                 Ok(told.unwrap_or(0))
             })
             .map_err(|err| self.vm_error(&err))?;

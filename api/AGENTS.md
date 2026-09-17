@@ -1131,12 +1131,14 @@ write from there.
 asks what is touching it, so the bed that soaks a puddle also drains the river
 it is the bed of.
 
-**`everywhere = true` on a loop means every connected player, in every domain.**
-A storm you start for one valley plays inside somebody's ship. There is no way
-to address a sound to one player, no fades, and starting a loop that is already
-running restarts the clip from its beginning — so a loop whose gain you nudge
-every tick never gets past its first second. A positioned loop is panned once,
-where the listener stood when it started, and does not follow them.
+**`everywhere = true` on a loop means every connected player, in every domain**
+— unless you name a `player`, which makes it that one player's alone. `play_loop`
+and `stop_loop` take `fade_ticks`, and starting a loop that is already running
+the same sound MOVES its gain and place over that fade rather than restarting the
+clip, so a storm's loudness can follow its intensity. A positioned loop's
+loudness and pan follow the listener every frame; its treble is set once, at the
+start. A player who joins after a loop started is not told about it — start it
+again for them from `register_on_player_join`.
 
 **The sky is registration-only.** `register_sky` takes its keyframes in the
 registration window and the client interpolates them from the clock. Nothing a

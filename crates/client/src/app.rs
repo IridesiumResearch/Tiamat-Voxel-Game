@@ -3115,6 +3115,11 @@ impl App {
         std::mem::take(&mut self.heard)
     }
 
+    /// A mod's fade, in ticks, as the mixer's time.
+    fn fade_of(ticks: u32) -> std::time::Duration {
+        tiamot_core::tick::TICK_DURATION * ticks
+    }
+
     /// Plays everything the server has said is within earshot.
     ///
     /// **Called once a frame, from the frame loop**, because a sound's place is
@@ -3127,22 +3132,24 @@ impl App {
     /// late is worse than not playing it, and the file is ready for the next
     /// one.
     pub fn play_heard(&mut self) {
-        if self.heard.is_empty() {
-            return;
-        }
         let (x, y, z) = self.camera.position.to_world();
         let listener = [x, y, z];
         let forward = self.camera.forward();
         let right = self.camera.right();
         let forward = [forward.x, forward.y, forward.z];
         let right = [right.x, right.y, right.z];
+        // The loops that are somewhere follow the listener every frame.
+        self.mixer.follow(listener, forward, right);
+        if self.heard.is_empty() {
+            return;
+        }
 
         for event in std::mem::take(&mut self.heard) {
             // Loops first, because they are the same spatialisation with a
             // different lifetime and share every number below.
             match event {
-                crate::net::Event::StopLoop { id } => {
-                    self.mixer.stop_loop(&id);
+                crate::net::Event::StopLoop { id, fade_ticks } => {
+                    self.mixer.stop_loop(&id, Self::fade_of(fade_ticks));
                     continue;
                 }
                 crate::net::Event::StartLoop {
@@ -3152,12 +3159,15 @@ impl App {
                     radius,
                     gain,
                     everywhere,
+                    fade_ticks,
                 } => {
                     // **Ambience is placed at the listener, not in the world.**
                     // A loop with no position is not somewhere the player can
                     // walk away from, so it takes full gain, no pan and no
                     // distance filtering — which is the difference between
                     // "night" and "a cricket over there".
+                    let source =
+                        (!everywhere).then_some(crate::audio::Source { pos, radius, gain });
                     let placement = if everywhere {
                         crate::audio::Placement {
                             gain,
@@ -3172,7 +3182,14 @@ impl App {
                     } else {
                         crate::audio::Bus::Effects
                     };
-                    self.mixer.start_loop(&id, &sound, bus, placement);
+                    self.mixer.start_loop(
+                        &id,
+                        &sound,
+                        bus,
+                        placement,
+                        source,
+                        Self::fade_of(fade_ticks),
+                    );
                     continue;
                 }
                 _ => {}

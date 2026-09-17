@@ -227,7 +227,7 @@ impl Seen {
             }
             Event::SoundBindings { bindings } => self.bindings = bindings,
             Event::StartLoop { id, .. } => self.loops.push(id),
-            Event::StopLoop { id } => self.loops.retain(|running| *running != id),
+            Event::StopLoop { id, .. } => self.loops.retain(|running| *running != id),
             Event::Dialog { form, tree, .. } => {
                 self.dialogs.insert(form, *tree);
             }

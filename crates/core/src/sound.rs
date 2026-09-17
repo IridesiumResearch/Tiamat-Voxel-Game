@@ -150,18 +150,54 @@ pub struct LoopRequest {
     pub gain: f32,
     /// Heard at full gain wherever the listener is, with no panning.
     pub everywhere: bool,
+    /// One listener, or everyone in reach.
+    ///
+    /// **Narrows, never widens.** An `everywhere` loop for one player is
+    /// "on, for this listener": the storm over one player's valley and not
+    /// inside another's ship. A positioned loop for one player still has to
+    /// reach them. Weather ask W5.
+    pub player: Option<crate::identity::PlayerUuid>,
+    /// How long the client takes to bring it in, in ticks; 0 is at once.
+    ///
+    /// Also how long a change to a RUNNING loop takes: a start for a loop
+    /// already playing the same sound moves its gain and place over this
+    /// rather than restarting the clip, which is what lets weather ease.
+    pub fade_ticks: u32,
 }
+
+/// A loop to stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopRequest {
+    /// The id the mod gave it, qualified.
+    pub id: String,
+    /// How long the client takes to fade it out, in ticks; 0 is the
+    /// engine's own short fade.
+    pub fade_ticks: u32,
+    /// One listener, or everyone.
+    pub player: Option<crate::identity::PlayerUuid>,
+}
+
+/// The longest fade a mod may ask for: a minute.
+pub const MAX_FADE_TICKS: u32 = 1200;
 
 /// Clamps a loop's numbers the way [`sanitise`] does a one-shot's.
 #[must_use]
 pub fn sanitise_loop(mut request: LoopRequest) -> LoopRequest {
     request.gain = clamp_finite(request.gain, 0.0, 8.0, 1.0);
     request.radius = clamp_finite(request.radius, 0.0, MAX_RADIUS, 16.0);
+    request.fade_ticks = request.fade_ticks.min(MAX_FADE_TICKS);
     for value in &mut request.pos {
         if !value.is_finite() {
             *value = 0.0;
         }
     }
+    request
+}
+
+/// Clamps a stop's fade.
+#[must_use]
+pub fn sanitise_stop(mut request: StopRequest) -> StopRequest {
+    request.fade_ticks = request.fade_ticks.min(MAX_FADE_TICKS);
     request
 }
 
@@ -203,7 +239,7 @@ pub trait Access: Send + Sync {
     /// Returns how many players were told. Stopping one that is not running is
     /// not an error: a mod tidying up on shutdown should not have to remember
     /// what it started.
-    fn stop_loop(&self, id: &str) -> u32;
+    fn stop_loop(&self, request: &StopRequest) -> u32;
 }
 
 /// The largest radius a mod may ask for, in blocks.

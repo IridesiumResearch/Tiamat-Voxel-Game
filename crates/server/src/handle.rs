@@ -5691,15 +5691,18 @@ impl tiamot_core::sound::Access for Earshot {
             radius: request.radius,
             gain: request.gain,
             everywhere: request.everywhere,
+            fade_ticks: request.fade_ticks,
         };
-        // **Ambience reaches everybody; a positional loop reaches its radius.**
-        // A loop with no position has no distance to be outside of, and the
-        // whole reason a mod asks for one is that it should be on wherever the
-        // player is standing.
+        // **Ambience reaches everybody; a positional loop reaches its radius;
+        // `player` narrows either to one listener.** A loop with no position
+        // has no distance to be outside of, and the whole reason a mod asks
+        // for one is that it should be on wherever the player is standing —
+        // and, addressed, on for that player alone: the storm over their
+        // valley and not inside somebody else's ship.
         if request.everywhere {
-            self.tell_all(&message)
+            self.tell_all(&message, request.player)
         } else {
-            self.tell_within(&message, request.pos, request.radius)
+            self.tell_within(&message, request.pos, request.radius, request.player)
         }
     }
 
@@ -5707,7 +5710,7 @@ impl tiamot_core::sound::Access for Earshot {
         self.shared.day_fraction()
     }
 
-    fn stop_loop(&self, id: &str) -> u32 {
+    fn stop_loop(&self, request: &tiamot_core::sound::StopRequest) -> u32 {
         // **Told to everybody, whatever the loop's radius was.** A player who
         // walked out of a positional loop's radius has already been told to
         // stop it by leaving; a player still inside must be told now. Working
@@ -5716,18 +5719,31 @@ impl tiamot_core::sound::Access for Earshot {
         // second copy of state the clients already hold. A stop for a loop a
         // client is not running is a no-op on the client, so the cheap answer
         // is also the correct one.
-        self.tell_all(&tiamot_core::proto::ServerMessage::StopLoop { id: id.to_owned() })
+        self.tell_all(
+            &tiamot_core::proto::ServerMessage::StopLoop {
+                id: request.id.clone(),
+                fade_ticks: request.fade_ticks,
+            },
+            request.player,
+        )
     }
 }
 
 impl Earshot {
-    /// Queues a message for every connected player.
-    fn tell_all(&self, message: &tiamot_core::proto::ServerMessage) -> u32 {
+    /// Queues a message for every connected player, or for `only`.
+    fn tell_all(
+        &self,
+        message: &tiamot_core::proto::ServerMessage,
+        only: Option<tiamot_core::identity::PlayerUuid>,
+    ) -> u32 {
         let Ok(bodies) = self.shared.bodies.lock() else {
             return 0;
         };
         let mut told = 0;
         for uuid in bodies.keys() {
+            if only.is_some_and(|only| only != *uuid) {
+                continue;
+            }
             let _ = self
                 .shared
                 .push_entity_messages(uuid, std::iter::once(message.clone()));
@@ -5736,12 +5752,14 @@ impl Earshot {
         told
     }
 
-    /// Queues a message for every player within `radius` of `pos`.
+    /// Queues a message for every player within `radius` of `pos`, or for
+    /// `only` if they are.
     fn tell_within(
         &self,
         message: &tiamot_core::proto::ServerMessage,
         pos: [f64; 3],
         radius: f32,
+        only: Option<tiamot_core::identity::PlayerUuid>,
     ) -> u32 {
         let Ok(bodies) = self.shared.bodies.lock() else {
             return 0;
@@ -5749,6 +5767,9 @@ impl Earshot {
         let radius = f64::from(radius);
         let mut told = 0;
         for (uuid, player) in bodies.iter() {
+            if only.is_some_and(|only| only != *uuid) {
+                continue;
+            }
             let at =
                 tiamot_core::ent::Transform::at(player.origin, player.body.position).to_world();
             let offset = [at[0] - pos[0], at[1] - pos[1], at[2] - pos[2]];

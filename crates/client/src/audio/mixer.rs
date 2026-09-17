@@ -104,6 +104,29 @@ pub struct Placement {
     pub brightness: f32,
 }
 
+/// Where a positioned loop is, so it can be placed again as the listener moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Source {
+    /// Where it is, in world blocks.
+    pub pos: [f64; 3],
+    /// How far it carries.
+    pub radius: f32,
+    /// The mod's gain for it.
+    pub gain: f32,
+}
+
+/// What [`Mixer::start_loop`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Started {
+    /// A new loop, from the top of the clip.
+    Fresh,
+    /// A loop already playing this sound: its gain and place were moved and
+    /// the clip was left running.
+    Updated,
+    /// Nothing: the sound is not loaded.
+    Missing,
+}
+
 /// Works out how a sound at `source` reaches a listener.
 ///
 /// `forward` and `right` are the listener's own axes — unit vectors — so this
@@ -227,18 +250,30 @@ struct Loaded {
     voice: Voice,
 }
 
+/// One loop the mixer has going.
+struct Running {
+    /// The qualified sound id it plays, which decides whether a second start
+    /// under the same loop id moves this one or replaces it.
+    sound: String,
+    bus: Bus,
+    /// Where it is, if it is somewhere; ambience is nowhere.
+    source: Option<Source>,
+    /// The mod's gain for it, kept so a move can recompute the volume.
+    gain: f32,
+    /// `None` for a loop started with no sound device: the mixer still
+    /// records that it is on, so a later stop is not confused and a headless
+    /// test can assert what is playing. Whether a loop is running is a
+    /// property of the world, not of whether anybody has speakers.
+    handle: Option<kira::sound::static_sound::StaticSoundHandle>,
+}
+
 /// The audio backend, or nothing if this machine has no sound device.
 pub struct Mixer {
     manager: Option<kira::AudioManager>,
     /// Decoded sounds, by qualified id.
     clips: BTreeMap<String, Loaded>,
     /// Loops currently running, by the id the mod gave them.
-    ///
-    /// `None` for a loop started with no sound device: the mixer still records
-    /// that it is on, so a later stop is not confused and a headless test can
-    /// assert what is playing. Whether a loop is running is a property of the
-    /// world, not of whether anybody has speakers.
-    loops: BTreeMap<String, Option<kira::sound::static_sound::StaticSoundHandle>>,
+    loops: BTreeMap<String, Running>,
     /// Advances once per play, so successive plays of one sound differ.
     plays: u64,
     /// How loud each bus is.
@@ -428,25 +463,53 @@ impl Mixer {
         manager.play(sound).is_ok()
     }
 
-    /// Starts a sound looping under a name, replacing one already running.
+    /// Starts a loop, or moves one already running under the same id.
     ///
-    /// # Why replace rather than refuse or stack
+    /// **Replacing, not stacking, and moving rather than restarting.** "Make
+    /// sure the night loop is playing" is the natural thing to write in a
+    /// tick handler; stacking would give a second of that a hundred
+    /// overlapping copies, and refusing would make the mod track what it had
+    /// started. Replacing makes the careless version correct. And a start for
+    /// a loop already playing the SAME sound is a change of gain or place,
+    /// not a new loop: the clip keeps running and its volume and pan glide
+    /// there over `fade`, which is what lets weather ease a storm in and out
+    /// without the rain restarting from its first second every time.
     ///
-    /// "Make sure the night ambience is playing" is the natural thing for a mod
-    /// to write, and the natural place to write it is a tick handler. Stacking
-    /// would give a second of that a hundred overlapping copies; refusing would
-    /// make the mod track what it had started, which is state it should not
-    /// have to keep. Replacing makes the careless version correct.
-    ///
-    /// Returns whether anything is now playing under this id.
-    pub fn start_loop(&mut self, id: &str, sound: &str, bus: Bus, placement: Placement) -> bool {
-        self.stop_loop(id);
+    /// A fresh loop comes in from silence over `fade`, or at once when it is
+    /// zero. The treble a positioned loop loses to distance is baked into its
+    /// samples when it starts and does not move; gain and pan do.
+    pub fn start_loop(
+        &mut self,
+        id: &str,
+        sound: &str,
+        bus: Bus,
+        placement: Placement,
+        source: Option<Source>,
+        fade: std::time::Duration,
+    ) -> Started {
         let Some(voice) = self.clips.get(sound).map(|loaded| loaded.voice) else {
-            return false;
+            self.stop_loop(id, std::time::Duration::ZERO);
+            return Started::Missing;
         };
         let volume = self.volumes.of(bus) * placement.gain * voice.gain;
+
+        if let Some(running) = self.loops.get_mut(id)
+            && running.sound == sound
+            && running.bus == bus
+        {
+            running.source = source;
+            running.gain = placement.gain;
+            if let Some(handle) = running.handle.as_mut() {
+                let tween = glide(fade);
+                handle.set_volume(kira::Decibels(amplitude_to_db(volume)), tween);
+                handle.set_panning(kira::Panning(placement.pan), tween);
+            }
+            return Started::Updated;
+        }
+
+        self.stop_loop(id, std::time::Duration::ZERO);
         let Some(clip) = self.clips.get(sound).map(|loaded| &loaded.clip) else {
-            return false;
+            return Started::Missing;
         };
         // No pitch jitter: a loop varying its rate every time it restarts would
         // wow audibly, and the seam is the one place a loop must not draw
@@ -454,20 +517,33 @@ impl Mixer {
         let mut low = Filter::new(placement.brightness);
         let frames = build_frames(clip, &mut low);
         if frames.is_empty() {
-            return false;
+            return Started::Missing;
         }
+        let mut running = Running {
+            sound: sound.to_owned(),
+            bus,
+            source,
+            gain: placement.gain,
+            handle: None,
+        };
         let Some(manager) = self.manager.as_mut() else {
             // No device. The loop is still RECORDED as running, so a later
             // `stop_loop` is not confused and a test on a machine with no
             // speakers can still assert what is on.
-            self.loops.insert(id.to_owned(), None);
-            return true;
+            self.loops.insert(id.to_owned(), running);
+            return Started::Fresh;
+        };
+        let target = kira::Decibels(amplitude_to_db(volume));
+        let opening = if fade.is_zero() {
+            target
+        } else {
+            kira::Decibels::SILENCE
         };
         let data = kira::sound::static_sound::StaticSoundData {
             sample_rate: clip.sample_rate,
             frames: frames.into(),
             settings: kira::sound::static_sound::StaticSoundSettings::new()
-                .volume(kira::Decibels(amplitude_to_db(volume)))
+                .volume(opening)
                 .panning(kira::Panning(placement.pan))
                 // The whole clip, end to end, for ever. A mod wanting a shorter
                 // loop point trims the file, which is where that decision
@@ -476,32 +552,66 @@ impl Mixer {
             slice: None,
         };
         match manager.play(data) {
-            Ok(handle) => {
-                self.loops.insert(id.to_owned(), Some(handle));
-                true
+            Ok(mut handle) => {
+                if !fade.is_zero() {
+                    handle.set_volume(target, glide(fade));
+                }
+                running.handle = Some(handle);
+                self.loops.insert(id.to_owned(), running);
+                Started::Fresh
             }
-            Err(_) => false,
+            Err(_) => Started::Missing,
         }
     }
 
-    /// Stops a loop by the id it was started with.
+    /// Stops a loop by the id it was started with, over `fade` — or over the
+    /// mixer's own short fade when that is zero.
     ///
     /// Returns whether one was running. Stopping one that is not is not an
     /// error: a mod tidying up should not have to remember what it started.
-    pub fn stop_loop(&mut self, id: &str) -> bool {
-        match self.loops.remove(id) {
-            Some(Some(mut handle)) => {
-                // A short fade rather than a cut. Stopping a loop dead puts a
-                // click on the end of it, and the one thing worse than
-                // ambience you notice is ambience that stops with a click.
-                handle.stop(kira::Tween {
-                    duration: LOOP_FADE,
-                    ..Default::default()
-                });
-                true
-            }
-            Some(None) => true,
-            None => false,
+    pub fn stop_loop(&mut self, id: &str, fade: std::time::Duration) -> bool {
+        let Some(running) = self.loops.remove(id) else {
+            return false;
+        };
+        if let Some(mut handle) = running.handle {
+            // A fade rather than a cut, always. Stopping a loop dead puts a
+            // click on the end of it, and the one thing worse than ambience
+            // you notice is ambience that stops with a click.
+            handle.stop(kira::Tween {
+                duration: if fade.is_zero() { LOOP_FADE } else { fade },
+                ..Default::default()
+            });
+        }
+        true
+    }
+
+    /// Places every positioned loop against where the listener is now.
+    ///
+    /// **Once a frame, from the frame loop**, for the same reason a one-shot
+    /// is placed there: a loop panned once, where the listener stood when it
+    /// started, drifts to the wrong side as they walk past it. Gain and pan
+    /// glide over a frame's worth of time so the move is never a step;
+    /// brightness stays where it was baked.
+    pub fn follow(&mut self, listener: [f64; 3], forward: [f32; 3], right: [f32; 3]) {
+        for running in self.loops.values_mut() {
+            let (Some(source), Some(handle)) = (running.source, running.handle.as_mut()) else {
+                continue;
+            };
+            let Some(voice) = self.clips.get(&running.sound).map(|loaded| loaded.voice) else {
+                continue;
+            };
+            let placement = place(
+                source.pos,
+                listener,
+                forward,
+                right,
+                source.radius,
+                source.gain,
+            );
+            let volume = self.volumes.of(running.bus) * placement.gain * voice.gain;
+            let tween = glide(FOLLOW_GLIDE);
+            handle.set_volume(kira::Decibels(amplitude_to_db(volume)), tween);
+            handle.set_panning(kira::Panning(placement.pan), tween);
         }
     }
 
@@ -517,10 +627,26 @@ impl Mixer {
     pub fn stop_all_loops(&mut self) {
         let ids: Vec<String> = self.loops.keys().cloned().collect();
         for id in ids {
-            self.stop_loop(&id);
+            self.stop_loop(&id, std::time::Duration::ZERO);
         }
     }
 }
+
+/// A tween over `duration`, and never a step: a change of gain on a running
+/// loop with no time to happen in is a click.
+fn glide(duration: std::time::Duration) -> kira::Tween {
+    kira::Tween {
+        duration: duration.max(MIN_GLIDE),
+        ..Default::default()
+    }
+}
+
+/// The shortest a gain or pan change on a running loop may take.
+const MIN_GLIDE: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// How long a followed loop takes to arrive at its new place: a few frames,
+/// so a fast turn is smooth and a slow walk is unnoticeable.
+const FOLLOW_GLIDE: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// How long a stopped loop takes to fade out.
 const LOOP_FADE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -832,6 +958,70 @@ mod tests {
         let voice = Voice::of(&negative);
         assert!(voice.gain.abs() < f32::EPSILON, "{voice:?}");
         assert!(voice.pitch_variance.abs() < f32::EPSILON, "{voice:?}");
+    }
+
+    #[test]
+    fn a_loop_started_again_with_its_own_sound_is_moved_and_with_another_is_replaced() {
+        // **Weather ask W5.** A start for a running loop used to be a full
+        // stop and a restart from the top of the clip, so a mod nudging a
+        // storm's gain every second never got past the rain's first second.
+        // Now the same sound under the same id is a move; a different sound
+        // is the replacement it always was. Headless, so what is asserted is
+        // what the mixer SAYS it did, which is what a device would be told.
+        let mut mixer = Mixer::open(Volumes::default());
+        for sound in ["test:rain", "test:wind"] {
+            mixer.insert(
+                sound.to_owned(),
+                Clip {
+                    samples: vec![0.5; 32],
+                    channels: 1,
+                    sample_rate: 48_000,
+                },
+                Voice::default(),
+            );
+        }
+        let placement = Placement {
+            gain: 1.0,
+            pan: 0.0,
+            brightness: 1.0,
+        };
+        let fade = std::time::Duration::from_millis(500);
+        assert_eq!(
+            mixer.start_loop("w:storm", "test:rain", Bus::Ambient, placement, None, fade),
+            Started::Fresh
+        );
+        let quieter = Placement {
+            gain: 0.4,
+            ..placement
+        };
+        assert_eq!(
+            mixer.start_loop("w:storm", "test:rain", Bus::Ambient, quieter, None, fade),
+            Started::Updated,
+            "the same sound under the same id is a change of gain, not a restart"
+        );
+        assert_eq!(
+            mixer.start_loop("w:storm", "test:wind", Bus::Ambient, placement, None, fade),
+            Started::Fresh,
+            "another sound under the same id replaces the loop"
+        );
+        assert_eq!(mixer.running_loops().count(), 1);
+        assert_eq!(
+            mixer.start_loop(
+                "w:storm",
+                "test:missing",
+                Bus::Ambient,
+                placement,
+                None,
+                fade
+            ),
+            Started::Missing
+        );
+        assert_eq!(
+            mixer.running_loops().count(),
+            0,
+            "a start for a sound that is not loaded stops what was under the id"
+        );
+        assert!(!mixer.stop_loop("w:storm", fade));
     }
 
     #[test]

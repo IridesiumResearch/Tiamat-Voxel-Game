@@ -12,7 +12,7 @@ pub mod mixer;
 pub mod synth;
 
 pub use ingest::{AudioError, Clip, Limits};
-pub use mixer::{Bus, Mixer, Placement, Voice, Volumes, place};
+pub use mixer::{Bus, Mixer, Placement, Source, Started, Voice, Volumes, place};
 
 /// Decodes a sound with panic isolation.
 ///

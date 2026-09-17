@@ -851,6 +851,7 @@ fn server_messages() -> Vec<Vec<u8>> {
             radius: 16.0,
             gain: 0.3,
             everywhere: true,
+            fade_ticks: 40,
         },
         // And the positional shape, which takes a different branch on both ends.
         ServerMessage::StartLoop {
@@ -860,9 +861,11 @@ fn server_messages() -> Vec<Vec<u8>> {
             radius: 24.0,
             gain: 1.0,
             everywhere: false,
+            fade_ticks: 0,
         },
         ServerMessage::StopLoop {
             id: "core_sky:ambience".to_owned(),
+            fade_ticks: 20,
         },
         ServerMessage::HudScripts {
             scripts: vec![

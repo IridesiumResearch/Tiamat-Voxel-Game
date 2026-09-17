@@ -185,12 +185,16 @@ pub enum Event {
         gain: f32,
         /// Heard at full gain wherever the listener stands.
         everywhere: bool,
+        /// How long to bring it in, or to move it if already running, in ticks.
+        fade_ticks: u32,
     },
 
     /// Stop a looping sound.
     StopLoop {
         /// The id it was started with.
         id: String,
+        /// How long to fade it out, in ticks; 0 is the mixer's own short fade.
+        fade_ticks: u32,
     },
 
     /// What one mod wants this player's HUD to show.
@@ -1526,6 +1530,7 @@ async fn session(
                 radius,
                 gain,
                 everywhere,
+                fade_ticks,
             } => {
                 let _ = events.send(Event::StartLoop {
                     id,
@@ -1534,11 +1539,12 @@ async fn session(
                     radius,
                     gain,
                     everywhere,
+                    fade_ticks,
                 });
             }
 
-            ServerMessage::StopLoop { id } => {
-                let _ = events.send(Event::StopLoop { id });
+            ServerMessage::StopLoop { id, fade_ticks } => {
+                let _ = events.send(Event::StopLoop { id, fade_ticks });
             }
 
             ServerMessage::HudValues { mod_id, values } => {
