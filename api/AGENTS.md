@@ -1135,9 +1135,11 @@ meeting IS reported to `register_on_fluid_flow`, beside or below, with `meets`
 naming the other fluid, so what it MEANS — steam, obsidian, a hiss — is yours to
 write from there.
 
-**Ground drinks any fluid.** `absorbs` is a property of the material and nothing
-asks what is touching it, so the bed that soaks a puddle also drains the river
-it is the bed of.
+**Ground drinks any fluid unless it names one.** `absorbs = { rate, becomes }`
+drinks whatever touches it; `absorbs = { rate, becomes, fluid = "weather:rain" }`
+drinks that fluid alone, so the bed that soaks a puddle of rain does not drain
+the river it is the bed of. A named fluid nobody registered is one nothing
+drinks.
 
 **`everywhere = true` on a loop means every connected player, in every domain**
 — unless you name a `player`, which makes it that one player's alone. `play_loop`

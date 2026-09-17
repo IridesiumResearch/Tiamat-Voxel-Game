@@ -2963,15 +2963,17 @@ impl ScriptVm for MluaVm {
                 let absorbs = entry
                     .as_ref()
                     .and_then(|entry| entry.get::<Option<Table>>("absorbs").ok().flatten())
-                    .map_or((0, None), |absorbs| {
-                        let rate = absorbs
-                            .get::<Option<u32>>("rate")
-                            .ok()
-                            .flatten()
-                            .unwrap_or(0)
-                            .min(crate::fluid::MAX_VOLUME);
-                        let becomes = absorbs.get::<Option<String>>("becomes").ok().flatten();
-                        (rate, becomes)
+                    .map_or_else(crate::script::AbsorbsRule::default, |absorbs| {
+                        crate::script::AbsorbsRule {
+                            rate: absorbs
+                                .get::<Option<u32>>("rate")
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0)
+                                .min(crate::fluid::MAX_VOLUME),
+                            becomes: absorbs.get::<Option<String>>("becomes").ok().flatten(),
+                            fluid: absorbs.get::<Option<String>>("fluid").ok().flatten(),
+                        }
                     });
                 (
                     *id,
@@ -8058,7 +8060,7 @@ const BLOCK_FIELDS: [&str; 17] = [
 const TEXTURE_FIELDS: [&str; 1] = ["all"];
 
 /// Keys the `absorbs` sub-table accepts.
-const ABSORBS_FIELDS: [&str; 2] = ["rate", "becomes"];
+const ABSORBS_FIELDS: [&str; 3] = ["rate", "becomes", "fluid"];
 
 /// Reads and validates `absorbs = { rate = ..., becomes = ... }`.
 ///
@@ -8090,6 +8092,18 @@ fn block_absorbs(lua: &Lua, owner: &str, id: &str, absorbs: &Table) -> mlua::Res
             "becomes",
             qualify_id(owner, &becomes).map_err(mlua::Error::external)?,
         )?;
+    }
+    // A fluid may be another mod's — `core_milk:milk` — so a name with a
+    // namespace is kept as written, and a bare one is the mod's own. Whether
+    // it exists is known only after every mod has registered, so that is
+    // checked at freeze: a fluid nobody registered is one nothing drinks.
+    if let Some(fluid) = absorbs.get::<Option<String>>("fluid")? {
+        let fluid = if fluid.contains(':') {
+            fluid
+        } else {
+            qualify_id(owner, &fluid).map_err(mlua::Error::external)?
+        };
+        stored.set("fluid", fluid)?;
     }
     Ok(stored)
 }

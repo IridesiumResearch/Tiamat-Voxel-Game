@@ -2083,17 +2083,21 @@ impl ServerHandle {
         // emissions are — and with the SUCCESSOR resolved through the same
         // table, so `becomes = "damp_dirt"` names the same block on a world
         // that has seen a different mod set.
-        let absorbency = crate::fluid::absorbency_from_rules(&block_rules, |block| {
-            let runtime = registry
-                .iter()
-                .find(|(_, name)| *name == block)
-                .map(|(id, _)| id)?;
-            world
-                .materials()
-                .to_world(runtime)
-                .ok()
-                .map(tiamot_core::MaterialId)
-        });
+        let absorbency = crate::fluid::absorbency_from_rules(
+            &block_rules,
+            |block| {
+                let runtime = registry
+                    .iter()
+                    .find(|(_, name)| *name == block)
+                    .map(|(id, _)| id)?;
+                world
+                    .materials()
+                    .to_world(runtime)
+                    .ok()
+                    .map(tiamot_core::MaterialId)
+            },
+            |fluid| fluids.id_of(fluid),
+        );
 
         // **Stable ids for the fluids, and adoption of any the world already
         // knew.** Charter rule 8: a fluid byte on disk carries a number, and
@@ -4854,7 +4858,8 @@ impl ServerHandle {
                                     .filter_map(|taken| {
                                         let block = world.resident(&domain, taken.pos.chunk())?;
                                         let becomes = fluid
-                                            .absorbs_block(&block.get_block_local(taken.pos.local()))?
+                                            .absorbs_block(&block.get_block_local(taken.pos.local()))
+                                            .filter(|absorbs| absorbs.rate_for(taken.fluid) > 0)?
                                             .becomes?;
                                         Some((taken.pos, becomes))
                                     })

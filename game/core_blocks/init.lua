@@ -94,10 +94,11 @@ game.log("registered core:crumb and core:pitch")
 -- porosity is (charter rule 1).
 --
 -- **It lives with the BLOCKS and not with the milk.** Absorbency is a property
--- of a material, not of a fluid — the engine's field is on `register_block` and
--- names no fluid at all — so a world with two fluids in it has one answer for
--- what dirt does, and a mod adding ground does not have to depend on a mod
--- adding water.
+-- of a material, not of a fluid — the engine's field is on `register_block`,
+-- and this ground names no fluid — so a world with two fluids in it has one
+-- answer for what dirt does, and a mod adding ground does not have to depend
+-- on a mod adding water. Ground that should drink one fluid and not another
+-- says so with `fluid = "mod:id"`, and then it does depend on that mod.
 --
 -- **`soaked` does not absorb, and that is the whole shape of the behaviour.**
 -- Ground that kept drinking would be a drain: any pool, however deep, would

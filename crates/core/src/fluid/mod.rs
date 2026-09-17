@@ -206,6 +206,26 @@ pub struct Absorbs {
     /// The last step of a saturation chain is the material that says nothing,
     /// which is how a chain terminates without the engine counting steps.
     pub becomes: Option<MaterialId>,
+    /// The one fluid it drinks, or `None` for any.
+    ///
+    /// Rain-wet dirt beside a river: the ground that soaks rainwater must not
+    /// drain the river it is the bed of. A block naming a fluid nobody
+    /// registered is given [`FluidId::NONE`] here, which no fluid is, so it
+    /// drinks nothing rather than everything. Weather ask W7.
+    pub fluid: Option<FluidId>,
+}
+
+impl Absorbs {
+    /// How many cells this takes of `fluid` per fluid tick: the rate, or zero
+    /// for a fluid it does not drink.
+    #[must_use]
+    pub fn rate_for(&self, fluid: FluidId) -> u32 {
+        if self.fluid.is_none_or(|only| only == fluid) {
+            self.rate
+        } else {
+            0
+        }
+    }
 }
 
 /// Which materials drink, and what they become.
@@ -239,10 +259,11 @@ impl Absorbency {
         self.by_id.get(material.0 as usize).copied().flatten()
     }
 
-    /// How many cells `material` takes per fluid tick, or zero.
+    /// How many cells of `fluid` `material` takes per fluid tick, or zero.
     #[must_use]
-    pub fn rate(&self, material: MaterialId) -> u32 {
-        self.get(material).map_or(0, |absorbs| absorbs.rate)
+    pub fn rate(&self, material: MaterialId, fluid: FluidId) -> u32 {
+        self.get(material)
+            .map_or(0, |absorbs| absorbs.rate_for(fluid))
     }
 
     /// What a whole block does to fluid touching it.

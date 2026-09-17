@@ -85,19 +85,22 @@ pub trait Neighbourhood {
     /// drain silently into a chunk that has not arrived.
     fn occupancy(&self, pos: BlockPos) -> Option<u32>;
 
-    /// How many cells of fluid this block soaks up per fluid tick, or zero.
+    /// How many cells of `fluid` this block soaks up per fluid tick, or zero.
     ///
     /// **A fact about the block, not a policy.** Which materials are absorbent,
-    /// how much they take and what they turn into when they have had it are the
-    /// mod's (charter rule 1); this module knows only the number, exactly as it
-    /// knows occupancy and not what the block is made of. The material swap is
-    /// applied by whoever is holding the registry, from the [`Sinks::absorbed`]
-    /// events this produces.
+    /// how much they take, which fluid they take it of and what they turn into
+    /// when they have had it are the mod's (charter rule 1); this module knows
+    /// only the number, exactly as it knows occupancy and not what the block
+    /// is made of. The fluid is passed because a mod may say "this ground
+    /// drinks rainwater and not the sea", and the answer is then a number for
+    /// one and zero for the other. The material swap is applied by whoever is
+    /// holding the registry, from the [`Sinks::absorbed`] events this
+    /// produces.
     ///
     /// Zero for anything not loaded, because the caller has already established
     /// loadedness through [`Neighbourhood::occupancy`] before asking.
-    fn absorbency(&self, pos: BlockPos) -> u32 {
-        let _ = pos;
+    fn absorbency(&self, pos: BlockPos, fluid: FluidId) -> u32 {
+        let _ = (pos, fluid);
         0
     }
 
@@ -990,7 +993,7 @@ fn absorb(
         if world.occupancy(at).is_none() {
             continue;
         }
-        let cells = world.absorbency(at).min(mine);
+        let cells = world.absorbency(at, fluid).min(mine);
         if cells == 0 {
             continue;
         }
@@ -1028,6 +1031,8 @@ mod tests {
     pub(super) struct Scene {
         solid: BTreeSet<(i32, i32, i32)>,
         absorbent: BTreeMap<(i32, i32, i32), u32>,
+        /// Absorbent blocks that drink ONE fluid; the rest drink any.
+        thirst: BTreeMap<(i32, i32, i32), FluidId>,
         /// Blocks part full of terrain, in cells. A river bed is rarely a whole
         /// block of air, and §4.5's "brims" is about capacity rather than 27.
         partial: BTreeMap<(i32, i32, i32), u32>,
@@ -1132,11 +1137,12 @@ mod tests {
             )
         }
 
-        fn absorbency(&self, pos: BlockPos) -> u32 {
-            self.absorbent
-                .get(&(pos.x, pos.y, pos.z))
-                .copied()
-                .unwrap_or(0)
+        fn absorbency(&self, pos: BlockPos, fluid: FluidId) -> u32 {
+            let at = (pos.x, pos.y, pos.z);
+            if self.thirst.get(&at).is_some_and(|only| *only != fluid) {
+                return 0;
+            }
+            self.absorbent.get(&at).copied().unwrap_or(0)
         }
 
         fn fluid(&self, pos: BlockPos) -> Fluid {
@@ -1493,6 +1499,43 @@ mod tests {
             6,
             "what was absorbed plus what is left is not what was poured"
         );
+    }
+
+    #[test]
+    fn ground_that_drinks_one_fluid_refuses_another() {
+        // **Weather ask W7.** Rain-wet dirt beside a river: ground that names
+        // the fluid it drinks takes that one at its rate and the other not at
+        // all — the same walled scene as above, poured with milk, under
+        // ground thirsty first for something else and then for milk.
+        const RAIN: FluidId = FluidId(2);
+        let scene_for = |thirst: FluidId| {
+            let mut scene = Scene::floored(-2..=2, -2..=2);
+            scene.absorbent.insert((0, 0, 0), 3);
+            scene.thirst.insert((0, 0, 0), thirst);
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                scene.solid.insert((dx, 1, dz));
+            }
+            scene.pour(BlockPos::new(0, 1, 0), 6);
+            scene
+        };
+
+        let mut scene = scene_for(RAIN);
+        let mut solver = Solver::new();
+        solver.touch(BlockPos::new(0, 1, 0));
+        let sinks = settle(&mut scene, &mut solver, Tuning::DEFAULT, 4);
+        assert!(
+            sinks.absorbed.is_empty(),
+            "ground thirsty for rain drank milk: {:?}",
+            sinks.absorbed
+        );
+        assert_eq!(scene.total(), 6, "and the milk is all still there");
+
+        let mut scene = scene_for(MILK);
+        let mut solver = Solver::new();
+        solver.touch(BlockPos::new(0, 1, 0));
+        let sinks = settle(&mut scene, &mut solver, Tuning::DEFAULT, 1);
+        assert_eq!(sinks.absorbed.len(), 1, "ground thirsty for milk drinks it");
+        assert_eq!(sinks.absorbed[0].cells, 3);
     }
 
     #[test]

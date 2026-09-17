@@ -228,6 +228,23 @@ pub struct BlockTexture {
 
 pub use crate::dig::Brush;
 
+/// A block's `absorbs`, as the mod wrote it: names, not ids.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AbsorbsRule {
+    /// Cells of 27 per fluid tick; zero is a block that does not absorb.
+    pub rate: u32,
+    /// The qualified block id it becomes once it has drunk, if any.
+    pub becomes: Option<String>,
+    /// The qualified fluid id it drinks, or `None` for any fluid.
+    ///
+    /// **Optional, because most ground drinks whatever touches it** — and a
+    /// mod adding ground should not have to depend on a mod adding water.
+    /// Named, it is what lets rain-wet dirt exist beside a river: the dirt
+    /// that soaks rainwater does not drain the river it is the bed of.
+    /// Weather ask W7.
+    pub fluid: Option<String>,
+}
+
 /// What a mod said about how hard a block is to break, and what it yields.
 ///
 /// Held apart from [`BlockTexture`] and [`ScriptVm::registered_blocks`] for the
@@ -285,12 +302,13 @@ pub struct BlockRules {
     ///
     /// Sunlight is not settable here. It comes from the sky, not from a block.
     pub light_emit: (u8, u8, u8),
-    /// How much fluid this block drinks per fluid tick, and what it becomes.
+    /// How much fluid this block drinks per fluid tick, what it becomes, and
+    /// which fluid it drinks.
     ///
-    /// `(0, None)` for anything that does not absorb, which is almost
-    /// everything. The second half is a block id and is resolved against the
-    /// registry by whoever holds one — charter rule 8 again.
-    pub absorbs: (u32, Option<String>),
+    /// A rate of zero for anything that does not absorb, which is almost
+    /// everything. The ids are strings and are resolved against the
+    /// registries by whoever holds them — charter rule 8 again.
+    pub absorbs: AbsorbsRule,
     /// Whether the block can be seen through: glass.
     ///
     /// **A flag, not an alpha value** — the texture already carries the alpha,

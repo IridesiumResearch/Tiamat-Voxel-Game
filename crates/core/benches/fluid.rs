@@ -102,7 +102,7 @@ impl Neighbourhood for Scene {
         })
     }
 
-    fn absorbency(&self, pos: BlockPos) -> u32 {
+    fn absorbency(&self, pos: BlockPos, _fluid: tiamot_core::fluid::FluidId) -> u32 {
         if self.absorbent && self.solid.contains(&(pos.x, pos.y, pos.z)) {
             1
         } else {

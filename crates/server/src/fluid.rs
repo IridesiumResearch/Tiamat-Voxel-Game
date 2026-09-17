@@ -84,18 +84,29 @@ pub const VISITS_PER_TICK: usize = 512;
 pub fn absorbency_from_rules(
     rules: &[tiamot_core::script::BlockRules],
     id_of: impl Fn(&str) -> Option<tiamot_core::MaterialId>,
+    fluid_of: impl Fn(&str) -> Option<tiamot_core::fluid::FluidId>,
 ) -> Absorbency {
     Absorbency::new(rules.iter().filter_map(|rule| {
-        let (rate, becomes) = &rule.absorbs;
-        if *rate == 0 {
+        let absorbs = &rule.absorbs;
+        if absorbs.rate == 0 {
             return None;
         }
-        let becomes = becomes.as_deref().and_then(&id_of);
+        let becomes = absorbs.becomes.as_deref().and_then(&id_of);
+        // A named fluid is the RUNTIME id, unlike the successor beside it:
+        // the solver compares it against what is in the layer, which holds
+        // runtime ids until it is saved. One nobody registered becomes
+        // `NONE`, which no fluid is — ground that names a fluid it cannot
+        // find drinks nothing, not everything.
+        let fluid = absorbs
+            .fluid
+            .as_deref()
+            .map(|name| fluid_of(name).unwrap_or(tiamot_core::fluid::FluidId::NONE));
         Some((
             id_of(&rule.block)?,
             Absorbs {
-                rate: *rate,
+                rate: absorbs.rate,
                 becomes,
+                fluid,
             },
         ))
     }))
@@ -745,7 +756,7 @@ impl Neighbourhood for Wet<'_> {
     /// The material's own rate, and nothing about what it becomes — the solver
     /// has no registry, so it reports that a block absorbed and whoever holds
     /// one decides that dirt is now damp dirt.
-    fn absorbency(&self, pos: BlockPos) -> u32 {
+    fn absorbency(&self, pos: BlockPos, fluid: tiamot_core::fluid::FluidId) -> u32 {
         if self.absorbency.is_empty() {
             return 0;
         }
@@ -754,7 +765,7 @@ impl Neighbourhood for Wet<'_> {
         };
         self.absorbency
             .block(&chunk.get_block_local(pos.local()))
-            .map_or(0, |absorbs| absorbs.rate)
+            .map_or(0, |absorbs| absorbs.rate_for(fluid))
     }
 
     fn fluid(&self, pos: BlockPos) -> Fluid {
