@@ -2329,6 +2329,14 @@ impl Renderer {
     /// write depth, so the order within the pass is what decides this rather
     /// than the depth buffer.
     fn draw_overlays(&self, pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline) {
+        // **Rebind the world's group first.** The particle pass just before
+        // this sets its own group at slot 0, whose layout the selection
+        // pipeline does not share, and the pass keeps it: a frame with any
+        // particle in it and a selection or chunk cage to draw was a fatal
+        // wgpu validation error (2026-09-16, teleporting to the Cinder Coast).
+        if self.selection_vertices > 0 || self.border_vertices > 0 {
+            pass.set_bind_group(0, &self.bind_group, &[]);
+        }
         if self.selection_vertices > 0 {
             pass.set_pipeline(pipeline);
             pass.set_vertex_buffer(0, self.selection.slice(..));

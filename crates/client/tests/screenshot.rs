@@ -4820,3 +4820,68 @@ fn a_biome_colour_brighter_than_one_brightens_the_world() {
          {untinted} untinted — the tint still cannot brighten, which is ask 33"
     );
 }
+
+#[test]
+fn a_frame_with_particles_and_a_selection_in_it_draws_at_all() {
+    // **Reported from the window, as a crash**: teleporting to a biome with
+    // particles in the air killed the client outright.
+    //
+    //     In a draw command, kind: Draw
+    //       The BindGroupLayout with 'particle-bind-layout' label of current
+    //       set BindGroup with 'particle' label at index 0 is not compatible
+    //       with the corresponding BindGroupLayout with 'world-bind-layout'
+    //       label of RenderPipeline with 'selection' label
+    //
+    // The particle pass sets its OWN bind group at slot 0, and the overlays
+    // drawn immediately after it — the selection outline and the chunk cage —
+    // use the world's layout there. A render pass keeps whatever was last
+    // bound, so the first frame that had both a particle and something to
+    // outline was a fatal validation error. Either alone was fine, which is
+    // why this survived every test in this file: one draws particles, another
+    // draws a selection, and nothing drew both.
+    //
+    // No pixel is asserted. The capture itself is the test — wgpu treats a
+    // validation error as fatal, so a frame that draws is a frame that passes.
+    let Some(gpu) = gpu() else { return };
+
+    let mut renderer = prepare(gpu, &scene(), RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // Particles in front of the camera, as the mist a biome makes.
+    let sprites: Vec<client::render::particle::Sprite> = (-2..=2)
+        .map(|dx| client::render::particle::Sprite {
+            centre: [dx as f32 * 0.4, -1.0, 6.0],
+            size: 1.2,
+            colour: [0.8, 0.85, 1.0, 0.6],
+        })
+        .collect();
+    renderer.set_particles(&sprites);
+
+    // And a block outlined under the crosshair, which is the ordinary state of
+    // a player standing and looking at anything.
+    renderer.set_selection(&[[0.0, -2.0, 6.0]]);
+    let with_both = target.capture(&mut renderer, &viewpoint());
+    assert!(
+        with_both.is_ok(),
+        "a frame holding both particles and a selection did not draw"
+    );
+
+    // The chunk cage is the other overlay through the same pipeline, and the
+    // same crash: the debug overlay is one keypress away in the real client.
+    renderer.set_chunk_borders(true);
+    let with_cage = target.capture(&mut renderer, &viewpoint());
+    assert!(
+        with_cage.is_ok(),
+        "a frame holding both particles and the chunk cage did not draw"
+    );
+
+    // And in mode 3, which compiles its own copies of both pipelines for the
+    // float target — the mode the report came from.
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let beautiful = target.capture(&mut renderer, &viewpoint());
+    assert!(
+        beautiful.is_ok(),
+        "in mode 3 a frame holding particles and overlays did not draw"
+    );
+    renderer.set_lighting_mode(LightingMode::Classic);
+}
