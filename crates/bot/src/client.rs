@@ -631,6 +631,18 @@ impl Bot {
             .collect()
     }
 
+    /// Every flash received so far, in arrival order.
+    #[must_use]
+    pub fn flashes_received(&self) -> Vec<tiamot_core::atmosphere::Flash> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Flash { flash } => Some(flash),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every particle burst received so far, in arrival order.
     #[must_use]
     pub fn particles_received(&self) -> Vec<tiamot_core::particle::Burst> {

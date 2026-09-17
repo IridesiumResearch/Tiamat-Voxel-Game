@@ -1147,7 +1147,9 @@ sky, sky_mix, fog_distance, saturation, ease_ticks })` lays a per-player change
 over them at any time — a storm darkens the sun, closes the horizon in and
 greys the grade, eased on that player's client — and `nil` puts the plain sky
 back. It multiplies and mixes rather than replacing, so it is right at every
-hour. The sun's direction and the keyframes themselves cannot be moved.
+hour. `game.flash{ pos, radius, intensity, colour, attack_ticks, decay_ticks }`
+is lightning: a moment's light on the sun and sky of everyone in reach, with no
+relight. The sun's direction and the keyframes themselves cannot be moved.
 
 **A place's fog and tint are asked when a chunk is SERVED, and never again.**
 Change what your callback returns and only chunks a player has not loaded yet

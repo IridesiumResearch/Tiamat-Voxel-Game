@@ -1424,6 +1424,38 @@ fn loop_player(spec: &Table, what: &str) -> mlua::Result<Option<crate::identity:
         .transpose()
 }
 
+/// A flash from a mod's table: `pos` (with its domain) and `radius` say who
+/// sees it; the rest is the flash. Wrong types are errors, wrong numbers are
+/// clamped, as `emit_particles` has it.
+fn flash_request(spec: &Table) -> mlua::Result<crate::atmosphere::FlashRequest> {
+    let pos: Table = spec
+        .get::<Option<Table>>("pos")?
+        .ok_or_else(|| mlua::Error::external("flash needs a `pos` table"))?;
+    let colour = match spec.get::<Option<Table>>("colour")? {
+        Some(table) => {
+            let channel = |name: &str, index: i64| -> mlua::Result<f32> {
+                Ok(table
+                    .get::<Option<f32>>(name)?
+                    .or(table.get::<Option<f32>>(index)?)
+                    .unwrap_or(1.0))
+            };
+            [channel("r", 1)?, channel("g", 2)?, channel("b", 3)?]
+        }
+        None => [1.0; 3],
+    };
+    Ok(crate::atmosphere::FlashRequest {
+        flash: crate::atmosphere::Flash {
+            intensity: spec.get::<Option<f32>>("intensity")?.unwrap_or(1.0),
+            colour,
+            attack_ticks: spec.get::<Option<u32>>("attack_ticks")?.unwrap_or(1),
+            decay_ticks: spec.get::<Option<u32>>("decay_ticks")?.unwrap_or(6),
+        },
+        pos: [pos.get("x")?, pos.get("y")?, pos.get("z")?],
+        domain: domain_of(&pos)?,
+        radius: spec.get::<Option<f32>>("radius")?.unwrap_or(256.0),
+    })
+}
+
 /// A sky modifier from a mod's table. See `install_atmosphere`.
 fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier> {
     let number = |name: &str, fallback: f32| -> mlua::Result<f32> {
@@ -5850,6 +5882,21 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_sky_modifier", set)
             .map_err(|err| self.vm_error(&err))?;
+
+        let slot = std::sync::Arc::clone(&self.atmosphere);
+        let flash = self
+            .lua
+            .create_function(move |_, spec: Table| {
+                let request = crate::atmosphere::sanitise_flash(flash_request(&spec)?);
+                let told = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.flash(&request)));
+                Ok(told.unwrap_or(0))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("flash", flash)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -9426,6 +9473,7 @@ mod tests {
     #[derive(Default)]
     struct Weather {
         set: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::SkyModifier>)>>,
+        flashed: std::sync::Mutex<Vec<crate::atmosphere::FlashRequest>>,
     }
 
     impl crate::atmosphere::Access for Weather {
@@ -9440,6 +9488,53 @@ mod tests {
                 .push((player.to_hex(), modifier));
             true
         }
+
+        fn flash(&self, request: &crate::atmosphere::FlashRequest) -> u32 {
+            self.flashed
+                .lock()
+                .expect("weather lock")
+                .push(request.clone());
+            2
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_mod_flashes_the_sky_with_defaults_and_its_numbers_clamped() {
+        // **Weather ask W3.** The ask's own shape reaches the seam; the
+        // defaults are a white strike, one tick up and six down.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        load(
+            &mut host,
+            "storm",
+            "told = game.flash{ pos = { x = 10, y = 80, z = -3, domain = 'storm:above' }, radius = 9000,\n\
+             \x20   intensity = 1.5, colour = { 0.9, 0.92, 1.0 }, attack_ticks = 2, decay_ticks = 9 }\n\
+             game.flash{ pos = { x = 0, y = 0, z = 0 } }",
+        )
+        .expect("load");
+        let env = host.environment("storm").expect("env");
+        assert_eq!(env.get::<u32>("told").expect("told"), 2);
+        let flashed = weather.flashed.lock().expect("lock").clone();
+        assert_eq!(flashed.len(), 2);
+        let strike = &flashed[0];
+        assert_eq!(strike.domain, "storm:above");
+        assert!((strike.radius - crate::atmosphere::MAX_FLASH_RADIUS).abs() < f32::EPSILON);
+        assert!((strike.flash.intensity - 1.5).abs() < f32::EPSILON);
+        assert!((strike.flash.colour[1] - 0.92).abs() < f32::EPSILON);
+        assert_eq!(
+            (strike.flash.attack_ticks, strike.flash.decay_ticks),
+            (2, 9)
+        );
+        let plain = &flashed[1];
+        assert_eq!(plain.domain, crate::domain::OVERWORLD);
+        assert!((plain.radius - 256.0).abs() < f32::EPSILON);
+        assert_eq!(plain.flash.colour, [1.0; 3], "white by default");
+        assert_eq!((plain.flash.attack_ticks, plain.flash.decay_ticks), (1, 6));
     }
 
     #[test]

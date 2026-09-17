@@ -451,6 +451,9 @@ pub enum Event {
     /// A mod's standing change to this player's sky, or none.
     SkyModifier(Option<tiamot_core::atmosphere::SkyModifier>),
 
+    /// A flash of light: lightning, seen.
+    Flash(tiamot_core::atmosphere::Flash),
+
     /// Where the server's clock stands in the day, `0.0..1.0`.
     TimeOfDay(f32),
 
@@ -1558,6 +1561,9 @@ async fn session(
             }
             ServerMessage::SkyModifier { modifier } => {
                 let _ = events.send(Event::SkyModifier(modifier));
+            }
+            ServerMessage::Flash { flash } => {
+                let _ = events.send(Event::Flash(flash));
             }
             ServerMessage::FontTable { fonts } => {
                 // The same pipeline as a sound: by hash, after the join, and a

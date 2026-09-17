@@ -32,4 +32,40 @@ impl tiamot_core::atmosphere::Access for Shared {
         self.endpoint.set_sky_modifier(&player, modifier);
         true
     }
+
+    fn flash(&self, request: &tiamot_core::atmosphere::FlashRequest) -> u32 {
+        // **Who can see it, decided here and not by the client**, as a
+        // sound's earshot is: the domain and the radius, and a client told
+        // about every strike on the server would light up for storms it is
+        // not under.
+        let Ok(bodies) = self.endpoint.bodies.lock() else {
+            return 0;
+        };
+        let message = tiamot_core::proto::ServerMessage::Flash {
+            flash: request.flash,
+        };
+        let radius = f64::from(request.radius);
+        let mut told = 0;
+        for (uuid, player) in bodies.iter() {
+            if player.domain != request.domain {
+                continue;
+            }
+            let at =
+                tiamot_core::ent::Transform::at(player.origin, player.body.position).to_world();
+            let offset = [
+                at[0] - request.pos[0],
+                at[1] - request.pos[1],
+                at[2] - request.pos[2],
+            ];
+            let distance = offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2];
+            if distance > radius * radius {
+                continue;
+            }
+            let _ = self
+                .endpoint
+                .push_entity_messages(uuid, std::iter::once(message.clone()));
+            told += 1;
+        }
+        told
+    }
 }

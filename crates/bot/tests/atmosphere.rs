@@ -41,6 +41,10 @@ end)
 local since = {}
 game.register_on_player_join(function(event)
     since[event.player] = 0
+    -- Lightning beside them, and a strike far out of sight (W3).
+    game.flash{ pos = { x = 30, y = 80, z = 0 }, radius = 256, intensity = 1.5,
+                colour = { 0.9, 0.92, 1.0 }, attack_ticks = 1, decay_ticks = 6 }
+    game.flash{ pos = { x = 5000, y = 80, z = 0 }, radius = 256, intensity = 0.25 }
 end)
 game.register_on_tick(function()
     for player, ticks in pairs(since) do
@@ -64,7 +68,8 @@ end)
     clippy::float_cmp,
     reason = "the values asserted are set, not computed"
 )]
-fn a_mods_weather_reaches_the_players_sky_once_per_change_and_clears() {
+fn a_mods_weather_reaches_the_players_sky_once_per_change_and_clears_and_lightning_is_seen_in_reach()
+ {
     let server = ServerHandle::start(&Settings {
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: scratch("world"),
@@ -118,6 +123,16 @@ fn a_mods_weather_reaches_the_players_sky_once_per_change_and_clears() {
             assert_eq!(storm.fog_distance, 0.6);
             assert_eq!(storm.ease_ticks, 400);
             assert_eq!(received[1], None, "nil clears it");
+
+            let flashes = bot.flashes_received();
+            assert_eq!(
+                flashes.len(),
+                1,
+                "the strike beside the player and no other: {flashes:?}"
+            );
+            assert_eq!(flashes[0].intensity, 1.5);
+            assert_eq!(flashes[0].colour, [0.9, 0.92, 1.0]);
+            assert_eq!((flashes[0].attack_ticks, flashes[0].decay_ticks), (1, 6));
             bot.disconnect().await;
         });
     assert!(server.stop());

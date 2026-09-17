@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 58;
+pub const PROTOCOL_VERSION: u32 = 59;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,8 @@ pub const PROTOCOL_VERSION: u32 = 58;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v59 (weather W3): appended `ServerMessage::Flash`, lightning seen: a moment's
+// light added to the sun on the client, no relight.
 // v58 (weather W1): appended `ServerMessage::SkyModifier`, a mod's standing
 // change to one player's sky, eased on the client over the keyframes.
 // v57 (weather W5): `fade_ticks` appended to `StartLoop` and `StopLoop` — a
@@ -2057,6 +2059,16 @@ pub enum ServerMessage {
         /// The modifier, or `None` to clear it.
         modifier: Option<crate::atmosphere::SkyModifier>,
     },
+    /// A flash of light this player can see: lightning.
+    ///
+    /// **Appended at the end** (protocol v59). An event, sent to everyone
+    /// within the flash's radius in its domain; the client adds it to the
+    /// sun for its attack and decay and relights nothing. See
+    /// [`crate::atmosphere::Flash`].
+    Flash {
+        /// The flash.
+        flash: crate::atmosphere::Flash,
+    },
 }
 
 /// An entity as a client is first told about it.
@@ -2477,15 +2489,22 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
 
 /// Rejects a particle message outside the ranges `particle::sanitise` keeps a
 /// well-behaved server inside.
-/// A sky modifier's numbers are the client's to trust only in range.
-fn check_sky_modifier(
-    modifier: Option<&crate::atmosphere::SkyModifier>,
-) -> Result<(), ProtocolError> {
-    if modifier.is_none_or(crate::atmosphere::SkyModifier::is_valid) {
+/// The weather messages: a sky modifier's and a flash's numbers are the
+/// client's to trust only in range. One function for both, because
+/// `validate_server_message` is at clippy's line ceiling.
+fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
+    let valid = match message {
+        ServerMessage::SkyModifier { modifier } => modifier
+            .as_ref()
+            .is_none_or(crate::atmosphere::SkyModifier::is_valid),
+        ServerMessage::Flash { flash } => flash.is_valid(),
+        _ => true,
+    };
+    if valid {
         Ok(())
     } else {
         Err(ProtocolError::FieldTooLarge {
-            field: "sky_modifier",
+            field: "atmosphere",
             len: 0,
             limit: 0,
         })
@@ -2900,7 +2919,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
-        ServerMessage::SkyModifier { modifier } => check_sky_modifier(modifier.as_ref())?,
+        ServerMessage::SkyModifier { .. } | ServerMessage::Flash { .. } => check_atmosphere(message)?,
         // A domain id is a string a server chose, and it reaches a loading
         // screen the client draws. Capped like every other id on the wire
         // (charter rule 14: a server is not trusted for being the server).
@@ -4090,6 +4109,17 @@ mod tests {
         // Protocol v58.
         let sky = encode(&ServerMessage::SkyModifier { modifier: None }).expect("encode");
         assert_eq!(sky[0], 44);
+        // Protocol v59.
+        let flash = encode(&ServerMessage::Flash {
+            flash: crate::atmosphere::Flash {
+                intensity: 1.0,
+                colour: [1.0; 3],
+                attack_ticks: 1,
+                decay_ticks: 6,
+            },
+        })
+        .expect("encode");
+        assert_eq!(flash[0], 45);
     }
 
     #[test]

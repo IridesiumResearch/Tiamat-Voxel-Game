@@ -19,8 +19,19 @@
 //! doing the presenting. What the server owns is the *clock*, because two
 //! players standing together must see the same sky.
 
-use tiamot_core::atmosphere::SkyModifier;
+use tiamot_core::atmosphere::{Flash, SkyModifier};
 use tiamot_core::proto::{SkyFrame, SkyGrade};
+
+/// Everything a mod's weather does to this player's sky: the standing
+/// modifier on its way to where the mod put it, and the flashes lighting it
+/// right now.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Weather {
+    /// The modifier, easing.
+    pub modifier: Eased,
+    /// Lightning, seen.
+    pub flashes: Flashes,
+}
 
 /// A mod's sky modifier on its way to where the mod put it.
 ///
@@ -92,6 +103,91 @@ impl Eased {
             saturation: scalar(self.from.saturation, self.to.saturation),
             ease_ticks: self.to.ease_ticks,
         }
+    }
+}
+
+/// The flashes lighting this player's sky right now.
+///
+/// Each runs an envelope — up over its attack, down over its decay — and
+/// they add, capped where the renderer caps the sun. Presentation, on frame
+/// time.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Flashes {
+    /// Each with its age in seconds.
+    active: Vec<(Flash, f32)>,
+}
+
+impl Flashes {
+    /// A strike, just now.
+    pub fn strike(&mut self, flash: Flash) {
+        if self.active.len() < MAX_FLASHES {
+            self.active.push((flash, 0.0));
+        }
+    }
+
+    /// Advances by a frame and forgets what has died away.
+    pub fn advance(&mut self, dt: f32) {
+        let tick = tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        for (_, age) in &mut self.active {
+            *age += dt.max(0.0);
+        }
+        self.active
+            .retain(|(flash, age)| *age <= (flash.attack_ticks + flash.decay_ticks) as f32 * tick);
+    }
+
+    /// How much light there is now, and its colour: the sum of every
+    /// envelope, and the colour of the brightest.
+    #[must_use]
+    pub fn light(&self) -> (f32, [f32; 3]) {
+        let tick = tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        let mut total = 0.0_f32;
+        let mut brightest = (0.0_f32, [1.0; 3]);
+        for (flash, age) in &self.active {
+            let attack = flash.attack_ticks as f32 * tick;
+            let decay = flash.decay_ticks as f32 * tick;
+            let envelope = if *age < attack {
+                *age / attack
+            } else if decay > 0.0 {
+                (1.0 - (*age - attack) / decay).max(0.0)
+            } else {
+                0.0
+            };
+            let amount = flash.intensity * envelope;
+            total += amount;
+            if amount > brightest.0 {
+                brightest = (amount, flash.colour);
+            }
+        }
+        (total, brightest.1)
+    }
+
+    /// Whether anything is lit.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.active.is_empty()
+    }
+}
+
+/// How many strikes a client will hold at once; more than this is one storm.
+const MAX_FLASHES: usize = 16;
+
+/// A moment with the flashes added.
+///
+/// The sun's intensity gains the light (the renderer caps it at daylight),
+/// and the sun and sky lean towards the flash's colour by it. With no light
+/// every term is an add of zero or a lerp by zero, which is exact.
+#[must_use]
+pub fn flashed(moment: Moment, flashes: &Flashes) -> Moment {
+    if flashes.is_empty() {
+        return moment;
+    }
+    let (amount, colour) = flashes.light();
+    let lean = amount.min(1.0);
+    Moment {
+        intensity: moment.intensity + amount,
+        sun: mix(moment.sun, colour, lean),
+        sky: mix(moment.sky, colour, lean * 0.5),
+        ..moment
     }
 }
 
@@ -741,5 +837,46 @@ mod tests {
         assert_eq!(dim.intensity, 0.5);
         assert_eq!(dim.sky, [0.5, 0.5, 0.5]);
         assert_eq!(dim.grade.saturation, 0.5);
+    }
+
+    #[test]
+    fn a_flash_rises_over_its_attack_falls_over_its_decay_and_is_gone() {
+        // **Weather ask W3.** One tick up, four down: at half a tick it is
+        // half way up, at the peak it is all there, two ticks into the decay
+        // it is half gone, and after five ticks nothing is left and the
+        // moment is the moment it was.
+        let tick = tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        let mut flashes = Flashes::default();
+        flashes.strike(Flash {
+            intensity: 2.0,
+            colour: [0.5, 0.5, 1.0],
+            attack_ticks: 1,
+            decay_ticks: 4,
+        });
+        assert!(flashes.light().0.abs() < 1e-6, "nothing yet");
+        flashes.advance(tick * 0.5);
+        assert!(
+            (flashes.light().0 - 1.0).abs() < 1e-5,
+            "{:?}",
+            flashes.light()
+        );
+        flashes.advance(tick * 0.5);
+        assert!((flashes.light().0 - 2.0).abs() < 1e-5, "the peak");
+        let plain = Sky::none().moment();
+        let lit = flashed(plain, &flashes);
+        assert!(lit.intensity > plain.intensity);
+        assert!(
+            lit.sun[2] > lit.sun[0],
+            "the sun leans to the flash's colour"
+        );
+        flashes.advance(tick * 2.0);
+        assert!((flashes.light().0 - 1.0).abs() < 1e-5, "half decayed");
+        flashes.advance(tick * 3.0);
+        assert!(flashes.is_empty(), "died away and forgotten");
+        assert_eq!(
+            flashed(plain, &flashes),
+            plain,
+            "and the moment is exactly what it was"
+        );
     }
 }

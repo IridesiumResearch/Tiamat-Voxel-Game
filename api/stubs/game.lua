@@ -606,6 +606,30 @@ function game.register_sky(spec) end
 ---@return boolean here
 function game.set_sky_modifier(player, modifier) end
 
+---Lightning, seen: a moment's light added to the sun and sky of every player
+---within `radius` of `pos` in its domain. Returns how many were told.
+---
+---**Why this and not a lamp or a burst.** A light-emitting block placed and
+---removed is two relights a strike; a white particle burst at night is lit by
+---the night and comes out grey; the sky modifier eases and a flash must not.
+---This adds `intensity` to the sun for `attack_ticks` up and `decay_ticks`
+---down, on the client, relighting nothing — with thunder delayed by distance,
+---it is the whole visible effect of lightning at a distance. (The renderer
+---caps the sun at daylight, so a flash at noon is invisible, as it is.)
+---
+---```lua
+---game.flash{ pos = { x = x, y = 120, z = z }, radius = 256,
+---            intensity = 1.0, colour = { 0.9, 0.92, 1.0 },
+---            attack_ticks = 1, decay_ticks = 6 }
+---```
+---
+---Defaults: white, `radius` 256, `intensity` 1, one tick up, six down. Wrong
+---numbers are clamped (intensity up to 4, radius up to 1024, attack up to 100
+---ticks, decay up to 400).
+---@param spec { pos: Tiamot.BlockPos, radius?: number, intensity?: number, colour?: number[]|{ r: number, g: number, b: number }, attack_ticks?: integer, decay_ticks?: integer }
+---@return integer told
+function game.flash(spec) end
+
 ---Registers a tool.
 ---
 ---**Registration window only**, like `game.register_block`.
