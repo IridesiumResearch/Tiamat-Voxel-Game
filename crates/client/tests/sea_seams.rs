@@ -164,13 +164,28 @@ struct Diver {
     connection: Connection,
     store: ChunkStore,
     tally: std::collections::BTreeMap<&'static str, usize>,
+    world: PathBuf,
 }
 
 impl Diver {
     fn join(name: &str, lua: &str, view: ViewDistance) -> Self {
+        Self::join_world(name, lua, view, scratch(&format!("{name}-world")))
+    }
+
+    /// Joins a server started on a world that already exists on disk, so
+    /// what streams is what was saved rather than what was just generated.
+    fn rejoin(name: &str, lua: &str, view: ViewDistance, world: PathBuf) -> Self {
+        Self::join_world(name, lua, view, world)
+    }
+
+    fn world_path(&self) -> PathBuf {
+        self.world.clone()
+    }
+
+    fn join_world(name: &str, lua: &str, view: ViewDistance, world: PathBuf) -> Self {
         let server = ServerHandle::start(&Settings {
             bind_addr: "127.0.0.1:0".parse().expect("loopback"),
-            world_path: scratch(&format!("{name}-world")),
+            world_path: world.clone(),
             identity_path: None,
             max_players: 2,
             allowlist: Allowlist::open(),
@@ -188,7 +203,9 @@ impl Diver {
         let connection = Connection::open(
             server.local_addr(),
             Identity::generate().expect("identity"),
-            "Diver".to_owned(),
+            // A name is bound to the identity that first claimed it (charter
+            // rule 13), and a rejoin is a new identity.
+            format!("Diver-{name}"),
             ContentCache::open(&home.join("content")).expect("cache"),
             Pinning::Remembered(&home.join("known-hosts")),
         )
@@ -198,6 +215,7 @@ impl Diver {
             connection,
             store: ChunkStore::new(),
             tally: std::collections::BTreeMap::new(),
+            world,
         }
     }
 
@@ -364,6 +382,37 @@ const ISLANDS: &str = "local sand = game.register_block{ id = \"sand\" }\n\
      \x20   return false\n\
      end)\n";
 
+/// A sea laid by the terraced fill rather than `fill_fluid_below`, with a
+/// level field, a lip material and a body bound, over a sloping seabed — the
+/// shape a world mod's ocean has — and a chat mover to take the diver far
+/// from the origin.
+const TERRACED: &str = "local sand = game.register_block{ id = \"sand\" }\n\
+     local stone = game.register_block{ id = \"stone\" }\n\
+     game.register_block{ id = \"water\" }\n\
+     game.register_block{ id = \"milk\" }\n\
+     game.register_fluid{ id = \"milk\", material = \"sea:milk\" }\n\
+     game.register_fluid{ id = \"water\", material = \"sea:water\" }\n\
+     local bed = game.density{\n\
+     \x20   op = \"sub\",\n\
+     \x20   a = { op = \"noise\", stream = \"bed\", frequency = 0.02, octaves = 2 },\n\
+     \x20   b = { op = \"mul\",\n\
+     \x20         a = { op = \"add\", a = { op = \"y\" }, b = { op = \"const\", value = 20 } },\n\
+     \x20         b = { op = \"const\", value = 0.05 } },\n\
+     }\n\
+     local level = game.density{ op = \"const\", value = 0 }\n\
+     local everywhere = game.density{ op = \"const\", value = 1 }\n\
+     game.register_on_generate(function(buf, pos)\n\
+     \x20   buf:fill_density(bed, sand, { detail = \"smooth\" })\n\
+     \x20   buf:fill_fluid_terraced{ level = level, within = everywhere, fluid = \"sea:water\", lip = stone }\n\
+     end)\n\
+     game.register_on_chat(function(event)\n\
+     \x20   local x, z = event.text:match(\"^go (%-?%d+) (%-?%d+)$\")\n\
+     \x20   if x then\n\
+     \x20       game.move_player(event.player, { x = tonumber(x), y = 4, z = tonumber(z) })\n\
+     \x20   end\n\
+     \x20   return false\n\
+     end)\n";
+
 const VIEW: ViewDistance = ViewDistance {
     horizontal: 3,
     vertical: 3,
@@ -381,6 +430,55 @@ fn a_streamed_sea_draws_no_walls_between_its_chunks() {
 fn a_sea_over_subnode_terrain_draws_no_walls_between_its_chunks() {
     let mut diver = Diver::join("islands", ISLANDS, VIEW);
     diver.settle();
+    diver.assert_seamless();
+    diver.stop();
+}
+
+#[test]
+fn a_terraced_sea_draws_no_walls_between_its_chunks() {
+    let mut diver = Diver::join("terraced", TERRACED, VIEW);
+    diver.settle();
+    diver.assert_seamless();
+    diver.stop();
+}
+
+#[test]
+fn a_sea_read_back_from_the_database_draws_no_walls_between_its_chunks() {
+    // **Reported from the window as walls on every seam that survive logging
+    // off and restarting the game.** Every other test here streams a sea the
+    // server has just generated; a restarted server streams what it SAVED,
+    // and a fluid layer that comes back from the database differently from
+    // how it went in is a seam on every chunk.
+    let mut diver = Diver::join("saved", TERRACED, VIEW);
+    diver.settle();
+    diver.assert_seamless();
+    let world = diver.world_path();
+    diver.stop();
+
+    let mut diver = Diver::rejoin("saved-again", TERRACED, VIEW, world);
+    diver.settle();
+    diver.assert_seamless();
+    diver.stop();
+}
+
+#[test]
+fn a_sea_far_from_the_origin_draws_no_walls_between_its_chunks() {
+    // Reported from the window at x = 16399, with walls on every seam.
+    let mut diver = Diver::join("far", TERRACED, VIEW);
+    diver.settle();
+    diver.say("go 16399 0");
+    diver.settle();
+    let (far, near) = diver.store.positions().fold((0, 0), |(far, near), pos| {
+        if pos.x >= 1020 {
+            (far + 1, near)
+        } else {
+            (far, near + 1)
+        }
+    });
+    assert!(
+        far > 20,
+        "the diver did not arrive far out: {far} far chunks, {near} near"
+    );
     diver.assert_seamless();
     diver.stop();
 }
