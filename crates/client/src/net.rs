@@ -1594,6 +1594,31 @@ async fn session(
                 }
             }
 
+            ServerMessage::PictureTable { pictures } => {
+                // **A HUD's art, asked for before a script names it.** The
+                // same shape as a dialog's pictures — by hash, after the
+                // join, a client that has the bytes asks for nothing — but
+                // from a table, because a HUD script names a picture only
+                // when it draws one and the frame does not wait.
+                let wanted: Vec<tiamot_core::proto::ContentHash> =
+                    pictures.iter().filter_map(|picture| picture.file).collect();
+                for hash in &wanted {
+                    if !awaited_pictures.contains(hash) {
+                        awaited_pictures.push(*hash);
+                    }
+                    offer_picture(*hash, &cache, &events);
+                }
+                let missing = cache.missing(&wanted);
+                if !missing.is_empty()
+                    && let Err(err) = send
+                        .write(&ClientMessage::ContentRequest { hashes: missing })
+                        .await
+                {
+                    finish(format!("could not ask for the pictures: {err}"));
+                    break;
+                }
+            }
+
             ServerMessage::HudScripts { scripts } => {
                 // The same pipeline as a sound, for the same reason: by hash,
                 // after the join, and a client that already has the bytes asks

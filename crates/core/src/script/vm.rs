@@ -1587,6 +1587,11 @@ pub trait ScriptVm: Sized {
     /// glyph atlas as much as about parsing bytes a server pushed.
     fn registered_fonts(&self) -> Vec<crate::font::Font>;
 
+    /// Every picture the loaded mods registered, in load order.
+    ///
+    /// Bounded by [`crate::picture::MAX_PICTURES`].
+    fn registered_pictures(&self) -> Vec<crate::picture::Picture>;
+
     /// Every cue binding the loaded mods declared, in load order.
     ///
     /// Load order is precedence: two mods binding the same cue leave the later

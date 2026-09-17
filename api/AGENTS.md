@@ -121,6 +121,14 @@ it, and returning `""` says you handled it. Return `nil` for blocks that are not
 yours, so the next mod — and in the end the engine's own "nothing selected"
 warning — gets its turn.
 
+**A HUD script's pictures must be registered: `game.register_picture{ file }`.**
+A dialog's tree is its own manifest and its pictures are fetched when it
+arrives, but a HUD script names a picture only when it draws one, so nothing
+had ever fetched the bytes and `hud.image` drew the "not arrived" box for ever.
+`register_picture` puts the file in a table the client fetches on join and
+answers its content hash in hex; `game.content_hash(file)` answers the hash
+alone, for a dialog's `image` or `nine_slice`. Neither hash is pasted by hand.
+
 **The top of a column is one call: `game.surface_at{ x, z, from, depth,
 skip_passable, skip_fluid }`.** Snow, rain, a spawn point, anything that has to
 find the ground as it is NOW — built on and dug since worldgen, which no

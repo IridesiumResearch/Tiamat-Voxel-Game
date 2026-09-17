@@ -1905,6 +1905,17 @@ impl Bot {
             })
     }
 
+    /// The pictures a server's mods registered.
+    #[must_use]
+    pub fn picture_table(&self) -> Option<Vec<tiamot_core::proto::PictureDef>> {
+        self.received()
+            .into_iter()
+            .find_map(|message| match message {
+                ServerMessage::PictureTable { pictures } => Some(pictures),
+                _ => None,
+            })
+    }
+
     /// The fonts a server's mods registered.
     #[must_use]
     pub fn font_table(&self) -> Option<Vec<tiamot_core::proto::FontDef>> {

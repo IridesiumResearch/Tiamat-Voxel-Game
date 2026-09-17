@@ -85,6 +85,7 @@ pub mod particle;
 pub mod path;
 pub mod persist;
 pub mod phys;
+pub mod picture;
 pub mod place;
 pub mod plan;
 pub mod proto;

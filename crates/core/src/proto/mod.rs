@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 60;
+pub const PROTOCOL_VERSION: u32 = 61;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,8 @@ pub const PROTOCOL_VERSION: u32 = 60;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v61 (HUD pictures): appended `ServerMessage::PictureTable`, the pictures a
+// mod registered so a client fetches them before a HUD script names one.
 // v60 (weather W4b): appended `ServerMessage::Precipitation`, the shape of the
 // rain around one player, which their client spawns itself.
 // v59 (weather W3): appended `ServerMessage::Flash`, lightning seen: a moment's
@@ -568,6 +570,20 @@ pub struct FontDef {
     /// The content hash of the font file, or `None` if the mod named one that
     /// is not in its directory — the client draws in its own font rather than
     /// guessing at what was meant.
+    pub file: Option<ContentHash>,
+}
+
+/// A picture a mod registered, as the client needs to see it: a hash to
+/// fetch before a HUD script names it. See [`crate::picture`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PictureDef {
+    /// The qualified id, e.g. `"my_mod:hotbar_slot"`.
+    pub id: String,
+    /// The mod that registered it.
+    pub mod_id: String,
+    /// The content hash of the file, or `None` if the mod named one that is
+    /// not in its directory — nothing is fetched and the HUD draws its
+    /// "not arrived" box, which is the honest picture of the mistake.
     pub file: Option<ContentHash>,
 }
 
@@ -2080,6 +2096,16 @@ pub enum ServerMessage {
         /// The shape of the rain, or `None` to stop it.
         precipitation: Option<crate::atmosphere::Precipitation>,
     },
+    /// Every picture a mod registered, in load order, so a client fetches
+    /// them before a HUD script names one.
+    ///
+    /// **Appended at the end** (protocol v61). Sent in the join burst after
+    /// `ModSettings`, and fetched by hash after the join like the fonts.
+    /// Bounded by [`crate::picture::MAX_PICTURES`].
+    PictureTable {
+        /// The pictures.
+        pictures: Vec<PictureDef>,
+    },
 }
 
 /// An entity as a client is first told about it.
@@ -2712,6 +2738,20 @@ fn check_sounds(sounds: &[SoundDef]) -> Result<(), ProtocolError> {
 /// the message that decides how many parsers a client will run on bytes it
 /// pushed. The count cap is [`crate::font::MAX_FONTS`] — the file bytes are
 /// bounded where they arrive, not here, because this message carries hashes.
+/// Bounds the picture table: a list of hashes, so the count and the ids.
+fn check_pictures(pictures: &[PictureDef]) -> Result<(), ProtocolError> {
+    check_len(
+        "picture_table",
+        pictures.len(),
+        crate::picture::MAX_PICTURES,
+    )?;
+    for picture in pictures {
+        check_len("picture_id", picture.id.len(), MAX_ID_BYTES)?;
+        check_len("picture_mod_id", picture.mod_id.len(), MAX_ID_BYTES)?;
+    }
+    Ok(())
+}
+
 fn check_fonts(fonts: &[FontDef]) -> Result<(), ProtocolError> {
     check_len("font_table", fonts.len(), crate::font::MAX_FONTS)?;
     for font in fonts {
@@ -2936,6 +2976,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::ActionTable { actions } => check_actions(actions)?,
         ServerMessage::SoundTable { sounds } => check_sounds(sounds)?,
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
+        ServerMessage::PictureTable { pictures } => check_pictures(pictures)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
         ServerMessage::SkyModifier { .. }
@@ -4150,6 +4191,12 @@ mod tests {
         })
         .expect("encode");
         assert_eq!(rain[0], 46);
+        // Protocol v61.
+        let pictures = encode(&ServerMessage::PictureTable {
+            pictures: Vec::new(),
+        })
+        .expect("encode");
+        assert_eq!(pictures[0], 47);
     }
 
     #[test]

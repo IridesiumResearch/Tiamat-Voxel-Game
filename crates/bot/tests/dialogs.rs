@@ -192,6 +192,84 @@ end)
     root
 }
 
+/// A mod that registers a picture and shows a dialog framed with it, naming
+/// the frame by the hex the registration answered.
+fn write_framed(name: &str) -> (PathBuf, Vec<u8>) {
+    let root = scratch(name);
+    let dir = root.join("framed");
+    std::fs::create_dir_all(dir.join("textures")).expect("mod dir");
+    let png = b"\x89PNG\r\n\x1a\nbytes standing in for a frame".to_vec();
+    std::fs::write(dir.join("textures/frame.png"), &png).expect("picture");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"framed\"\nname = \"Framed\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+local frame = game.register_picture{ id = "frame", file = "textures/frame.png" }
+game.register_on_player_join(function(event)
+    game.show_dialog{
+        player = event.player, form = "framed",
+        tree = {
+            type = "container", direction = "column",
+            children = {
+                { type = "label", text = "Framed", style = { nine_slice = frame } },
+            },
+        },
+    }
+end)
+"#,
+    )
+    .expect("script");
+    (root, png)
+}
+
+#[test]
+fn a_mods_picture_reaches_a_client_by_hash_and_a_dialog_names_it_in_hex() {
+    // **The HUD's art was never fetched**: a dialog's tree named its pictures
+    // and a HUD script's were named by nothing. A registered picture is in a
+    // table sent on join, hashed by the server from the same bytes the mod
+    // was answered a hash for — and that hex spelling names a nine-slice.
+    let (mods, png) = write_framed("pictures");
+    let server = start("pictures", mods);
+    block_on(async {
+        let mut bot = join(&server, "Reader").await;
+        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+
+        let pictures = bot.picture_table().expect("a picture table on join");
+        assert_eq!(pictures.len(), 1, "the picture table is {pictures:?}");
+        assert_eq!(pictures[0].id, "framed:frame");
+        assert_eq!(pictures[0].mod_id, "framed");
+        let hash = tiamot_core::content::hash_bytes(&png);
+        assert_eq!(
+            pictures[0].file,
+            Some(hash),
+            "the server's hash of the file is not the one the mod was answered"
+        );
+
+        let dialogs = bot.dialogs();
+        let (_, tree) = &dialogs[0];
+        let framed: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter_map(|node| node.style.nine_slice)
+            .collect();
+        assert_eq!(
+            framed,
+            vec![hash],
+            "the hex the mod was answered did not name the frame"
+        );
+    });
+}
+
 #[test]
 fn a_mods_font_reaches_a_client_by_hash_and_a_style_names_it() {
     // **The seam test.** A registry, a table and a client-side installer can

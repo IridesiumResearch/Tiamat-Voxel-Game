@@ -1779,6 +1779,34 @@ impl ServerHandle {
             .collect();
         info!(fonts = font_table.len(), "font table built");
 
+        // And the pictures: a HUD's art, fetched by hash before a script
+        // names it. The hash a mod was answered at registration is the one
+        // the index holds, computed from the same bytes the same way.
+        let picture_table: Vec<tiamot_core::proto::PictureDef> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_pictures())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|picture| {
+                let file = content_index.hash_of(&picture.mod_id, &picture.file);
+                if file.is_none() {
+                    error!(
+                        mod_id = %picture.mod_id,
+                        path = %picture.file,
+                        picture = %picture.id,
+                        "picture declares a file that is not in the mod directory; clients \
+                         will draw nothing"
+                    );
+                }
+                tiamot_core::proto::PictureDef {
+                    id: picture.id,
+                    mod_id: picture.mod_id,
+                    file,
+                }
+            })
+            .collect();
+        info!(pictures = picture_table.len(), "picture table built");
+
         // Which sound each named event plays. Charter rule 1 again: the engine
         // emits cues and has no opinion about what any of them sounds like.
         let sound_bindings: Vec<tiamot_core::proto::SoundBinding> = host
@@ -2273,6 +2301,7 @@ impl ServerHandle {
             setting_table,
             sound_table,
             font_table,
+            picture_table,
             sound_bindings,
             hud_scripts,
             fluid_table,

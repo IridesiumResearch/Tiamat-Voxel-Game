@@ -148,6 +148,9 @@ fn a_bot_completes_the_whole_join_flow() {
             // this arrives, so it has to precede the join for a mod to see
             // them on the player's first tick.
             "ModSettings",
+            // Protocol v61: the pictures a mod registered, so a HUD's art is
+            // asked for before a script names it. Appended, as ever.
+            "PictureTable",
             "JoinWorld",
         ];
         assert!(
@@ -549,6 +552,7 @@ fn describe(message: &ServerMessage) -> &'static str {
         ServerMessage::SoundBindings { .. } => "SoundBindings",
         ServerMessage::FontTable { .. } => "FontTable",
         ServerMessage::ModSettings { .. } => "ModSettings",
+        ServerMessage::PictureTable { .. } => "PictureTable",
         ServerMessage::JoinWorld { .. } => "JoinWorld",
         ServerMessage::Disconnect { .. } => "Disconnect",
         _ => "other",

@@ -79,13 +79,100 @@ const HOOK_FLOW: &str = "on_fluid_flow";
 /// bytes in a Lua string are technically the former and emphatically not the
 /// latter the moment anyone logs one.
 fn hex_uuid(uuid: [u8; 32]) -> String {
+    hex_bytes(uuid)
+}
+
+/// Thirty-two bytes as sixty-four hex characters: a UUID, a content hash.
+fn hex_bytes(bytes: [u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut hex = String::with_capacity(64);
-    for byte in uuid {
+    for byte in bytes {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
 }
+
+/// Sixty-four hex characters back to thirty-two bytes, or `None`.
+fn unhex_bytes(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// The content hash of a file a mod ships, read from the mod's own directory.
+///
+/// **The mod names a path and the engine reads it**, under the rules a block
+/// texture's path already obeys — relative, no `..`, nothing absolute — and
+/// only a file clients are sent at all (`content::is_distributable`), so the
+/// hash answered here is exactly the one the server's index will hold. A
+/// path that is not a file, or is bigger than a client will take, is an error
+/// naming it: a mod hears at load where it wrote the wrong name, rather than
+/// drawing a magenta box in somebody's HUD.
+fn hash_mod_file(
+    lua: &Lua,
+    owner: &str,
+    what: &str,
+    file: &str,
+) -> mlua::Result<crate::proto::ContentHash> {
+    let relative = validate_mod_path(what, file).map_err(mlua::Error::external)?;
+    let dir: String = lua
+        .named_registry_value::<Table>(MOD_DIRS)
+        .and_then(|dirs| dirs.get(owner))
+        .map_err(|_| {
+            mlua::Error::external(format!(
+                "{what}: mod `{owner}` has no directory to read from"
+            ))
+        })?;
+    let path = Path::new(&dir).join(&relative);
+    if !crate::content::is_distributable(&path) {
+        return Err(mlua::Error::external(format!(
+            "{what}: `{file}` is not a file clients are sent — a picture is a .png or .jpg"
+        )));
+    }
+    let bytes = std::fs::read(&path).map_err(|err| {
+        mlua::Error::external(format!(
+            "{what}: `{file}` is not a file in mod `{owner}`'s directory: {err}"
+        ))
+    })?;
+    if bytes.len() as u64 > crate::content::MAX_FILE_BYTES {
+        return Err(mlua::Error::external(format!(
+            "{what}: `{file}` is {} bytes, and a client takes at most {}",
+            bytes.len(),
+            crate::content::MAX_FILE_BYTES
+        )));
+    }
+    Ok(crate::content::hash_bytes(&bytes))
+}
+
+/// A path inside the mod's directory, or why it is not one. The rules a
+/// block texture's path has, without its message.
+fn validate_mod_path(what: &str, path: &str) -> Result<String, String> {
+    let normalised = path.replace('\\', "/");
+    let refuse = |why: &str| {
+        Err(format!(
+            "{what}: path `{path}` {why}. Paths are relative to your mod's own directory."
+        ))
+    };
+    if normalised.trim().is_empty() {
+        return refuse("is empty");
+    }
+    if normalised.starts_with('/') || normalised.contains(':') {
+        return refuse("is absolute");
+    }
+    if normalised.split('/').any(|segment| segment == "..") {
+        return refuse("escapes the mod directory");
+    }
+    Ok(normalised)
+}
+
+/// Registry key holding each mod's directory, `mod_id -> path`, for the
+/// calls that hash a file the mod ships.
+const MOD_DIRS: &str = "tiamot.mod_dirs";
 
 /// Registry key holding the mods that registered `on_punch`.
 const PUNCHERS: &str = "tiamot.punchers";
@@ -1988,6 +2075,13 @@ impl ScriptVm for MluaVm {
     }
 
     fn load_mod(&mut self, mod_id: &str, source: &str, dir: &Path) -> Result<(), ScriptError> {
+        // Where the mod's files are, for `content_hash` and
+        // `register_picture` — the engine reads a validated path inside it;
+        // the mod never sees the directory.
+        if let Ok(dirs) = self.lua.named_registry_value::<Table>(MOD_DIRS) {
+            dirs.set(mod_id, dir.to_string_lossy().into_owned())
+                .map_err(|err| self.vm_error(&err))?;
+        }
         let env = self.build_environment(mod_id, dir)?;
         let game = self.build_game_table(mod_id, &env)?;
         env.set("game", game).map_err(|err| self.vm_error(&err))?;
@@ -2097,6 +2191,24 @@ impl ScriptVm for MluaVm {
             // Bounded here as well as at registration: one mod cannot register
             // a ninth, and eight mods registering one each still can.
             .take(crate::font::MAX_FONTS)
+            .collect()
+    }
+
+    fn registered_pictures(&self) -> Vec<crate::picture::Picture> {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.pictures") else {
+            return Vec::new();
+        };
+        registry
+            .sequence_values::<Table>()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                Some(crate::picture::Picture {
+                    id: entry.get("id").ok()?,
+                    mod_id: entry.get("mod_id").ok()?,
+                    file: entry.get("file").ok()?,
+                })
+            })
+            .take(crate::picture::MAX_PICTURES)
             .collect()
     }
 
@@ -3685,6 +3797,7 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
 
         self.install_font(mod_id, game)?;
+        self.install_picture(mod_id, game)?;
 
         // **One per mod, and the last one wins.** A mod with two HUD scripts is
         // a mod that should concatenate them: the client budgets per script per
@@ -4190,6 +4303,73 @@ impl MluaVm {
     /// concern anyway: what a sound is handed to is a mixer, and what a font is
     /// handed to is a parser running on bytes a server pushed. See
     /// [`crate::font`] for the caps that follow from that.
+    /// `game.register_picture` and `game.content_hash`.
+    ///
+    /// **A picture is registered so a client fetches it before a HUD names
+    /// it.** A dialog's tree is its own manifest and its pictures are asked
+    /// for when it arrives; a HUD script names a picture only when it draws
+    /// one, and nothing had ever asked for the bytes. Both calls hash the
+    /// file HERE, in the registration window, from the mod's own directory
+    /// — the same bytes and the same hash the server's content index will
+    /// hold — and answer it in hex, which is the spelling `hud.image` and a
+    /// dialog's `image` and `nine_slice` all take. So a mod pastes no hash
+    /// by hand and cannot go stale.
+    fn install_picture(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        let owner = mod_id.to_owned();
+        let register_picture = self
+            .lua
+            .create_function(move |lua, spec: Table| {
+                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: registration is closed"
+                    )));
+                }
+                let file: String = spec.get("file")?;
+                let hash = hash_mod_file(lua, &owner, "register_picture", &file)?;
+                // The id defaults to the file, so a mod that only wants the
+                // hash back need not invent a name.
+                let id = spec
+                    .get::<Option<String>>("id")?
+                    .unwrap_or_else(|| file.clone());
+                let entry = lua.create_table()?;
+                entry.set(
+                    "id",
+                    qualify_id(&owner, &id).map_err(mlua::Error::external)?,
+                )?;
+                entry.set("mod_id", owner.clone())?;
+                entry.set("file", file)?;
+                let pictures: Table = lua.named_registry_value("tiamot.pictures")?;
+                if pictures.raw_len() >= crate::picture::MAX_PICTURES {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: a server may push at most {} pictures",
+                        crate::picture::MAX_PICTURES
+                    )));
+                }
+                pictures.push(entry)?;
+                Ok(hex_bytes(hash))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_picture", register_picture)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let owner = mod_id.to_owned();
+        let content_hash = self
+            .lua
+            .create_function(move |lua, file: String| {
+                Ok(hex_bytes(hash_mod_file(
+                    lua,
+                    &owner,
+                    "content_hash",
+                    &file,
+                )?))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("content_hash", content_hash)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     fn install_font(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
         // **The same shape as a sound, and for the same reason**: a file in
         // the mod's own directory, travelling by hash. What differs is what it
@@ -6831,6 +7011,14 @@ impl MluaVm {
         self.lua
             .set_named_registry_value("tiamot.fonts", fonts)
             .map_err(|err| self.vm_error(&err))?;
+        let pictures = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
+        self.lua
+            .set_named_registry_value("tiamot.pictures", pictures)
+            .map_err(|err| self.vm_error(&err))?;
+        let mod_dirs = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
+        self.lua
+            .set_named_registry_value(MOD_DIRS, mod_dirs)
+            .map_err(|err| self.vm_error(&err))?;
         self.lua
             .set_named_registry_value("tiamot.hud_scripts", hud_scripts)
             .map_err(|err| self.vm_error(&err))?;
@@ -8454,10 +8642,11 @@ fn widget_style(spec: &Table) -> mlua::Result<crate::ui::Style> {
     Ok(crate::ui::Style {
         background: colour(&style, "background")?,
         border: colour(&style, "border")?,
-        nine_slice: style
-            .get::<Option<Table>>("nine_slice")?
-            .map(|_| content_hash(&style, "nine_slice"))
-            .transpose()?,
+        // Present in either spelling — hex or bytes — or absent.
+        nine_slice: match style.get::<Value>("nine_slice")? {
+            Value::Nil => None,
+            _ => Some(content_hash(&style, "nine_slice")?),
+        },
         text_colour: colour(&style, "text_colour")?,
         text_size: style.get::<Option<u16>>("text_size")?,
         font: style.get::<Option<String>>("font")?,
@@ -8483,11 +8672,26 @@ fn colour(table: &Table, key: &str) -> mlua::Result<Option<[u8; 4]>> {
     ]))
 }
 
-/// A 32-byte content hash, as a table of numbers.
+/// A content hash, as the 64 hex characters `register_picture` and
+/// `content_hash` answer — or, as a dialog tree spelled it before those
+/// existed, a table of 32 bytes.
 fn content_hash(table: &Table, key: &str) -> mlua::Result<[u8; 32]> {
-    let bytes: Vec<u8> = table.get(key)?;
-    <[u8; 32]>::try_from(bytes.as_slice())
-        .map_err(|_| mlua::Error::external(format!("`{key}` must be 32 bytes of content hash")))
+    match table.get::<Value>(key)? {
+        Value::String(text) => unhex_bytes(&text.to_str()?).ok_or_else(|| {
+            mlua::Error::external(format!(
+                "`{key}` must be a content hash: 64 hex characters, as game.content_hash answers"
+            ))
+        }),
+        Value::Table(bytes) => {
+            let bytes: Vec<u8> = bytes.sequence_values().collect::<Result<_, _>>()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+                mlua::Error::external(format!("`{key}` must be 32 bytes of content hash"))
+            })
+        }
+        _ => Err(mlua::Error::external(format!(
+            "`{key}` must be a content hash: 64 hex characters, as game.content_hash answers"
+        ))),
+    }
 }
 
 /// Keys a widget table accepts. Same rule as `BLOCK_FIELDS`: a typo is an
@@ -9690,6 +9894,73 @@ mod tests {
             None,
             "the faulted mod was asked again"
         );
+    }
+
+    #[test]
+    fn a_mod_registers_a_picture_and_is_answered_the_hash_the_server_will_serve() {
+        // **The HUD's art was never fetched.** A dialog's tree names its
+        // pictures and they are asked for; a HUD script names one only when
+        // it draws, and nothing had asked for the bytes. A registered picture
+        // is in a table the client fetches from, and the hash answered here
+        // is computed from the same bytes the same way as the server's
+        // content index — asserted against `content::hash_bytes` directly. A
+        // path that escapes the mod, a file that is not there, and a file
+        // clients are not sent are errors where they are written.
+        let dir = std::env::temp_dir().join("tiamot-vm-pictures");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("textures")).expect("mod dir");
+        let png = b"\x89PNG\r\n\x1a\nnot really a picture, but bytes with a hash";
+        std::fs::write(dir.join("textures/slot.png"), png).expect("picture");
+        std::fs::write(dir.join("init.lua"), "").expect("a file that is code");
+
+        let mut host = vm();
+        host.load_mod(
+            "art",
+            "slot = game.register_picture{ id = 'slot', file = 'textures/slot.png' }\n\
+             same = game.content_hash('textures/slot.png')\n\
+             bare = game.register_picture{ file = 'textures/slot.png' }\n\
+             escaped = tostring(select(2, pcall(game.content_hash, '../init.lua')))\n\
+             missing = tostring(select(2, pcall(game.content_hash, 'textures/nope.png')))\n\
+             code = tostring(select(2, pcall(game.content_hash, 'init.lua')))",
+            &dir,
+        )
+        .expect("load");
+
+        let expected = hex_bytes(crate::content::hash_bytes(png));
+        let env = host.environment("art").expect("env");
+        assert_eq!(env.get::<String>("slot").expect("slot"), expected);
+        assert_eq!(env.get::<String>("same").expect("same"), expected);
+        assert_eq!(env.get::<String>("bare").expect("bare"), expected);
+        for (name, wants) in [
+            ("escaped", "escapes the mod directory"),
+            ("missing", "not a file in mod"),
+            ("code", "not a file clients are sent"),
+        ] {
+            let message = env.get::<String>(name).expect(name);
+            assert!(message.contains(wants), "{name}: {message}");
+        }
+
+        let pictures = host.registered_pictures();
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0].id, "art:slot");
+        assert_eq!(pictures[0].mod_id, "art");
+        assert_eq!(pictures[0].file, "textures/slot.png");
+        assert_eq!(
+            pictures[1].id, "art:textures/slot.png",
+            "the id defaults to the file"
+        );
+
+        // And the hex names a dialog's frame, as the bytes did before.
+        host.freeze().expect("freeze");
+        let hex = expected.clone();
+        let table = host.lua.create_table().expect("table");
+        table.set("nine_slice", hex).expect("set");
+        assert_eq!(
+            content_hash(&table, "nine_slice").expect("hex"),
+            crate::content::hash_bytes(png)
+        );
+        table.set("nine_slice", "not a hash").expect("set");
+        assert!(content_hash(&table, "nine_slice").is_err());
     }
 
     /// Records every sky modifier a mod set.

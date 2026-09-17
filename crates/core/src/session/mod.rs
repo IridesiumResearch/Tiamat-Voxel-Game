@@ -329,6 +329,9 @@ pub struct JoinContext<'a> {
     /// like, and the engine has an opinion about exactly one — its own, which
     /// is what a mod that says nothing gets. See [`crate::proto::FontDef`].
     pub fonts: &'a [crate::proto::FontDef],
+    /// Every picture a mod registered, in load order, so the client fetches
+    /// them before a HUD script names one. See [`crate::proto::PictureDef`].
+    pub pictures: &'a [crate::proto::PictureDef],
     /// Which sound each named event plays, in load order.
     ///
     /// The client needs this and not only the server: the handful of cues the
@@ -843,6 +846,12 @@ impl Session {
                 ServerMessage::ModSettings {
                     settings: context.settings.to_vec(),
                 },
+                // And the pictures, appended for the same reason: fetched by
+                // hash after the join, so a HUD's first frame has asked for
+                // its art rather than found it never arrived.
+                ServerMessage::PictureTable {
+                    pictures: context.pictures.to_vec(),
+                },
             ],
             close: false,
             action: Action::None,
@@ -1026,6 +1035,7 @@ mod tests {
             settings: &[],
             sounds: &[],
             fonts: &[],
+            pictures: &[],
             sound_bindings: &[],
             hud_scripts: &[],
             sky: (0, &[]),
@@ -1140,7 +1150,9 @@ mod tests {
         // does not renumber every message after it — which is what this
         // assertion exists to notice.
         assert!(matches!(sent[12], ServerMessage::ModSettings { .. }));
-        assert!(matches!(sent[13], ServerMessage::JoinWorld { .. }));
+        // And the pictures after them (protocol v61), for the same reason.
+        assert!(matches!(sent[13], ServerMessage::PictureTable { .. }));
+        assert!(matches!(sent[14], ServerMessage::JoinWorld { .. }));
     }
 
     #[test]
