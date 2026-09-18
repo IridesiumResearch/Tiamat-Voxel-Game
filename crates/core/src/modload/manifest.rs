@@ -54,6 +54,137 @@ pub struct WorldOption {
     pub default: u32,
 }
 
+/// A mod's look, applied to the engine's OWN screens.
+///
+/// # Why the engine has no look of its own to defend
+///
+/// Charter rule 1: the mod API is the only API. The pause screen, the settings
+/// pages and the start screen are the client's, drawn in plain egui, and a mod
+/// has no hook into any of them — so a game built on this engine could restyle
+/// its own dialogs and then hand the player back to a menu that looked like a
+/// different program. Painting one game's art into the client instead would be
+/// putting content in the engine, which is the same rule from the other side.
+///
+/// So a look is DATA a mod ships, and the engine applies it to its own
+/// furniture. Nothing here is code and nothing here is drawn by the mod.
+///
+/// # Declared here and not in Lua
+///
+/// The same reason [`WorldOption`] is: **the start screen runs before any
+/// server exists**, so no Lua has run and none can. A manifest is read without
+/// a VM, which is what lets the launcher wear the theme of the mods it is
+/// about to load.
+///
+/// ```toml
+/// [theme]
+/// font = "fonts/Cinzel.ttf"
+/// sheet = "art/frame_iron.png"
+/// button = "art/button_brass.png"
+///
+/// [theme.colours]
+/// text = "#e8dcc0"
+/// heading = "#f0d890"
+/// background = "#1a1512"
+/// button = "#2a2018"
+/// accent = "#b08d57"
+/// ```
+///
+/// Every field is optional and anything left out is the client's own look, so
+/// a theme that names only a palette is a theme. **One theme applies at a
+/// time — the last mod in load order that declares one** — because two mods
+/// blending their idea of a frame is not a look, it is an accident.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Theme {
+    /// A font file inside the mod's directory, drawn in place of the client's
+    /// own on every engine screen.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// A nine-slice image for the frame around a sheet — the inventory, the
+    /// pause screen, a settings page. Its border is a THIRD of the image, the
+    /// rule `Style::nine_slice` already uses.
+    #[serde(default)]
+    pub sheet: Option<String>,
+    /// A nine-slice image for the frame around a button.
+    #[serde(default)]
+    pub button: Option<String>,
+    /// The palette. See [`ThemeColours`].
+    #[serde(default)]
+    pub colours: ThemeColours,
+}
+
+/// A theme's palette, as `"#rrggbb"` or `"#rrggbbaa"` strings.
+///
+/// Five, which is what it takes to restyle the engine's screens and no more.
+/// A longer list would be the engine describing its own widget tree in a mod's
+/// manifest, and every entry in it would be a promise about how the client is
+/// built.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeColours {
+    /// Ordinary text.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Headings, and the title on a sheet's bar.
+    #[serde(default)]
+    pub heading: Option<String>,
+    /// The fill behind a sheet, under any frame image.
+    #[serde(default)]
+    pub background: Option<String>,
+    /// The fill behind a button.
+    #[serde(default)]
+    pub button: Option<String>,
+    /// Selection, hover, and the active parts of a slider or a tick box.
+    #[serde(default)]
+    pub accent: Option<String>,
+}
+
+impl ThemeColours {
+    /// Every colour in it, named, for a caller that has to check or convert
+    /// them all.
+    ///
+    /// A method rather than five field reads at each call site: a sixth colour
+    /// should be added in one place and reach every one of them, and the
+    /// alternative is a validator that silently stops checking the new one.
+    #[must_use]
+    pub fn named(&self) -> [(&'static str, Option<&str>); 5] {
+        [
+            ("text", self.text.as_deref()),
+            ("heading", self.heading.as_deref()),
+            ("background", self.background.as_deref()),
+            ("button", self.button.as_deref()),
+            ("accent", self.accent.as_deref()),
+        ]
+    }
+}
+
+/// Parses `"#rrggbb"` or `"#rrggbbaa"` into straight RGBA bytes.
+///
+/// **Hex and not a table of numbers**, because a palette is copied out of the
+/// program the art was drawn in, and every one of those shows hex.
+///
+/// Returns `None` for anything else, which the manifest turns into a named
+/// error rather than a silently black screen.
+#[must_use]
+pub fn parse_colour(text: &str) -> Option<crate::ui::Colour> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 && digits.len() != 8 {
+        return None;
+    }
+    if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    Some([
+        byte(0)?,
+        byte(2)?,
+        byte(4)?,
+        // No alpha written is opaque, which is what somebody pasting a colour
+        // out of an art program means by it.
+        if digits.len() == 8 { byte(6)? } else { 0xFF },
+    ])
+}
+
 /// What a world chose for one option, as a mod reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldOptionValue {
@@ -62,6 +193,72 @@ pub enum WorldOptionValue {
     /// A choice's answer: the option's TEXT, never its index, so a mod that
     /// inserts an option above it keeps comparing against the same string.
     Choice(String),
+}
+
+impl Theme {
+    /// Checks a theme is one a client could actually wear.
+    ///
+    /// **Refused here rather than ignored later.** A colour that does not parse
+    /// and a frame image nobody will ever fetch are both mistakes a mod author
+    /// wants told about while they are editing the file — and the alternative,
+    /// falling back silently, is a mod that looks like the engine ignoring it.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::BadTheme`] naming the field and what is wrong with it.
+    pub fn validate(&self, id: &str) -> Result<(), ManifestError> {
+        let bad = |reason: String| ManifestError::BadTheme {
+            id: id.to_owned(),
+            reason,
+        };
+        for (field, path) in [
+            ("font", self.font.as_deref()),
+            ("sheet", self.sheet.as_deref()),
+            ("button", self.button.as_deref()),
+        ] {
+            let Some(path) = path else { continue };
+            // **The same rule every other mod-supplied path obeys.** A theme's
+            // files travel to clients through the content pipeline, and that
+            // pipeline only carries distributable kinds — so a `.lua` or a
+            // `.txt` here would be a file the server indexed and no client
+            // could ever be sent.
+            if !crate::content::is_distributable(Path::new(path)) {
+                return Err(bad(format!(
+                    "`{field} = \"{path}\"` is not a kind of file clients are sent"
+                )));
+            }
+            // Nothing may climb out of the mod's own directory. The content
+            // index applies this too; saying it here means the author is told
+            // at the file they wrote rather than by a picture that never loads.
+            if Path::new(path).is_absolute() || path.split(['/', '\\']).any(|part| part == "..") {
+                return Err(bad(format!(
+                    "`{field} = \"{path}\"` must be inside the mod's own directory"
+                )));
+            }
+        }
+        for (field, colour) in self.colours.named() {
+            let Some(colour) = colour else { continue };
+            if parse_colour(colour).is_none() {
+                return Err(bad(format!(
+                    "`colours.{field} = \"{colour}\"` is not `#rrggbb` or `#rrggbbaa`"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The files this theme needs shipped to a client, in declaration order.
+    #[must_use]
+    pub fn files(&self) -> Vec<&str> {
+        [
+            self.font.as_deref(),
+            self.sheet.as_deref(),
+            self.button.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
 }
 
 impl WorldOptionValue {
@@ -218,6 +415,10 @@ pub struct ModManifest {
     /// Choices offered when a world is made. See [`WorldOption`].
     #[serde(default, rename = "world_option")]
     pub world_options: Vec<WorldOption>,
+
+    /// How this mod wants the engine's own screens to look. See [`Theme`].
+    #[serde(default)]
+    pub theme: Option<Theme>,
 }
 
 /// A manifest could not be read or is not valid.
@@ -253,6 +454,15 @@ pub enum ManifestError {
         path: PathBuf,
         /// The offending id.
         id: String,
+    },
+
+    /// A `[theme]` is malformed.
+    #[error("mod `{id}` declares its theme wrongly: {reason}")]
+    BadTheme {
+        /// The mod.
+        id: String,
+        /// What is wrong with it.
+        reason: String,
     },
 
     /// A `[[world_option]]` is malformed.
@@ -390,6 +600,10 @@ impl ModManifest {
             }
         }
 
+        if let Some(theme) = &self.theme {
+            theme.validate(&self.id)?;
+        }
+
         if !dir.join(ENTRY_FILE).is_file() {
             return Err(ManifestError::MissingEntry {
                 id: self.id.clone(),
@@ -510,6 +724,88 @@ mod tests {
         assert!(!requirement.matches(&semver::Version::parse("0.9.0").expect("v")));
         assert!(requirement.matches(&semver::Version::parse("1.5.0").expect("v")));
         assert!(!requirement.matches(&semver::Version::parse("2.0.0").expect("v")));
+    }
+
+    #[test]
+    fn a_theme_parses_out_of_the_manifest_it_shares_with_everything_else() {
+        // **In `mod.toml` and not beside it**, for the reason a world option
+        // is: the start screen has to read a theme before any mod has run, and
+        // it already reads this file without a VM. A second file would be a
+        // second discovery path and a second way to be malformed.
+        // `r##` rather than `r#`: a hex colour ends in `"#`, which closes a
+        // single-hash raw string in the middle of the fixture.
+        let manifest: ModManifest = toml::from_str(
+            r##"
+            id = "iron"
+            name = "Iron"
+            version = "1.0.0"
+
+            [theme]
+            font = "fonts/Cinzel.ttf"
+            sheet = "art/frame.png"
+            button = "art/button.png"
+
+            [theme.colours]
+            text = "#e8dcc0"
+            heading = "#f0d890"
+            accent = "#b08d57ff"
+            "##,
+        )
+        .expect("a manifest with a theme in it");
+        let theme = manifest.theme.clone().expect("a theme");
+        assert_eq!(theme.font.as_deref(), Some("fonts/Cinzel.ttf"));
+        assert_eq!(
+            theme.files(),
+            ["fonts/Cinzel.ttf", "art/frame.png", "art/button.png"]
+        );
+        theme.validate("iron").expect("a valid theme");
+
+        // A colour left out is the client's own, so the palette is a partial
+        // statement rather than a thing a mod has to fill in.
+        assert_eq!(theme.colours.background, None);
+        assert_eq!(parse_colour("#e8dcc0"), Some([0xE8, 0xDC, 0xC0, 0xFF]));
+        assert_eq!(parse_colour("#b08d5780"), Some([0xB0, 0x8D, 0x57, 0x80]));
+
+        // And a manifest with no theme at all is every mod written so far.
+        let plain: ModManifest =
+            toml::from_str("id = \"plain\"\nname = \"Plain\"\nversion = \"1.0.0\"")
+                .expect("a manifest");
+        assert_eq!(plain.theme, None);
+    }
+
+    #[test]
+    fn a_theme_that_could_not_be_worn_is_refused_at_the_manifest() {
+        let of = |body: &str| {
+            toml::from_str::<ModManifest>(&format!(
+                "id = \"iron\"\nname = \"Iron\"\nversion = \"1.0.0\"\n{body}"
+            ))
+            .expect("parses")
+            .theme
+            .expect("a theme")
+            .validate("iron")
+        };
+
+        // A colour nobody can read. Silently falling back would look exactly
+        // like the engine ignoring the mod.
+        let err = of("[theme.colours]\ntext = \"dark brown\"").expect_err("not hex");
+        assert!(format!("{err}").contains("colours.text"), "{err}");
+        assert!(
+            of("[theme.colours]\ntext = \"#abc\"").is_err(),
+            "three digits"
+        );
+
+        // A file kind the content pipeline will not carry, so no client could
+        // ever be sent it however correct the rest of the theme is.
+        let err = of("[theme]\nsheet = \"art/frame.bmp\"").expect_err("not distributable");
+        assert!(format!("{err}").contains("sheet"), "{err}");
+
+        // And nothing climbs out of the mod's own directory.
+        assert!(of("[theme]\nfont = \"../../../etc/passwd\"").is_err());
+        assert!(of("[theme]\nfont = \"/usr/share/fonts/x.ttf\"").is_err());
+
+        // Non-vacuous: the same shape with the faults taken out passes.
+        of("[theme]\nsheet = \"art/frame.png\"\n[theme.colours]\ntext = \"#e8dcc0\"")
+            .expect("a theme with nothing wrong with it");
     }
 
     #[test]
