@@ -158,6 +158,35 @@ impl ThemeColours {
     }
 }
 
+/// Whether a mod-supplied path stays inside the mod's own directory.
+///
+/// # Judged as TEXT, on purpose
+///
+/// `Path::is_absolute` answers differently on different platforms:
+/// `/usr/share/fonts/x.ttf` is absolute on Linux and **relative on Windows**,
+/// and `C:\x.ttf` is the other way round. A manifest judged with it is a
+/// manifest that means two things — the same mod accepted on one server and
+/// refused on another, which is the worst shape a rule can have. CI's Windows
+/// leg caught exactly that, on a test asserting a Unix absolute path was
+/// refused.
+///
+/// So the rule is stated over the string and is the same everywhere: no leading
+/// separator, no drive letter, and no `..` component under either separator.
+#[must_use]
+fn is_inside_mod_dir(path: &str) -> bool {
+    if path.is_empty() || path.starts_with(['/', '\\']) {
+        return false;
+    }
+    // A drive-qualified path, `C:x` and `C:\x` alike. The second is absolute
+    // and the first is relative to that drive's current directory, and neither
+    // is inside a mod.
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    !path.split(['/', '\\']).any(|part| part == "..")
+}
+
 /// Parses `"#rrggbb"` or `"#rrggbbaa"` into straight RGBA bytes.
 ///
 /// **Hex and not a table of numbers**, because a palette is copied out of the
@@ -230,7 +259,7 @@ impl Theme {
             // Nothing may climb out of the mod's own directory. The content
             // index applies this too; saying it here means the author is told
             // at the file they wrote rather than by a picture that never loads.
-            if Path::new(path).is_absolute() || path.split(['/', '\\']).any(|part| part == "..") {
+            if !is_inside_mod_dir(path) {
                 return Err(bad(format!(
                     "`{field} = \"{path}\"` must be inside the mod's own directory"
                 )));
@@ -806,6 +835,38 @@ mod tests {
         // Non-vacuous: the same shape with the faults taken out passes.
         of("[theme]\nsheet = \"art/frame.png\"\n[theme.colours]\ntext = \"#e8dcc0\"")
             .expect("a theme with nothing wrong with it");
+    }
+
+    #[test]
+    fn a_path_out_of_the_mod_directory_is_refused_the_same_way_on_every_platform() {
+        // **A manifest must mean one thing.** `Path::is_absolute` answers
+        // differently per platform — `/usr/share/x.ttf` is absolute on Linux
+        // and RELATIVE on Windows, `C:\x.ttf` the other way round — so a rule
+        // written with it accepts a mod on one server and refuses it on
+        // another. CI's Windows leg caught that on the first push; this is the
+        // test that does not need a Windows runner to catch it again.
+        for escape in [
+            "/usr/share/fonts/x.ttf",
+            "\\windows\\fonts\\x.ttf",
+            "C:\\windows\\fonts\\x.ttf",
+            "c:x.ttf",
+            "../x.ttf",
+            "art/../../x.png",
+            "art\\..\\..\\x.png",
+            "",
+        ] {
+            assert!(
+                !is_inside_mod_dir(escape),
+                "`{escape}` should not be a path inside a mod"
+            );
+        }
+
+        // Non-vacuous: the ordinary shapes a mod actually writes still pass,
+        // including a Windows-style separator, which is a real relative path
+        // and not an escape.
+        for fine in ["x.ttf", "art/frame.png", "art\\frame.png", "a/b/c/d.png"] {
+            assert!(is_inside_mod_dir(fine), "`{fine}` is an ordinary mod path");
+        }
     }
 
     #[test]
