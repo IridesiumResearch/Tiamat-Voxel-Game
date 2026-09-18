@@ -41,6 +41,19 @@ struct Clouds {
     // field's scale is hundreds of blocks, so a fraction of a block of
     // precision at the world's edge is nothing.
     camera: vec4<f32>,
+    // How wide one pixel is in radians (x), and three spare.
+    //
+    // **The LOD is decided against this, not against a distance.** A cube is
+    // worth drawing while it covers more than about a pixel, and how far away
+    // that is depends on the resolution — so a threshold in blocks is right at
+    // one window size and wrong at every other.
+    //
+    // **Its place in this struct is load-bearing.** A field added here and in
+    // the Rust `Uniforms` at two different offsets does not fail to compile:
+    // every field after the shorter one reads its neighbour's bytes, and the
+    // sky simply empties. That is what happened, and the only symptom was that
+    // clouds stopped existing.
+    view: vec4<f32>,
     // Which way sunlight travels (xyz), and the deck's floor (w).
     sun_direction: vec4<f32>,
     // The sun's colour (xyz), and the deck's thickness (w).
@@ -55,7 +68,12 @@ struct Clouds {
     weather: vec4<f32>,
     // drift x, drift z, evolve, the field's seed.
     motion: vec4<f32>,
-    // How far to march, how far detail reaches, octaves, lighting mode.
+    // How far to march, how far detail reaches, octaves, and the lighting
+    // mode as `LightingMode::code` numbers it: 0 Simple, 1 Classic, 2
+    // Beautiful. **The engine's own numbering**, not 1/2/3 — inventing a
+    // second one here made Classic draw as Simple and Beautiful draw as
+    // Classic, and the only sign was that two of the three pictures were
+    // identical.
     quality: vec4<f32>,
 }
 
@@ -284,20 +302,47 @@ struct Hit {
     t: f32,
     position: vec3<f32>,
     face_y: f32,
+    /// The grid this ray marched on.
+    cell: f32,
+    /// The face that was crossed, as a unit normal.
+    ///
+    /// **Taken from the analyser, not from the hit's position.** Working it
+    /// out afterwards means asking which cell the point is in, and the point
+    /// is exactly ON a cell wall — `floor` puts it either side depending on
+    /// the last bit, so the face flips between the two cells that share the
+    /// wall and neighbouring pixels disagree. That is what turned solid cloud
+    /// into gold confetti. The analyser knows which boundary it crossed, so
+    /// there is nothing to infer.
+    normal: vec3<f32>,
 };
 
 // Marches the grid and returns the first solid cell.
+//
+// # A DDA, because a fixed step skips cells
+//
+// The first version advanced `t` by a fixed length and tested whichever column
+// that landed in. Wherever the step grew past the cell size — which is most of
+// the frame, since the step grows with distance — it skipped columns entirely,
+// testing one of them against a segment crossing several. The picture was
+// confetti: cubes hit and missed at random along every ray, with no solid
+// surface anywhere.
+//
+// A digital differential analyser steps to the next cell BOUNDARY instead, so
+// every cell along the ray is visited exactly once with the exact `t` it was
+// entered and left at. That is what makes a silhouette solid, and it is also
+// what makes the faces exact — the boundary crossed IS the face.
 fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     var out: Hit;
     out.hit = false;
     out.t = far;
     out.position = origin;
     out.face_y = 0.0;
+    out.cell = clouds.colour.w;
+    out.normal = vec3<f32>(0.0, 1.0, 0.0);
 
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
-    let cell = clouds.colour.w;
-    let small = max(clouds.shade.w, 0.25);
+    let base_cell = clouds.colour.w;
     let detail_reach = clouds.quality.y;
 
     // The slab the whole deck lives in, so a ray that never reaches it costs
@@ -320,59 +365,94 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
         return out;
     }
 
-    // The step grows with distance: a cube a kilometre away is well under a
-    // pixel, so stepping at its size there is work nobody can see. This is the
-    // LOD, and it is one line rather than a tile scheme.
-    // **The column is remembered across steps.** The march steps at the SMALL
-    // cube so the rind resolves, but the field is per LARGE cell — so without
-    // this the same column is evaluated once per small cube inside it, which
-    // near the camera is `detail` times over for the same answer. The field is
-    // the whole cost of the loop; everything else in it is arithmetic.
+    // **The grid coarsens with distance, per ray.** A cube whose angular size
+    // is under a pixel cannot be drawn, only aliased: neighbouring columns
+    // differ by a whole cell where the rind bites, so at a kilometre every
+    // pixel samples a different micro-feature and solid cloud turns to
+    // confetti. Fading the rind is not enough — the CELLS have to grow.
+    //
+    // Chosen once per ray from where it meets the deck, so the analyser keeps
+    // one uniform grid and stays simple, and quantised to powers of two so
+    // that two neighbouring rays at slightly different distances land on the
+    // SAME grid rather than on two that disagree by a fraction of a cell,
+    // which would shimmer as the camera moved.
+    // Grow the cell until it covers at least `WANTED` pixels. A cube at a
+    // kilometre is under a pixel across, and a cube under a pixel cannot be
+    // drawn — only aliased, because neighbouring columns differ by a whole
+    // cell wherever the rind bites.
+    let pixels = max(base_cell / max(t_enter * clouds.view.x, 0.000001), 0.0001);
+    let steps = clamp(3.0 / pixels, 1.0, 32.0);
+    let cell = base_cell * exp2(ceil(log2(steps)));
+    out.cell = cell;
+
+    // Set the analyser up on the cell the ray enters the slab in.
+    let entry = origin + direction * t_enter;
+    var cell_index = floor(entry.xz / cell);
+    let step = sign(direction.xz);
+    // How far along the ray one whole cell of travel is, per axis. A ray with
+    // no component on an axis never crosses one of its boundaries, which is
+    // what the huge number stands for.
+    let delta = select(
+        vec2<f32>(1e30, 1e30),
+        abs(vec2<f32>(cell, cell) / direction.xz),
+        abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
+    );
+    // And how far to the FIRST boundary, which depends on where in the cell
+    // the ray came in and which way it is going.
+    let boundary = (cell_index + max(step, vec2<f32>(0.0, 0.0))) * cell;
+    var next = select(
+        vec2<f32>(1e30, 1e30),
+        t_enter + (boundary - entry.xz) / direction.xz,
+        abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
+    );
+
+    // Which wall got us into the cell being tested: 0 for an x wall, 1 for a
+    // z wall, and -1 for the first, which was entered through the deck's own
+    // floor or ceiling rather than through a wall.
+    var entered = -1;
     var t = t_enter;
     var guard = 0;
-    var last_cell = vec2<f32>(1e30, 1e30);
-    var column = empty_column();
     loop {
         if (t >= t_leave || guard >= 512) {
             break;
         }
         guard = guard + 1;
+        let leave = min(min(next.x, next.y), t_leave);
         let detail_mix = clamp(1.0 - t / max(detail_reach, 1.0), 0.0, 1.0);
-        let step_len = mix(cell, small, detail_mix) * (1.0 + t / max(detail_reach, 1.0));
-        let at = origin + direction * t;
-        let cell_xz = floor(at.xz / cell) * cell + cell * 0.5;
-        if (any(cell_xz != last_cell)) {
-            last_cell = cell_xz;
-            column = column_at(cell_xz, detail_mix);
-        }
-        let found = enter_column(column, origin.y, direction.y, t, min(t + step_len, t_leave));
+        let cell_xz = cell_index * cell + cell * 0.5;
+        let column = column_at(cell_xz, detail_mix);
+        let found = enter_column(column, origin.y, direction.y, t, leave);
         if (found.x >= 0.0) {
             out.hit = true;
             out.t = found.x;
             out.position = origin + direction * found.x;
             out.face_y = found.y;
+            // A horizontal face if the ray met the column's top or bottom
+            // inside this cell, and otherwise the wall it came in through. A
+            // ray travelling downwards that meets a horizontal face met the
+            // TOP of the cloud, so the face points up.
+            if (found.y > 0.5 || entered < 0) {
+                out.normal = vec3<f32>(0.0, select(-1.0, 1.0, direction.y < 0.0), 0.0);
+            } else if (entered == 0) {
+                out.normal = vec3<f32>(-step.x, 0.0, 0.0);
+            } else {
+                out.normal = vec3<f32>(0.0, 0.0, -step.y);
+            }
             return out;
         }
-        t = t + step_len;
+        // Over the nearer boundary and into the next cell.
+        t = leave;
+        if (next.x < next.y) {
+            cell_index.x = cell_index.x + step.x;
+            next.x = next.x + delta.x;
+            entered = 0;
+        } else {
+            cell_index.y = cell_index.y + step.y;
+            next.y = next.y + delta.y;
+            entered = 1;
+        }
     }
     return out;
-}
-
-// The cube face a hit landed on, as a unit normal.
-//
-// Taken from where the hit sits in its own cell rather than from which wall
-// the march crossed: the march steps along `t` rather than wall to wall, so
-// the cell is what it knows. The dominant axis of the offset from the cell's
-// centre IS the face, exactly, which is what keeps the silhouette cubic.
-fn face_normal(hit: vec3<f32>, cell_xz: vec2<f32>, span: vec2<f32>, face_y: f32) -> vec3<f32> {
-    if (face_y > 0.5) {
-        return vec3<f32>(0.0, select(-1.0, 1.0, hit.y > (span.x + span.y) * 0.5), 0.0);
-    }
-    let offset = hit.xz - cell_xz;
-    if (abs(offset.x) >= abs(offset.y)) {
-        return vec3<f32>(select(-1.0, 1.0, offset.x > 0.0), 0.0, 0.0);
-    }
-    return vec3<f32>(0.0, 0.0, select(-1.0, 1.0, offset.y > 0.0));
 }
 
 // The sky along one view ray: a gradient, the sun's glow, and its disc.
@@ -391,9 +471,7 @@ fn face_normal(hit: vec3<f32>, cell_xz: vec2<f32>, span: vec2<f32>, face_y: f32)
 // From the keyframes a mod already registered (charter rule 1): the zenith is
 // the mod's own sky colour deepened, the glow is the mod's own sun colour.
 // Nothing here invents a palette — it renders the one that was declared more
-// faithfully than a flat fill could. A mod that wants to state its zenith
-// outright is an additive keyframe field, and this is what every world written
-// before that gets.
+// faithfully than a flat fill could.
 fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     let horizon = clouds.sky.xyz;
     // Deeper and bluer overhead. Multiplying rather than lerping to a constant
@@ -409,14 +487,12 @@ fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     // The glow, which is most of what reads as golden hour: a wide warm halo
     // around the sun, and a tight one on it.
     //
-    // **Only mode 3 may blow out.** It draws into a float target and its post
-    // chain tonemaps, so a sun brighter than white is a sun that survives as
-    // one. Modes 1 and 2 write straight to an sRGB surface and CLIP, so the
-    // same numbers there do not make a brighter sun — they make a wider white
-    // hole, and the brightness washes into everything sampled near it. Two
-    // screenshot tests that had nothing to do with the sky failed on exactly
-    // that: a block's faces all read 0.84–0.96 and lost their own shading.
-    let headroom = select(1.0, 2.6, clouds.quality.w >= 3.0);
+    // **Only Beautiful may blow out.** It draws into a float target and its
+    // post chain tonemaps, so a sun brighter than white survives as one. The
+    // other two write straight to an sRGB surface and CLIP, where the same
+    // numbers do not make a brighter sun — they make a wider white hole, and
+    // the brightness washes into everything sampled near it.
+    let headroom = select(1.0, 2.6, clouds.quality.w >= 2.0);
     colour = colour + clouds.sun.xyz * pow(alignment, 8.0) * 0.17 * headroom;
     colour = colour + clouds.sun.xyz * pow(alignment, 128.0) * 0.42 * headroom;
     // And the disc. Small, and deliberately not a texture: it is the one
@@ -476,13 +552,7 @@ fn fragment_main(in: Varyings) -> Painted {
         return out;
     }
 
-    let cell_xz = floor(found.position.xz / cell) * cell + cell * 0.5;
-    let column = column_at(cell_xz, clamp(1.0 - found.t / max(clouds.quality.y, 1.0), 0.0, 1.0));
-    var span = column.lower;
-    if (found.position.y >= column.upper.x && found.position.y <= column.upper.y) {
-        span = column.upper;
-    }
-    let normal = face_normal(found.position, cell_xz, span, found.face_y);
+    let normal = found.normal;
 
     // Mode 1 shades by face direction alone: no sun colour, no sky colour, one
     // ambient. It is the mode that pays for nothing it cannot show.
@@ -490,7 +560,7 @@ fn fragment_main(in: Varyings) -> Painted {
     let facing = dot(normal, toward_sun);
     var lit = clouds.colour.xyz * (0.72 + 0.28 * max(normal.y, 0.0));
 
-    if (mode >= 2.0) {
+    if (mode >= 1.0) {
         // **Golden hour is BACKLIT.** The sun is at the horizon, so it lights
         // cloud BASES, and the violet-grey belongs to the clouds far from it.
         // A model that shaded "up is lit, down is shaded" would get the one
@@ -501,7 +571,7 @@ fn fragment_main(in: Varyings) -> Painted {
         lit = mix(cool, warm, sunward * sunward);
     }
 
-    if (mode >= 3.0) {
+    if (mode >= 2.0) {
         // Self-shadow: the inside of a heap is darker than its rim because
         // cloud above and sunward of it is in the way.
         let shadow = sun_shadow(found.position, cell);

@@ -1569,6 +1569,10 @@ impl Renderer {
             sun: [self.sun_colour[0], self.sun_colour[1], self.sun_colour[2]],
             sky: self.sky_colour,
             fog_end: self.fog_end,
+            // Vertical field of view over the frame's height: how much sky one
+            // pixel covers, which is what decides when a cube stops being
+            // worth drawing.
+            pixel_angle: camera.fov_y / f32::from(u16::try_from(self.depth_size.1).unwrap_or(1080)),
             mode: self.lighting_mode().code(),
         };
         let gpu = self.gpu.clone();

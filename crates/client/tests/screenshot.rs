@@ -5124,7 +5124,8 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         sun: [1.0, 0.86, 0.62],
         sky: [0.42, 0.58, 0.85],
         fog_end: 3000.0,
-        mode: 3,
+        pixel_angle: 1.0 / f32::from(u16::try_from(HEIGHT).unwrap_or(240)),
+        mode: 2,
     };
 
     // A deck and a cover: the pass has something to draw.
@@ -5239,9 +5240,15 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
     let cloudy_sky = average(&clouded, 0, 0, WIDTH, HEIGHT / 2);
     println!("clear {empty_sky:?} clouded {cloudy_sky:?}");
 
+    // **Less BLUE, not brighter.** An overcast base is whatever the light
+    // makes it — bright white under a high sun, dark violet-grey under a low
+    // one — so brightness says nothing on its own. What cloud always does is
+    // take the blue out: it is lit by the sun and the sky rather than being
+    // the sky. That is the same margin `is_sky` measures.
+    let margin = |c: [f32; 3]| c[2] - c[0];
     assert!(
-        cloudy_sky[0] > empty_sky[0] + 0.02,
-        "an overcast sky should be less blue and more even than a clear one; \
+        margin(cloudy_sky) < margin(empty_sky) - 0.02,
+        "an overcast sky should be less blue than a clear one; \
          clear {empty_sky:?} clouded {cloudy_sky:?}"
     );
 
@@ -5286,11 +5293,11 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
     // clear sky in the references still has a few small clouds in it, which is
     // what the threshold at zero cover gives.
     assert!(
-        (off_sky[0] - cloudy_sky[0]).abs() > 0.1,
+        (margin(off_sky) - margin(cloudy_sky)).abs() > 0.05,
         "an overcast sky and no clouds at all should not look alike"
     );
     assert!(
-        (off_sky[0] - empty_sky[0]).abs() > 0.005,
+        (margin(off_sky) - margin(empty_sky)).abs() > 0.002,
         "a clear sky should still carry a few clouds, so it is not the same as none"
     );
 }
@@ -5476,4 +5483,102 @@ fn the_sky_is_a_gradient_and_the_horizon_still_matches_the_fog() {
         (near_horizon[2] - flat[2]).abs() < 0.12,
         "the horizon drifted from the fog's colour; horizon {near_horizon:?} fog {flat:?}"
     );
+}
+
+/// A deck shaped like the reference images: heaped, towering, drifting.
+fn cumulus() -> tiamot_core::atmosphere::CloudLayer {
+    tiamot_core::atmosphere::CloudLayer {
+        base: 180.0,
+        thickness: 110.0,
+        cell: 6.0,
+        detail: 2,
+        frequency: 1.0 / 220.0,
+        octaves: 4,
+        // High, because the references' hero cloud is a tower that mushrooms
+        // out over its own waist — that is what `towers` drives.
+        towers: 0.55,
+        drift: [1.5, 0.4],
+        evolve: 1.0 / 2400.0,
+        colour: [1.0; 3],
+        shade: [0.42, 0.44, 0.58],
+    }
+}
+
+#[test]
+#[ignore = "the golden-hour picture for a person to compare; run with --ignored --nocapture"]
+fn dump_the_golden_hour() {
+    // **Weather ask W2's acceptance criterion, as far as a machine can take
+    // it.** The criterion is "standing at golden hour under `cover = 0.55` in
+    // mode 3, a screenshot should be comparable with the references: blocky
+    // two-scale cumulus with flat bases, sunlit gold tops, violet undersides,
+    // towers among flatter banks, and cloud down to the horizon", and under
+    // `cover = 1, darkness = 1` a low grey ceiling.
+    //
+    // **No assertion, and there cannot be one.** "Comparable with the
+    // references" is a judgement about a picture. This writes the pictures and
+    // says where they are; whether they are comparable is the human gate.
+    //
+    // Into the repo's own `target/`, for the reason the mode matrix gives: the
+    // system temp directory on Windows is a hidden path under `AppData\Local`,
+    // which is a poor place to send somebody to look at pictures.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/golden-hour");
+    std::fs::create_dir_all(&dir).expect("output dir");
+    let dir = dir.canonicalize().unwrap_or(dir);
+    println!("writing to {}", dir.display());
+
+    let Some(gpu) = gpu() else {
+        println!("no adapter, so nothing was written");
+        return;
+    };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // **The sun low and warm**, which is the whole of "golden hour" and the
+    // case the lighting was built around: at this angle the sun lights cloud
+    // BASES, so the undersides nearest it are the warmest thing in the frame
+    // and the violet-grey belongs to the clouds away from it.
+    renderer.set_sun(0.9, [1.0, 0.76, 0.48], [-0.12, -0.06, 0.99]);
+
+    // Looking a little above the horizon, along the sun, as the references are
+    // framed. Straight up would show one cloud and no horizon.
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 24.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, 0.16);
+
+    let shots: [(&str, f32, f32); 3] = [
+        ("golden-hour-cover55", 0.55, 0.0),
+        ("overcast", 1.0, 0.2),
+        ("storm", 1.0, 1.0),
+    ];
+    for (label, cover, darkness) in shots {
+        for mode in MODES {
+            renderer.set_lighting_mode(mode);
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer: Some(cumulus()),
+                clouds: Some(tiamot_core::atmosphere::Clouds {
+                    cover,
+                    darkness,
+                    base: None,
+                    ease_ticks: 0,
+                }),
+                quality: client::render::clouds::Quality::Fine,
+                seed: 4242,
+            });
+            let frame = target.capture(&mut renderer, &camera).expect("capture");
+            let path = dir.join(format!("{label}-{mode:?}.png"));
+            let mut bytes = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut bytes, frame.width, frame.height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header().expect("header");
+                writer.write_image_data(&frame.rgba).expect("data");
+            }
+            std::fs::write(&path, &bytes).expect("write");
+            println!("wrote {}", path.display());
+        }
+    }
 }

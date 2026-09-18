@@ -130,6 +130,7 @@ struct Uniforms {
     inverse_view_projection: [[f32; 4]; 4],
     view_projection: [[f32; 4]; 4],
     camera: [f32; 4],
+    view: [f32; 4],
     sun_direction: [f32; 4],
     sun: [f32; 4],
     sky: [f32; 4],
@@ -155,8 +156,12 @@ pub struct Frame {
     pub sky: [f32; 3],
     /// Where distance fog is total, in blocks.
     pub fog_end: f32,
-    /// The lighting mode, as `LightingMode::code` numbers it.
+    /// The lighting mode, as `LightingMode::code` numbers it: 0 Simple,
+    /// 1 Classic, 2 Beautiful.
     pub mode: u32,
+    /// How wide one pixel is, in radians. The LOD is decided against this
+    /// rather than a distance in blocks — see `clouds.wgsl`.
+    pub pixel_angle: f32,
 }
 
 /// The pipelines, buffer and binding.
@@ -299,6 +304,7 @@ impl Pass {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
             view_projection: frame.view_projection.to_cols_array_2d(),
             camera: [camera[0], camera[1], camera[2], self.seconds],
+            view: [frame.pixel_angle.max(1e-6), 0.0, 0.0, 0.0],
             sun_direction: [
                 frame.sun_direction[0],
                 frame.sun_direction[1],
@@ -315,7 +321,10 @@ impl Pass {
                 quality.reach(),
                 quality.detail_reach(),
                 f32::from(layer.octaves.max(1)),
-                frame.mode.clamp(1, 3) as f32,
+                #[expect(clippy::cast_precision_loss, reason = "a mode number, 0 to 2")]
+                {
+                    frame.mode.min(2) as f32
+                },
             ],
         };
         gpu.queue

@@ -273,6 +273,26 @@ fn pixels_beyond(
     differing as f32 / counted.max(1) as f32
 }
 
+/// Whether a frame has ground in the bottom of it.
+///
+/// # It used to ask whether the frame varied at all
+///
+/// That worked while the sky was one flat colour: anything that was not a
+/// blank fill was a world. **The sky is drawn now** — a gradient deepening
+/// overhead, a glow around the sun — so a frame of nothing but sky varies
+/// comfortably more than the old threshold, and the counter-example this
+/// helper exists for stopped being able to fail. Caught by CI's macOS runner,
+/// which is the only one with an adapter real enough to run these.
+///
+/// So it asks the question the assertion actually means: the sky is BLUER
+/// than it is red, everywhere and at every height, because the zenith is the
+/// horizon's own colour scaled rather than mixed towards something else.
+/// Ground is not. The bottom of the frame is where ground is if there is any.
+/// Whether a frame has anything in it but a wash.
+///
+/// **Colour is not available as a discriminator**, which two attempts proved:
+/// terrain in this scene reads `[59, 69, 102]`, bluer than red, so "the sky is
+/// the blue one" answers wrong about the ground.
 fn shows_a_world(frame: &client::texture::Image) -> bool {
     let mut lowest = [f32::MAX; 3];
     let mut highest = [f32::MIN; 3];
@@ -363,23 +383,29 @@ fn singleplayer_joins_its_own_server_and_draws_the_world() {
     // it, on this machine, this driver and this frame size, before it is trusted
     // to say yes about one that does.
     //
-    // Straight up: nothing is above the player at spawn, so the frame is the
-    // clear colour and nothing else. `look_down_by` takes a downward angle, so a
-    // negative one aims at the sky.
-    app.look_down_by(-1.5);
-    let upward = *app.camera();
+    // **A renderer with no world in it**, rather than a camera pointed at the
+    // sky. Pointing up used to give the clear colour and nothing else, and
+    // that stopped being true the day the sky was DRAWN: a gradient deepening
+    // overhead with a glow around the sun varies far more than this heuristic's
+    // threshold, so the counter-example quietly became one that could not fail.
+    // CI's macOS runner caught it — the only leg with an adapter real enough
+    // to run this file.
+    //
+    // Emptying the renderer is the thing that cannot draw a world by
+    // construction, whichever way the camera is pointed and whatever the sky
+    // is doing.
     // **And with no hand in it.** The viewmodel is always on screen in first
-    // person, so a frame of nothing but sky is not a frame of nothing any more
-    // — and the counter-example is about whether the WORLD drew. Caught by this
-    // very assertion the day the hand landed, which is what it is for.
+    // person, so a frame of nothing but world is not a frame of nothing — and
+    // the counter-example is about whether the WORLD drew. Caught by this very
+    // assertion the day the hand landed, which is what it is for.
     app.renderer().set_hands(Vec::new());
-    let sky_only = target.capture(app.renderer(), &upward).expect("capture");
+    app.renderer().clear();
+    let sky_only = target.capture(app.renderer(), &camera).expect("capture");
     assert!(
         !shows_a_world(&sky_only),
-        "looking straight up at an empty sky still reads as a world, so this test cannot fail \
+        "a renderer holding no chunks at all still reads as a world, so this test cannot fail \
          and proves nothing"
     );
-    app.look_down_by(0.0);
 
     assert!(
         shows_a_world(&frame),
