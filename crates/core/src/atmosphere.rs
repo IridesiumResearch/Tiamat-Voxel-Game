@@ -248,6 +248,187 @@ pub fn sanitise_precipitation(mut precipitation: Precipitation) -> Precipitation
     precipitation
 }
 
+/// A cloud deck, as a mod declares it once at load.
+///
+/// # Shape, not geometry
+///
+/// The client never builds cloud cubes. This describes a FIELD, and the
+/// renderer marches a ray through it — which is what makes cube faces exact
+/// (a grid march hits flat walls and flat tops by construction), makes drift
+/// and evolution free (offset the sample, rather than rebuild a mesh), and
+/// makes reaching the horizon a matter of step count rather than of memory.
+/// A deck 8 km across at `cell = 8` would be millions of cubes as geometry,
+/// rebuilt forever because it evolves; as a field it is this struct.
+///
+/// # A column is an interval, and what that cannot do
+///
+/// At each column of the grid the field gives a BOTTOM and a TOP. Two
+/// heights rather than one flat base, because real cumulus has stepped,
+/// blocky undersides and lobes that hang below their neighbours, and a
+/// single flat base can show neither.
+///
+/// **One interval per column cannot represent a true overhang** — solid,
+/// then air, then solid again in the same column. A tower that mushrooms out
+/// over its own stem needs a three-dimensional field and a three-dimensional
+/// march, which is a different cost class. The detail noise bites the
+/// underside as well as the top, so overhangs exist at the detail scale; the
+/// large-scale kind is knowingly not here.
+///
+/// # Presentation only
+///
+/// Outside every determinism hash (charter rule 4 exempts rendering), so the
+/// client may use fast non-deterministic noise. It is seeded from the world
+/// seed all the same, which costs nothing and buys two things: a screenshot
+/// of a given sky is reproducible, and two players describing the same cloud
+/// agree about it.
+///
+/// Weather ask W2.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CloudLayer {
+    /// World `y` of the deck's floor, before any per-column bottom lifts it.
+    pub base: f32,
+    /// Blocks from `base` to the tallest tower's top.
+    pub thickness: f32,
+    /// Blocks per large cube: the grid the march steps through.
+    pub cell: f32,
+    /// Small cubes per large-cube edge on the surface. 1 is none.
+    pub detail: u8,
+    /// The cloud field's horizontal scale, in cycles per block.
+    pub frequency: f32,
+    /// Octaves of the cloud field.
+    pub octaves: u8,
+    /// How much taller the highest heaps grow. 0 is flat banks.
+    pub towers: f32,
+    /// Blocks a second the deck drifts, in x and z.
+    pub drift: [f32; 2],
+    /// How fast the field changes shape, per second.
+    pub evolve: f32,
+    /// Lit cloud, before the sun's own colour.
+    pub colour: [f32; 3],
+    /// The unlit side, before the sky's own colour.
+    pub shade: [f32; 3],
+}
+
+/// The largest cube a mod may ask for, in blocks.
+pub const MAX_CELL: f32 = 64.0;
+/// The smallest, below which a march to the horizon has no hope of stepping.
+pub const MIN_CELL: f32 = 1.0;
+/// The most small cubes per large-cube edge.
+pub const MAX_DETAIL: u8 = 4;
+/// The most octaves of cloud field.
+pub const MAX_OCTAVES: u8 = 6;
+/// The tallest deck, in blocks.
+pub const MAX_THICKNESS: f32 = 1024.0;
+/// The fastest a deck may drift, in blocks a second.
+pub const MAX_DRIFT: f32 = 64.0;
+
+impl CloudLayer {
+    /// Whether every number is finite and in range (charter rule 14).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.base.is_finite()
+            && (0.0..=MAX_THICKNESS).contains(&self.thickness)
+            && (MIN_CELL..=MAX_CELL).contains(&self.cell)
+            && (1..=MAX_DETAIL).contains(&self.detail)
+            && self.frequency.is_finite()
+            && self.frequency > 0.0
+            && (1..=MAX_OCTAVES).contains(&self.octaves)
+            && (0.0..=1.0).contains(&self.towers)
+            && self.drift.iter().all(|d| d.abs() <= MAX_DRIFT)
+            && self.evolve.is_finite()
+            && self.evolve.abs() <= 1.0
+            && self.colour.iter().all(|c| (0.0..=MAX_CHANNEL).contains(c))
+            && self.shade.iter().all(|c| (0.0..=MAX_CHANNEL).contains(c))
+    }
+}
+
+/// Clamps a cloud layer's numbers into range.
+///
+/// **Clamped rather than refused**, like every other registration: a mod that
+/// got one number wrong should lose that number, not its whole sky. The
+/// protocol refuses anything out of range on the way IN, because a server's
+/// word for it is not a mod's.
+#[must_use]
+pub fn sanitise_clouds(mut layer: CloudLayer) -> CloudLayer {
+    let clamp = |value: f32, low: f32, high: f32, fallback: f32| {
+        if value.is_finite() {
+            value.clamp(low, high)
+        } else {
+            fallback
+        }
+    };
+    layer.base = clamp(layer.base, -30_000.0, 30_000.0, 256.0);
+    layer.thickness = clamp(layer.thickness, 0.0, MAX_THICKNESS, 64.0);
+    layer.cell = clamp(layer.cell, MIN_CELL, MAX_CELL, 8.0);
+    layer.detail = layer.detail.clamp(1, MAX_DETAIL);
+    // A frequency of zero is one cloud over the whole world, which is not a
+    // sky; the fallback is the scale the ask's own example uses.
+    layer.frequency = if layer.frequency.is_finite() && layer.frequency > 0.0 {
+        layer.frequency.min(1.0)
+    } else {
+        1.0 / 600.0
+    };
+    layer.octaves = layer.octaves.clamp(1, MAX_OCTAVES);
+    layer.towers = clamp(layer.towers, 0.0, 1.0, 0.0);
+    for drift in &mut layer.drift {
+        *drift = clamp(*drift, -MAX_DRIFT, MAX_DRIFT, 0.0);
+    }
+    layer.evolve = clamp(layer.evolve, -1.0, 1.0, 0.0);
+    for channel in &mut layer.colour {
+        *channel = clamp(*channel, 0.0, MAX_CHANNEL, 1.0);
+    }
+    for channel in &mut layer.shade {
+        *channel = clamp(*channel, 0.0, MAX_CHANNEL, 0.5);
+    }
+    layer
+}
+
+/// How much cloud one player is under, and how dark it is.
+///
+/// Latest state, like [`SkyModifier`]: one message when the weather changes,
+/// eased client-side. Per player rather than per domain for the reason the
+/// sky modifier is — two players in one domain can stand under different
+/// weather. Weather ask W2.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Clouds {
+    /// 0 is clear, 1 is overcast.
+    pub cover: f32,
+    /// 0 is fair-weather white, 1 is storm grey.
+    pub darkness: f32,
+    /// Overrides the registered base for this player, in world `y`.
+    pub base: Option<f32>,
+    /// How long the client takes to get there, in ticks.
+    pub ease_ticks: u32,
+}
+
+impl Clouds {
+    /// Whether every number is finite and in range (charter rule 14).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        (0.0..=1.0).contains(&self.cover)
+            && (0.0..=1.0).contains(&self.darkness)
+            && self.base.is_none_or(f32::is_finite)
+            && self.ease_ticks <= MAX_EASE_TICKS
+    }
+}
+
+/// Clamps a cloud state's numbers into range.
+#[must_use]
+pub fn sanitise_cloud_state(mut clouds: Clouds) -> Clouds {
+    let clamp = |value: f32, low: f32, high: f32, fallback: f32| {
+        if value.is_finite() {
+            value.clamp(low, high)
+        } else {
+            fallback
+        }
+    };
+    clouds.cover = clamp(clouds.cover, 0.0, 1.0, 0.0);
+    clouds.darkness = clamp(clouds.darkness, 0.0, 1.0, 0.0);
+    clouds.base = clouds.base.filter(|base| base.is_finite());
+    clouds.ease_ticks = clouds.ease_ticks.min(MAX_EASE_TICKS);
+    clouds
+}
+
 /// Where `game.set_sky_modifier` and `game.flash` reach.
 ///
 /// The same seam shape as [`crate::hud::Access`], and for the same reason:
@@ -265,11 +446,97 @@ pub trait Access: Send + Sync {
     ///
     /// Returns whether the player was there to tell.
     fn set_precipitation(&self, player: PlayerUuid, precipitation: Option<Precipitation>) -> bool;
+
+    /// Replaces one player's cloud state, or clears it with `None`.
+    ///
+    /// Returns whether the player was there to tell.
+    fn set_clouds(&self, player: PlayerUuid, clouds: Option<Clouds>) -> bool;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A layer near enough the ask's own example to be recognisable.
+    fn fair_weather() -> CloudLayer {
+        CloudLayer {
+            base: 420.0,
+            thickness: 96.0,
+            cell: 8.0,
+            detail: 2,
+            frequency: 1.0 / 600.0,
+            octaves: 3,
+            towers: 0.25,
+            drift: [1.5, 0.4],
+            evolve: 1.0 / 2400.0,
+            colour: [1.0, 1.0, 1.0],
+            shade: [0.42, 0.44, 0.58],
+        }
+    }
+
+    #[test]
+    fn a_cloud_layer_a_mod_got_wrong_is_clamped_into_one_that_can_be_drawn() {
+        // **Clamped rather than refused**, like every other registration: a
+        // mod that got one number wrong should lose that number and not its
+        // whole sky. Every field is wild here, and every one comes back inside
+        // the range `is_valid` states — which is the property that makes the
+        // two functions one rule rather than two.
+        let wild = CloudLayer {
+            base: f32::NAN,
+            thickness: -40.0,
+            // A cell of zero would make a march to the horizon step for ever.
+            cell: 0.0,
+            detail: 200,
+            frequency: 0.0,
+            octaves: 0,
+            towers: 9.0,
+            drift: [f32::INFINITY, -500.0],
+            evolve: f32::NAN,
+            colour: [9.0, -1.0, f32::NAN],
+            shade: [f32::NEG_INFINITY, 2.0, 0.5],
+        };
+        assert!(!wild.is_valid(), "the fixture must be worth sanitising");
+        let tame = sanitise_clouds(wild);
+        assert!(tame.is_valid(), "sanitising left {tame:?} out of range");
+        assert!(tame.cell >= MIN_CELL, "a zero cell would never step");
+        assert!(
+            tame.frequency > 0.0,
+            "a zero frequency is one cloud for ever"
+        );
+        assert!(tame.octaves >= 1);
+
+        // Non-vacuous: a layer that was already fine is returned unchanged,
+        // so the clamp cannot be passing by flattening everything.
+        let fine = fair_weather();
+        assert!(fine.is_valid());
+        assert_eq!(sanitise_clouds(fine), fine);
+    }
+
+    #[test]
+    fn a_cloud_state_a_mod_got_wrong_is_clamped_too() {
+        let wild = Clouds {
+            cover: 40.0,
+            darkness: f32::NAN,
+            base: Some(f32::INFINITY),
+            ease_ticks: u32::MAX,
+        };
+        assert!(!wild.is_valid());
+        let tame = sanitise_cloud_state(wild);
+        assert!(tame.is_valid(), "sanitising left {tame:?} out of range");
+        assert_eq!(
+            tame.base, None,
+            "a base that is not a number is no override, not an override of nothing"
+        );
+
+        let fine = Clouds {
+            cover: 0.55,
+            darkness: 0.0,
+            base: Some(380.0),
+            ease_ticks: 600,
+        };
+        assert!(fine.is_valid());
+        assert_eq!(sanitise_cloud_state(fine), fine);
+    }
 
     #[test]
     #[expect(

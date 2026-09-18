@@ -10088,6 +10088,7 @@ mod tests {
         set: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::SkyModifier>)>>,
         flashed: std::sync::Mutex<Vec<crate::atmosphere::FlashRequest>>,
         rained: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Precipitation>)>>,
+        clouded: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Clouds>)>>,
     }
 
     impl crate::atmosphere::Access for Weather {
@@ -10120,6 +10121,18 @@ mod tests {
                 .lock()
                 .expect("weather lock")
                 .push((player.to_hex(), precipitation));
+            true
+        }
+
+        fn set_clouds(
+            &self,
+            player: crate::identity::PlayerUuid,
+            clouds: Option<crate::atmosphere::Clouds>,
+        ) -> bool {
+            self.clouded
+                .lock()
+                .expect("weather lock")
+                .push((player.to_hex(), clouds));
             true
         }
     }
