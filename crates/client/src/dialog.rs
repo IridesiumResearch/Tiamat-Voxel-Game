@@ -160,7 +160,7 @@ impl EguiRuler<'_> {
         reason = "UI layout is presentation; float-determinism.md Scope"
     )]
     fn text(&self, text: &str, style: &Style) -> (i32, i32) {
-        let font = self.look.font(style);
+        let font = self.look.font(self.ctx, style);
         let galley = self
             .ctx
             .fonts_mut(|fonts| fonts.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE));
@@ -251,9 +251,19 @@ impl Look<'_> {
     /// A font id nothing answers to falls back to the client's own, for the
     /// reason `fonts::Fonts::family` gives: a missing file must not become a
     /// missing screen.
-    fn font(&self, style: &Style) -> egui::FontId {
+    /// **`bound_family`, not `family`.** This goes into a `FontId` egui lays
+    /// text out with, and `set_fonts` does not take effect until the next
+    /// frame — so a font that arrived this frame names a family egui has not
+    /// picked up yet, and epaint panics rather than falling back. It crashed
+    /// the client's first frame through the theme's copy of this same
+    /// mistake; see `fonts::Fonts::bound_family`.
+    fn font(&self, ctx: &egui::Context, style: &Style) -> egui::FontId {
         let size = f32::from(style.text_size.unwrap_or(14)).clamp(8.0, 48.0);
-        match style.font.as_deref().and_then(|id| self.fonts.family(id)) {
+        match style
+            .font
+            .as_deref()
+            .and_then(|id| self.fonts.bound_family(ctx, id))
+        {
             Some(family) => egui::FontId::new(size, family),
             None => egui::FontId::proportional(size),
         }
@@ -793,7 +803,7 @@ fn paint_widget(
         colour: node.style.text_colour.map_or(egui::Color32::WHITE, |c| {
             egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
         }),
-        font: look.font(&node.style),
+        font: look.font(ui.ctx(), &node.style),
         fill: node
             .style
             .background

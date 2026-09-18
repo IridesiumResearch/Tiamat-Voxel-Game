@@ -49,6 +49,10 @@ pub struct Fonts {
     pending: Vec<(String, Vec<u8>)>,
     /// Ids that would not parse, so a second arrival is not retried for ever.
     refused: Vec<String>,
+    /// The pass each font was handed to egui on. See [`Self::bound_family`]:
+    /// egui takes a new font set up at the START of the next pass, so nothing
+    /// may name one until the count has moved.
+    installed_at: BTreeMap<String, u64>,
 }
 
 impl Fonts {
@@ -57,6 +61,7 @@ impl Fonts {
     pub const fn new() -> Self {
         Self {
             installed: BTreeMap::new(),
+            installed_at: BTreeMap::new(),
             pending: Vec::new(),
             refused: Vec::new(),
         }
@@ -92,11 +97,45 @@ impl Fonts {
     /// **A name no font answers to is `None`, not an error.** A dialog whose
     /// lettering failed to arrive is still a dialog, and refusing to draw it
     /// would turn a missing file into a missing screen.
+    ///
+    /// This answers from THIS side's record, which is what a caller that only
+    /// wants to know "did the bytes arrive" is asking. Anything that puts the
+    /// family into a `FontId` egui will lay text out with must ask
+    /// [`Self::bound_family`] instead — see there for what the difference
+    /// costs.
     #[must_use]
     pub fn family(&self, id: &str) -> Option<egui::FontFamily> {
         self.installed
             .contains_key(id)
             .then(|| egui::FontFamily::Name(family_name(id).into()))
+    }
+
+    /// The same, but only once egui has actually taken the font up.
+    ///
+    /// # A frame has to pass first
+    ///
+    /// `set_fonts` does not take effect in the pass it is called in — it files
+    /// the definitions in memory and egui swaps them in "at the start of the
+    /// next pass". So a font installed and then named in a `FontId` within one
+    /// frame names a family that is not there yet, and epaint does not fall
+    /// back: it panics, from inside the layout of whatever text used it.
+    ///
+    /// **That crashed the client on its first frame.** The start screen read a
+    /// theme, installed its font, put the family into every text style, and
+    /// died laying out the first label —
+    /// `FontFamily::Name("mod-font-...:theme_font") is not bound to any
+    /// fonts`. This side's record said the font was installed, and it was;
+    /// egui had simply not picked it up yet.
+    ///
+    /// **The pass counter rather than asking for the font set**, because
+    /// `Context::fonts` panics outright before the first pass has run — which
+    /// would have replaced a crash on frame one with a crash on frame zero.
+    /// `cumulative_pass_nr` answers 0 there instead.
+    #[must_use]
+    pub fn bound_family(&self, ctx: &egui::Context, id: &str) -> Option<egui::FontFamily> {
+        let family = self.family(id)?;
+        let installed_at = *self.installed_at.get(id)?;
+        (ctx.cumulative_pass_nr() > installed_at).then_some(family)
     }
 
     /// How many mod fonts are installed, for the debug overlay.
@@ -116,6 +155,7 @@ impl Fonts {
     /// A typeface belongs to the server that pushed it.
     pub fn clear(&mut self) {
         self.installed.clear();
+        self.installed_at.clear();
         self.pending.clear();
         self.refused.clear();
     }
@@ -146,6 +186,13 @@ impl Fonts {
         }
 
         if apply(ctx, bundled, &self.installed) {
+            // **When, not whether.** egui takes the new set up at the start of
+            // the next pass, so every font in this batch is unusable until the
+            // count has moved past here — see `bound_family`.
+            let now = ctx.cumulative_pass_nr();
+            for id in self.installed.keys() {
+                self.installed_at.entry(id.clone()).or_insert(now);
+            }
             return Vec::new();
         }
 
@@ -153,6 +200,7 @@ impl Fonts {
         // so they are not offered again, and rebuild from what worked before.
         for id in &names {
             self.installed.remove(id);
+            self.installed_at.remove(id);
             self.refused.push(id.clone());
         }
         let _ = apply(ctx, bundled, &self.installed);

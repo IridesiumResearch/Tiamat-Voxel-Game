@@ -145,8 +145,17 @@ impl Theme {
     /// `dialog::Look::font` gives: a face that has not arrived yet must not
     /// become a screen that has not arrived.
     #[must_use]
-    pub fn family(&self, fonts: &crate::fonts::Fonts) -> Option<egui::FontFamily> {
-        self.font.as_deref().and_then(|id| fonts.family(id))
+    pub fn family(
+        &self,
+        ctx: &egui::Context,
+        fonts: &crate::fonts::Fonts,
+    ) -> Option<egui::FontFamily> {
+        // **`bound_family`, not `family`.** This goes into a `FontId` that egui
+        // will lay text out with, and a family egui has not picked up yet is a
+        // panic rather than a fallback. See `fonts::Fonts::bound_family`.
+        self.font
+            .as_deref()
+            .and_then(|id| fonts.bound_family(ctx, id))
     }
 
     /// Lays this theme over egui's visuals and text styles.
@@ -165,7 +174,7 @@ impl Theme {
         if self.is_none() {
             return;
         }
-        let family = self.family(fonts);
+        let family = self.family(ctx, fonts);
         // **Both styles, not the active one.** A mod's palette is not a
         // light/dark preference, and a theme that applied to one of them would
         // vanish the moment the platform said the other.
@@ -545,6 +554,47 @@ mod tests {
     }
 
     #[test]
+    fn a_font_installed_this_frame_is_not_named_until_egui_has_it() {
+        // **The crash the start screen died on, as a test.** `set_fonts` does
+        // not take effect in the frame it is called in — egui swaps its font
+        // set at the start of the NEXT frame — so a theme that installed its
+        // font and then put the family into every text style named a family
+        // that was not there yet, and epaint panicked laying out the first
+        // label rather than falling back.
+        //
+        // Reported from the window as
+        // `FontFamily::Name("mod-font-tiamot_default_ui:theme_font") is not
+        // bound to any fonts`, on the client's very first frame.
+        let ctx = egui::Context::default();
+        crate::app::install_fonts(&ctx);
+        let mut fonts = crate::fonts::Fonts::new();
+        assert!(
+            fonts.offer("iron:theme_font".to_owned(), crate::app::HUD_FONT.to_vec()),
+            "the bundled font should parse"
+        );
+        let _ = fonts.install(&ctx, crate::app::HUD_FONT);
+
+        // This side's record says it is installed, and it is.
+        assert!(
+            fonts.family("iron:theme_font").is_some(),
+            "the font arrived, so the bytes-side answer is yes"
+        );
+        // egui has not picked it up yet, so nothing may name it in a `FontId`.
+        assert_eq!(
+            fonts.bound_family(&ctx, "iron:theme_font"),
+            None,
+            "a family egui has not bound yet must not reach a FontId"
+        );
+
+        // A frame passes, and now it may.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        assert!(
+            fonts.bound_family(&ctx, "iron:theme_font").is_some(),
+            "after a frame egui has the family and the theme may use it"
+        );
+    }
+
+    #[test]
     fn a_theme_only_asks_for_the_art_it_actually_names() {
         let theme = Theme::from_def(&def());
         assert_eq!(theme.art(), vec![[7; 32]]);
@@ -606,7 +656,8 @@ mod tests {
         // has not arrived. `Fonts::new()` is a client that has been told about
         // no fonts at all, which is every client before the table lands.
         let theme = Theme::from_def(&def());
-        assert_eq!(theme.family(&crate::fonts::Fonts::new()), None);
+        let ctx = egui::Context::default();
+        assert_eq!(theme.family(&ctx, &crate::fonts::Fonts::new()), None);
     }
 
     #[test]
