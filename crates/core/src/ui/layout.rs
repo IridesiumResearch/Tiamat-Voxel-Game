@@ -27,7 +27,7 @@
 //! Determinism (charter rule 4) does not reach here — this is presentation —
 //! but integer arithmetic means it happens to be exact anyway.
 
-use super::tree::{Align, Direction, Style, Tree, Widget};
+use super::tree::{Align, Direction, Node, Style, Tree, Widget};
 
 /// A rectangle in virtual pixels, top-left origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -341,6 +341,35 @@ fn natural_of(tree: &Tree, index: usize, measure: &dyn Measure) -> (i32, i32) {
 /// somebody checked, and layout must not be the thing that assumes it.
 const MAX_WALK_DEPTH: usize = 32;
 
+/// A child's main- and cross-axis extent, in its PARENT's terms.
+///
+/// # Why the parent asks, and the child cannot answer
+///
+/// **The measuring pass and the placing pass have to agree, and for a while
+/// they did not.** [`place_children`] honours `size` and `cross_size`
+/// independently — `size` alone fixes a child's length along its parent's
+/// direction — while measuring honoured the pair only when a node set BOTH. So
+/// a column holding a 20-pixel heading and a row with `size = 52` measured
+/// itself as 20 + 36 (an item slot's natural height), then laid the row into
+/// that 36 and squashed the slots inside it. Reported by a mod author building
+/// a wardrobe tab exactly as the guide advises.
+///
+/// `size` is a length ALONG THE PARENT'S DIRECTION, so nothing but the parent
+/// knows whether it is a width or a height. That is why this takes `direction`,
+/// and why [`natural_at`]'s early return cannot do the job: it answers in
+/// `(w, h)` with no parent in sight.
+fn child_extent(node: &Node, natural: (i32, i32), direction: Direction) -> (i32, i32) {
+    let (w, h) = natural;
+    let (main, cross) = match direction {
+        Direction::Row => (w, h),
+        Direction::Column => (h, w),
+    };
+    (
+        node.size.map_or(main, i32::from),
+        node.cross_size.map_or(cross, i32::from),
+    )
+}
+
 fn natural_at(tree: &Tree, index: usize, measure: &dyn Measure, depth: usize) -> (i32, i32) {
     if depth >= MAX_WALK_DEPTH {
         return (0, 0);
@@ -363,11 +392,11 @@ fn natural_at(tree: &Tree, index: usize, measure: &dyn Measure, depth: usize) ->
             let mut main = 0;
             let mut cross = 0;
             for (position, child) in tree.children_of(index).enumerate() {
-                let (w, h) = natural_at(tree, child, measure, depth + 1);
-                let (child_main, child_cross) = match direction {
-                    Direction::Row => (w, h),
-                    Direction::Column => (h, w),
-                };
+                let natural = natural_at(tree, child, measure, depth + 1);
+                let (child_main, child_cross) = tree
+                    .nodes
+                    .get(child)
+                    .map_or((0, 0), |node| child_extent(node, natural, *direction));
                 main += child_main + if position > 0 { gap } else { 0 };
                 cross = cross.max(child_cross);
             }
@@ -376,10 +405,16 @@ fn natural_at(tree: &Tree, index: usize, measure: &dyn Measure, depth: usize) ->
                 Direction::Column => (cross + pad, main + pad),
             }
         }
-        Widget::Scroll => tree
-            .children_of(index)
-            .map(|child| natural_at(tree, child, measure, depth + 1))
-            .fold((0, 0), |acc, (w, h)| (acc.0.max(w), acc.1 + h)),
+        // A scroll stacks its children downwards, so it measures them the way
+        // a column does — including a child's own `size`, which here is its
+        // height.
+        Widget::Scroll => tree.children_of(index).fold((0, 0), |acc, child| {
+            let natural = natural_at(tree, child, measure, depth + 1);
+            let (child_main, child_cross) = tree.nodes.get(child).map_or((0, 0), |node| {
+                child_extent(node, natural, Direction::Column)
+            });
+            (acc.0.max(child_cross), acc.1 + child_main)
+        }),
         widget => measure.natural(widget, &node.style),
     }
 }
@@ -405,6 +440,94 @@ mod tests {
                 Widget::Spacer => (0, 0),
                 _ => (10, 10),
             }
+        }
+    }
+
+    /// A column, a heading, and a row that asked to be 52 tall.
+    ///
+    /// The shape a mod author reported: the row holds item slots, whose
+    /// natural height is a slot, and it asks for more than that so the slots
+    /// have room to breathe.
+    fn wardrobe(row_size: Option<u16>) -> Tree {
+        let row = Build::of(
+            Node {
+                size: row_size,
+                ..Node::new(Widget::Container {
+                    direction: Direction::Row,
+                    gap: 4,
+                    padding: 0,
+                    // Stretch, so the slots take the height the row won: the
+                    // whole reason a mod sets `size` on the row at all.
+                    align: Align::Stretch,
+                })
+            },
+            vec![
+                Build::leaf(Widget::ItemSlot {
+                    view: "player:main".to_owned(),
+                    index: 0,
+                }),
+                Build::leaf(Widget::ItemSlot {
+                    view: "player:main".to_owned(),
+                    index: 1,
+                }),
+            ],
+        );
+        Build::of(
+            Node::new(Widget::Container {
+                direction: Direction::Column,
+                gap: 4,
+                padding: 8,
+                align: Align::Start,
+            }),
+            vec![
+                Build::leaf(Widget::Label {
+                    text: "Wardrobe".to_owned(),
+                }),
+                row,
+            ],
+        )
+        .flatten()
+    }
+
+    #[test]
+    fn a_container_measures_a_child_by_the_length_it_asked_for() {
+        // **The measuring pass has to agree with the placing pass.** A row
+        // that asked for 52 is PLACED at 52 by `place_children`, which honours
+        // `size` on its own — so a column that measures the same row as 10,
+        // its slots' natural height, reports a height the layout will not
+        // keep to. Laid into that measurement the row is shrunk and the slots
+        // squash, which is what a mod author saw on a wardrobe tab.
+        let (_, height) = natural(&wardrobe(Some(52)), &Ruler);
+        assert_eq!(
+            height,
+            12 + 4 + 52 + 16,
+            "the heading, the gap, the length the row ASKED for, and the padding"
+        );
+
+        // Non-vacuous: the same tree with the row saying nothing measures from
+        // its slots instead, and is 42 tall. That number is what the bug
+        // reported for BOTH trees.
+        let (_, natural_height) = natural(&wardrobe(None), &Ruler);
+        assert_eq!(natural_height, 12 + 4 + 10 + 16);
+        assert_ne!(height, natural_height);
+    }
+
+    #[test]
+    fn a_tree_laid_into_its_own_measurement_keeps_every_fixed_child() {
+        // The other half, and the one the player sees: measure, lay out into
+        // exactly that, and nothing is shrunk to fit. Before the measuring
+        // fix the column was measured 42 tall, the row was placed into it at
+        // 10, and every slot in it lost three quarters of its height.
+        let tree = wardrobe(Some(52));
+        let (width, height) = natural(&tree, &Ruler);
+        let laid = layout(&tree, Rect::new(0, 0, width, height), &Ruler);
+        let row = &laid.children[1];
+        assert_eq!(
+            row.rect.h, 52,
+            "the row is placed at the length it asked for"
+        );
+        for slot in &row.children {
+            assert_eq!(slot.rect.h, 52, "a stretched row hands its height on");
         }
     }
 
