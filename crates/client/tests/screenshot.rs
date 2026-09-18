@@ -5114,28 +5114,283 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
     let frame = client::render::clouds::Frame {
         view_projection: glam::camera::rh::proj::directx::perspective(1.0, 16.0 / 9.0, 0.1, 4000.0),
         camera: [1000.0, 80.0, -2000.0],
-        seconds: 12.0,
         sun_direction: [-0.2, -0.15, 0.96],
         sun: [1.0, 0.86, 0.62],
         sky: [0.42, 0.58, 0.85],
         fog_end: 3000.0,
         mode: 3,
-        quality: client::render::clouds::Quality::Normal,
-        seed: 4242,
     };
 
     // A deck and a cover: the pass has something to draw.
-    pass.prepare(&gpu, Some(layer), Some(state), &frame);
+    pass.set(client::render::clouds::Deck {
+        layer: Some(layer),
+        clouds: Some(state),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    pass.advance(12.0);
+    pass.prepare(&gpu, &frame);
 
     // No deck is the ordinary case — most worlds register none — and it must
     // cost nothing rather than draw an empty sky.
-    pass.prepare(&gpu, None, Some(state), &frame);
+    pass.set(client::render::clouds::Deck {
+        layer: None,
+        clouds: Some(state),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    pass.prepare(&gpu, &frame);
 
     // A deck the player turned off is the same answer by a different route,
     // and the one a mod must not be able to override.
-    let off = client::render::clouds::Frame {
+    pass.set(client::render::clouds::Deck {
+        layer: Some(layer),
+        clouds: Some(state),
         quality: client::render::clouds::Quality::Off,
-        ..frame
+        seed: 4242,
+    });
+    pass.prepare(&gpu, &frame);
+}
+
+/// A camera looking a little ABOVE the horizon, which is how the references
+/// are framed and the only way a frame samples enough of the field to have
+/// both cloud and sky in it.
+///
+/// **Looking straight up does not work**, and the first version of this did:
+/// a deck overhead fills the frame with one or two clouds whatever the cover
+/// is, because the view crosses barely a period of the field. That is not a
+/// bug in the march, it is what a ceiling looks like from underneath.
+fn skyward() -> Camera {
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
     };
-    pass.prepare(&gpu, Some(layer), Some(state), &off);
+    camera.look(0.0, 0.18);
+    camera
+}
+
+/// A deck at an ordinary altitude, seen from the fixed scene's floor.
+fn low_deck() -> tiamot_core::atmosphere::CloudLayer {
+    tiamot_core::atmosphere::CloudLayer {
+        base: 220.0,
+        thickness: 70.0,
+        cell: 8.0,
+        detail: 2,
+        frequency: 1.0 / 260.0,
+        octaves: 3,
+        towers: 0.3,
+        drift: [0.0, 0.0],
+        evolve: 0.0,
+        colour: [1.0; 3],
+        shade: [0.42, 0.44, 0.58],
+    }
+}
+
+#[test]
+fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
+    // **The first test that looks at a drawn cloud.** Everything before this
+    // proved the data arrived and the shader compiled; this asks whether the
+    // march puts anything on screen, and whether the player's own setting can
+    // take it away again.
+    //
+    // Pointed UP, because that is where the deck is: the fixed scene's own
+    // viewpoint looks down at the floor and would never cross it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // Clear first, so the comparison is against this scene's own sky rather
+    // than against a number written down here.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(tiamot_core::atmosphere::Clouds {
+            cover: 0.0,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+        }),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let clear = target.capture(&mut renderer, &skyward()).expect("capture");
+    let empty_sky = average(&clear, 0, 0, WIDTH, HEIGHT / 2);
+
+    // Now overcast. Cloud is brighter and much less blue than sky, so the
+    // blue-over-red margin `is_sky` measures collapses.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(tiamot_core::atmosphere::Clouds {
+            cover: 0.95,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+        }),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let clouded = target.capture(&mut renderer, &skyward()).expect("capture");
+    let cloudy_sky = average(&clouded, 0, 0, WIDTH, HEIGHT / 2);
+    println!("clear {empty_sky:?} clouded {cloudy_sky:?}");
+
+    assert!(
+        cloudy_sky[0] > empty_sky[0] + 0.02,
+        "an overcast sky should be less blue and more even than a clear one; \
+         clear {empty_sky:?} clouded {cloudy_sky:?}"
+    );
+
+    // **And the player can refuse it.** A mod declares the deck; whether this
+    // machine draws it is the player's, and a mod must not be able to override
+    // that. Turned off must be indistinguishable from a world that registered
+    // no deck at all.
+    let overcast = tiamot_core::atmosphere::Clouds {
+        cover: 0.95,
+        darkness: 0.0,
+        base: None,
+        ease_ticks: 0,
+    };
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(overcast),
+        quality: client::render::clouds::Quality::Off,
+        seed: 4242,
+    });
+    let refused = target.capture(&mut renderer, &skyward()).expect("capture");
+    let off_sky = average(&refused, 0, 0, WIDTH, HEIGHT / 2);
+
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: Some(overcast),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let none = target.capture(&mut renderer, &skyward()).expect("capture");
+    let no_deck_sky = average(&none, 0, 0, WIDTH, HEIGHT / 2);
+    println!("off {off_sky:?} no deck {no_deck_sky:?}");
+
+    for channel in 0..3 {
+        assert!(
+            (off_sky[channel] - no_deck_sky[channel]).abs() < 0.005,
+            "clouds turned off should look like a world with no deck; \
+             off {off_sky:?} none {no_deck_sky:?}"
+        );
+    }
+    // Non-vacuous: turning them off really removed something, rather than
+    // there having been nothing to remove. **`cover = 0` is not `Off`** — a
+    // clear sky in the references still has a few small clouds in it, which is
+    // what the threshold at zero cover gives.
+    assert!(
+        (off_sky[0] - cloudy_sky[0]).abs() > 0.1,
+        "an overcast sky and no clouds at all should not look alike"
+    );
+    assert!(
+        (off_sky[0] - empty_sky[0]).abs() > 0.005,
+        "a clear sky should still carry a few clouds, so it is not the same as none"
+    );
+}
+
+#[test]
+fn a_half_covered_sky_has_cloud_and_sky_in_it_rather_than_one_flat_fill() {
+    // **A flat fill would pass every test above.** An overcast ceiling seen
+    // from directly underneath IS one colour, so "the sky changed" cannot tell
+    // a working march from a shader that paints every sky pixel — which is
+    // what a march that hits at zero distance, or never advances, would do.
+    //
+    // At half cover the references show cloud AND sky in the same frame, so
+    // the frame must have both. Measured as variance across tiles rather than
+    // as a colour, because what is being asserted is that shapes resolved, not
+    // which shapes.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(tiamot_core::atmosphere::Clouds {
+            cover: 0.55,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+        }),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let frame = target.capture(&mut renderer, &skyward()).expect("capture");
+
+    // Eight columns across the upper half: how blue is each?
+    let mut blues = Vec::new();
+    for column in 0..8 {
+        let x0 = WIDTH * column / 8;
+        let x1 = WIDTH * (column + 1) / 8;
+        let tile = average(&frame, x0, 0, x1, HEIGHT / 2);
+        blues.push(tile[2] - tile[0]);
+    }
+    let lowest = blues.iter().copied().fold(f32::MAX, f32::min);
+    let highest = blues.iter().copied().fold(f32::MIN, f32::max);
+    println!("blue-over-red per column: {blues:?}");
+
+    assert!(
+        highest - lowest > 0.02,
+        "half a sky of cloud should not be one flat colour across the frame; \
+         blue-over-red ran {lowest} to {highest}"
+    );
+}
+
+#[test]
+#[ignore = "a measurement, not a gate; run with --ignored --nocapture"]
+fn how_long_a_cloud_frame_takes() {
+    // **A probe, not a gate.** This runs under llvmpipe, which is software
+    // rasterisation and says nothing about a real adapter's number. What it
+    // CAN answer is the shape of the cost: how much a frame grows when the
+    // deck is switched on, and how the three qualities compare to each other.
+    // A ratio survives the move to real hardware where a millisecond does not.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    let overcast = tiamot_core::atmosphere::Clouds {
+        cover: 0.55,
+        darkness: 0.0,
+        base: None,
+        ease_ticks: 0,
+    };
+    let time = |renderer: &mut Renderer| {
+        // One to warm the pipeline, then a handful timed.
+        let _ = target.capture(renderer, &skyward());
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            let _ = target.capture(renderer, &skyward());
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / 5.0
+    };
+
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: None,
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let bare = time(&mut renderer);
+    println!("no deck:           {bare:7.2} ms");
+
+    for quality in [
+        client::render::clouds::Quality::Coarse,
+        client::render::clouds::Quality::Normal,
+        client::render::clouds::Quality::Fine,
+    ] {
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: Some(low_deck()),
+            clouds: Some(overcast),
+            quality,
+            seed: 4242,
+        });
+        let with = time(&mut renderer);
+        println!(
+            "{quality:?}: {with:7.2} ms  (+{:.2} ms, x{:.2})",
+            with - bare,
+            with / bare.max(0.001)
+        );
+    }
 }

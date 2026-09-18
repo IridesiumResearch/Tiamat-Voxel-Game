@@ -161,10 +161,20 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let evolve = clouds.motion.z * seconds;
     let at = (cell_xz - drift) * frequency;
 
-    let stem = fbm(at + vec2<f32>(evolve, -evolve), octaves, seed);
+    // **Widened before it is compared.** Averaged octaves pile up around the
+    // middle — three of them leave a field of roughly 0.5 give or take 0.19 —
+    // so a threshold read straight off 0..1 does almost nothing for most of
+    // its range and then everything at once. Half a sky of cloud came out as
+    // a solid ceiling, which `a_half_covered_sky_has_cloud_and_sky_in_it`
+    // caught. Spreading the field first is what makes `cover` mean what it
+    // says.
+    let raw = fbm(at + vec2<f32>(evolve, -evolve), octaves, seed);
+    let stem = clamp((raw - 0.5) * 2.0 + 0.5, 0.0, 1.0);
     // Cover raises the water line rather than scaling the field, so a clear
-    // sky is a few islands and an overcast one is a ceiling with holes.
-    let threshold = mix(0.62, 0.02, clamp(cover, 0.0, 1.0));
+    // sky is a few islands and an overcast one is a ceiling with holes. The
+    // low end goes BELOW zero: overcast should leave almost nothing, and a
+    // threshold of zero still lets the field's floor through.
+    let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
     if (stem <= threshold) {
         return empty_column();
     }
@@ -313,8 +323,15 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     // The step grows with distance: a cube a kilometre away is well under a
     // pixel, so stepping at its size there is work nobody can see. This is the
     // LOD, and it is one line rather than a tile scheme.
+    // **The column is remembered across steps.** The march steps at the SMALL
+    // cube so the rind resolves, but the field is per LARGE cell — so without
+    // this the same column is evaluated once per small cube inside it, which
+    // near the camera is `detail` times over for the same answer. The field is
+    // the whole cost of the loop; everything else in it is arithmetic.
     var t = t_enter;
     var guard = 0;
+    var last_cell = vec2<f32>(1e30, 1e30);
+    var column = empty_column();
     loop {
         if (t >= t_leave || guard >= 512) {
             break;
@@ -324,7 +341,10 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
         let step_len = mix(cell, small, detail_mix) * (1.0 + t / max(detail_reach, 1.0));
         let at = origin + direction * t;
         let cell_xz = floor(at.xz / cell) * cell + cell * 0.5;
-        let column = column_at(cell_xz, detail_mix);
+        if (any(cell_xz != last_cell)) {
+            last_cell = cell_xz;
+            column = column_at(cell_xz, detail_mix);
+        }
         let found = enter_column(column, origin.y, direction.y, t, min(t + step_len, t_leave));
         if (found.x >= 0.0) {
             out.hit = true;

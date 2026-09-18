@@ -422,6 +422,15 @@ pub struct Config {
     #[serde(default)]
     pub shadow_quality: ShadowQuality,
 
+    /// How much of a mod's cloud deck this machine draws.
+    ///
+    /// **The player's own, and the server is never told.** A mod declares the
+    /// deck; how much of it is drawn is a graphics setting like view distance,
+    /// and a mod must not assume its clouds are on screen at all. `Off` draws
+    /// none.
+    #[serde(default)]
+    pub clouds: crate::render::clouds::Quality,
+
     /// Whether to wait for vertical blank.
     ///
     /// On by default. Charter rule 18 makes frame *pacing* the metric rather
@@ -717,6 +726,7 @@ impl Default for Config {
             render_mode: RenderMode::default(),
             lighting_mode: LightingMode::default(),
             shadow_quality: ShadowQuality::default(),
+            clouds: crate::render::clouds::Quality::default(),
             vsync: Self::default_vsync(),
             debug_overlay: Self::default_debug_overlay(),
             fog_chunks: Self::default_fog_chunks(),

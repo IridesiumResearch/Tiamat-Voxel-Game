@@ -30,7 +30,8 @@ use super::{DEPTH_FORMAT, Gpu, graph};
 /// **The player's own choice, and the server is never told.** A mod declares
 /// the deck; how much of it this machine draws is a graphics setting like view
 /// distance, and a mod must not assume its clouds are being drawn at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Quality {
     /// No clouds at all.
     Off,
@@ -104,6 +105,24 @@ impl Quality {
     }
 }
 
+/// Everything the renderer holds about clouds between frames.
+///
+/// **One struct rather than four fields**, because a renderer needs all of
+/// them or none: a deck with no weather is a clear sky, weather with no deck
+/// is nothing to draw, a player who turned clouds off gets neither however
+/// much a mod registered, and the seed decides which sky it is.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Deck {
+    /// The deck a mod registered.
+    pub layer: Option<CloudLayer>,
+    /// What this player is under.
+    pub clouds: Option<Clouds>,
+    /// The player's own quality setting.
+    pub quality: Quality,
+    /// The world's seed, so a sky is the same one twice.
+    pub seed: u64,
+}
+
 /// `Clouds` in `clouds.wgsl`, field for field.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -128,8 +147,6 @@ pub struct Frame {
     pub view_projection: glam::Mat4,
     /// The camera in WORLD blocks, so the deck stays where the world is.
     pub camera: [f64; 3],
-    /// Seconds since the world began, for drift and evolution.
-    pub seconds: f32,
     /// Which way sunlight travels.
     pub sun_direction: [f32; 3],
     /// The sun's colour.
@@ -138,12 +155,8 @@ pub struct Frame {
     pub sky: [f32; 3],
     /// Where distance fog is total, in blocks.
     pub fog_end: f32,
-    /// The lighting mode, 1, 2 or 3.
-    pub mode: u8,
-    /// The player's own cloud setting.
-    pub quality: Quality,
-    /// The world's seed, so a sky is the same one twice.
-    pub seed: u64,
+    /// The lighting mode, as `LightingMode::code` numbers it.
+    pub mode: u32,
 }
 
 /// The pipelines, buffer and binding.
@@ -154,6 +167,15 @@ pub struct Pass {
     bind: wgpu::BindGroup,
     /// Whether this frame has a deck to draw.
     draws: bool,
+    /// The deck, the weather over it, the player's quality and the seed.
+    ///
+    /// **Held here rather than on the renderer**, for the reason this pass has
+    /// its own uniform and bind group: `Renderer::new` is at clippy's line
+    /// ceiling, and a pass that keeps its own state costs it one line instead
+    /// of four. It is also where the state belongs.
+    deck: Deck,
+    /// Seconds since the client started, for drift and evolution.
+    seconds: f32,
 }
 
 impl Pass {
@@ -198,32 +220,42 @@ impl Pass {
             uniforms,
             bind,
             draws: false,
+            deck: Deck::default(),
+            seconds: 0.0,
         }
+    }
+
+    /// Sets the deck, the weather over it, and the player's own quality.
+    pub const fn set(&mut self, deck: Deck) {
+        self.deck = deck;
+    }
+
+    /// Advances the deck's own clock.
+    ///
+    /// Seconds rather than ticks: drift and evolution are presentation and run
+    /// on the frame loop, not the simulation's — charter rule 4 exempts this.
+    pub const fn advance(&mut self, seconds: f32) {
+        self.seconds += seconds;
     }
 
     /// Writes this frame's uniform, or marks the pass as drawing nothing.
     ///
     /// Nothing to draw is the ordinary case: most worlds register no deck, and
     /// a player may have turned clouds off.
-    pub fn prepare(
-        &mut self,
-        gpu: &Gpu,
-        layer: Option<CloudLayer>,
-        clouds: Option<Clouds>,
-        frame: &Frame,
-    ) {
-        let Some(layer) = layer.filter(|_| frame.quality.draws()) else {
+    pub fn prepare(&mut self, gpu: &Gpu, frame: &Frame) {
+        let Some(layer) = self.deck.layer.filter(|_| self.deck.quality.draws()) else {
             self.draws = false;
             return;
         };
         self.draws = true;
-        let state = clouds.unwrap_or(Clouds {
+        let quality = self.deck.quality;
+        let state = self.deck.clouds.unwrap_or(Clouds {
             cover: 0.0,
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
         });
-        let cell = (layer.cell * frame.quality.cell_scale()).max(1.0);
+        let cell = (layer.cell * quality.cell_scale()).max(1.0);
         let small = (cell / f32::from(layer.detail.max(1))).max(0.5);
         let base = state.base.unwrap_or(layer.base);
         #[expect(
@@ -240,11 +272,11 @@ impl Pass {
             clippy::cast_precision_loss,
             reason = "the seed only has to pick a field, not be read back"
         )]
-        let seed = (frame.seed & 0xFFFF) as f32;
+        let seed = (self.deck.seed & 0xFFFF) as f32;
         let uniforms = Uniforms {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
             view_projection: frame.view_projection.to_cols_array_2d(),
-            camera: [camera[0], camera[1], camera[2], frame.seconds],
+            camera: [camera[0], camera[1], camera[2], self.seconds],
             sun_direction: [
                 frame.sun_direction[0],
                 frame.sun_direction[1],
@@ -258,10 +290,10 @@ impl Pass {
             weather: [state.cover, state.darkness, layer.frequency, layer.towers],
             motion: [layer.drift[0], layer.drift[1], layer.evolve, seed],
             quality: [
-                frame.quality.reach(),
-                frame.quality.detail_reach(),
+                quality.reach(),
+                quality.detail_reach(),
                 f32::from(layer.octaves.max(1)),
-                f32::from(frame.mode.clamp(1, 3)),
+                frame.mode.clamp(1, 3) as f32,
             ],
         };
         gpu.queue

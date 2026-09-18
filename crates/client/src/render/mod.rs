@@ -877,6 +877,8 @@ pub struct Renderer {
     place_fog: place_fog::PlaceFog,
     /// Every live particle, drawn last in the world pass. See `crate::particles`.
     particles: particle::Pass,
+    /// The cloud deck, and what this player is under. See `clouds`.
+    clouds: clouds::Pass,
     /// This frame's view of it: where the camera stands, and the fog there.
     fog_here: place_fog::Uniforms,
     /// Retired chunk buffers, kept for reuse. See [`BufferPool`].
@@ -1071,6 +1073,7 @@ impl Renderer {
         // table says one does, and the shader's first test is the scale.
         let place_fog = place_fog::PlaceFog::new(&gpu);
         let particles = particle::Pass::new(&gpu);
+        let clouds = clouds::Pass::new(&gpu);
         let (view, grid, side, tints, bind_group) =
             build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, place_fog.buffer());
 
@@ -1154,6 +1157,7 @@ impl Renderer {
             fog_up: f32::MAX,
             place_fog,
             particles,
+            clouds,
             fog_here: place_fog::Uniforms::NONE,
             drawn: 0,
             cast: 0,
@@ -1522,6 +1526,40 @@ impl Renderer {
     #[must_use]
     pub const fn particle_count(&self) -> u32 {
         self.particles.count()
+    }
+
+    /// Sets the cloud deck, the weather over it, and the player's own quality.
+    ///
+    /// **All three together**, because a renderer needs all of them or none: a
+    /// deck with no weather is a clear sky, weather with no deck is nothing to
+    /// draw, and a player who turned clouds off gets neither however much a
+    /// mod registered.
+    pub fn set_clouds(&mut self, deck: clouds::Deck) {
+        self.clouds.set(deck);
+    }
+
+    /// Advances the deck's own clock.
+    ///
+    /// Seconds rather than ticks: drift and evolution are presentation and run
+    /// on the frame loop, not the simulation's (charter rule 4 exempts this).
+    pub const fn advance_clouds(&mut self, seconds: f32) {
+        self.clouds.advance(seconds);
+    }
+
+    /// Writes the cloud pass's view of this frame.
+    fn prepare_clouds(&mut self, camera: &Camera, view_projection: glam::Mat4) {
+        let (x, y, z) = camera.position.to_world();
+        let frame = clouds::Frame {
+            view_projection,
+            camera: [x, y, z],
+            sun_direction: self.sun_direction,
+            sun: [self.sun_colour[0], self.sun_colour[1], self.sun_colour[2]],
+            sky: self.sky_colour,
+            fog_end: self.fog_end,
+            mode: self.lighting_mode().code(),
+        };
+        let gpu = self.gpu.clone();
+        self.clouds.prepare(&gpu, &frame);
     }
 
     /// Whether place fog is drawn. The client turns it off under water, where
@@ -2696,6 +2734,7 @@ impl Renderer {
         self.hands_at = hands;
 
         self.prepare_particles(camera, view_projection);
+        self.prepare_clouds(camera, view_projection);
 
         let culled = self.cull_and_upload(camera, view_projection);
         self.upload_chunk_borders(camera, &culled.visible);
@@ -2800,6 +2839,13 @@ impl Renderer {
             self.draw_cutout(&mut pass, pass_targets.world, &culled.cutout_far);
 
             self.draw_sprites(&mut pass, pass_targets.sprites, &culled.sprites);
+
+            // **After everything opaque and before everything blended.** The
+            // deck writes the depth of the cube it hit, so it sorts against
+            // terrain in both directions — high ground reaches into it and a
+            // player above looks down on the tops — and drawing it here means
+            // the glass, the fluid and the particles still sort against it.
+            self.clouds.draw(&mut pass, self.post.is_some());
 
             // Glass first of the two blended passes, then the milk. Both
             // inherit slot 1 from the chunk loop above, which is what the

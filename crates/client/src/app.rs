@@ -4889,6 +4889,15 @@ impl App {
         let moment = crate::sky::flashed(moment, &self.weather.flashes);
         self.renderer
             .set_sun(moment.intensity, moment.sun, moment.sun_direction);
+        // The deck drifts and evolves on frame time for the same reason the
+        // clock above does: it is presentation, and charter rule 4 exempts it.
+        self.renderer.advance_clouds(dt);
+        self.renderer.set_clouds(crate::render::clouds::Deck {
+            layer: self.cloud_layer,
+            clouds: self.clouds,
+            quality: self.config.clouds,
+            seed: self.seed.unwrap_or(0),
+        });
         // **Under the milk, the milk IS the sky.**
         //
         // Being submerged is fog: dense, close, and the colour of what you are
