@@ -27,6 +27,7 @@
 //! exercise the same code the window does, which is the only way a screenshot
 //! test is worth having.
 
+pub mod clouds;
 pub mod frustum;
 pub mod grade;
 pub mod graph;

@@ -5080,3 +5080,62 @@ fn a_pond_against_the_sky_is_still_drawn_in_mode_3() {
     );
     renderer.set_lighting_mode(LightingMode::Classic);
 }
+
+#[test]
+fn the_cloud_shader_compiles_and_a_deck_prepares() {
+    // **The only check that the WGSL is valid.** `include_wgsl!` embeds the
+    // source; naga does not see it until a shader module is created, so a
+    // syntax error in the march sits in the tree looking fine until something
+    // draws. This builds the pass, which compiles both pipelines.
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let mut pass = client::render::clouds::Pass::new(&gpu);
+
+    let layer = tiamot_core::atmosphere::CloudLayer {
+        base: 420.0,
+        thickness: 96.0,
+        cell: 8.0,
+        detail: 2,
+        frequency: 1.0 / 600.0,
+        octaves: 3,
+        towers: 0.25,
+        drift: [1.5, 0.4],
+        evolve: 1.0 / 2400.0,
+        colour: [1.0; 3],
+        shade: [0.42, 0.44, 0.58],
+    };
+    let state = tiamot_core::atmosphere::Clouds {
+        cover: 0.55,
+        darkness: 0.0,
+        base: None,
+        ease_ticks: 600,
+    };
+    let frame = client::render::clouds::Frame {
+        view_projection: glam::camera::rh::proj::directx::perspective(1.0, 16.0 / 9.0, 0.1, 4000.0),
+        camera: [1000.0, 80.0, -2000.0],
+        seconds: 12.0,
+        sun_direction: [-0.2, -0.15, 0.96],
+        sun: [1.0, 0.86, 0.62],
+        sky: [0.42, 0.58, 0.85],
+        fog_end: 3000.0,
+        mode: 3,
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    };
+
+    // A deck and a cover: the pass has something to draw.
+    pass.prepare(&gpu, Some(layer), Some(state), &frame);
+
+    // No deck is the ordinary case — most worlds register none — and it must
+    // cost nothing rather than draw an empty sky.
+    pass.prepare(&gpu, None, Some(state), &frame);
+
+    // A deck the player turned off is the same answer by a different route,
+    // and the one a mod must not be able to override.
+    let off = client::render::clouds::Frame {
+        quality: client::render::clouds::Quality::Off,
+        ..frame
+    };
+    pass.prepare(&gpu, Some(layer), Some(state), &off);
+}
