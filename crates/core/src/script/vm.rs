@@ -1634,6 +1634,14 @@ pub trait ScriptVm: Sized {
     /// a rule that is arbitrary but fixed beats one that depends on load order.
     fn registered_sky(&self) -> Option<Sky>;
 
+    /// The cloud deck a mod registered, if any.
+    ///
+    /// `None` is a world with no clouds, which is most of them. The same
+    /// lowest-mod-id rule as [`Self::registered_sky`], for the same reason.
+    fn registered_clouds(&self) -> Option<crate::atmosphere::CloudLayer> {
+        None
+    }
+
     /// Calls a named zero-argument global, for benchmarking and tests.
     ///
     /// # Errors

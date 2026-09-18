@@ -1544,6 +1544,78 @@ fn flash_request(spec: &Table) -> mlua::Result<crate::atmosphere::FlashRequest> 
 }
 
 /// A sky modifier from a mod's table. See `install_atmosphere`.
+/// Reads a `{ r, g, b }` or positional `{ r, g, b }` colour, with a fallback.
+///
+/// Shared by the cloud calls and written the way `sky_modifier_of` reads its
+/// `sky`: named or positional, because a mod that learned one spelling in one
+/// call should not have to learn another in the next.
+fn cloud_colour(spec: &Table, name: &str, fallback: [f32; 3]) -> mlua::Result<[f32; 3]> {
+    let Some(table) = spec.get::<Option<Table>>(name)? else {
+        return Ok(fallback);
+    };
+    let channel = |key: &str, index: i64, fallback: f32| -> mlua::Result<f32> {
+        Ok(table
+            .get::<Option<f32>>(key)?
+            .or(table.get::<Option<f32>>(index)?)
+            .unwrap_or(fallback))
+    };
+    Ok([
+        channel("r", 1, fallback[0])?,
+        channel("g", 2, fallback[1])?,
+        channel("b", 3, fallback[2])?,
+    ])
+}
+
+/// Reads `game.register_clouds`' table into a layer.
+///
+/// Every field is optional with a documented default, because a mod that
+/// wants ordinary fair-weather cloud should be able to ask for it by name
+/// alone. The defaults are the ask's own worked example.
+fn cloud_layer_of(spec: &Table) -> mlua::Result<crate::atmosphere::CloudLayer> {
+    let number = |name: &str, fallback: f32| -> mlua::Result<f32> {
+        Ok(spec.get::<Option<f32>>(name)?.unwrap_or(fallback))
+    };
+    let drift = match spec.get::<Option<Table>>("drift")? {
+        Some(table) => {
+            let axis = |key: &str, index: i64| -> mlua::Result<f32> {
+                Ok(table
+                    .get::<Option<f32>>(key)?
+                    .or(table.get::<Option<f32>>(index)?)
+                    .unwrap_or(0.0))
+            };
+            [axis("x", 1)?, axis("z", 2)?]
+        }
+        None => [0.0; 2],
+    };
+    Ok(crate::atmosphere::sanitise_clouds(
+        crate::atmosphere::CloudLayer {
+            base: number("base", 256.0)?,
+            thickness: number("thickness", 64.0)?,
+            cell: number("cell", 8.0)?,
+            detail: spec.get::<Option<u8>>("detail")?.unwrap_or(1),
+            frequency: number("frequency", 1.0 / 600.0)?,
+            octaves: spec.get::<Option<u8>>("octaves")?.unwrap_or(3),
+            towers: number("towers", 0.0)?,
+            drift,
+            evolve: number("evolve", 0.0)?,
+            colour: cloud_colour(spec, "colour", [1.0; 3])?,
+            shade: cloud_colour(spec, "shade", [0.42, 0.44, 0.58])?,
+        },
+    ))
+}
+
+/// Reads `game.set_clouds`' table into one player's cloud state.
+fn cloud_state_of(spec: &Table) -> mlua::Result<crate::atmosphere::Clouds> {
+    Ok(crate::atmosphere::sanitise_cloud_state(
+        crate::atmosphere::Clouds {
+            cover: spec.get::<Option<f32>>("cover")?.unwrap_or(0.0),
+            darkness: spec.get::<Option<f32>>("darkness")?.unwrap_or(0.0),
+            base: spec.get::<Option<f32>>("base")?,
+            ease_ticks: spec.get::<Option<u32>>("ease_ticks")?.unwrap_or(0),
+        },
+    ))
+}
+
 fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier> {
     let number = |name: &str, fallback: f32| -> mlua::Result<f32> {
         Ok(spec.get::<Option<f32>>(name)?.unwrap_or(fallback))
@@ -3304,6 +3376,39 @@ impl ScriptVm for MluaVm {
         let _ = per_player.set(id, value);
     }
 
+    /// The cloud deck a mod registered, if one did.
+    ///
+    /// Lowest mod id wins where several register one, the rule
+    /// [`Self::registered_sky`] follows and for the same reason: two decks
+    /// blended is not a sky, and arbitrary-but-fixed beats depending on load
+    /// order.
+    fn registered_clouds(&self) -> Option<crate::atmosphere::CloudLayer> {
+        let registry = self
+            .lua
+            .named_registry_value::<Table>("tiamot.clouds")
+            .ok()?;
+        let mut entries: Vec<(String, Table)> = registry
+            .pairs::<String, Table>()
+            .filter_map(Result::ok)
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let (_, entry) = entries.into_iter().next()?;
+        let number = |name: &str| entry.get::<f32>(name).ok();
+        Some(crate::atmosphere::CloudLayer {
+            base: number("base")?,
+            thickness: number("thickness")?,
+            cell: number("cell")?,
+            detail: entry.get::<u8>("detail").ok()?,
+            frequency: number("frequency")?,
+            octaves: entry.get::<u8>("octaves").ok()?,
+            towers: number("towers")?,
+            drift: [number("drift_x")?, number("drift_z")?],
+            evolve: number("evolve")?,
+            colour: [number("colour0")?, number("colour1")?, number("colour2")?],
+            shade: [number("shade0")?, number("shade1")?, number("shade2")?],
+        })
+    }
+
     fn registered_sky(&self) -> Option<Sky> {
         let registry = self
             .lua
@@ -4292,6 +4397,73 @@ impl MluaVm {
     /// Its own method for the reason `install_font` and `install_picture`
     /// are: `install_sound` sat on clippy's hundred-line ceiling, and the
     /// thing that pushed it over was this one growing a second call shape.
+    /// `game.register_sky` and `game.register_clouds` — what is overhead.
+    ///
+    /// The two together for the reason `install_hud_script` is its own method:
+    /// `install_registration` sits on clippy's hundred-line ceiling and every
+    /// registration added to it pushes it over. They pair naturally, being the
+    /// same subject, and a mod that registers one usually registers the other.
+    fn install_sky(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        let owner = mod_id.to_owned();
+        let register_sky = self
+            .lua
+            .create_function(move |lua, spec: Table| register_sky(lua, &owner, &spec))
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_sky", register_sky)
+            .map_err(|err| self.vm_error(&err))?;
+
+        // **One deck, and the lowest mod id wins**, the rule `registered_sky`
+        // already follows: two mods blending their idea of a cloud is not a
+        // sky, and arbitrary-but-fixed beats depending on load order.
+        let owner = mod_id.to_owned();
+        let register_clouds = self
+            .lua
+            .create_function(move |lua, spec: Table| {
+                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: registration is closed"
+                    )));
+                }
+                for pair in spec.pairs::<Value, Value>() {
+                    let (key, _) = pair?;
+                    if let Value::String(name) = key {
+                        let name = name.to_string_lossy();
+                        if !CLOUD_FIELDS.contains(&name.as_ref()) {
+                            return Err(mlua::Error::external(format!(
+                                "register_clouds: unknown field `{name}`"
+                            )));
+                        }
+                    }
+                }
+                let layer = cloud_layer_of(&spec)?;
+                let registry: Table = lua.named_registry_value("tiamot.clouds")?;
+                let entry = lua.create_table()?;
+                entry.set("base", layer.base)?;
+                entry.set("thickness", layer.thickness)?;
+                entry.set("cell", layer.cell)?;
+                entry.set("detail", layer.detail)?;
+                entry.set("frequency", layer.frequency)?;
+                entry.set("octaves", layer.octaves)?;
+                entry.set("towers", layer.towers)?;
+                entry.set("drift_x", layer.drift[0])?;
+                entry.set("drift_z", layer.drift[1])?;
+                entry.set("evolve", layer.evolve)?;
+                for (index, channel) in layer.colour.iter().enumerate() {
+                    entry.set(format!("colour{index}"), *channel)?;
+                }
+                for (index, channel) in layer.shade.iter().enumerate() {
+                    entry.set(format!("shade{index}"), *channel)?;
+                }
+                registry.set(owner.clone(), entry)?;
+                Ok(())
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_clouds", register_clouds)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     fn install_hud_script(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
         // **One per mod, and the last one wins.** A mod with two HUD scripts is
         // a mod that should concatenate them: the client budgets per script per
@@ -4532,6 +4704,7 @@ impl MluaVm {
             "tiamot.domains",
             "tiamot.fluids",
             "tiamot.skies",
+            "tiamot.clouds",
         ] {
             let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
             self.lua
@@ -4819,13 +4992,7 @@ impl MluaVm {
         game.set("register_fluid", register_fluid)
             .map_err(|err| self.vm_error(&err))?;
 
-        let owner = mod_id.to_owned();
-        let register_sky = self
-            .lua
-            .create_function(move |lua, spec: Table| register_sky(lua, &owner, &spec))
-            .map_err(|err| self.vm_error(&err))?;
-        game.set("register_sky", register_sky)
-            .map_err(|err| self.vm_error(&err))?;
+        self.install_sky(mod_id, game)?;
 
         let owner = mod_id.to_owned();
         let key = Self::tick_key(mod_id);
@@ -6201,6 +6368,23 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_precipitation", set)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let slot = std::sync::Arc::clone(&self.atmosphere);
+        let set = self
+            .lua
+            .create_function(move |_, (uuid, spec): (String, Option<Table>)| {
+                let player =
+                    crate::identity::PlayerUuid::from_bytes(player_of(&uuid, "set_clouds")?);
+                let clouds = spec.map(|spec| cloud_state_of(&spec)).transpose()?;
+                let told = slot.lock().ok().and_then(|slot| {
+                    slot.as_ref()
+                        .map(|access| access.set_clouds(player, clouds))
+                });
+                Ok(told.unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_clouds", set)
             .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
@@ -8254,6 +8438,26 @@ const GRADE_MIN_GAMMA: f32 = 0.1;
 /// same because there was nothing lit to tell them apart.
 const SKY_FIELDS: [&str; 3] = ["day_length_ticks", "keyframes", "start_time"];
 
+/// Fields `register_clouds` accepts.
+///
+/// An allowlist, for the reason every other one here is: a typo silently
+/// ignored is a mod whose author cannot tell why nothing happened. `tint` and
+/// `transparent` were missing from `BLOCK_FIELDS` for a day and glass was
+/// undeclarable the whole time.
+const CLOUD_FIELDS: [&str; 11] = [
+    "base",
+    "thickness",
+    "cell",
+    "detail",
+    "frequency",
+    "octaves",
+    "towers",
+    "drift",
+    "evolve",
+    "colour",
+    "shade",
+];
+
 /// Fields `register_tool` accepts.
 const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "default"];
 
@@ -9484,6 +9688,80 @@ mod tests {
         let closed = screen.closed.lock().expect("lock");
         assert_eq!(shown[0].form, "shop:till");
         assert_eq!(closed[0], ("abc".to_owned(), "shop:till".to_owned()));
+    }
+
+    #[test]
+    fn a_mod_registers_a_cloud_deck_and_the_lowest_mod_id_wins() {
+        // **One deck.** Two mods blending their idea of a cloud is not a sky,
+        // so the same lowest-mod-id rule the registered sky uses applies here,
+        // and for the same reason: arbitrary but fixed beats load order.
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        load(
+            &mut vm,
+            "zzz_weather",
+            r"game.register_clouds{ base = 420, thickness = 96, cell = 8, detail = 2,
+                                    towers = 0.25, drift = { x = 1.5, z = 0.4 },
+                                    colour = { 1, 1, 1 }, shade = { 0.42, 0.44, 0.58 } }",
+        )
+        .expect("load");
+        let layer = vm.registered_clouds().expect("a deck");
+        assert!((layer.base - 420.0).abs() < 0.001);
+        assert!((layer.thickness - 96.0).abs() < 0.001);
+        assert_eq!(layer.detail, 2);
+        assert!((layer.drift[0] - 1.5).abs() < 0.001);
+        assert!((layer.drift[1] - 0.4).abs() < 0.001);
+        assert!((layer.shade[2] - 0.58).abs() < 0.001);
+
+        // A second mod registers a lower id and takes the sky.
+        load(
+            &mut vm,
+            "aaa_other",
+            r"game.register_clouds{ base = 100, cell = 16 }",
+        )
+        .expect("load");
+        let layer = vm.registered_clouds().expect("a deck");
+        assert!(
+            (layer.base - 100.0).abs() < 0.001,
+            "the lower mod id should have won, got base {}",
+            layer.base
+        );
+
+        // And a world where nobody registered one has no clouds at all, which
+        // is most worlds.
+        let bare = MluaVm::new(VmLimits::default()).expect("vm");
+        assert_eq!(bare.registered_clouds(), None);
+    }
+
+    #[test]
+    fn a_cloud_field_a_mod_misspelt_is_an_error_rather_than_a_silence() {
+        // The allowlist rule every other registration follows. `tint` and
+        // `transparent` were missing from `BLOCK_FIELDS` for a day and glass
+        // was undeclarable for the whole of it, with no error to say so.
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        let err = load(
+            &mut vm,
+            "typo",
+            r"game.register_clouds{ base = 420, thikness = 96 }",
+        )
+        .expect_err("a misspelt field is an error");
+        assert!(
+            format!("{err:?}").contains("thikness"),
+            "the error should name the field: {err:?}"
+        );
+
+        // Registration is closed after the freeze, like every other register_*
+        // (charter rule 9). The reason is in the cause chain rather than the
+        // top line, which reads "mod `late` errored in eval".
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        load(&mut vm, "late", "").expect("load");
+        vm.freeze().expect("freeze");
+        let err = vm
+            .eval_in("late", "game.register_clouds{ base = 1 }")
+            .expect_err("registration was accepted after freeze");
+        assert!(
+            format!("{err:?}").contains("registration is closed"),
+            "the error did not say why: {err:?}"
+        );
     }
 
     #[test]
