@@ -1004,6 +1004,13 @@ pub struct App {
     /// Empty until a server says otherwise, which is the client's own look —
     /// see [`crate::theme`].
     theme: crate::theme::Theme,
+    /// The cloud deck this world's mods registered, if one did.
+    ///
+    /// Registration state, so it arrives once and does not change. `None` is
+    /// a world with no clouds, which is most of them.
+    cloud_layer: Option<tiamot_core::atmosphere::CloudLayer>,
+    /// How much cloud this player is under, as the weather last said.
+    clouds: Option<tiamot_core::atmosphere::Clouds>,
     /// What each mod wants this player's HUD to show, by mod id.
     ///
     /// Held here rather than inside the VM because it arrives on the network
@@ -1425,6 +1432,8 @@ impl App {
             hud_values: std::collections::BTreeMap::new(),
             hud_reserve: 0,
             theme: crate::theme::Theme::none(),
+            cloud_layer: None,
+            clouds: None,
             hud_vm: start_hud_vm(),
             fps: 0.0,
             last_dt: 0.0,
@@ -3720,6 +3729,41 @@ impl App {
         self.config.hud_visible
     }
 
+    /// Takes one weather event.
+    ///
+    /// Five arms in one, because `pump_network` is at clippy's hundred-line
+    /// ceiling and the weather is the part of it that keeps growing — and
+    /// these five are one subject, so grouping them is what the reader wants
+    /// anyway.
+    fn adopt_weather(&mut self, event: &crate::net::Event) {
+        match event {
+            crate::net::Event::SkyModifier(modifier) => self.weather.modifier.set(*modifier),
+            crate::net::Event::Flash(flash) => self.weather.flashes.strike(*flash),
+            crate::net::Event::Precipitation(rain) => self.weather.rain.set(*rain),
+            crate::net::Event::CloudLayer(layer) => self.cloud_layer = *layer,
+            crate::net::Event::Clouds(clouds) => self.clouds = *clouds,
+            // Unreachable by construction: the caller matched these five.
+            // An arm rather than an `unreachable!`, because a sixth weather
+            // event added to the caller and forgotten here should do nothing
+            // rather than kill the client's network pump.
+            _ => {}
+        }
+    }
+
+    /// The cloud deck this world registered, and what this player is under.
+    ///
+    /// Both together because a renderer needs both or neither: a deck with no
+    /// state is a clear sky, and a state with no deck is nothing to draw.
+    #[must_use]
+    pub const fn clouds(
+        &self,
+    ) -> (
+        Option<tiamot_core::atmosphere::CloudLayer>,
+        Option<tiamot_core::atmosphere::Clouds>,
+    ) {
+        (self.cloud_layer, self.clouds)
+    }
+
     /// The look this server's mods asked the engine's own screens to wear.
     #[must_use]
     pub const fn theme(&self) -> &crate::theme::Theme {
@@ -4340,174 +4384,193 @@ impl App {
     /// close the window.
     pub fn pump_network(&mut self) -> bool {
         while let Some(event) = self.connection.poll() {
-            match event {
-                Event::Connected {
-                    address,
-                    fingerprint,
-                    first_use,
-                } => self.connected_to(&address, &fingerprint, first_use),
+            if !self.adopt(event) {
+                return false;
+            }
+        }
+        true
+    }
 
-                Event::Materials { table, images } => self.adopt_atlas(&table, &images),
-                // A dialog's art, arriving whenever it arrives. Held until
-                // something draws it — see `crate::pictures`.
-                Event::Picture { hash, image } => self.pictures.insert(hash, image),
-                // Queued, not installed: installing rebuilds egui's glyph
-                // atlas and this is the network pump. See `client::fonts`.
-                Event::Font { id, bytes } => self.adopt_font(&id, bytes),
+    /// Takes one event from the server.
+    ///
+    /// **A dispatch table is its own function.** `pump_network` was this
+    /// match plus a loop, and it sat on clippy's hundred-line ceiling — so
+    /// every event the engine gained had to be paid for by shortening an
+    /// unrelated arm. The loop is four lines; the table is as long as the
+    /// protocol.
+    ///
+    /// `false` means the connection is gone and the pump should stop.
+    fn adopt(&mut self, event: Event) -> bool {
+        match event {
+            Event::Connected {
+                address,
+                fingerprint,
+                first_use,
+            } => self.connected_to(&address, &fingerprint, first_use),
 
-                Event::Joined {
-                    spawn,
-                    tick,
-                    may_fly,
-                    seed,
-                    ..
-                } => self.joined_world(spawn, tick, may_fly, seed),
+            Event::Materials { table, images } => self.adopt_atlas(&table, &images),
+            // A dialog's art, arriving whenever it arrives. Held until
+            // something draws it — see `crate::pictures`.
+            Event::Picture { hash, image } => self.pictures.insert(hash, image),
+            // Queued, not installed: installing rebuilds egui's glyph
+            // atlas and this is the network pump. See `client::fonts`.
+            Event::Font { id, bytes } => self.adopt_font(&id, bytes),
 
-                Event::Chunk(chunk, tint, fog) => self.adopt_chunk(*chunk, tint, fog),
+            Event::Joined {
+                spawn,
+                tick,
+                may_fly,
+                seed,
+                ..
+            } => self.joined_world(spawn, tick, may_fly, seed),
 
-                Event::ChunkSummary { pos, summary } => self.adopt_summary(pos, *summary),
+            Event::Chunk(chunk, tint, fog) => self.adopt_chunk(*chunk, tint, fog),
 
-                Event::ChunkLight(pos, layer) => self.store.set_light(pos, *layer),
+            Event::ChunkSummary { pos, summary } => self.adopt_summary(pos, *summary),
 
-                event @ (Event::EntitySpawn(_)
-                | Event::EntityDespawn(_)
-                | Event::EntityArmed(_)
-                | Event::EntityState { .. }) => self.entity_event(event),
+            Event::ChunkLight(pos, layer) => self.store.set_light(pos, *layer),
 
-                Event::ChunkFluid(pos, layer) => self.store.set_fluid(pos, *layer),
+            event @ (Event::EntitySpawn(_)
+            | Event::EntityDespawn(_)
+            | Event::EntityArmed(_)
+            | Event::EntityState { .. }) => self.entity_event(event),
 
-                Event::Fluids { fluids } => self.adopt_fluids(&fluids),
+            Event::ChunkFluid(pos, layer) => self.store.set_fluid(pos, *layer),
 
-                // **The GRANTED radius, which is what the fog is drawn from.**
-                // Using the configured one instead would end the world in clear
-                // air whenever the server gave less than was asked for — and
-                // the server's limit is the one that decides, so that is not a
-                // rare case but the normal one on any server with a lower cap
-                // than this client's config.
-                Event::ViewDistance {
-                    horizontal,
-                    vertical,
-                } => self.accept_view_distance(horizontal, vertical),
+            Event::Fluids { fluids } => self.adopt_fluids(&fluids),
 
-                Event::Sky(sky) => self.sky = sky,
+            // **The GRANTED radius, which is what the fog is drawn from.**
+            // Using the configured one instead would end the world in clear
+            // air whenever the server gave less than was asked for — and
+            // the server's limit is the one that decides, so that is not a
+            // rare case but the normal one on any server with a lower cap
+            // than this client's config.
+            Event::ViewDistance {
+                horizontal,
+                vertical,
+            } => self.accept_view_distance(horizontal, vertical),
 
-                // Ignored while the clock is being scrubbed by hand. The server
-                // is still the authority and still sending; a local override
-                // that the next broadcast undid a second later would be
-                // unusable for looking at anything.
-                Event::TimeOfDay(time) => {
-                    if !self.time_override {
-                        self.sky.set_time(time);
-                    }
+            Event::Sky(sky) => self.sky = sky,
+
+            // Ignored while the clock is being scrubbed by hand. The server
+            // is still the authority and still sending; a local override
+            // that the next broadcast undid a second later would be
+            // unusable for looking at anything.
+            Event::TimeOfDay(time) => {
+                if !self.time_override {
+                    self.sky.set_time(time);
                 }
+            }
 
-                Event::ChunkUnload(pos) => {
-                    if self.store.remove(pos) {
-                        // The mesh has to go with the data. A renderer holding
-                        // a mesh for a chunk the store has forgotten draws a
-                        // ghost that nothing will ever update.
-                        self.renderer.remove_chunk(&self.drawn_at(pos));
-                    }
+            Event::ChunkUnload(pos) => {
+                if self.store.remove(pos) {
+                    // The mesh has to go with the data. A renderer holding
+                    // a mesh for a chunk the store has forgotten draws a
+                    // ghost that nothing will ever update.
+                    self.renderer.remove_chunk(&self.drawn_at(pos));
                 }
+            }
 
-                Event::DomainChanged { domain } => {
-                    self.entering = Some(domain.clone());
-                    // **The prediction goes with the chunks.** Left alone it
-                    // keeps the footing it had in the space being left, and
-                    // walks on the spot against an empty store — audibly, since
-                    // footsteps are gated on being grounded.
-                    if let Some(predictor) = self.predictor.as_mut() {
-                        predictor.adrift();
-                    }
-                    self.stride = 0.0;
-                    // **Everything, and the meshes with it.** The store's
-                    // positions all mean different chunks now, so a mesh kept
-                    // for any of them draws terrain from a place the player has
-                    // left, standing exactly where they are. `ChunkUnload` does
-                    // this one position at a time; a switch does it for the
-                    // lot, which is why it is one message rather than a
-                    // thousand.
-                    let drawn: Vec<_> = self.store.positions().collect();
-                    for pos in drawn {
-                        self.renderer.remove_chunk(&self.drawn_at(pos));
-                    }
-                    self.store.clear();
-                    self.entities.clear();
-                    self.particles.clear();
-                    tracing::info!(%domain, "moved to another domain");
+            Event::DomainChanged { domain } => {
+                self.entering = Some(domain.clone());
+                // **The prediction goes with the chunks.** Left alone it
+                // keeps the footing it had in the space being left, and
+                // walks on the spot against an empty store — audibly, since
+                // footsteps are gated on being grounded.
+                if let Some(predictor) = self.predictor.as_mut() {
+                    predictor.adrift();
                 }
-
-                Event::Edit(edit) => {
-                    self.store.apply(&edit);
+                self.stride = 0.0;
+                // **Everything, and the meshes with it.** The store's
+                // positions all mean different chunks now, so a mesh kept
+                // for any of them draws terrain from a place the player has
+                // left, standing exactly where they are. `ChunkUnload` does
+                // this one position at a time; a switch does it for the
+                // lot, which is why it is one message rather than a
+                // thousand.
+                let drawn: Vec<_> = self.store.positions().collect();
+                for pos in drawn {
+                    self.renderer.remove_chunk(&self.drawn_at(pos));
                 }
+                self.store.clear();
+                self.entities.clear();
+                self.particles.clear();
+                tracing::info!(%domain, "moved to another domain");
+            }
 
-                Event::Particles(bursts) => self.adopt_particles(&bursts),
+            Event::Edit(edit) => {
+                self.store.apply(&edit);
+            }
 
-                Event::PlayerState(state) => self.accept_player_state(&state),
+            Event::Particles(bursts) => self.adopt_particles(&bursts),
 
-                Event::DigProgress { target, progress } => {
-                    self.dig = Some((target, progress));
-                }
+            Event::PlayerState(state) => self.accept_player_state(&state),
 
-                Event::Actions { actions } => self.adopt_actions(actions),
-                Event::ModSettings { settings } => self.adopt_mod_settings(settings),
+            Event::DigProgress { target, progress } => {
+                self.dig = Some((target, progress));
+            }
 
-                // Recorded now, played later: the audio backend is the next
-                // piece of Task 13, and until it lands a client knows what a
-                // server's sounds ARE without being able to make one.
-                Event::Sounds { sounds } => self.sounds = sounds,
+            Event::Actions { actions } => self.adopt_actions(actions),
+            Event::ModSettings { settings } => self.adopt_mod_settings(settings),
 
-                Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
-                Event::Theme(theme) => self.theme = crate::theme::Theme::of(theme.as_ref()),
-                Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
-                // **Replaced, not merged.** The server sends a mod's whole set
-                // each time it changes, so a value a mod stopped sending stops
-                // being shown — which merging would make impossible to say.
-                Event::HudValues { mod_id, values } => {
-                    self.hud_values.insert(mod_id, values);
-                }
+            // Recorded now, played later: the audio backend is the next
+            // piece of Task 13, and until it lands a client knows what a
+            // server's sounds ARE without being able to make one.
+            Event::Sounds { sounds } => self.sounds = sounds,
 
-                Event::SkyModifier(modifier) => self.weather.modifier.set(modifier),
-                Event::Flash(flash) => self.weather.flashes.strike(flash),
-                Event::Precipitation(precipitation) => self.weather.rain.set(precipitation),
+            Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
+            Event::Theme(theme) => self.theme = crate::theme::Theme::of(theme.as_ref()),
 
-                Event::SoundBindings { bindings } => self.adopt_bindings(bindings),
+            Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
+            // **Replaced, not merged.** The server sends a mod's whole set
+            // each time it changes, so a value a mod stopped sending stops
+            // being shown — which merging would make impossible to say.
+            Event::HudValues { mod_id, values } => {
+                self.hud_values.insert(mod_id, values);
+            }
 
-                Event::View { view, slots, held } => self.adopt_view(view, slots, held),
-                Event::Dialog {
-                    form,
-                    tree,
-                    compact,
-                } => self.adopt_dialog(form, Some(crate::dialog::Screen::new(*tree, compact))),
-                Event::DialogClosed { form } => self.adopt_dialog(form, None),
+            Event::SkyModifier(_)
+            | Event::Flash(_)
+            | Event::Precipitation(_)
+            | Event::CloudLayer(_)
+            | Event::Clouds(_) => self.adopt_weather(&event),
 
-                // Held for the frame loop, which is the only place a sound can
-                // be spatialised against where the camera is NOW. Loops travel
-                // with them: same placement, different lifetime.
-                Event::PlaySound { .. } | Event::StartLoop { .. } | Event::StopLoop { .. } => {
-                    self.heard.push(event);
-                }
+            Event::SoundBindings { bindings } => self.adopt_bindings(bindings),
 
-                // Decoded and ready. Handed straight to the mixer, which holds
-                // it even with no sound device — whether an asset decoded is a
-                // property of the asset, and the tests ask on machines that
-                // have no speakers.
-                Event::SoundReady { id, clip, voice } => self.mixer.insert(id, clip, voice),
+            Event::View { view, slots, held } => self.adopt_view(view, slots, held),
+            Event::Dialog {
+                form,
+                tree,
+                compact,
+            } => self.adopt_dialog(form, Some(crate::dialog::Screen::new(*tree, compact))),
+            Event::DialogClosed { form } => self.adopt_dialog(form, None),
 
-                Event::Tools { tools } => self.adopt_tools(tools),
+            // Held for the frame loop, which is the only place a sound can
+            // be spatialised against where the camera is NOW. Loops travel
+            // with them: same placement, different lifetime.
+            Event::PlaySound { .. } | Event::StartLoop { .. } | Event::StopLoop { .. } => {
+                self.heard.push(event);
+            }
 
-                Event::Inventory { stacks } => self.adopt_inventory(stacks),
+            // Decoded and ready. Handed straight to the mixer, which holds
+            // it even with no sound device — whether an asset decoded is a
+            // property of the asset, and the tests ask on machines that
+            // have no speakers.
+            Event::SoundReady { id, clip, voice } => self.mixer.insert(id, clip, voice),
 
-                Event::Chat { text, .. } => self.say(text),
+            Event::Tools { tools } => self.adopt_tools(tools),
 
-                Event::Warning(text) => self.warn(text),
+            Event::Inventory { stacks } => self.adopt_inventory(stacks),
 
-                // Through `select_slot`, not the field: see `Event::SelectSlot`.
-                Event::SelectSlot { slot } => self.select_slot(usize::from(slot)),
-                Event::Disconnected { reason } => {
-                    self.warn(format!("disconnected: {reason}"));
-                    return false;
-                }
+            Event::Chat { text, .. } => self.say(text),
+
+            Event::Warning(text) => self.warn(text),
+
+            // Through `select_slot`, not the field: see `Event::SelectSlot`.
+            Event::SelectSlot { slot } => self.select_slot(usize::from(slot)),
+            Event::Disconnected { reason } => {
+                self.warn(format!("disconnected: {reason}"));
+                return false;
             }
         }
         true

@@ -260,19 +260,29 @@ pub fn sanitise_precipitation(mut precipitation: Precipitation) -> Precipitation
 /// A deck 8 km across at `cell = 8` would be millions of cubes as geometry,
 /// rebuilt forever because it evolves; as a field it is this struct.
 ///
-/// # A column is an interval, and what that cannot do
+/// # A column is up to TWO intervals, which is what buys the anvil
 ///
-/// At each column of the grid the field gives a BOTTOM and a TOP. Two
-/// heights rather than one flat base, because real cumulus has stepped,
-/// blocky undersides and lobes that hang below their neighbours, and a
-/// single flat base can show neither.
+/// At each column of the grid the field gives a bottom and a top, and may
+/// give a second pair above them. Two heights rather than one flat base
+/// because real cumulus has stepped, blocky undersides and lobes hanging
+/// below their neighbours; a second interval because the reference images'
+/// hero cloud is a tower that **mushrooms out over its own waist**, and one
+/// interval per column — solid from bottom to top and nothing else — cannot
+/// represent solid, air, solid.
 ///
-/// **One interval per column cannot represent a true overhang** — solid,
-/// then air, then solid again in the same column. A tower that mushrooms out
-/// over its own stem needs a three-dimensional field and a three-dimensional
-/// march, which is a different cost class. The detail noise bites the
-/// underside as well as the top, so overhangs exist at the detail scale; the
-/// large-scale kind is knowingly not here.
+/// The upper lobe is driven by [`CloudLayer::towers`] rather than by a field
+/// of its own, so a mod that asks for flat banks pays for neither. **Two is a
+/// deliberate stopping point**, not a step toward N: it covers the anvil and
+/// the mushroom, which is what the references show, at roughly twice a
+/// column's cost rather than the open-ended cost of a full three-dimensional
+/// march. A cloud needing three would need the 3-D field.
+///
+/// # The camera may be anywhere
+///
+/// Below the deck, inside it, or above it looking down on the tops — a player
+/// can fly up through this. The march therefore starts at the camera rather
+/// than at the deck's floor, and a camera inside a filled cell sees fog
+/// rather than a cube's inside face.
 ///
 /// # Presentation only
 ///
@@ -394,6 +404,12 @@ pub struct Clouds {
     /// 0 is clear, 1 is overcast.
     pub cover: f32,
     /// 0 is fair-weather white, 1 is storm grey.
+    ///
+    /// High darkness also hangs a dark haze UNDER the deck, which is what
+    /// makes a storm read from outside it. Rain seen at a distance is a
+    /// curtain kilometres away, and `set_precipitation` spawns around the
+    /// player's own camera by construction — so the storm a player sees over
+    /// the next valley is this, not particles.
     pub darkness: f32,
     /// Overrides the registered base for this player, in world `y`.
     pub base: Option<f32>,

@@ -464,6 +464,26 @@ open the dropdown gets them.
 
 Key on the UUID, never the display name (charter rule 13).
 
+### Clouds
+
+`game.register_clouds{ ... }` declares the deck once at load and
+`game.set_clouds(uuid, { cover, darkness })` says how much of it one player is
+under. The client draws it by marching a ray through a **field**, not by
+building cubes — which is why a deck can reach the horizon, drift and change
+shape without anything being rebuilt, and why you can fly up through one.
+
+Two things follow that are worth knowing before you design around them. A
+column of the deck is up to **two** intervals, which gives stepped undersides
+and a tower that mushrooms over its waist, but not a third lobe. And `darkness`
+hangs a dark haze under the deck as well as greying it: that, rather than
+`set_precipitation`, is what makes a storm read from outside it, because
+precipitation spawns around the player's own camera and cannot draw a curtain
+of rain over the next valley.
+
+The player owns the quality: a cloud setting in their own graphics options
+scales the deck's resolution and draw distance, down to off. The server is
+never told, and a mod must not assume its clouds are being drawn at all.
+
 ### A look for the engine's own screens
 
 **The engine's own screens can wear your look.** The pause screen, the settings

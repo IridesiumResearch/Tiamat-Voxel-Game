@@ -2002,6 +2002,97 @@ function game.register_hud_script(file) end
 ---@field file string Required. Path to the Lua file inside your mod directory.
 ---@field reserve number? Virtual pixels at the bottom of the canvas to keep the engine's sheets clear of. Default 0, clamped to 540.
 
+---Declares this world's cloud deck. Registration window only.
+---
+---**One deck per world**, and where several mods register one the lowest mod
+---id wins — the same rule `register_sky` follows, because two mods blending
+---their idea of a cloud is not a sky.
+---
+---The client draws it by marching a ray through a FIELD rather than by
+---building cubes, which is why a deck can reach the horizon and drift and
+---change shape without costing anything to rebuild. Every field below is
+---optional; the defaults are an ordinary fair-weather deck.
+---
+---```lua
+---game.register_clouds{
+---    base = 420,       -- world y of the deck's floor
+---    thickness = 96,   -- blocks from base to the tallest tower's top
+---    cell = 8,         -- blocks per cube
+---    detail = 2,       -- small cubes per cube edge on the surface; 1 is none
+---    frequency = 1 / 600, octaves = 3,
+---    towers = 0.25,    -- how much taller the highest heaps grow; 0 is flat banks
+---    drift = { x = 1.5, z = 0.4 },   -- blocks a second
+---    evolve = 1 / 2400,              -- how fast the shape changes, per second
+---    colour = { 1.0, 1.0, 1.0 },     -- lit cloud, before the sun's own colour
+---    shade = { 0.42, 0.44, 0.58 },   -- the unlit side, before the sky's
+---}
+---```
+---
+---**Presentation only.** It is outside every determinism hash, like the sky's
+---keyframes, so nothing you do here can change a world's terrain. The field is
+---seeded from the world seed all the same, so two players looking at the same
+---cloud agree about it.
+---
+---A number out of range is clamped rather than refused: a deck you got wrong
+---loses that number, not your sky. A field name you misspell IS an error,
+---because a typo that did nothing silently is a mod whose author cannot tell
+---why nothing happened.
+---
+---The player can turn clouds down or off in their own graphics settings, and
+---is never asked to tell the server.
+---
+---@param spec Tiamot.CloudSpec
+function game.register_clouds(spec) end
+
+---Fields accepted by `game.register_clouds`.
+---@class Tiamot.CloudSpec
+---@field base number? World y of the deck's floor. Default 256.
+---@field thickness number? Blocks from the base to the tallest top. Default 64, at most 1024.
+---@field cell number? Blocks per cube. Default 8, from 1 to 64.
+---@field detail integer? Small cubes per cube edge on the surface. Default 1 (none), at most 4.
+---@field frequency number? The field's horizontal scale, in cycles per block. Default 1/600.
+---@field octaves integer? Octaves of the field. Default 3, at most 6.
+---@field towers number? How much taller the highest heaps grow, 0..1. Default 0.
+---@field drift { x: number, z: number }? Blocks a second. Default none, at most 64.
+---@field evolve number? How fast the shape changes, per second. Default 0.
+---@field colour { r: number, g: number, b: number }? Lit cloud. Default white.
+---@field shade { r: number, g: number, b: number }? The unlit side. Default a blue-grey.
+
+---Sets how much cloud one player is under. Latest state, eased.
+---
+---**Per player, not per domain**, for the reason `set_sky_modifier` is: two
+---players in one domain can stand under different weather. One message when it
+---changes, so calling this every tick costs one message and nothing overflows.
+---
+---```lua
+---game.set_clouds(uuid, { cover = 0.55, darkness = 0.0, ease_ticks = 600 })
+---game.set_clouds(uuid, nil)   -- a clear sky, eased
+---```
+---
+---`cover` is 0 for clear and 1 for overcast. `darkness` is 0 for fair-weather
+---white and 1 for storm grey, and it also hangs a dark haze UNDER the deck —
+---which is what makes a storm read from outside it. Rain seen at a distance is
+---a curtain kilometres away, and `game.set_precipitation` spawns around the
+---player's own camera by construction, so the storm a player sees over the next
+---valley is this rather than particles.
+---
+---`base` overrides the registered floor for this player alone, for a world
+---whose ground height varies enough that one number will not do.
+---
+---Returns whether that player was there to tell.
+---
+---@param uuid string The player's UUID.
+---@param spec Tiamot.CloudsSpec|nil
+---@return boolean told
+function game.set_clouds(uuid, spec) end
+
+---Fields accepted by `game.set_clouds`.
+---@class Tiamot.CloudsSpec
+---@field cover number? 0 is clear, 1 is overcast. Default 0.
+---@field darkness number? 0 is fair-weather white, 1 is storm grey. Default 0.
+---@field base number? Overrides the registered floor for this player.
+---@field ease_ticks integer? How long the client takes to get there. Default 0, at most 2400.
+
 ---There is no `game.register_theme`, and there cannot be.
 ---
 ---A mod's look for the engine's OWN screens — the pause screen, the settings

@@ -140,6 +140,8 @@ pub struct Shared {
     pub picture_table: Vec<tiamot_core::proto::PictureDef>,
     /// How the loaded mods want the engine's own screens to look, or `None`.
     pub theme: Option<tiamot_core::proto::ThemeDef>,
+    /// The cloud deck a mod registered, or `None` for a world with none.
+    pub cloud_layer: Option<tiamot_core::atmosphere::CloudLayer>,
     /// The HUD scripts the mods asked to push, in load order.
     pub hud_scripts: Vec<tiamot_core::proto::HudScriptDef>,
     /// Which sound each named event plays, in load order.
@@ -337,6 +339,8 @@ pub struct Shared {
     pub sky_modifiers: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, SkySlot>>,
     /// Each player's precipitation, and whether they have been told it.
     pub precipitation: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, PrecipitationSlot>>,
+    /// Each player's cloud state, and whether they have been told it.
+    pub clouds: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, CloudSlot>>,
 
     /// Every distributable file the loaded mods supply, by hash.
     ///
@@ -409,6 +413,15 @@ pub struct Shared {
 pub struct PrecipitationSlot {
     /// The rain, or none.
     pub precipitation: Option<tiamot_core::atmosphere::Precipitation>,
+    /// Whether the player has been told this version.
+    pub sent: bool,
+}
+
+/// One player's cloud state as a mod last set it, and whether it was sent.
+#[derive(Debug, Clone, Default)]
+pub struct CloudSlot {
+    /// The state, or none.
+    pub clouds: Option<tiamot_core::atmosphere::Clouds>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -1109,6 +1122,7 @@ impl Shared {
         self.forget_hud_values(uuid);
         self.forget_sky_modifier(uuid);
         self.forget_precipitation(uuid);
+        self.forget_clouds(uuid);
     }
 
     /// Files an input against the tick it belongs to.
@@ -2174,6 +2188,39 @@ impl Shared {
         }
     }
 
+    /// Replaces one player's cloud state; unchanged and already sent is a no-op.
+    pub fn set_clouds(&self, uuid: &PlayerUuid, clouds: Option<tiamot_core::atmosphere::Clouds>) {
+        let Ok(mut all) = self.clouds.lock() else {
+            return;
+        };
+        let slot = all.entry(*uuid).or_default();
+        if slot.clouds == clouds && slot.sent {
+            return;
+        }
+        slot.clouds = clouds;
+        slot.sent = false;
+    }
+
+    /// Takes the cloud state one player has not been told yet.
+    pub fn unsent_clouds(&self, uuid: &PlayerUuid) -> Option<ServerMessage> {
+        let mut all = self.clouds.lock().ok()?;
+        let slot = all.get_mut(uuid)?;
+        if slot.sent {
+            return None;
+        }
+        slot.sent = true;
+        Some(ServerMessage::Clouds {
+            clouds: slot.clouds,
+        })
+    }
+
+    /// Forgets a player's cloud state, when they leave.
+    pub fn forget_clouds(&self, uuid: &PlayerUuid) {
+        if let Ok(mut all) = self.clouds.lock() {
+            all.remove(uuid);
+        }
+    }
+
     /// Replaces one player's precipitation; unchanged and already sent is a no-op.
     pub fn set_precipitation(
         &self,
@@ -2630,6 +2677,9 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     if let Some(message) = shared.unsent_precipitation(&uuid) {
                         frame::write(&mut send, &message).await?;
                     }
+                    if let Some(message) = shared.unsent_clouds(&uuid) {
+                        frame::write(&mut send, &message).await?;
+                    }
                     // Why the last thing they asked for did not happen. Sent
                     // as chat from nobody: a refusal the player never sees is
                     // indistinguishable from the server having lost the
@@ -2757,6 +2807,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 fonts: &shared.font_table,
                 pictures: &shared.picture_table,
                 theme: shared.theme.as_ref(),
+                cloud_layer: shared.cloud_layer,
                 hud_scripts: &shared.hud_scripts,
                 sound_bindings: &shared.sound_bindings,
                 sky: (shared.sky_day_length, &shared.sky_keyframes),
@@ -3278,6 +3329,7 @@ mod tests {
             font_table: Vec::new(),
             picture_table: Vec::new(),
             theme: None,
+            cloud_layer: None,
             hud_scripts: Vec::new(),
             sound_bindings: Vec::new(),
             fluid_table: Vec::new(),
@@ -3310,6 +3362,7 @@ mod tests {
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            clouds: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             precipitation: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),

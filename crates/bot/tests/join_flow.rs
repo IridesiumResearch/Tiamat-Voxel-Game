@@ -156,6 +156,10 @@ fn a_bot_completes_the_whole_join_flow() {
             // a theme pointing at a font or a frame it has not been told
             // about. Appended, as ever.
             "Theme",
+            // Protocol v64: the cloud deck, registration state like the sky's
+            // keyframes. What a player is UNDER rides the drain instead, so it
+            // is not in the burst. Appended, as ever.
+            "CloudLayer",
             "JoinWorld",
         ];
         assert!(
@@ -559,6 +563,7 @@ fn describe(message: &ServerMessage) -> &'static str {
         ServerMessage::ModSettings { .. } => "ModSettings",
         ServerMessage::PictureTable { .. } => "PictureTable",
         ServerMessage::Theme { .. } => "Theme",
+        ServerMessage::CloudLayer { .. } => "CloudLayer",
         ServerMessage::JoinWorld { .. } => "JoinWorld",
         ServerMessage::Disconnect { .. } => "Disconnect",
         _ => "other",

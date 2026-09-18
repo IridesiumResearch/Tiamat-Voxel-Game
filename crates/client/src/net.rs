@@ -208,6 +208,16 @@ pub enum Event {
         values: tiamot_core::hud::Values,
     },
 
+    /// The cloud deck a mod registered, or `None` for a world with none.
+    ///
+    /// Registration state: one message in the join burst, like the sky's
+    /// keyframes. See [`tiamot_core::atmosphere::CloudLayer`].
+    CloudLayer(Option<tiamot_core::atmosphere::CloudLayer>),
+
+    /// How much cloud this player is under, latest state — one message when
+    /// the weather changes, eased client-side.
+    Clouds(Option<tiamot_core::atmosphere::Clouds>),
+
     /// How this server's mods want the engine's own screens to look, or
     /// `None` for the client's own — see [`crate::theme`].
     Theme(Option<tiamot_core::proto::ThemeDef>),
@@ -1607,6 +1617,14 @@ async fn session(
                     finish(format!("could not ask for the fonts: {err}"));
                     break;
                 }
+            }
+
+            ServerMessage::CloudLayer { layer } => {
+                let _ = events.send(Event::CloudLayer(layer));
+            }
+
+            ServerMessage::Clouds { clouds } => {
+                let _ = events.send(Event::Clouds(clouds));
             }
 
             ServerMessage::Theme { theme } => {

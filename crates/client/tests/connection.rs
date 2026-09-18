@@ -190,6 +190,11 @@ struct Seen {
     theme: Option<tiamot_core::proto::ThemeDef>,
     /// Pictures whose bytes arrived and decoded, by content hash.
     pictures: Vec<tiamot_core::proto::ContentHash>,
+    /// The cloud deck the server sent, if the message arrived at all. The
+    /// outer option is "was told", the inner is "there is one".
+    cloud_layer: Option<Option<tiamot_core::atmosphere::CloudLayer>>,
+    /// How much cloud this player was last told they are under.
+    clouds: Option<tiamot_core::atmosphere::Clouds>,
     hud_values: std::collections::BTreeMap<String, tiamot_core::hud::Values>,
     /// Which sound each named event plays, as the server last said.
     bindings: Vec<tiamot_core::proto::SoundBinding>,
@@ -220,6 +225,8 @@ impl Seen {
             | Event::Precipitation(_) => {}
             Event::HudReserve(reserve) => self.hud_reserve = Some(reserve),
             Event::Theme(theme) => self.theme = theme,
+            Event::CloudLayer(layer) => self.cloud_layer = Some(layer),
+            Event::Clouds(clouds) => self.clouds = clouds,
             // A mod's font. Same reasoning as the picture above.
             Event::Font { .. } => {}
             Event::Materials { table, images } => {
@@ -1091,4 +1098,91 @@ fn a_mods_declared_look_reaches_a_client_and_names_art_the_client_asked_for() {
         "the theme's frame was named but its bytes never arrived; warnings={:?}",
         seen.warnings
     );
+}
+
+/// A mod directory whose one mod registers a cloud deck and steers it.
+fn cloudy_mods(name: &str) -> PathBuf {
+    let mods = scratch(&format!("{name}-mods"));
+    let dir = mods.join("weather");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"weather\"\nname = \"Weather\"\nversion = \"1.0.0\"\n",
+    )
+    .expect("manifest");
+    // The deck at load; the cover when a player arrives. Exactly the two
+    // halves the ask describes, and the reason they are two calls: a deck is
+    // registration state and a cover is weather.
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+game.register_clouds{ base = 420, thickness = 96, cell = 8, detail = 2,
+                      towers = 0.25, drift = { x = 1.5, z = 0.4 } }
+
+game.register_on_player_join(function(event)
+    game.set_clouds(event.player, { cover = 0.55, darkness = 0.0, ease_ticks = 600 })
+end)
+"#,
+    )
+    .expect("init");
+    mods
+}
+
+#[test]
+fn a_mods_cloud_deck_and_a_players_cover_both_reach_a_client() {
+    // **The two halves, and why they are two.** The deck is registration
+    // state — it rides the join burst once, like the sky's keyframes. What a
+    // player is UNDER is latest state and rides the drain, like the sky
+    // modifier, because two players in one domain can stand under different
+    // weather.
+    //
+    // Nothing is drawn yet. What is under test is that a mod can say both
+    // things and a real client is told both, which is the whole of stage 1.
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("clouds-world"),
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(cloudy_mods("clouds")),
+        enabled_mods: None,
+        seed: Some(4242),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start");
+    let home = Home::new("clouds");
+    let mut connection = home.open(&server);
+    let mut seen = Seen::default();
+
+    assert!(
+        pump(&mut connection, &mut seen, |seen| seen
+            .cloud_layer
+            .is_some()
+            && seen.clouds.is_some()),
+        "the deck or the cover never arrived; layer={:?} clouds={:?} warnings={:?}",
+        seen.cloud_layer,
+        seen.clouds,
+        seen.warnings
+    );
+
+    let layer = seen
+        .cloud_layer
+        .expect("told about the deck")
+        .expect("a world with a deck in it");
+    assert!((layer.base - 420.0).abs() < 0.01);
+    assert!((layer.thickness - 96.0).abs() < 0.01);
+    assert_eq!(layer.detail, 2);
+    assert!(
+        (layer.drift[0] - 1.5).abs() < 0.01,
+        "the drift a mod asked for did not survive the wire: {:?}",
+        layer.drift
+    );
+
+    let clouds = seen.clouds.expect("told a cover");
+    assert!((clouds.cover - 0.55).abs() < 0.01);
+    assert_eq!(clouds.ease_ticks, 600);
 }

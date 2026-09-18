@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 63;
+pub const PROTOCOL_VERSION: u32 = 64;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -2124,6 +2124,24 @@ pub enum ServerMessage {
         /// not sending this at all.
         theme: Option<ThemeDef>,
     },
+    /// The cloud deck a mod registered, or `None` for a world with none.
+    ///
+    /// **Appended at the end** (protocol v64). Sent in the join burst: the
+    /// deck is registration state, like the sky's keyframes, and the client
+    /// draws nothing until it arrives. See [`crate::atmosphere::CloudLayer`].
+    CloudLayer {
+        /// The deck, or `None` for a world where no mod registered one.
+        layer: Option<crate::atmosphere::CloudLayer>,
+    },
+    /// How much cloud one player is under, latest state.
+    ///
+    /// **Appended at the end** (protocol v64). One message when the weather
+    /// changes, eased client-side — the sky modifier's shape, and for the same
+    /// reason. See [`crate::atmosphere::Clouds`].
+    Clouds {
+        /// The state, or `None` for a clear sky.
+        clouds: Option<crate::atmosphere::Clouds>,
+    },
 }
 
 /// A mod's look, as the client is told about it.
@@ -2633,6 +2651,14 @@ fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
         ServerMessage::Precipitation { precipitation } => precipitation
             .as_ref()
             .is_none_or(crate::atmosphere::Precipitation::is_valid),
+        // A deck out of range would make a march step for ever or fill the
+        // sky with one cloud; a server's word for it is not a mod's.
+        ServerMessage::CloudLayer { layer } => layer
+            .as_ref()
+            .is_none_or(crate::atmosphere::CloudLayer::is_valid),
+        ServerMessage::Clouds { clouds } => clouds
+            .as_ref()
+            .is_none_or(crate::atmosphere::Clouds::is_valid),
         _ => true,
     };
     if valid {
@@ -3078,7 +3104,9 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
         ServerMessage::SkyModifier { .. }
         | ServerMessage::Flash { .. }
-        | ServerMessage::Precipitation { .. } => check_atmosphere(message)?,
+        | ServerMessage::Precipitation { .. }
+        | ServerMessage::CloudLayer { .. }
+        | ServerMessage::Clouds { .. } => check_atmosphere(message)?,
         // A domain id is a string a server chose, and it reaches a loading
         // screen the client draws. Capped like every other id on the wire
         // (charter rule 14: a server is not trusted for being the server).
@@ -4297,6 +4325,11 @@ mod tests {
         // Protocol v63.
         let theme = encode(&ServerMessage::Theme { theme: None }).expect("encode");
         assert_eq!(theme[0], 48);
+        // Protocol v64: the cloud deck, and how much of it one player is under.
+        let layer = encode(&ServerMessage::CloudLayer { layer: None }).expect("encode");
+        assert_eq!(layer[0], 49);
+        let clouds = encode(&ServerMessage::Clouds { clouds: None }).expect("encode");
+        assert_eq!(clouds[0], 50);
     }
 
     #[test]

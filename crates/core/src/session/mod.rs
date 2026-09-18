@@ -336,6 +336,10 @@ pub struct JoinContext<'a> {
     /// for a mod set that says nothing — which is the client's own look.
     /// See [`crate::proto::ThemeDef`] and [`crate::modload::Theme`].
     pub theme: Option<&'a crate::proto::ThemeDef>,
+    /// The cloud deck a mod registered, or `None` for a world with none.
+    /// Registration state, like the sky's keyframes — see
+    /// [`crate::atmosphere::CloudLayer`].
+    pub cloud_layer: Option<crate::atmosphere::CloudLayer>,
     /// Which sound each named event plays, in load order.
     ///
     /// The client needs this and not only the server: the handful of cues the
@@ -863,6 +867,13 @@ impl Session {
                 ServerMessage::Theme {
                     theme: context.theme.cloned(),
                 },
+                // And the cloud deck, appended for the same reason. What a
+                // player is UNDER is latest state and rides the drain like
+                // the sky modifier; the deck itself is registration and comes
+                // once, here.
+                ServerMessage::CloudLayer {
+                    layer: context.cloud_layer,
+                },
             ],
             close: false,
             action: Action::None,
@@ -1038,6 +1049,7 @@ mod tests {
         JoinContext {
             cert_fingerprint: &FINGERPRINT,
             theme: None,
+            cloud_layer: None,
             mods,
             mod_set_fingerprint: 0xCAFE,
             materials: &[],
@@ -1168,7 +1180,8 @@ mod tests {
         // client is never handed a theme pointing at a font or a frame it has
         // not been told about.
         assert!(matches!(sent[14], ServerMessage::Theme { .. }));
-        assert!(matches!(sent[15], ServerMessage::JoinWorld { .. }));
+        assert!(matches!(sent[15], ServerMessage::CloudLayer { .. }));
+        assert!(matches!(sent[16], ServerMessage::JoinWorld { .. }));
     }
 
     #[test]

@@ -1826,6 +1826,14 @@ impl ServerHandle {
         let picture_table = picture_table;
         info!(theme = ?theme.as_ref().map(|theme| &theme.mod_id), "theme chosen");
 
+        // The cloud deck, registration state like the sky's keyframes: sent
+        // once in the join burst, and `set_clouds` moves what a player is
+        // under without moving the deck itself.
+        let cloud_layer = host
+            .as_ref()
+            .and_then(|loaded| loaded.vm().registered_clouds());
+        info!(clouds = cloud_layer.is_some(), "cloud deck built");
+
         // Which sound each named event plays. Charter rule 1 again: the engine
         // emits cues and has no opinion about what any of them sounds like.
         let sound_bindings: Vec<tiamot_core::proto::SoundBinding> = host
@@ -2323,6 +2331,7 @@ impl ServerHandle {
             font_table,
             picture_table,
             theme,
+            cloud_layer,
             sound_bindings,
             hud_scripts,
             fluid_table,
@@ -2370,6 +2379,7 @@ impl ServerHandle {
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            clouds: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             precipitation: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             // Capacity is per-receiver backlog, not a total. 1024 messages at
             // 20 Hz is roughly fifty seconds behind before a client starts
