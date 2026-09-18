@@ -121,6 +121,16 @@ pub struct Front {
     /// choice belongs to the world it makes, and the next world starts from
     /// the defaults exactly as the seed box starts empty.
     pub world_options: std::collections::BTreeMap<String, u32>,
+    /// The look the installed mods ask this screen to wear, read off the local
+    /// disk because there is no server yet — see [`crate::theme::Local`].
+    dress: crate::theme::Local,
+    /// This frame's art from that look.
+    ///
+    /// **Held on the screen rather than passed down**, because every tab draws
+    /// buttons and threading it through six `&mut self` methods is six places
+    /// a new tab could forget it — and a tab in the client's own buttons
+    /// beside a tab in the mod's would read as a bug in the art.
+    worn: crate::theme::Dressing,
 }
 
 impl Front {
@@ -130,6 +140,8 @@ impl Front {
         let name = library.unused_name("New World");
         Self {
             tab: Tab::default(),
+            dress: crate::theme::Local::default(),
+            worn: crate::theme::Dressing::default(),
             selected: (!library.entries.is_empty()).then_some(0),
             library,
             notice: catalogue.problem.clone(),
@@ -219,7 +231,12 @@ impl Front {
     ///
     /// `config` is edited in place — the settings tab writes straight to it and
     /// the window saves when [`Front::settings_dirty`] says so.
-    pub fn draw(&mut self, ctx: &egui::Context, config: &mut crate::config::Config) -> Action {
+    pub fn draw(
+        &mut self,
+        ctx: &egui::Context,
+        config: &mut crate::config::Config,
+        bundled: &'static [u8],
+    ) -> Action {
         const TABS: [(Tab, &str); 3] = [
             (Tab::Play, "Play"),
             (Tab::Mods, "Mods"),
@@ -231,64 +248,74 @@ impl Front {
         // its own size and run off the edges — see `crate::panel::sheet`. The
         // tabs are this screen's own row under the shared bar, because it is
         // the one screen with nowhere to go Back to.
-        crate::panel::sheet(ctx, "Tiamot", None, |ui| {
-            // **Quit above the tabs, not beside them.** The strip draws the
-            // page edge across the whole sheet — that line under the inactive
-            // tabs and around the active one is what makes them tabs — so it
-            // needs the full width, and a button sharing the row would either
-            // be pushed off it or cut the line short.
-            //
-            // **The `horizontal` is what gives it a row.** `with_layout` on
-            // its own claims the whole REMAINING height of a top-down `Ui` and
-            // centres its contents in it, so the button came out floating two
-            // hundred points above everything else — reported from the window
-            // as "the quit button is way up above the tabs randomly".
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Quit").clicked() {
-                        action = Action::Quit;
-                    }
+        // **The mods' look, before the sheet that wears it.** Read from the
+        // local mods directory rather than pushed, because nothing is
+        // connected to yet — `crate::theme::Local` says why that is the only
+        // place it may come from.
+        self.worn = self.dress.wear(ctx, &self.catalogue, bundled);
+        let dressing = self.worn;
+        crate::panel::sheet_with(
+            ctx,
+            crate::panel::Sheet::titled("Tiamot").themed(dressing),
+            |ui| {
+                // **Quit above the tabs, not beside them.** The strip draws the
+                // page edge across the whole sheet — that line under the inactive
+                // tabs and around the active one is what makes them tabs — so it
+                // needs the full width, and a button sharing the row would either
+                // be pushed off it or cut the line short.
+                //
+                // **The `horizontal` is what gives it a row.** `with_layout` on
+                // its own claims the whole REMAINING height of a top-down `Ui` and
+                // centres its contents in it, so the button came out floating two
+                // hundred points above everything else — reported from the window
+                // as "the quit button is way up above the tabs randomly".
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::widget::button(ui, dressing.button, "Quit").clicked() {
+                            action = Action::Quit;
+                        }
+                    });
                 });
-            });
 
-            let active = TABS
-                .iter()
-                .position(|(tab, _)| *tab == self.tab)
-                .unwrap_or(0);
-            let labels: Vec<&str> = TABS.iter().map(|(_, label)| *label).collect();
-            if let Some(picked) = crate::widget::tabs(ui, active, &labels) {
-                self.tab = TABS[picked].0;
-            }
-            ui.add_space(6.0);
-
-            if let Some(notice) = &self.notice {
-                ui.colored_label(egui::Color32::from_rgb(230, 170, 90), notice);
-                ui.separator();
-            }
-
-            // **First decided wins.** `Tab::Play` assigned straight into
-            // `action`, which overwrote a Quit pressed higher up the same frame
-            // with the `Action::None` a tab returns when nothing in it was
-            // clicked — so the button did nothing on the tab a player lands on.
-            // Reported from the window as the quit button not quitting.
-            //
-            // One thing can be acted on per frame and Quit is above the tabs,
-            // so the rule is that a decision already made stands.
-            let picked = match self.tab {
-                Tab::Play => self.play_tab(ui),
-                Tab::Mods => {
-                    self.mods_tab(ui);
-                    Action::None
+                let active = TABS
+                    .iter()
+                    .position(|(tab, _)| *tab == self.tab)
+                    .unwrap_or(0);
+                let labels: Vec<&str> = TABS.iter().map(|(_, label)| *label).collect();
+                if let Some(picked) = crate::widget::tabs(ui, active, &labels) {
+                    self.tab = TABS[picked].0;
                 }
-                Tab::Settings => {
-                    self.settings_tab(ui, config);
-                    Action::None
+                ui.add_space(6.0);
+
+                if let Some(notice) = &self.notice {
+                    ui.colored_label(egui::Color32::from_rgb(230, 170, 90), notice);
+                    ui.separator();
                 }
-            };
-            if matches!(action, Action::None) {
-                action = picked;
-            }
-        });
+
+                // **First decided wins.** `Tab::Play` assigned straight into
+                // `action`, which overwrote a Quit pressed higher up the same frame
+                // with the `Action::None` a tab returns when nothing in it was
+                // clicked — so the button did nothing on the tab a player lands on.
+                // Reported from the window as the quit button not quitting.
+                //
+                // One thing can be acted on per frame and Quit is above the tabs,
+                // so the rule is that a decision already made stands.
+                let picked = match self.tab {
+                    Tab::Play => self.play_tab(ui),
+                    Tab::Mods => {
+                        self.mods_tab(ui);
+                        Action::None
+                    }
+                    Tab::Settings => {
+                        self.settings_tab(ui, config);
+                        Action::None
+                    }
+                };
+                if matches!(action, Action::None) {
+                    action = picked;
+                }
+            },
+        );
 
         if let Some(confirmed) = self.confirmation(ctx) {
             action = confirmed;
@@ -375,7 +402,7 @@ impl Front {
 
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Play").clicked()
+            if crate::widget::button(ui, self.worn.button, "Play").clicked()
                 && let Some(index) = self.selected
                 && let Some(entry) = self.library.entries.get(index).cloned()
             {
@@ -387,7 +414,7 @@ impl Front {
                     None => Action::Open(entry),
                 };
             }
-            if ui.button("Forget").clicked() {
+            if crate::widget::button(ui, self.worn.button, "Forget").clicked() {
                 action = self.forget_selected();
             }
             // **Only for a world this machine runs.** Joining somebody else's
@@ -410,7 +437,7 @@ impl Front {
         ui.horizontal(|ui| {
             ui.label("New world");
             ui.text_edit_singleline(&mut self.name);
-            if ui.button("Create").clicked() {
+            if crate::widget::button(ui, self.worn.button, "Create").clicked() {
                 let name = self.library.unused_name(self.name.trim());
                 action = Action::Create {
                     name,
@@ -442,7 +469,7 @@ impl Front {
         ui.horizontal(|ui| {
             ui.label("Server");
             ui.text_edit_singleline(&mut self.address);
-            if ui.button("Add").clicked() {
+            if crate::widget::button(ui, self.worn.button, "Add").clicked() {
                 action = self.remember_typed();
             }
         });
@@ -539,7 +566,7 @@ impl Front {
                     world.name, world.players, world.max_players
                 );
                 if world.compatible {
-                    if ui.button(label).clicked() {
+                    if crate::widget::button(ui, self.worn.button, label).clicked() {
                         action = Some(Action::Open(Entry {
                             name: world.name.clone(),
                             kind: Kind::Remote {
@@ -573,6 +600,8 @@ impl Front {
     /// a door to be shut.
     fn confirmation(&mut self, ctx: &egui::Context) -> Option<Action> {
         let (index, difference) = self.confirming.clone()?;
+        // Copied out before the closure, which borrows `self` mutably.
+        let worn = self.worn.button;
         let mut decided = None;
         egui::Window::new("Different mods")
             .collapsible(false)
@@ -590,7 +619,7 @@ impl Front {
                     "Blocks from a mod that is off are kept and come back if you turn it on again.",
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Play anyway").clicked() {
+                    if crate::widget::button(ui, worn, "Play anyway").clicked() {
                         decided = self
                             .library
                             .entries
@@ -599,7 +628,7 @@ impl Front {
                             .map(Action::Open)
                             .or(Some(Action::None));
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::widget::button(ui, worn, "Cancel").clicked() {
                         decided = Some(Action::None);
                     }
                 });
@@ -863,6 +892,8 @@ mod tests {
             name: id.to_owned(),
             description: String::new(),
             enabled: true,
+            theme: None,
+            dir: std::path::PathBuf::new(),
         }
     }
 
@@ -888,7 +919,7 @@ mod tests {
         let mut acted = Action::None;
         let _ = ctx.run_ui(input, |_| {
             let context = ctx.clone();
-            acted = screen.draw(&context, &mut config);
+            acted = screen.draw(&context, &mut config, crate::app::HUD_FONT);
         });
         acted
     }

@@ -58,10 +58,60 @@ pub mod shade;
 pub mod shape_view;
 pub mod sky;
 pub mod texture;
+pub mod theme;
 pub mod trust;
 
 /// Interface controls whose behaviour is shared between screens.
 pub mod widget {
+    /// A button wearing a theme's frame, or the client's own if there is none.
+    ///
+    /// # Why a helper and not a style
+    ///
+    /// egui draws a button's background itself, from `Visuals`, and a fill and
+    /// a stroke is all that can be said there — so a theme's colours reach a
+    /// button through [`crate::theme::Theme::apply`] and its ART cannot. This
+    /// paints the nine-slice first and puts a button with no background of its
+    /// own on top of it.
+    ///
+    /// **Not `frame(false)`.** That would take the hover and press highlights
+    /// away with the fill, and a button that does not respond to the pointer
+    /// reads as broken however good the frame around it looks. The fill is
+    /// made transparent instead, so every state still lights the way egui
+    /// intends and the art shows through all of them.
+    ///
+    /// A theme with no button frame returns `ui.button` unchanged, which is
+    /// every client until a server says otherwise.
+    pub fn button(
+        ui: &mut egui::Ui,
+        frame: Option<crate::pictures::Picture>,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        let Some(frame) = frame else {
+            return ui.button(text);
+        };
+        // Measured before it is drawn, because the frame goes UNDER it and
+        // the rectangle is not known until the button has claimed one.
+        let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT);
+        let (rect, response) = {
+            let response = ui.add(button);
+            (response.rect, response)
+        };
+        crate::pictures::paint_nine_slice(
+            // **Behind**, which is what the layer is for: the button has
+            // already painted into the current one, so drawing the frame there
+            // would put the art over the lettering.
+            &ui.painter().clone().with_layer_id(egui::LayerId::new(
+                egui::Order::Background,
+                ui.layer_id().id,
+            )),
+            frame.texture,
+            rect,
+            1.0,
+            (frame.width, frame.height),
+        );
+        response
+    }
+
     /// A row of tabs, drawn the way a browser draws them.
     ///
     /// Returns the index of one that was clicked, or `None`.
@@ -411,6 +461,13 @@ pub mod panel {
         /// reserve, already converted by [`reserve_points`]. Zero anywhere
         /// there is no HUD, which is every screen before a world is joined.
         pub reserve: f32,
+        /// The frame picture to paint around this sheet, if a theme supplied
+        /// one and its bytes have arrived — see [`crate::theme`].
+        pub frame: Option<crate::pictures::Picture>,
+        /// The frame picture for buttons on this sheet's own bar.
+        pub button: Option<crate::pictures::Picture>,
+        /// The colour a themed heading is drawn in.
+        pub heading_colour: Option<egui::Color32>,
     }
 
     impl<'a> Sheet<'a> {
@@ -427,7 +484,23 @@ pub mod panel {
                 back: None,
                 fit: Fit::Scrolling,
                 reserve: 0.0,
+                frame: None,
+                button: None,
+                heading_colour: None,
             }
+        }
+
+        /// The same sheet wearing a theme's frame and heading colour.
+        ///
+        /// **A method rather than two more fields at every call site**: a
+        /// screen that forgot one of them would be a screen in half a look,
+        /// and there is nothing at a call site to notice it.
+        #[must_use]
+        pub fn themed(mut self, dressing: crate::theme::Dressing) -> Self {
+            self.frame = dressing.sheet;
+            self.button = dressing.button;
+            self.heading_colour = dressing.heading;
+            self
         }
     }
 
@@ -482,6 +555,9 @@ pub mod panel {
             back,
             fit,
             reserve,
+            frame,
+            button: frame_for_buttons,
+            heading_colour,
         } = sheet;
         let title = id;
         let screen = ctx.content_rect();
@@ -502,17 +578,40 @@ pub mod panel {
             .max_height(height)
             .show(ctx, |ui| {
                 ui.set_min_size(egui::vec2(width, height));
+                // **Behind the contents, and outside the window's own
+                // padding.** A frame is art around the whole sheet, so it is
+                // painted on the layer the window already owns rather than
+                // allocated as a widget — allocated, it would take room from
+                // the page it is a frame for, and a settings list would start
+                // an inch further down for having a border.
+                if let Some(frame) = frame {
+                    crate::pictures::paint_nine_slice(
+                        &ui.painter().clone(),
+                        frame.texture,
+                        ui.max_rect().expand(ui.spacing().window_margin.leftf()),
+                        1.0,
+                        (frame.width, frame.height),
+                    );
+                }
                 // **The bar is the same on every screen**, which is the point:
                 // a player who has learned where Back is has learned it once.
                 ui.horizontal(|ui| {
                     if let Some(label) = back {
-                        went_back |= ui.button(format!("← {label}")).clicked();
+                        // The one button every engine screen has, so it is
+                        // the one that most has to wear the look.
+                        went_back |=
+                            crate::widget::button(ui, frame_for_buttons, format!("← {label}"))
+                                .clicked();
                         if heading.is_some() {
                             ui.separator();
                         }
                     }
                     if let Some(heading) = heading {
-                        ui.heading(heading);
+                        let text = egui::RichText::new(heading);
+                        ui.heading(match heading_colour {
+                            Some(colour) => text.color(colour),
+                            None => text,
+                        });
                     }
                 });
                 ui.separator();

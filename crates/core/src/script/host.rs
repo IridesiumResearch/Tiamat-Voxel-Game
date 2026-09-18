@@ -214,6 +214,32 @@ impl<V: ScriptVm> ModHost<V> {
         &self.world_options
     }
 
+    /// The theme the engine's own screens should wear, and the mod that set it.
+    ///
+    /// # Last in load order, and only one
+    ///
+    /// Two mods blending their idea of a frame is not a look, it is an
+    /// accident — so one theme applies and it is the last one declared, which
+    /// is the rule a place's fog and tint already follow. Load order is topo
+    /// order, so a mod that depends on another paints over it, which is what
+    /// "depends on" ought to mean for a look.
+    ///
+    /// **A mod that failed to load does not get to theme anything.** Its Lua
+    /// never ran, none of its blocks or sounds exist, and a client wearing its
+    /// frame around screens listing none of its content would be the engine
+    /// advertising a mod that is not there.
+    #[must_use]
+    pub fn theme(&self) -> Option<(&str, &crate::modload::Theme)> {
+        let failed: std::collections::BTreeSet<&str> =
+            self.failed.iter().map(|(id, _)| id.as_str()).collect();
+        self.resolved
+            .order
+            .iter()
+            .filter(|entry| !failed.contains(entry.id.as_str()))
+            .rev()
+            .find_map(|entry| entry.theme.as_ref().map(|theme| (entry.id.as_str(), theme)))
+    }
+
     /// Closes the registration window.
     ///
     /// # Errors

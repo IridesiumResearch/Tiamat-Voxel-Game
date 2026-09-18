@@ -2002,6 +2002,17 @@ function game.register_hud_script(file) end
 ---@field file string Required. Path to the Lua file inside your mod directory.
 ---@field reserve number? Virtual pixels at the bottom of the canvas to keep the engine's sheets clear of. Default 0, clamped to 540.
 
+---There is no `game.register_theme`, and there cannot be.
+---
+---A mod's look for the engine's OWN screens — the pause screen, the settings
+---pages, the start screen — is declared in `mod.toml` under `[theme]`, not here.
+---The start screen runs before any server exists, so no Lua has run on it and
+---none can; a manifest is read without a VM, which is what lets the launcher
+---wear the look of the mods it is about to load. See `api/AGENTS.md`.
+---
+---`style` on a widget in your own dialogs is the other half and is unaffected:
+---a theme is the furniture around a screen, your styles are what is in it.
+
 ---Fields accepted by `game.play_sound`.
 ---@class Tiamot.PlaySpec
 ---@field sound string Required. A sound id; unqualified means your own.

@@ -289,6 +289,7 @@ impl Dialogs {
         fonts: &crate::fonts::Fonts,
         area: (f32, f32),
         reserve: f32,
+        dressing: crate::theme::Dressing,
     ) -> Vec<Raised> {
         self.retain_open(open);
         let mut raised = Vec::new();
@@ -304,7 +305,7 @@ impl Dialogs {
                 fonts,
             };
             raised.extend(draw_form(
-                ctx, form, screen, local, views, icons, look, area, reserve,
+                ctx, form, screen, local, views, icons, look, area, reserve, dressing,
             ));
         }
         // **Last, and over everything.** What is on the cursor is drawn after
@@ -503,6 +504,7 @@ fn draw_form(
     look: Look<'_>,
     area: (f32, f32),
     reserve: f32,
+    dressing: crate::theme::Dressing,
 ) -> Vec<Raised> {
     let tree = &screen.tree;
     let mut raised = Vec::new();
@@ -564,7 +566,12 @@ fn draw_form(
                 back: Some("Close"),
                 fit: crate::panel::Fit::Fixed,
                 reserve,
-                ..crate::panel::Sheet::titled(form)
+                // **A mod's screen wears the engine's sheet, frame and all.**
+                // The tree inside it is the mod's to style; the sheet around
+                // it is furniture, and furniture that matched the pause screen
+                // on one side and nothing on the other would be the thing a
+                // theme exists to stop.
+                ..crate::panel::Sheet::titled(form).themed(dressing)
             },
             |ui| {
                 // The room the sheet handed over, below its bar. Measured
@@ -1722,6 +1729,7 @@ mod tests {
                     &crate::fonts::Fonts::new(),
                     area,
                     0.0,
+                    crate::theme::Dressing::default(),
                 );
             });
             covered = egui::Rect::NOTHING;
@@ -1806,6 +1814,7 @@ mod tests {
                     &crate::fonts::Fonts::new(),
                     (1280.0, 720.0),
                     0.0,
+                    crate::theme::Dressing::default(),
                 );
             });
             raised

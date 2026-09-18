@@ -151,6 +151,11 @@ fn a_bot_completes_the_whole_join_flow() {
             // Protocol v61: the pictures a mod registered, so a HUD's art is
             // asked for before a script names it. Appended, as ever.
             "PictureTable",
+            // Protocol v63: how the loaded mods want the engine's own screens
+            // to look. AFTER both tables it names into, so a client never has
+            // a theme pointing at a font or a frame it has not been told
+            // about. Appended, as ever.
+            "Theme",
             "JoinWorld",
         ];
         assert!(
@@ -553,6 +558,7 @@ fn describe(message: &ServerMessage) -> &'static str {
         ServerMessage::FontTable { .. } => "FontTable",
         ServerMessage::ModSettings { .. } => "ModSettings",
         ServerMessage::PictureTable { .. } => "PictureTable",
+        ServerMessage::Theme { .. } => "Theme",
         ServerMessage::JoinWorld { .. } => "JoinWorld",
         ServerMessage::Disconnect { .. } => "Disconnect",
         _ => "other",

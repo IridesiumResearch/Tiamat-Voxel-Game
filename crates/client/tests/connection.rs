@@ -186,6 +186,10 @@ struct Seen {
     hud_scripts: Vec<(String, String)>,
     /// The tallest reserve any pushed HUD asked for, in virtual pixels.
     hud_reserve: Option<u16>,
+    /// The look the server's mods asked the engine's screens to wear.
+    theme: Option<tiamot_core::proto::ThemeDef>,
+    /// Pictures whose bytes arrived and decoded, by content hash.
+    pictures: Vec<tiamot_core::proto::ContentHash>,
     hud_values: std::collections::BTreeMap<String, tiamot_core::hud::Values>,
     /// Which sound each named event plays, as the server last said.
     bindings: Vec<tiamot_core::proto::SoundBinding>,
@@ -202,10 +206,11 @@ impl Seen {
                 address, first_use, ..
             } => self.connected = Some((address, first_use)),
             Event::SelectSlot { slot } => self.selected = Some(slot),
-            // A dialog's art. This test never opens one, and the arm is here
-            // because the match is exhaustive on purpose: a new event should
-            // make somebody decide what this test does about it.
-            Event::Picture { .. } => {}
+            // Art that arrived and decoded — a dialog's, a HUD's, or a
+            // theme's frame. Recorded rather than dropped, because "the server
+            // named a picture" and "the client actually got the bytes" are two
+            // different claims and a theme needs the second one.
+            Event::Picture { hash, .. } => self.pictures.push(hash),
             // A mod's options. Same reasoning: this test's server declares
             // none, and an empty table is still a table that arrives.
             Event::ModSettings { .. } => {}
@@ -214,6 +219,7 @@ impl Seen {
             | Event::Flash(_)
             | Event::Precipitation(_) => {}
             Event::HudReserve(reserve) => self.hud_reserve = Some(reserve),
+            Event::Theme(theme) => self.theme = theme,
             // A mod's font. Same reasoning as the picture above.
             Event::Font { .. } => {}
             Event::Materials { table, images } => {
@@ -988,5 +994,101 @@ fn a_mods_own_numbers_reach_a_mods_own_hud_script() {
         drawn,
         ["hp 17.0 Ada".to_owned()],
         "the mod's own values did not reach its own script"
+    );
+}
+
+/// A mod directory holding one mod that declares a `[theme]`, and its files.
+fn themed_mods(name: &str) -> PathBuf {
+    let mods = scratch(&format!("{name}-mods"));
+    let dir = mods.join("look");
+    std::fs::create_dir_all(dir.join("art")).expect("mod dir");
+    std::fs::write(dir.join("init.lua"), "").expect("entry");
+
+    // A real PNG through the real pipeline: the server hashes it, the client
+    // asks for it by hash, and a fixture of `b"png"` would be indexed and then
+    // refused by the decoder, which is a different test.
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, 1, 1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .expect("header")
+        .write_image_data(&[0xFF, 0xFF, 0xFF, 0xFF])
+        .expect("pixel");
+    std::fs::write(dir.join("art/frame.png"), &png).expect("frame");
+
+    std::fs::write(
+        dir.join("mod.toml"),
+        concat!(
+            "id = \"look\"\n",
+            "name = \"Look\"\n",
+            "version = \"1.0.0\"\n",
+            "\n",
+            "[theme]\n",
+            "sheet = \"art/frame.png\"\n",
+            "\n",
+            "[theme.colours]\n",
+            "heading = \"#f0d890\"\n",
+        ),
+    )
+    .expect("manifest");
+    mods
+}
+
+#[test]
+fn a_mods_declared_look_reaches_a_client_and_names_art_the_client_asked_for() {
+    // **Charter rule 1 applied to the engine's own furniture.** The pause
+    // screen and the settings pages are the client's, so a game built on this
+    // engine could restyle every dialog it pushes and then hand the player
+    // back to a menu that looked like a different program. This is the whole
+    // path that stops that: `[theme]` in a manifest, chosen at freeze, pushed
+    // on join, and its frame fetched through the picture pipeline.
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("theme-world"),
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(themed_mods("theme")),
+        enabled_mods: None,
+        seed: Some(4242),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start");
+    let home = Home::new("theme");
+    let mut connection = home.open(&server);
+    let mut seen = Seen::default();
+
+    assert!(
+        pump(&mut connection, &mut seen, |seen| seen.theme.is_some()
+            && seen.joined.is_some()),
+        "the server never pushed a theme; warnings={:?}",
+        seen.warnings
+    );
+    let theme = seen.theme.clone().expect("a theme");
+    assert_eq!(theme.mod_id, "look");
+    assert_eq!(
+        theme.colours.heading,
+        Some([0xF0, 0xD8, 0x90, 0xFF]),
+        "the palette is parsed on the SERVER, so a client never has hex to fail on"
+    );
+    assert_eq!(theme.font, None, "this mod named no font");
+
+    // **The frame is named by hash and the bytes were actually asked for.**
+    // A theme that named a picture the client never fetched would be a theme
+    // that drew nothing — which is how HUD art failed before `register_picture`
+    // existed, and the reason a theme's files ride the picture table at all.
+    let sheet = theme.sheet.expect("a sheet frame");
+    assert!(
+        pump(&mut connection, &mut seen, |seen| seen
+            .pictures
+            .contains(&sheet)),
+        "the theme's frame was named but its bytes never arrived; warnings={:?}",
+        seen.warnings
     );
 }

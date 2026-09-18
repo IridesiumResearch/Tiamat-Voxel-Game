@@ -19,6 +19,13 @@ pub struct ResolvedMod {
     pub dir: PathBuf,
     /// Ids this mod must load after, resolved through aliases.
     pub after: Vec<String>,
+    /// How this mod wants the engine's own screens to look, if it says.
+    ///
+    /// **Carried here rather than re-read from `mod.toml` later**, because the
+    /// theme that applies is the LAST one in load order and load order is what
+    /// this structure is. Reading the manifests again somewhere else would be
+    /// a second place that had to agree about the order.
+    pub theme: Option<crate::modload::Theme>,
 }
 
 /// The resolved mod set, in load order.
@@ -259,6 +266,7 @@ pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
                         .get(id.as_str())
                         .map(|set| set.iter().cloned().collect())
                         .unwrap_or_default(),
+                    theme: found.manifest.theme.clone(),
                 }
             })
             .collect(),

@@ -332,6 +332,10 @@ pub struct JoinContext<'a> {
     /// Every picture a mod registered, in load order, so the client fetches
     /// them before a HUD script names one. See [`crate::proto::PictureDef`].
     pub pictures: &'a [crate::proto::PictureDef],
+    /// How the loaded mods want the engine's own screens to look, or `None`
+    /// for a mod set that says nothing — which is the client's own look.
+    /// See [`crate::proto::ThemeDef`] and [`crate::modload::Theme`].
+    pub theme: Option<&'a crate::proto::ThemeDef>,
     /// Which sound each named event plays, in load order.
     ///
     /// The client needs this and not only the server: the handful of cues the
@@ -852,6 +856,13 @@ impl Session {
                 ServerMessage::PictureTable {
                     pictures: context.pictures.to_vec(),
                 },
+                // And the look, appended last for the same reason and sent
+                // AFTER both tables it names into: a client that applied a
+                // theme before the table carrying its frame arrived would ask
+                // for a picture id nothing answered to yet.
+                ServerMessage::Theme {
+                    theme: context.theme.cloned(),
+                },
             ],
             close: false,
             action: Action::None,
@@ -1026,6 +1037,7 @@ mod tests {
     fn context<'a>(allowlist: &'a Allowlist, mods: &'a [ModEntry]) -> JoinContext<'a> {
         JoinContext {
             cert_fingerprint: &FINGERPRINT,
+            theme: None,
             mods,
             mod_set_fingerprint: 0xCAFE,
             materials: &[],
@@ -1152,7 +1164,11 @@ mod tests {
         assert!(matches!(sent[12], ServerMessage::ModSettings { .. }));
         // And the pictures after them (protocol v61), for the same reason.
         assert!(matches!(sent[13], ServerMessage::PictureTable { .. }));
-        assert!(matches!(sent[14], ServerMessage::JoinWorld { .. }));
+        // And the look after both tables it names into (protocol v63), so a
+        // client is never handed a theme pointing at a font or a frame it has
+        // not been told about.
+        assert!(matches!(sent[14], ServerMessage::Theme { .. }));
+        assert!(matches!(sent[15], ServerMessage::JoinWorld { .. }));
     }
 
     #[test]

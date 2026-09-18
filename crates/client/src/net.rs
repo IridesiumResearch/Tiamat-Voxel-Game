@@ -208,6 +208,10 @@ pub enum Event {
         values: tiamot_core::hud::Values,
     },
 
+    /// How this server's mods want the engine's own screens to look, or
+    /// `None` for the client's own — see [`crate::theme`].
+    Theme(Option<tiamot_core::proto::ThemeDef>),
+
     /// How much of the bottom of the canvas the loaded HUDs want kept clear,
     /// in virtual pixels — the tallest reserve any script in the table asked
     /// for.
@@ -1603,6 +1607,16 @@ async fn session(
                     finish(format!("could not ask for the fonts: {err}"));
                     break;
                 }
+            }
+
+            ServerMessage::Theme { theme } => {
+                // **The files it names are already on their way.** A theme's
+                // font rides the font table and its frames ride the picture
+                // table, both of which arrived before this in the join burst
+                // and both of which have already been asked for — so there is
+                // nothing to fetch here, only a look to put on when the bytes
+                // land.
+                let _ = events.send(Event::Theme(theme));
             }
 
             ServerMessage::PictureTable { pictures } => {

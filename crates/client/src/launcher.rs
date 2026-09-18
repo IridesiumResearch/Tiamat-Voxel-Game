@@ -304,6 +304,15 @@ pub struct Listing {
     /// `tiamot_core::modload::WorldOption`. Drawn beside the seed box, and
     /// only for mods that are on.
     pub world_options: Vec<tiamot_core::modload::WorldOption>,
+    /// How it wants the engine's own screens to look, if it says — see
+    /// `tiamot_core::modload::Theme`.
+    pub theme: Option<tiamot_core::modload::Theme>,
+    /// The directory it was found in, which its theme's files are relative to.
+    ///
+    /// **Kept because the start screen has no server to fetch from.** In a
+    /// world a theme's files arrive through the content pipeline; before one,
+    /// the only copy is the one the player installed, and this is where it is.
+    pub dir: std::path::PathBuf,
 }
 
 /// Every mod installed on this machine, and which are ticked.
@@ -365,6 +374,8 @@ impl Catalogue {
                     name: discovered.manifest.name,
                     description: discovered.manifest.description,
                     world_options: discovered.manifest.world_options,
+                    theme: discovered.manifest.theme,
+                    dir: discovered.dir,
                 })
                 .collect(),
         }

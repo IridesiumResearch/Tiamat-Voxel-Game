@@ -1807,6 +1807,25 @@ impl ServerHandle {
             .collect();
         info!(pictures = picture_table.len(), "picture table built");
 
+        // The engine's own screens, wearing a mod's look (charter rule 1).
+        let mut font_table = font_table;
+        let mut picture_table = picture_table;
+        let theme = host
+            .as_ref()
+            .and_then(|loaded| loaded.theme())
+            .map(|(mod_id, theme)| {
+                build_theme(
+                    mod_id,
+                    theme,
+                    &content_index,
+                    &mut font_table,
+                    &mut picture_table,
+                )
+            });
+        let font_table = font_table;
+        let picture_table = picture_table;
+        info!(theme = ?theme.as_ref().map(|theme| &theme.mod_id), "theme chosen");
+
         // Which sound each named event plays. Charter rule 1 again: the engine
         // emits cues and has no opinion about what any of them sounds like.
         let sound_bindings: Vec<tiamot_core::proto::SoundBinding> = host
@@ -2303,6 +2322,7 @@ impl ServerHandle {
             sound_table,
             font_table,
             picture_table,
+            theme,
             sound_bindings,
             hud_scripts,
             fluid_table,
@@ -5843,6 +5863,87 @@ impl Earshot {
             told += 1;
         }
         told
+    }
+}
+
+/// Turns a mod's declared theme into what a client is told, folding its files
+/// into the tables that already carry their kinds.
+///
+/// # Why the files ride the font and picture tables
+///
+/// Both of those paths already cap their bytes before allocating, decode on a
+/// worker with panic isolation, and have a `cargo fuzz` target on the same
+/// entry point (charter rule 14). A third file pipeline for a frame image
+/// would be a third set of caps to get wrong and no new capability at all.
+///
+/// The ids are in the `engine:` namespace, which a mod cannot register —
+/// `qualify_id` puts every mod's own ids under its own name — so a theme can
+/// never collide with a font or picture the mod registered itself.
+///
+/// A file that is not in the mod's directory is logged and left out. The rest
+/// of the theme still applies: a missing frame is a screen in the right
+/// colours, and refusing the whole look over one path would be worse.
+fn build_theme(
+    mod_id: &str,
+    theme: &tiamot_core::modload::Theme,
+    content_index: &tiamot_core::content::ContentIndex,
+    fonts: &mut Vec<tiamot_core::proto::FontDef>,
+    pictures: &mut Vec<tiamot_core::proto::PictureDef>,
+) -> tiamot_core::proto::ThemeDef {
+    let hash_of = |path: &Option<String>, what: &str| {
+        let path = path.as_ref()?;
+        let hash = content_index.hash_of(mod_id, path);
+        if hash.is_none() {
+            error!(
+                mod_id = %mod_id,
+                path = %path,
+                what,
+                "theme names a file that is not in the mod directory; that part of the look \
+                 will be the client's own"
+            );
+        }
+        hash.map(|hash| (format!("engine:theme_{what}"), hash))
+    };
+
+    let font = hash_of(&theme.font, "font").map(|(id, file)| {
+        fonts.push(tiamot_core::proto::FontDef {
+            id: id.clone(),
+            mod_id: mod_id.to_owned(),
+            file: Some(file),
+        });
+        id
+    });
+    // A frame is named by HASH, which is how the client resolves a picture —
+    // but it still goes in the table, because the table is what makes the
+    // client ASK for the bytes. Left out of it, the hash would name something
+    // that never arrived.
+    let mut picture = |slot: &Option<String>, what: &str| {
+        hash_of(slot, what).map(|(id, file)| {
+            pictures.push(tiamot_core::proto::PictureDef {
+                id,
+                mod_id: mod_id.to_owned(),
+                file: Some(file),
+            });
+            file
+        })
+    };
+    let sheet = picture(&theme.sheet, "sheet");
+    let button = picture(&theme.button, "button");
+
+    let colour =
+        |text: &Option<String>| text.as_deref().and_then(tiamot_core::modload::parse_colour);
+    tiamot_core::proto::ThemeDef {
+        mod_id: mod_id.to_owned(),
+        font,
+        sheet,
+        button,
+        colours: tiamot_core::proto::ThemePalette {
+            text: colour(&theme.colours.text),
+            heading: colour(&theme.colours.heading),
+            background: colour(&theme.colours.background),
+            button: colour(&theme.colours.button),
+            accent: colour(&theme.colours.accent),
+        },
     }
 }
 

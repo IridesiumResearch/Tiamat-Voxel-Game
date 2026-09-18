@@ -464,6 +464,41 @@ open the dropdown gets them.
 
 Key on the UUID, never the display name (charter rule 13).
 
+### A look for the engine's own screens
+
+**The engine's own screens can wear your look.** The pause screen, the settings
+pages and the start screen are the client's, drawn in plain egui, and no Lua
+runs on the start screen at all — it is shown before any server exists. So a
+look is DATA: a `[theme]` table in your `mod.toml` naming a font, a nine-slice
+frame for sheets, one for buttons, and five colours.
+
+```toml
+[theme]
+font = "fonts/Cinzel.ttf"
+sheet = "art/frame_iron.png"
+button = "art/button_brass.png"
+
+[theme.colours]
+text = "#e8dcc0"
+heading = "#f0d890"
+background = "#1a1512"
+button = "#2a2018"
+accent = "#b08d57"
+```
+
+Every field is optional and anything you leave out stays the client's own, so a
+theme that is only a palette is a theme — and a theme cannot make a screen
+unreadable, because every part of it is an override with a default underneath.
+A frame's border is a THIRD of the image, the same rule `style.nine_slice`
+uses. **One theme applies at a time: the last mod in load order that declares
+one**, so a mod that depends on another paints over it.
+
+In a world the theme is pushed on join and its files ride the font and picture
+pipelines, so they are capped, isolated and fuzzed like any other pushed asset.
+On the start screen it is read from the mods installed locally — never from a
+cache of the last server's, which would mean decoding bytes a remote server
+chose before you had chosen to trust anything.
+
 ---
 
 ## Terrain that does not look like a texture

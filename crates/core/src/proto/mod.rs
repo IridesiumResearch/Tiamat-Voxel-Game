@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 62;
+pub const PROTOCOL_VERSION: u32 = 63;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -2114,6 +2114,69 @@ pub enum ServerMessage {
         /// The pictures.
         pictures: Vec<PictureDef>,
     },
+    /// How this server's mods want the engine's OWN screens to look.
+    ///
+    /// **Appended at the end** (protocol v63). See [`ThemeDef`], and
+    /// [`crate::modload::Theme`] for why a look is a mod's to declare at all.
+    Theme {
+        /// The theme, or `None` for a server whose mods declare none — which
+        /// is the client's own look, and what every server before v63 sends by
+        /// not sending this at all.
+        theme: Option<ThemeDef>,
+    },
+}
+
+/// A mod's look, as the client is told about it.
+///
+/// # Why this names files rather than carrying them
+///
+/// A theme's font and frames are files, and this engine already has two
+/// audited paths for getting files from a server to a client: the font table
+/// and the picture table. Both cap their bytes before allocating, decode on a
+/// worker with panic isolation, and have a `cargo fuzz` target on the same
+/// entry point (charter rule 14).
+///
+/// So the server folds a theme's files into those tables — the font under a
+/// reserved `engine:` id a mod cannot register — and this points at them.
+/// **No new parser runs on server-chosen bytes**, which is the whole reason a
+/// theme is not a third file pipeline with its own caps to get wrong.
+///
+/// The font is named by ID and the frames by HASH because that is how a client
+/// looks each one up: `fonts::Fonts::family` takes an id, and a picture is
+/// resolved from the store by content hash. Naming them any other way would
+/// mean the client kept a second table to translate between them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThemeDef {
+    /// The mod that set it, for attribution in the settings screen.
+    pub mod_id: String,
+    /// A font id in the font table, or `None` for the client's own face.
+    pub font: Option<String>,
+    /// The nine-slice frame around a sheet, by content hash.
+    pub sheet: Option<ContentHash>,
+    /// The nine-slice frame around a button, by content hash.
+    pub button: Option<ContentHash>,
+    /// The palette, already parsed — straight RGBA, `None` where the mod said
+    /// nothing and the client keeps its own.
+    pub colours: ThemePalette,
+}
+
+/// A theme's five colours, resolved from the manifest's hex.
+///
+/// **Parsed on the server, not on the client.** Hex on the wire would be a
+/// string a client had to parse and could fail to, and a screen half in one
+/// palette is worse than a screen in the other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThemePalette {
+    /// Ordinary text.
+    pub text: Option<crate::ui::Colour>,
+    /// Headings, and a sheet's title.
+    pub heading: Option<crate::ui::Colour>,
+    /// The fill behind a sheet, under any frame image.
+    pub background: Option<crate::ui::Colour>,
+    /// The fill behind a button.
+    pub button: Option<crate::ui::Colour>,
+    /// Selection, hover, and the live parts of a slider or a tick box.
+    pub accent: Option<crate::ui::Colour>,
 }
 
 /// An entity as a client is first told about it.
@@ -2628,6 +2691,22 @@ fn check_occupancy(edit: &Edit) -> Result<(), ProtocolError> {
 /// through the content pipeline, and what makes it safe is the sandbox it runs
 /// in rather than anything a decoder could see. What is bounded here is what
 /// this message can make a client allocate before any of that.
+/// A theme, checked as what a server sent (charter rule 14).
+///
+/// Only the strings need bounding: a colour is four bytes and cannot be out of
+/// range, and a hash is fixed-width and is looked up in a store that either has
+/// those bytes or does not. A font id naming nothing draws the client's own
+/// face, which is `Fonts::family`'s existing answer for a font that never
+/// arrived.
+fn check_theme(theme: Option<&ThemeDef>) -> Result<(), ProtocolError> {
+    let Some(theme) = theme else { return Ok(()) };
+    check_len("theme_mod_id", theme.mod_id.len(), MAX_ID_BYTES)?;
+    if let Some(font) = theme.font.as_deref() {
+        check_len("theme_font", font.len(), MAX_ID_BYTES)?;
+    }
+    Ok(())
+}
+
 fn check_hud_scripts(scripts: &[HudScriptDef]) -> Result<(), ProtocolError> {
     check_len("hud_scripts", scripts.len(), MAX_HUD_SCRIPTS)?;
     for script in scripts {
@@ -2993,6 +3072,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::ActionTable { actions } => check_actions(actions)?,
         ServerMessage::SoundTable { sounds } => check_sounds(sounds)?,
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
+        ServerMessage::Theme { theme } => check_theme(theme.as_ref())?,
         ServerMessage::PictureTable { pictures } => check_pictures(pictures)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
@@ -4214,6 +4294,9 @@ mod tests {
         })
         .expect("encode");
         assert_eq!(pictures[0], 47);
+        // Protocol v63.
+        let theme = encode(&ServerMessage::Theme { theme: None }).expect("encode");
+        assert_eq!(theme[0], 48);
     }
 
     #[test]

@@ -2050,7 +2050,7 @@ fn draw_chat(app: &mut App, ctx: &egui::Context) {
 /// overlay is. **Chat is not among them** — moderation depends on a player
 /// being able to read what is said, so it cannot be switched off from a menu
 /// any more than a mod can hide it.
-fn draw_menu(app: &mut App, ctx: &egui::Context) {
+fn draw_menu(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dressing) {
     // The pause screen covers the HUD exactly as a mod's screen does, and the
     // HUD is still drawn behind it — pausing stops the world, not the health
     // bar. So it clears the same reserve.
@@ -2073,7 +2073,7 @@ fn draw_menu(app: &mut App, ctx: &egui::Context) {
         client::panel::Sheet {
             back: Some("Resume"),
             reserve,
-            ..client::panel::Sheet::titled("Paused")
+            ..client::panel::Sheet::titled("Paused").themed(dressing)
         },
         |ui| {
             {
@@ -2090,14 +2090,14 @@ fn draw_menu(app: &mut App, ctx: &egui::Context) {
                         );
                         ui.add_space(6.0);
                     }
-                    if ui.button("Settings").clicked() {
+                    if client::widget::button(ui, dressing.button, "Settings").clicked() {
                         controls = true;
                     }
                     // **"Leave", not "Quit".** It goes back to the front screen,
                     // where the game is still running and another world is one
                     // click away — calling that quitting would make a player who
                     // wanted to switch worlds close the game instead.
-                    if ui.button("Leave world").clicked() {
+                    if client::widget::button(ui, dressing.button, "Leave world").clicked() {
                         quit = true;
                     }
                     ui.add_space(10.0);
@@ -2142,7 +2142,7 @@ fn draw_menu(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-fn draw_settings(app: &mut App, ctx: &egui::Context) {
+fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dressing) {
     // Collected before the panel runs, because drawing borrows the registry
     // and the buttons need `&mut App` to act.
     #[derive(Clone)]
@@ -2199,7 +2199,7 @@ fn draw_settings(app: &mut App, ctx: &egui::Context) {
         client::panel::Sheet {
             back: Some("Back"),
             reserve,
-            ..client::panel::Sheet::titled("Controls and audio")
+            ..client::panel::Sheet::titled("Controls and audio").themed(dressing)
         },
         |ui| {
             {
@@ -2384,7 +2384,7 @@ fn draw_settings(app: &mut App, ctx: &egui::Context) {
                 ui.separator();
                 // No "Close" here: the top bar's Back is the way out of every
                 // screen, and a second one further down is a second thing to learn.
-                if ui.button("Reset all").clicked() {
+                if client::widget::button(ui, dressing.button, "Reset all").clicked() {
                     reset_all = true;
                 }
             }
@@ -2466,7 +2466,7 @@ fn draw_front(
     let output = surface.egui.run_ui(raw, |root| {
         if let Stage::Front(front) = &mut surface.stage {
             let context = root.ctx().clone();
-            action = front.draw(&context, config);
+            action = front.draw(&context, config, client::app::HUD_FONT);
             dirty = front.take_settings_dirty();
             if front.take_catalogue_dirty() {
                 catalogue = Some(front.catalogue.clone());
@@ -2545,20 +2545,25 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
         if let Some(domain) = app.entering() {
             draw_entering(&context, domain);
         }
+        // **Fonts, then the theme, then anything that wears either.** A
+        // theme's face is looked up by id in the installed set, so installing
+        // after this point would leave the first frame of every screen in the
+        // client's own lettering and the next one in the mod's — a flicker at
+        // the exact moment a menu opens.
+        client::app::install_mod_fonts(app, &context);
+        let dressing = app.wear_theme(&context);
         if menu_open {
-            draw_menu(app, &context);
+            draw_menu(app, &context, dressing);
         }
         if settings_open {
-            draw_settings(app, &context);
+            draw_settings(app, &context, dressing);
         }
         // **Server dialogs, drawn from data.** Nothing here executes anything a
         // server sent: `client::dialog` walks the tree and the rectangles
         // `core::ui` computed for it. See that module for why the layout is
         // not egui's.
-        // **Fonts before anything is drawn with them.** Installing rebuilds
-        // egui's glyph atlas, so it happens here — once per batch that has
-        // arrived — rather than on the network pump or every frame.
-        client::app::install_mod_fonts(app, &context);
+        //
+        // The fonts were installed above, before the menus that draw in them.
 
         // Uploaded first, so the draw below can hold the dialogs and the views
         // by reference — see `App::dialog_art`.
@@ -2575,6 +2580,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
             &app.fonts,
             size,
             reserve,
+            dressing,
         );
         // **The interface makes its own noise, locally.** A click that waited
         // for the server to agree it had happened would arrive after the button

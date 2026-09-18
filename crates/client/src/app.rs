@@ -40,7 +40,7 @@ use crate::world::{ABSENT_POLICY, ChunkStore};
 /// `assets/third-party/go-font/`. Compiled in rather than loaded at runtime: a
 /// client that could fail to find its font is a client that can start with an
 /// invisible HUD, and 170 KiB is not worth a failure mode.
-const HUD_FONT: &[u8] = include_bytes!("../assets/third-party/go-font/Go-Mono.ttf");
+pub const HUD_FONT: &[u8] = include_bytes!("../assets/third-party/go-font/Go-Mono.ttf");
 
 /// How far you can see inside a fluid, in blocks.
 ///
@@ -999,6 +999,11 @@ pub struct App {
     /// How much of the bottom of the canvas the loaded HUDs want kept clear,
     /// in virtual pixels — see [`tiamot_core::hud::MAX_RESERVE`].
     hud_reserve: u16,
+    /// How this server's mods want the engine's own screens to look.
+    ///
+    /// Empty until a server says otherwise, which is the client's own look —
+    /// see [`crate::theme`].
+    theme: crate::theme::Theme,
     /// What each mod wants this player's HUD to show, by mod id.
     ///
     /// Held here rather than inside the VM because it arrives on the network
@@ -1419,6 +1424,7 @@ impl App {
             was_on_ground: true,
             hud_values: std::collections::BTreeMap::new(),
             hud_reserve: 0,
+            theme: crate::theme::Theme::none(),
             hud_vm: start_hud_vm(),
             fps: 0.0,
             last_dt: 0.0,
@@ -3714,6 +3720,24 @@ impl App {
         self.config.hud_visible
     }
 
+    /// The look this server's mods asked the engine's own screens to wear.
+    #[must_use]
+    pub const fn theme(&self) -> &crate::theme::Theme {
+        &self.theme
+    }
+
+    /// Uploads the frames this theme draws, and lays it over egui's styles.
+    ///
+    /// **Both in one call, once a frame**, because a theme that had been
+    /// applied but whose frame pictures had not been uploaded would draw half
+    /// a look — and the two halves are wanted at exactly the same moment.
+    pub fn wear_theme(&mut self, ctx: &egui::Context) -> crate::theme::Dressing {
+        self.theme.apply(ctx, &self.fonts);
+        let art = self.theme.art();
+        let resolved = self.pictures.resolve_hashes(ctx, &art);
+        self.theme.dress(&resolved)
+    }
+
     /// How many points at the bottom of a `area`-point window every sheet must
     /// stay clear of.
     ///
@@ -4434,6 +4458,7 @@ impl App {
                 Event::Sounds { sounds } => self.sounds = sounds,
 
                 Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
+                Event::Theme(theme) => self.theme = crate::theme::Theme::of(theme.as_ref()),
                 Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
                 // **Replaced, not merged.** The server sends a mod's whole set
                 // each time it changes, so a value a mod stopped sending stops
