@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 61;
+pub const PROTOCOL_VERSION: u32 = 62;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -690,6 +690,14 @@ pub struct HudScriptDef {
     /// that is not in its directory — the client runs nothing rather than
     /// guessing.
     pub file: Option<ContentHash>,
+    /// How much of the bottom of the canvas this HUD needs kept clear, in
+    /// virtual pixels — see [`crate::hud::MAX_RESERVE`].
+    ///
+    /// **Carried even when `file` is `None`.** A script whose bytes have not
+    /// arrived yet, or whose file the server could not find, still told the
+    /// client how much room its HUD wants; a sheet that jumped upwards the
+    /// moment a script finished loading would be the alternative.
+    pub reserve: u16,
 }
 
 /// How a material's colour varies from place to place.
@@ -2624,6 +2632,15 @@ fn check_hud_scripts(scripts: &[HudScriptDef]) -> Result<(), ProtocolError> {
     check_len("hud_scripts", scripts.len(), MAX_HUD_SCRIPTS)?;
     for script in scripts {
         check_len("hud_script_mod_id", script.mod_id.len(), MAX_ID_BYTES)?;
+        // A reserve pushes the player's own screens up the window, so a server
+        // that asked for the whole canvas could leave them nothing to read.
+        // The registration side clamps; this refuses, because what arrives
+        // here is a server's word for it (charter rule 14).
+        check_len(
+            "hud_script_reserve",
+            usize::from(script.reserve),
+            usize::from(crate::hud::MAX_RESERVE),
+        )?;
     }
     Ok(())
 }

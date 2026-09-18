@@ -2242,6 +2242,8 @@ impl ScriptVm for MluaVm {
                 Some(crate::hud::ScriptFile {
                     mod_id: entry.get("mod_id").ok()?,
                     file: entry.get("file").ok()?,
+                    // A mod that registered with the string form has none.
+                    reserve: entry.get("reserve").ok().flatten().unwrap_or(0),
                 })
             })
             .collect()
@@ -3799,36 +3801,7 @@ impl MluaVm {
         self.install_font(mod_id, game)?;
         self.install_picture(mod_id, game)?;
 
-        // **One per mod, and the last one wins.** A mod with two HUD scripts is
-        // a mod that should concatenate them: the client budgets per script per
-        // frame, so two scripts from one mod would quietly buy it twice the
-        // budget of a mod that shipped one.
-        let owner = mod_id.to_owned();
-        let register_hud = self
-            .lua
-            .create_function(move |lua, file: String| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
-                if frozen {
-                    return Err(mlua::Error::external(format!(
-                        "mod `{owner}`: registration is closed"
-                    )));
-                }
-                let scripts: Table = lua.named_registry_value("tiamot.hud_scripts")?;
-                for existing in scripts.clone().sequence_values::<Table>().flatten() {
-                    if existing.get::<String>("mod_id").ok().as_deref() == Some(owner.as_str()) {
-                        existing.set("file", file)?;
-                        return Ok(());
-                    }
-                }
-                let entry = lua.create_table()?;
-                entry.set("mod_id", owner.clone())?;
-                entry.set("file", file)?;
-                scripts.push(entry)?;
-                Ok(())
-            })
-            .map_err(|err| self.vm_error(&err))?;
-        game.set("register_hud_script", register_hud)
-            .map_err(|err| self.vm_error(&err))?;
+        self.install_hud_script(mod_id, game)?;
 
         let owner = mod_id.to_owned();
         let slot = std::sync::Arc::clone(&self.sounds);
@@ -4314,6 +4287,81 @@ impl MluaVm {
     /// hold — and answer it in hex, which is the spelling `hud.image` and a
     /// dialog's `image` and `nine_slice` all take. So a mod pastes no hash
     /// by hand and cannot go stale.
+    /// `game.register_hud_script`, charter rule 10's tier 2.
+    ///
+    /// Its own method for the reason `install_font` and `install_picture`
+    /// are: `install_sound` sat on clippy's hundred-line ceiling, and the
+    /// thing that pushed it over was this one growing a second call shape.
+    fn install_hud_script(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        // **One per mod, and the last one wins.** A mod with two HUD scripts is
+        // a mod that should concatenate them: the client budgets per script per
+        // frame, so two scripts from one mod would quietly buy it twice the
+        // budget of a mod that shipped one.
+        //
+        // **Two shapes, because the first shipped without a reserve.**
+        // `register_hud_script("hud.lua")` is every mod written before this,
+        // and it still means what it meant. The table form adds `reserve`, and
+        // taking a table where a string was accepted costs nothing to anybody
+        // who does not need one.
+        let owner = mod_id.to_owned();
+        let register_hud = self
+            .lua
+            .create_function(move |lua, spec: mlua::Value| {
+                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: registration is closed"
+                    )));
+                }
+                let (file, reserve) = match spec {
+                    mlua::Value::String(file) => (file.to_str()?.to_owned(), 0u16),
+                    mlua::Value::Table(spec) => {
+                        let file: String = spec.get("file")?;
+                        // **Clamped, not refused.** A number a mod got wrong
+                        // should cost it the extra room, not its whole HUD —
+                        // and the protocol refuses anything past the cap on
+                        // the way in, so a clamp here is the only way a mod's
+                        // own screen still works.
+                        let reserve = spec
+                            .get::<Option<f64>>("reserve")?
+                            .unwrap_or(0.0)
+                            .clamp(0.0, f64::from(crate::hud::MAX_RESERVE));
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "clamped into `u16`'s range on the line above"
+                        )]
+                        (file, reserve as u16)
+                    }
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "mod `{owner}`: register_hud_script wants a file name or a table \
+                             with one in it, not a {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let scripts: Table = lua.named_registry_value("tiamot.hud_scripts")?;
+                for existing in scripts.clone().sequence_values::<Table>().flatten() {
+                    if existing.get::<String>("mod_id").ok().as_deref() == Some(owner.as_str()) {
+                        existing.set("file", file)?;
+                        existing.set("reserve", reserve)?;
+                        return Ok(());
+                    }
+                }
+                let entry = lua.create_table()?;
+                entry.set("mod_id", owner.clone())?;
+                entry.set("file", file)?;
+                entry.set("reserve", reserve)?;
+                scripts.push(entry)?;
+                Ok(())
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_hud_script", register_hud)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     fn install_picture(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
         let owner = mod_id.to_owned();
         let register_picture = self
@@ -9436,6 +9484,77 @@ mod tests {
         let closed = screen.closed.lock().expect("lock");
         assert_eq!(shown[0].form, "shop:till");
         assert_eq!(closed[0], ("abc".to_owned(), "shop:till".to_owned()));
+    }
+
+    #[test]
+    fn a_hud_script_registers_as_a_name_or_as_a_table_with_a_reserve() {
+        // **Both shapes, because the first shipped without a reserve.** Every
+        // mod written before HUDs could ask for room passes a string, and that
+        // still means what it meant — a reserve of nothing.
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        load(&mut vm, "plain", r#"game.register_hud_script("hud.lua")"#).expect("load");
+        load(
+            &mut vm,
+            "roomy",
+            r#"game.register_hud_script{ file = "hud.lua", reserve = 130 }"#,
+        )
+        .expect("load");
+
+        let scripts = vm.registered_hud_scripts();
+        let of = |mod_id: &str| {
+            scripts
+                .iter()
+                .find(|script| script.mod_id == mod_id)
+                .cloned()
+                .expect("registered")
+        };
+        assert_eq!(of("plain").file, "hud.lua");
+        assert_eq!(of("plain").reserve, 0);
+        assert_eq!(of("roomy").file, "hud.lua");
+        assert_eq!(of("roomy").reserve, 130);
+    }
+
+    #[test]
+    fn a_reserve_past_the_cap_is_clamped_and_a_bad_one_is_refused() {
+        // **Clamped rather than refused**, because the protocol refuses
+        // anything past the cap on the way in — so a mod that got the number
+        // wrong would lose its whole HUD to a typo rather than the extra room.
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        load(
+            &mut vm,
+            "greedy",
+            r#"game.register_hud_script{ file = "hud.lua", reserve = 99999 }"#,
+        )
+        .expect("load");
+        assert_eq!(
+            vm.registered_hud_scripts()[0].reserve,
+            crate::hud::MAX_RESERVE
+        );
+
+        // And a negative one is not a small one: it clamps to nothing rather
+        // than wrapping round into the tallest reserve there is.
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        load(
+            &mut vm,
+            "backwards",
+            r#"game.register_hud_script{ file = "hud.lua", reserve = -40 }"#,
+        )
+        .expect("load");
+        assert_eq!(vm.registered_hud_scripts()[0].reserve, 0);
+
+        // Anything that is neither a name nor a table is a mod error, named as
+        // one — the alternative is a HUD that silently never registers.
+        let mut vm = MluaVm::new(VmLimits::default()).expect("vm");
+        let err = load(&mut vm, "wrong", "game.register_hud_script(7)")
+            .expect_err("a number is not a file name");
+        assert!(
+            format!("{err:?}").contains("register_hud_script"),
+            "the error should name the call: {err:?}"
+        );
+        assert!(
+            vm.registered_hud_scripts().is_empty(),
+            "a refused call must not half-register a script"
+        );
     }
 
     fn load(vm: &mut MluaVm, id: &str, source: &str) -> Result<(), ScriptError> {

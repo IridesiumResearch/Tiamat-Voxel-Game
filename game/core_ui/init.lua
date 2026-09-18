@@ -13,7 +13,17 @@
 -- The HUD is drawn by `hud.lua`, which the client runs in a sandbox. The
 -- inventory screen is a widget tree, which nothing runs at all.
 
-game.register_hud_script("hud.lua")
+-- **`reserve` is how tall this HUD is**, in the same virtual pixels `hud.lua`
+-- draws in. The hotbar's tallest bottom-anchored element sits at SLOT + 64 and
+-- has its own height above that, so 130 covers the row, its counts and the
+-- lines above it.
+--
+-- Without it the engine's sheets — the inventory, the pause screen, a mod's
+-- dialog — are centred in the whole window and their bottom edge lands on the
+-- hotbar. The engine cannot measure a HUD to find this out: a script draws
+-- what it likes where it likes, and what the engine sees is a flat list of
+-- commands with no height in it. So the mod says.
+game.register_hud_script{ file = "hud.lua", reserve = 130 }
 
 -- The inventory screen, and the other half of criterion 1.
 --

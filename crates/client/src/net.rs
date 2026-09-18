@@ -208,6 +208,17 @@ pub enum Event {
         values: tiamot_core::hud::Values,
     },
 
+    /// How much of the bottom of the canvas the loaded HUDs want kept clear,
+    /// in virtual pixels — the tallest reserve any script in the table asked
+    /// for.
+    ///
+    /// **From the TABLE, not from a script's arrival.** A reserve is a
+    /// property of what the server registered, not of whether the bytes have
+    /// turned up yet, and taking it from the table means a sheet is in the
+    /// right place on the first frame instead of jumping upwards when the last
+    /// script finishes loading.
+    HudReserve(u16),
+
     /// A pushed HUD script has arrived and is ready to run.
     ///
     /// One event per script rather than one for the table, because they arrive
@@ -1638,6 +1649,10 @@ async fn session(
                 {
                     say(format!("could not ask for the HUD scripts: {err}"));
                 }
+                // The tallest wins: two mods drawing along the bottom edge
+                // stack, and the sheet has to clear both.
+                let reserve = scripts.iter().map(|script| script.reserve).max();
+                let _ = events.send(Event::HudReserve(reserve.unwrap_or(0)));
                 awaited_hud_scripts = scripts;
             }
 

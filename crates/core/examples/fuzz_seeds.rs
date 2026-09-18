@@ -872,11 +872,15 @@ fn server_messages() -> Vec<Vec<u8>> {
                 HudScriptDef {
                     mod_id: "core_ui".to_owned(),
                     file: Some([0xAA; 32]),
+                    reserve: 0,
                 },
-                // The shape a mod produces by naming a file it does not have.
+                // The shape a mod produces by naming a file it does not have,
+                // and one that still asked for room — a reserve travels even
+                // when the bytes never will.
                 HudScriptDef {
                     mod_id: "broken".to_owned(),
                     file: None,
+                    reserve: tiamot_core::hud::MAX_RESERVE,
                 },
             ],
         },

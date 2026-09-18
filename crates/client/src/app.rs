@@ -996,6 +996,9 @@ pub struct App {
     /// says so once, because a client that refused to run without a scripting
     /// VM would be a client nobody could play on.
     hud_vm: Option<tiamot_core::script::HudVm>,
+    /// How much of the bottom of the canvas the loaded HUDs want kept clear,
+    /// in virtual pixels — see [`tiamot_core::hud::MAX_RESERVE`].
+    hud_reserve: u16,
     /// What each mod wants this player's HUD to show, by mod id.
     ///
     /// Held here rather than inside the VM because it arrives on the network
@@ -1292,6 +1295,25 @@ pub struct App {
     displacement: [i32; 3],
 }
 
+/// The sandbox pushed HUD scripts run in, or `None` if it would not start.
+///
+/// A free function so the constructor reads as a list of fields: the `match`
+/// and its warning are the only multi-line expression in a hundred of them,
+/// and they put the constructor over clippy's line ceiling.
+///
+/// `None` is an engine fault rather than a mod one, so it warns once and the
+/// client goes on drawing its own HUD — a client that refused to run without a
+/// scripting VM would be a client nobody could play on.
+fn start_hud_vm() -> Option<tiamot_core::script::HudVm> {
+    match tiamot_core::script::HudVm::new(tiamot_core::script::HudLimits::default()) {
+        Ok(vm) => Some(vm),
+        Err(err) => {
+            tracing::warn!(%err, "no HUD script runtime; pushed HUDs will not run");
+            None
+        }
+    }
+}
+
 impl App {
     /// Builds an app around an already-open connection and renderer.
     #[must_use]
@@ -1396,14 +1418,8 @@ impl App {
             dig_resumes_at: None,
             was_on_ground: true,
             hud_values: std::collections::BTreeMap::new(),
-            hud_vm: match tiamot_core::script::HudVm::new(tiamot_core::script::HudLimits::default())
-            {
-                Ok(vm) => Some(vm),
-                Err(err) => {
-                    tracing::warn!(%err, "no HUD script runtime; pushed HUDs will not run");
-                    None
-                }
-            },
+            hud_reserve: 0,
+            hud_vm: start_hud_vm(),
             fps: 0.0,
             last_dt: 0.0,
             pacing: Pacing::default(),
@@ -3698,6 +3714,22 @@ impl App {
         self.config.hud_visible
     }
 
+    /// How many points at the bottom of a `area`-point window every sheet must
+    /// stay clear of.
+    ///
+    /// **Zero when the HUD is off**, which is the whole of the reason it is a
+    /// method and not a field read: a player who has hidden the HUD has
+    /// nothing to cover, and a sheet that still sat high for a HUD that is not
+    /// there would be the engine keeping room for nobody.
+    #[must_use]
+    pub fn sheet_reserve(&self, area: (f32, f32)) -> f32 {
+        if self.hud_visible() {
+            crate::panel::reserve_points(area, self.hud_reserve)
+        } else {
+            0.0
+        }
+    }
+
     /// Shows or hides the HUD, and remembers the choice.
     pub fn set_hud_visible(&mut self, visible: bool) {
         if self.config.hud_visible == visible {
@@ -4401,6 +4433,7 @@ impl App {
                 // server's sounds ARE without being able to make one.
                 Event::Sounds { sounds } => self.sounds = sounds,
 
+                Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
                 Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
                 // **Replaced, not merged.** The server sends a mod's whole set
                 // each time it changes, so a value a mod stopped sending stops

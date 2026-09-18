@@ -1843,6 +1843,7 @@ impl ServerHandle {
                 tiamot_core::proto::HudScriptDef {
                     mod_id: script.mod_id,
                     file,
+                    reserve: script.reserve,
                 }
             })
             .collect();

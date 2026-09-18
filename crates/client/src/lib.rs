@@ -294,18 +294,73 @@ pub mod panel {
     /// The panel's size in points, for a window `area` points across.
     #[must_use]
     pub fn size(area: (f32, f32)) -> (f32, f32) {
-        let height = (area.1 * SHARE).max(120.0);
-        let width = (height * RATIO).min(area.0 * WIDEST).max(160.0);
-        // Height follows the clamped width, so a narrow window keeps the ratio
-        // rather than keeping the height and losing the shape.
-        (width, (width / RATIO).min(area.1 * SHARE).max(120.0))
+        size_clear_of(area, 0.0)
     }
 
     /// The panel's top-left corner in points, centred in `area`.
     #[must_use]
     pub fn origin(area: (f32, f32)) -> (f32, f32) {
-        let (width, height) = size(area);
-        ((area.0 - width) / 2.0, (area.1 - height) / 2.0)
+        origin_clear_of(area, 0.0)
+    }
+
+    /// How many points at the bottom of `area` a HUD's `reserve` asks for.
+    ///
+    /// A HUD is drawn against a canvas [`tiamot_core::hud::VIRTUAL_HEIGHT`]
+    /// tall whatever the window is, so a reserve is in those units too and is
+    /// converted here — the one place it happens. A reserve in points would
+    /// protect a different fraction of the screen on every monitor while the
+    /// HUD it is protecting scaled with the canvas.
+    #[must_use]
+    pub fn reserve_points(area: (f32, f32), reserve: u16) -> f32 {
+        let canvas = f32::from(tiamot_core::hud::VIRTUAL_HEIGHT);
+        (f32::from(reserve) / canvas * area.1).clamp(0.0, area.1)
+    }
+
+    /// The panel's size in points, keeping `reserve` points at the bottom of
+    /// the window clear.
+    ///
+    /// # Why a sheet gets out of the HUD's way and not the other way round
+    ///
+    /// A sheet is three quarters of the window's height and centred, which
+    /// leaves an eighth of the window below it. A HUD that draws rows along
+    /// the bottom edge needs more than that, and a mod author reported the
+    /// inventory sitting over their hearts, food and warmth.
+    ///
+    /// The HUD cannot move: a player reads it in the same place every time,
+    /// and a health bar that jumped whenever a screen opened would be worse
+    /// than one covered up. So the sheet moves.
+    ///
+    /// **It rises before it shrinks.** Most windows have room to lift a
+    /// full-sized sheet clear, and a sheet that shrank whenever a HUD grew
+    /// would change size for a reason the player cannot see. Only when the
+    /// room left above the reserve is less than the sheet wants does it lose
+    /// height — still four by three, because a screen that changes shape is
+    /// a screen whose contents reflow.
+    #[must_use]
+    pub fn size_clear_of(area: (f32, f32), reserve: f32) -> (f32, f32) {
+        // Never more than half the window, whatever was asked for: a reserve
+        // that swallowed the screen would leave no way to read the pause menu
+        // and so no way to leave.
+        let reserve = reserve.clamp(0.0, area.1 / 2.0);
+        let room = area.1 - reserve;
+        let height = (area.1 * SHARE).min(room).max(120.0);
+        let width = (height * RATIO).min(area.0 * WIDEST).max(160.0);
+        // Height follows the clamped width, so a narrow window keeps the ratio
+        // rather than keeping the height and losing the shape.
+        (width, (width / RATIO).min(height).max(120.0))
+    }
+
+    /// The panel's top-left corner in points, centred in what `reserve` leaves.
+    #[must_use]
+    pub fn origin_clear_of(area: (f32, f32), reserve: f32) -> (f32, f32) {
+        let reserve = reserve.clamp(0.0, area.1 / 2.0);
+        let (width, height) = size_clear_of(area, reserve);
+        (
+            (area.0 - width) / 2.0,
+            // Centred in the room ABOVE the reserve, so a sheet with room to
+            // spare sits a little high rather than resting on the HUD.
+            ((area.1 - reserve - height) / 2.0).max(0.0),
+        )
     }
 
     /// Whether a sheet's body scrolls.
@@ -328,6 +383,52 @@ pub mod panel {
         Scrolling,
         /// The body gets the room and no more.
         Fixed,
+    }
+
+    /// Everything about a sheet except what goes in it.
+    ///
+    /// A struct rather than five more parameters, for the reason
+    /// [`tiamot_core::ui`]'s `Flow` is one: they travel together, they are read
+    /// together, and passed separately they are two `Option<&str>` and a `bool`
+    /// in a row — which is how a heading ends up where a Back label was meant
+    /// to go.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Sheet<'a> {
+        /// egui's identity for the window, which no player is ever shown.
+        ///
+        /// A mod's dialog passes the namespaced form the server named —
+        /// `core_ui:inventory` — because egui needs to tell one window from
+        /// another and that is a name, not a title.
+        pub id: &'a str,
+        /// The heading on the bar, or `None` for a screen whose heading is
+        /// inside its own body, where the mod put it.
+        pub heading: Option<&'a str>,
+        /// The label on the way out, or `None` for a screen with none.
+        pub back: Option<&'a str>,
+        /// Whether the body scrolls.
+        pub fit: Fit,
+        /// Points at the bottom of the window to stay clear of — a HUD's
+        /// reserve, already converted by [`reserve_points`]. Zero anywhere
+        /// there is no HUD, which is every screen before a world is joined.
+        pub reserve: f32,
+    }
+
+    impl<'a> Sheet<'a> {
+        /// A scrolling sheet titled by its own id, clear of nothing.
+        ///
+        /// What the engine's own pages are: the id IS the heading, because a
+        /// screen the player opened from a menu is named by the button they
+        /// pressed.
+        #[must_use]
+        pub fn titled(id: &'a str) -> Self {
+            Self {
+                id,
+                heading: Some(id),
+                back: None,
+                fit: Fit::Scrolling,
+                reserve: 0.0,
+            }
+        }
     }
 
     /// What a screen the player pressed a button to open looks like.
@@ -353,7 +454,14 @@ pub mod panel {
         back: Option<&str>,
         contents: impl FnOnce(&mut egui::Ui),
     ) -> bool {
-        sheet_with(ctx, title, Some(title), back, Fit::Scrolling, contents)
+        sheet_with(
+            ctx,
+            Sheet {
+                back,
+                ..Sheet::titled(title)
+            },
+            contents,
+        )
     }
 
     /// The same sheet, for a screen whose heading is not its identity.
@@ -365,16 +473,21 @@ pub mod panel {
     /// it, so it passes `None` and gets the bar with just the way out on it.
     pub fn sheet_with(
         ctx: &egui::Context,
-        id: &str,
-        heading: Option<&str>,
-        back: Option<&str>,
-        fit: Fit,
+        sheet: Sheet<'_>,
         contents: impl FnOnce(&mut egui::Ui),
     ) -> bool {
+        let Sheet {
+            id,
+            heading,
+            back,
+            fit,
+            reserve,
+        } = sheet;
         let title = id;
         let screen = ctx.content_rect();
-        let (width, height) = size((screen.width(), screen.height()));
-        let (x, y) = origin((screen.width(), screen.height()));
+        let area = (screen.width(), screen.height());
+        let (width, height) = size_clear_of(area, reserve);
+        let (x, y) = origin_clear_of(area, reserve);
         let mut went_back = false;
         egui::Window::new(title)
             .collapsible(false)
@@ -445,6 +558,77 @@ pub mod panel {
                 assert!((x - (area.0 - width - x)).abs() < 0.01);
                 assert!((y - (area.1 - height - y)).abs() < 0.01);
             }
+        }
+
+        #[test]
+        fn a_sheet_rises_clear_of_a_huds_reserve_before_it_shrinks() {
+            // Reported by a mod author: with the inventory open, its bottom
+            // edge sat over their hearts, food and warmth and ran down to the
+            // hotbar. A sheet is three quarters of the window and centred, so
+            // it leaves an eighth below it — and that HUD was taller.
+            let area = (1920.0, 1080.0);
+            let (_, tall) = size(area);
+            let reserve = reserve_points(area, 170);
+
+            // A 1080-point window and a 1080-tall canvas, so a 170-pixel
+            // reserve is 170 points — the case the conversion is invisible in,
+            // which is exactly why the next test does not use it.
+            assert!((reserve - 170.0).abs() < 0.01);
+
+            // It RISES: nothing shrank, because there was room to lift it.
+            let (_, height) = size_clear_of(area, reserve);
+            assert!(
+                (height - tall).abs() < 0.01,
+                "a sheet with room above the reserve keeps its size; {height} against {tall}"
+            );
+            let (_, y) = origin_clear_of(area, reserve);
+            assert!(
+                y + height <= area.1 - reserve + 0.01,
+                "the sheet's bottom edge at {} is not clear of the reserve at {}",
+                y + height,
+                area.1 - reserve
+            );
+
+            // And the counter-example, without which the assertion above holds
+            // for a sheet that was already clear: with no reserve the bottom
+            // edge is well inside the room this one had to be lifted out of.
+            let (_, plain) = origin(area);
+            assert!(plain + tall > area.1 - reserve);
+        }
+
+        #[test]
+        fn a_reserve_too_tall_to_rise_clear_of_shrinks_the_sheet_and_keeps_its_shape() {
+            // Half the window, which is the cap: past this the sheet would be
+            // smaller than the thing it is making way for.
+            let area = (1920.0, 1080.0);
+            let (width, height) = size_clear_of(area, 800.0);
+            let ratio = width / height;
+            assert!(
+                (ratio - RATIO).abs() < 0.01,
+                "a squeezed sheet is still four by three, not {ratio}"
+            );
+            let (_, y) = origin_clear_of(area, 800.0);
+            // Clamped to half, so the sheet keeps the top half of the window
+            // rather than being squeezed to the 120-point floor.
+            assert!(y + height <= area.1 / 2.0 + 0.01);
+            assert!(height >= 120.0);
+        }
+
+        #[test]
+        fn a_reserve_is_the_same_share_of_every_window() {
+            // **The reason a reserve is in virtual pixels and not points.** A
+            // HUD scales with the window's height; a reserve in points would
+            // protect twice as much of a 720-point window as of a 1440-point
+            // one, so the sheet would clear the hotbar on one monitor and sit
+            // on it on another.
+            let share = |height: f32| reserve_points((height * 16.0 / 9.0, height), 130) / height;
+            let small = share(720.0);
+            let large = share(2160.0);
+            assert!(
+                (small - large).abs() < 0.001,
+                "a reserve took {small} of a small window and {large} of a large one"
+            );
+            assert!((small - 130.0 / 1080.0).abs() < 0.001);
         }
 
         #[test]

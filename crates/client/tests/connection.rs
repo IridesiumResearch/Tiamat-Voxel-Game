@@ -184,6 +184,8 @@ struct Seen {
     dialogs: std::collections::BTreeMap<String, tiamot_core::ui::Tree>,
     /// HUD scripts the server pushed, with their source, in arrival order.
     hud_scripts: Vec<(String, String)>,
+    /// The tallest reserve any pushed HUD asked for, in virtual pixels.
+    hud_reserve: Option<u16>,
     hud_values: std::collections::BTreeMap<String, tiamot_core::hud::Values>,
     /// Which sound each named event plays, as the server last said.
     bindings: Vec<tiamot_core::proto::SoundBinding>,
@@ -211,6 +213,7 @@ impl Seen {
             | Event::SkyModifier(_)
             | Event::Flash(_)
             | Event::Precipitation(_) => {}
+            Event::HudReserve(reserve) => self.hud_reserve = Some(reserve),
             // A mod's font. Same reasoning as the picture above.
             Event::Font { .. } => {}
             Event::Materials { table, images } => {
@@ -743,6 +746,18 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
         .cloned()
         .expect("a reference mod should have pushed a HUD script");
     assert_eq!(mod_id, "core_ui");
+
+    // **The reserve rode with the table, not with the bytes.** `core_ui` draws
+    // a hotbar along the bottom edge, and without a reserve every sheet the
+    // engine opens is centred in the whole window and lands on it — reported by
+    // a mod author whose hearts, food and warmth were under an open inventory.
+    // Asserted here rather than in the client because what is under test is
+    // that a MOD can ask for the room: the engine cannot measure a HUD.
+    assert!(
+        seen.hud_reserve.is_some_and(|reserve| reserve >= 130),
+        "the reference HUD asked for no room to draw in: {:?}",
+        seen.hud_reserve
+    );
 
     // The source arrived, so run it — in the same sandbox the client runs it
     // in, which is headless and is why this can be asserted without a window.

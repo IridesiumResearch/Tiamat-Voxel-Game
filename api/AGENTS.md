@@ -1123,9 +1123,27 @@ the whole generation path), `core_tools` (118, tools and actions), `core_gear`
 
 ## Limits worth knowing before you design around them
 
-Everything here is true as of 2026-09-16 and is the kind of thing that is
+Everything here is true as of 2026-09-18 and is the kind of thing that is
 cheaper to read than to discover. None of it is a rule the engine wants; each is
 work that has not been done, and each will move.
+
+**An open sheet covers the bottom of the screen, and your HUD has to say so.**
+The inventory, the pause screen and a mod's dialog are all one sheet: three
+quarters of the window's height, four by three, centred. That leaves an eighth
+of the window below it, and a HUD with more than a row or two along the bottom
+edge does not fit in it — hearts, food and warmth under an open inventory is
+what that looks like. Nothing the engine measures would tell it otherwise, so
+pass a `reserve` in the table form of `game.register_hud_script`, in the same
+virtual pixels your HUD draws in. Sheets rise to clear the tallest reserve any
+loaded mod asked for, and shrink only when there is no window left to rise into.
+
+**A widget's `size` is its length along its PARENT's direction**, and a
+container now measures its children by what they asked for rather than by what
+is in them. Before 2026-09-18 it only honoured `size` on a node that also set
+`cross_size`, so a column holding a row with `size = 52` measured that row at
+its contents' height, laid it out into that, and squashed everything inside it.
+If you have summed your children's sizes and set your own to work around this,
+you can stop; the workaround is harmless either way.
 
 **Fluid physics is per fluid.** `tick_rate`, `waterlogs_at` and `evaporates`
 are read from the fluid IN a block, so a slow lava beside a quick river and a

@@ -288,6 +288,7 @@ impl Dialogs {
         art: &BTreeMap<String, crate::pictures::Resolved>,
         fonts: &crate::fonts::Fonts,
         area: (f32, f32),
+        reserve: f32,
     ) -> Vec<Raised> {
         self.retain_open(open);
         let mut raised = Vec::new();
@@ -303,7 +304,7 @@ impl Dialogs {
                 fonts,
             };
             raised.extend(draw_form(
-                ctx, form, screen, local, views, icons, look, area,
+                ctx, form, screen, local, views, icons, look, area, reserve,
             ));
         }
         // **Last, and over everything.** What is on the cursor is drawn after
@@ -407,8 +408,8 @@ impl Screen {
 /// capped by the sheet: a mod that asks for a window bigger than the screen
 /// does not get one.
 #[must_use]
-pub fn prompt_size(wanted: (i32, i32), area: (f32, f32)) -> (i32, i32) {
-    let sheet = crate::panel::size(area);
+pub fn prompt_size(wanted: (i32, i32), area: (f32, f32), reserve: f32) -> (i32, i32) {
+    let sheet = crate::panel::size_clear_of(area, reserve);
     #[expect(
         clippy::cast_possible_truncation,
         reason = "a window's size in points, which is small and positive"
@@ -501,6 +502,7 @@ fn draw_form(
     icons: Icons<'_>,
     look: Look<'_>,
     area: (f32, f32),
+    reserve: f32,
 ) -> Vec<Raised> {
     let tree = &screen.tree;
     let mut raised = Vec::new();
@@ -510,7 +512,7 @@ fn draw_form(
     if screen.compact {
         // A prompt: measured, capped by the sheet, and draggable. Centred is
         // only a DEFAULT, so a player who moves one keeps it where they put it.
-        let (width, height) = prompt_size(tiamot_core::ui::natural(tree, &ruler), area);
+        let (width, height) = prompt_size(tiamot_core::ui::natural(tree, &ruler), area, reserve);
         egui::Window::new(form)
             .collapsible(false)
             .resizable(false)
@@ -557,10 +559,13 @@ fn draw_form(
         // built to hold it.
         close |= crate::panel::sheet_with(
             ctx,
-            form,
-            None,
-            Some("Close"),
-            crate::panel::Fit::Fixed,
+            crate::panel::Sheet {
+                heading: None,
+                back: Some("Close"),
+                fit: crate::panel::Fit::Fixed,
+                reserve,
+                ..crate::panel::Sheet::titled(form)
+            },
             |ui| {
                 // The room the sheet handed over, below its bar. Measured
                 // rather than assumed: the clip rectangle, which is the other
@@ -1599,11 +1604,11 @@ mod tests {
         #[expect(clippy::cast_possible_truncation, reason = "a size in points")]
         let sheet = (sheet.0 as i32, sheet.1 as i32);
 
-        assert_eq!(prompt_size((200, 150), area), (200, 150));
+        assert_eq!(prompt_size((200, 150), area, 0.0), (200, 150));
         // A mod that asks for a window bigger than the screen does not get one.
-        assert_eq!(prompt_size((4000, 4000), area), sheet);
+        assert_eq!(prompt_size((4000, 4000), area, 0.0), sheet);
         // And a floor, so a tree that measures to nothing is still clickable.
-        assert_eq!(prompt_size((0, 0), area), (160, 120));
+        assert_eq!(prompt_size((0, 0), area, 0.0), (160, 120));
     }
 
     #[test]
@@ -1716,6 +1721,7 @@ mod tests {
                     &BTreeMap::new(),
                     &crate::fonts::Fonts::new(),
                     area,
+                    0.0,
                 );
             });
             covered = egui::Rect::NOTHING;
@@ -1799,6 +1805,7 @@ mod tests {
                     &BTreeMap::new(),
                     &crate::fonts::Fonts::new(),
                     (1280.0, 720.0),
+                    0.0,
                 );
             });
             raised

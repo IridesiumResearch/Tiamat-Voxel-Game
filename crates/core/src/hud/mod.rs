@@ -63,7 +63,37 @@ pub struct ScriptFile {
     pub mod_id: String,
     /// The file inside that mod's directory, e.g. `"hud.lua"`.
     pub file: String,
+    /// How much of the bottom of the canvas this HUD needs kept clear, in
+    /// virtual pixels. See [`MAX_RESERVE`].
+    pub reserve: u16,
 }
+
+/// The most of the canvas a HUD may ask to have kept clear, in virtual pixels.
+///
+/// # What a reserve is for
+///
+/// A sheet — the inventory, the pause screen, a mod's dialog — is three
+/// quarters of the window's height and centred, which leaves an eighth of the
+/// window above it and an eighth below. A HUD that draws along the bottom edge
+/// lives in that bottom eighth, and a HUD with three rows in it does not fit:
+/// a mod author reported the inventory sitting over their hearts, food and
+/// warmth and running down to the hotbar.
+///
+/// Nothing the engine can measure would tell it that. A HUD script draws
+/// whatever it likes wherever it likes, and the engine sees a flat list of
+/// commands, not a layout with a height. So the mod says, and the client keeps
+/// its sheets clear of the tallest reserve any loaded script asked for.
+///
+/// **In virtual pixels, like everything else a HUD deals in** — see the module
+/// docs. A reserve in window points would mean a different fraction of the
+/// screen on every monitor, while the HUD it is protecting scales with the
+/// canvas.
+///
+/// Half the canvas is the cap: past that a sheet is smaller than what it is
+/// making way for, and a mod that wants the whole screen has `Builtin` and its
+/// own dialogs rather than a reserve that squeezes every engine screen to
+/// nothing.
+pub const MAX_RESERVE: u16 = VIRTUAL_HEIGHT / 2;
 
 pub use frame::{Anchor, Builtin, Command, Fill, Frame, HudError, Limits, Mark, VIRTUAL_HEIGHT};
 pub use state::{

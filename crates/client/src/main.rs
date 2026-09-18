@@ -2051,6 +2051,11 @@ fn draw_chat(app: &mut App, ctx: &egui::Context) {
 /// being able to read what is said, so it cannot be switched off from a menu
 /// any more than a mod can hide it.
 fn draw_menu(app: &mut App, ctx: &egui::Context) {
+    // The pause screen covers the HUD exactly as a mod's screen does, and the
+    // HUD is still drawn behind it — pausing stops the world, not the health
+    // bar. So it clears the same reserve.
+    let area = (ctx.content_rect().width(), ctx.content_rect().height());
+    let reserve = app.sheet_reserve(area);
     let mut resume = false;
     let mut controls = false;
     let mut quit = false;
@@ -2063,55 +2068,63 @@ fn draw_menu(app: &mut App, ctx: &egui::Context) {
 
     // **The same sheet every other screen gets**, and it decides the shape so
     // this cannot. See `client::panel::sheet`.
-    resume |= client::panel::sheet(ctx, "Paused", Some("Resume"), |ui| {
-        {
-            ui.vertical_centered_justified(|ui| {
-                ui.add_space(6.0);
-                // **Where to tell people to connect.** Only when the world is
-                // actually open: a line that always showed an address would
-                // have people typing one at a server that refuses them.
-                if let Some(address) = &hosting {
-                    ui.label(format!("Open to your network at  {address}"));
-                    ui.label(
-                        "They join from Play → Server. The first connection pins this \
-                         machine's certificate.",
-                    );
+    resume |= client::panel::sheet_with(
+        ctx,
+        client::panel::Sheet {
+            back: Some("Resume"),
+            reserve,
+            ..client::panel::Sheet::titled("Paused")
+        },
+        |ui| {
+            {
+                ui.vertical_centered_justified(|ui| {
                     ui.add_space(6.0);
-                }
-                if ui.button("Settings").clicked() {
-                    controls = true;
-                }
-                // **"Leave", not "Quit".** It goes back to the front screen,
-                // where the game is still running and another world is one
-                // click away — calling that quitting would make a player who
-                // wanted to switch worlds close the game instead.
-                if ui.button("Leave world").clicked() {
-                    quit = true;
-                }
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-            });
+                    // **Where to tell people to connect.** Only when the world is
+                    // actually open: a line that always showed an address would
+                    // have people typing one at a server that refuses them.
+                    if let Some(address) = &hosting {
+                        ui.label(format!("Open to your network at  {address}"));
+                        ui.label(
+                            "They join from Play → Server. The first connection pins this \
+                         machine's certificate.",
+                        );
+                        ui.add_space(6.0);
+                    }
+                    if ui.button("Settings").clicked() {
+                        controls = true;
+                    }
+                    // **"Leave", not "Quit".** It goes back to the front screen,
+                    // where the game is still running and another world is one
+                    // click away — calling that quitting would make a player who
+                    // wanted to switch worlds close the game instead.
+                    if ui.button("Leave world").clicked() {
+                        quit = true;
+                    }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                });
 
-            // **Interface scale, on release rather than live.** It used to
-            // apply while the drag was running, on the grounds that a scale you
-            // cannot see is a scale you have to guess at. That is true and it
-            // is the lesser problem: the scale rescales the slider, so the
-            // control moved under the pointer and the value chased it. Reported
-            // from the window as jumping around. See `client::widget::settle`.
-            settled = client::widget::on_release(
-                ui,
-                "interface scale",
-                client::config::UI_SCALE_RANGE,
-                client::config::UI_SCALE_STEP,
-                live,
-                draft,
-            );
-            ui.checkbox(&mut hud, "Show HUD");
-            ui.checkbox(&mut overlay, "Debug overlay");
-            ui.add_space(6.0);
-        }
-    });
+                // **Interface scale, on release rather than live.** It used to
+                // apply while the drag was running, on the grounds that a scale you
+                // cannot see is a scale you have to guess at. That is true and it
+                // is the lesser problem: the scale rescales the slider, so the
+                // control moved under the pointer and the value chased it. Reported
+                // from the window as jumping around. See `client::widget::settle`.
+                settled = client::widget::on_release(
+                    ui,
+                    "interface scale",
+                    client::config::UI_SCALE_RANGE,
+                    client::config::UI_SCALE_STEP,
+                    live,
+                    draft,
+                );
+                ui.checkbox(&mut hud, "Show HUD");
+                ui.checkbox(&mut overlay, "Debug overlay");
+                ui.add_space(6.0);
+            }
+        },
+    );
 
     if let Some(scale) = settled {
         app.set_ui_scale(scale);
@@ -2167,6 +2180,8 @@ fn draw_settings(app: &mut App, ctx: &egui::Context) {
         })
         .collect();
     let waiting = app.rebinding().map(ToOwned::to_owned);
+    let area = (ctx.content_rect().width(), ctx.content_rect().height());
+    let reserve = app.sheet_reserve(area);
 
     let mut rebind: Option<String> = None;
     let mut reset: Option<String> = None;
@@ -2179,193 +2194,202 @@ fn draw_settings(app: &mut App, ctx: &egui::Context) {
     // bindings with volume sliders under it, and a `fixed_size` egui grows past
     // is how it ended up running off the top and the bottom of the screen with
     // no way to reach either end.
-    close |= client::panel::sheet(ctx, "Controls and audio", Some("Back"), |ui| {
-        {
-            if let Some(id) = &waiting {
-                ui.label(
-                    egui::RichText::new(format!("Press a key for {id} — Escape to cancel"))
-                        .color(egui::Color32::LIGHT_YELLOW),
-                );
-                ui.separator();
-            }
-            if !conflicts.is_empty() {
-                for (input, ids) in &conflicts {
+    close |= client::panel::sheet_with(
+        ctx,
+        client::panel::Sheet {
+            back: Some("Back"),
+            reserve,
+            ..client::panel::Sheet::titled("Controls and audio")
+        },
+        |ui| {
+            {
+                if let Some(id) = &waiting {
                     ui.label(
-                        egui::RichText::new(format!("{input} is bound to {}", ids.join(", ")))
-                            .color(egui::Color32::LIGHT_RED),
+                        egui::RichText::new(format!("Press a key for {id} — Escape to cancel"))
+                            .color(egui::Color32::LIGHT_YELLOW),
                     );
+                    ui.separator();
                 }
-                ui.separator();
-            }
-            // **What a player came here to change goes first.** The bindings
-            // below are a reference list as much as a control — one row per
-            // action per mod, so they run to a screenful on their own — and
-            // putting them above the sliders meant the fog control was found
-            // by scrolling past everything else, or reported as missing.
-            // **A mod's own options, above the engine's.** They are the ones a
-            // player came looking for and cannot guess at — the engine's are in
-            // every game and a mod's are in this one — and a list of key
-            // bindings is long enough to bury anything below it.
-            //
-            // Grouped by the mod that asked, because "Compact hotbar" means
-            // nothing without knowing who offers it, and two mods may
-            // reasonably offer the same thing.
-            let settings = app.mod_settings().to_vec();
-            if !settings.is_empty() {
-                ui.heading("mods");
-                let mut owner: Option<String> = None;
-                for def in &settings {
-                    if owner.as_deref() != Some(def.mod_id.as_str()) {
-                        ui.weak(&def.mod_id);
-                        owner = Some(def.mod_id.clone());
-                    }
-                    let current = app.mod_setting(def);
-                    match def.kind {
-                        tiamot_core::proto::SettingKind::Toggle => {
-                            let mut on = current != 0;
-                            if ui.checkbox(&mut on, &def.name).changed() {
-                                app.set_mod_setting(&def.id, u32::from(on));
-                            }
-                        }
-                        tiamot_core::proto::SettingKind::Choice => {
-                            let index = (current as usize).min(def.options.len().saturating_sub(1));
-                            let shown = def
-                                .options
-                                .get(index)
-                                .map_or_else(String::new, Clone::clone);
-                            ui.horizontal(|ui| {
-                                ui.label(&def.name);
-                                egui::ComboBox::from_id_salt(&def.id)
-                                    .selected_text(shown)
-                                    .show_ui(ui, |ui| {
-                                        for (n, option) in def.options.iter().enumerate() {
-                                            let mut picked = index == n;
-                                            if ui
-                                                .selectable_value(&mut picked, true, option)
-                                                .clicked()
-                                            {
-                                                app.set_mod_setting(
-                                                    &def.id,
-                                                    u32::try_from(n).unwrap_or(0),
-                                                );
-                                            }
-                                        }
-                                    });
-                            });
-                        }
-                    }
-                    if !def.description.is_empty() {
-                        ui.indent(&def.id, |ui| ui.weak(&def.description));
-                    }
-                }
-                ui.separator();
-            }
-
-            ui.heading("volume");
-            // **Live, not on close.** A slider you cannot hear while dragging
-            // is a slider you have to guess at, so every change goes straight
-            // to the mixer and the file is written when the screen closes.
-            let mut volumes = app.mixer_mut().volumes().clone();
-            let mut changed = ui
-                .add(egui::Slider::new(&mut volumes.master, 0.0..=1.0).text("master"))
-                .changed();
-            for bus in client::audio::Bus::ALL {
-                let level = volumes.buses.entry(bus.name().to_owned()).or_insert(0.8);
-                changed |= ui
-                    .add(egui::Slider::new(level, 0.0..=1.0).text(bus.name()))
-                    .changed();
-            }
-            if changed {
-                app.mixer_mut().set_volumes(volumes);
-                volumes_changed = true;
-            }
-            if !app.audio_available() {
-                ui.label(
-                    egui::RichText::new("no audio device found; the game is running silently")
-                        .color(egui::Color32::LIGHT_YELLOW),
-                );
-            }
-
-            draw_sound_attribution(app, ui);
-
-            ui.separator();
-            ui.heading("display");
-            // **Here as well as on the front screen**, unlike view distance and
-            // field of view, because this one is a look: a haze setting chosen
-            // from a menu with no world behind it is chosen blind. It applies
-            // as the slider moves.
-            let mut fog = app.fog_chunks();
-            if ui
-                .add(
-                    egui::Slider::new(&mut fog, client::config::FOG_CHUNKS_RANGE)
-                        .text("fog distance (chunks)"),
-                )
-                .changed()
-            {
-                app.set_fog_chunks(fog);
-            }
-
-            // **The debug overlay ships, and lives here.** Charter rule 18
-            // makes frame pacing the metric, and every pacing question so far
-            // was answered by somebody reading these numbers off their own
-            // screen. A player on hardware nobody here will ever own is the
-            // person best placed to measure it, so the instrument is in the
-            // menu rather than behind a build flag or an undocumented key.
-            let mut overlay = app.debug_overlay();
-            if ui
-                .checkbox(
-                    &mut overlay,
-                    "Debug overlay (frame timings, memory, adapter)",
-                )
-                .changed()
-            {
-                app.set_debug_overlay(overlay);
-            }
-
-            ui.separator();
-            {
-                for (source, rows) in &groups {
-                    // **The attribution.** A player can see which mod wants
-                    // every binding they are being offered.
-                    ui.heading(source);
-                    for row in rows {
-                        ui.horizontal(|ui| {
-                            let label = if row.description.is_empty() {
-                                row.id.clone()
-                            } else {
-                                row.description.clone()
-                            };
-                            ui.add_sized([300.0, 18.0], egui::Label::new(label).truncate());
-                            let text = egui::RichText::new(&row.binding);
-                            let text = if row.conflicted {
-                                text.color(egui::Color32::LIGHT_RED)
-                            } else {
-                                text
-                            };
-                            if ui
-                                .add_sized([120.0, 18.0], egui::Button::new(text))
-                                .clicked()
-                            {
-                                rebind = Some(row.id.clone());
-                            }
-                            // Only where there is something to undo, so the row
-                            // says at a glance which bindings are the player's.
-                            if row.custom && ui.small_button("reset").clicked() {
-                                reset = Some(row.id.clone());
-                            }
-                        });
+                if !conflicts.is_empty() {
+                    for (input, ids) in &conflicts {
+                        ui.label(
+                            egui::RichText::new(format!("{input} is bound to {}", ids.join(", ")))
+                                .color(egui::Color32::LIGHT_RED),
+                        );
                     }
                     ui.separator();
                 }
+                // **What a player came here to change goes first.** The bindings
+                // below are a reference list as much as a control — one row per
+                // action per mod, so they run to a screenful on their own — and
+                // putting them above the sliders meant the fog control was found
+                // by scrolling past everything else, or reported as missing.
+                // **A mod's own options, above the engine's.** They are the ones a
+                // player came looking for and cannot guess at — the engine's are in
+                // every game and a mod's are in this one — and a list of key
+                // bindings is long enough to bury anything below it.
+                //
+                // Grouped by the mod that asked, because "Compact hotbar" means
+                // nothing without knowing who offers it, and two mods may
+                // reasonably offer the same thing.
+                let settings = app.mod_settings().to_vec();
+                if !settings.is_empty() {
+                    ui.heading("mods");
+                    let mut owner: Option<String> = None;
+                    for def in &settings {
+                        if owner.as_deref() != Some(def.mod_id.as_str()) {
+                            ui.weak(&def.mod_id);
+                            owner = Some(def.mod_id.clone());
+                        }
+                        let current = app.mod_setting(def);
+                        match def.kind {
+                            tiamot_core::proto::SettingKind::Toggle => {
+                                let mut on = current != 0;
+                                if ui.checkbox(&mut on, &def.name).changed() {
+                                    app.set_mod_setting(&def.id, u32::from(on));
+                                }
+                            }
+                            tiamot_core::proto::SettingKind::Choice => {
+                                let index =
+                                    (current as usize).min(def.options.len().saturating_sub(1));
+                                let shown = def
+                                    .options
+                                    .get(index)
+                                    .map_or_else(String::new, Clone::clone);
+                                ui.horizontal(|ui| {
+                                    ui.label(&def.name);
+                                    egui::ComboBox::from_id_salt(&def.id)
+                                        .selected_text(shown)
+                                        .show_ui(ui, |ui| {
+                                            for (n, option) in def.options.iter().enumerate() {
+                                                let mut picked = index == n;
+                                                if ui
+                                                    .selectable_value(&mut picked, true, option)
+                                                    .clicked()
+                                                {
+                                                    app.set_mod_setting(
+                                                        &def.id,
+                                                        u32::try_from(n).unwrap_or(0),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                });
+                            }
+                        }
+                        if !def.description.is_empty() {
+                            ui.indent(&def.id, |ui| ui.weak(&def.description));
+                        }
+                    }
+                    ui.separator();
+                }
+
+                ui.heading("volume");
+                // **Live, not on close.** A slider you cannot hear while dragging
+                // is a slider you have to guess at, so every change goes straight
+                // to the mixer and the file is written when the screen closes.
+                let mut volumes = app.mixer_mut().volumes().clone();
+                let mut changed = ui
+                    .add(egui::Slider::new(&mut volumes.master, 0.0..=1.0).text("master"))
+                    .changed();
+                for bus in client::audio::Bus::ALL {
+                    let level = volumes.buses.entry(bus.name().to_owned()).or_insert(0.8);
+                    changed |= ui
+                        .add(egui::Slider::new(level, 0.0..=1.0).text(bus.name()))
+                        .changed();
+                }
+                if changed {
+                    app.mixer_mut().set_volumes(volumes);
+                    volumes_changed = true;
+                }
+                if !app.audio_available() {
+                    ui.label(
+                        egui::RichText::new("no audio device found; the game is running silently")
+                            .color(egui::Color32::LIGHT_YELLOW),
+                    );
+                }
+
+                draw_sound_attribution(app, ui);
+
+                ui.separator();
+                ui.heading("display");
+                // **Here as well as on the front screen**, unlike view distance and
+                // field of view, because this one is a look: a haze setting chosen
+                // from a menu with no world behind it is chosen blind. It applies
+                // as the slider moves.
+                let mut fog = app.fog_chunks();
+                if ui
+                    .add(
+                        egui::Slider::new(&mut fog, client::config::FOG_CHUNKS_RANGE)
+                            .text("fog distance (chunks)"),
+                    )
+                    .changed()
+                {
+                    app.set_fog_chunks(fog);
+                }
+
+                // **The debug overlay ships, and lives here.** Charter rule 18
+                // makes frame pacing the metric, and every pacing question so far
+                // was answered by somebody reading these numbers off their own
+                // screen. A player on hardware nobody here will ever own is the
+                // person best placed to measure it, so the instrument is in the
+                // menu rather than behind a build flag or an undocumented key.
+                let mut overlay = app.debug_overlay();
+                if ui
+                    .checkbox(
+                        &mut overlay,
+                        "Debug overlay (frame timings, memory, adapter)",
+                    )
+                    .changed()
+                {
+                    app.set_debug_overlay(overlay);
+                }
+
+                ui.separator();
+                {
+                    for (source, rows) in &groups {
+                        // **The attribution.** A player can see which mod wants
+                        // every binding they are being offered.
+                        ui.heading(source);
+                        for row in rows {
+                            ui.horizontal(|ui| {
+                                let label = if row.description.is_empty() {
+                                    row.id.clone()
+                                } else {
+                                    row.description.clone()
+                                };
+                                ui.add_sized([300.0, 18.0], egui::Label::new(label).truncate());
+                                let text = egui::RichText::new(&row.binding);
+                                let text = if row.conflicted {
+                                    text.color(egui::Color32::LIGHT_RED)
+                                } else {
+                                    text
+                                };
+                                if ui
+                                    .add_sized([120.0, 18.0], egui::Button::new(text))
+                                    .clicked()
+                                {
+                                    rebind = Some(row.id.clone());
+                                }
+                                // Only where there is something to undo, so the row
+                                // says at a glance which bindings are the player's.
+                                if row.custom && ui.small_button("reset").clicked() {
+                                    reset = Some(row.id.clone());
+                                }
+                            });
+                        }
+                        ui.separator();
+                    }
+                }
+                ui.separator();
+                // No "Close" here: the top bar's Back is the way out of every
+                // screen, and a second one further down is a second thing to learn.
+                if ui.button("Reset all").clicked() {
+                    reset_all = true;
+                }
             }
-            ui.separator();
-            // No "Close" here: the top bar's Back is the way out of every
-            // screen, and a second one further down is a second thing to learn.
-            if ui.button("Reset all").clicked() {
-                reset_all = true;
-            }
-        }
-    });
+        },
+    );
 
     if let Some(id) = rebind {
         app.begin_rebind(&id);
@@ -2539,6 +2563,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
         // Uploaded first, so the draw below can hold the dialogs and the views
         // by reference — see `App::dialog_art`.
         let dialog_art = app.dialog_art(&context);
+        let reserve = app.sheet_reserve(size);
         let raised = surface.dialogs.draw(
             &context,
             app.dialogs(),
@@ -2549,6 +2574,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
             &dialog_art,
             &app.fonts,
             size,
+            reserve,
         );
         // **The interface makes its own noise, locally.** A click that waited
         // for the server to agree it had happened would arrive after the button
