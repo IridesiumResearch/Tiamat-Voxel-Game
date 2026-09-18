@@ -308,6 +308,28 @@ pub mod panel {
         ((area.0 - width) / 2.0, (area.1 - height) / 2.0)
     }
 
+    /// Whether a sheet's body scrolls.
+    ///
+    /// # Why this is a choice and not always yes
+    ///
+    /// The engine's own pages are as long as they are — the controls list
+    /// grows with every binding a mod registers — so they scroll, and the bar
+    /// above them stays put.
+    ///
+    /// **A mod's screen is different: it is laid out into exactly the room the
+    /// sheet gives it**, so it can never have anything to scroll, and a
+    /// scrolling body can only misreport it. It did: a rounding point of
+    /// content over the viewport is enough to put a scrollbar on a screen
+    /// built to fit, and the inventory arrived scrolled with its frame's top
+    /// out of view. Reported from the window.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Fit {
+        /// The body scrolls, and may be longer than the sheet.
+        Scrolling,
+        /// The body gets the room and no more.
+        Fixed,
+    }
+
     /// What a screen the player pressed a button to open looks like.
     ///
     /// # Why every one of these goes through here
@@ -331,7 +353,7 @@ pub mod panel {
         back: Option<&str>,
         contents: impl FnOnce(&mut egui::Ui),
     ) -> bool {
-        sheet_with(ctx, title, Some(title), back, contents)
+        sheet_with(ctx, title, Some(title), back, Fit::Scrolling, contents)
     }
 
     /// The same sheet, for a screen whose heading is not its identity.
@@ -346,6 +368,7 @@ pub mod panel {
         id: &str,
         heading: Option<&str>,
         back: Option<&str>,
+        fit: Fit,
         contents: impl FnOnce(&mut egui::Ui),
     ) -> bool {
         let title = id;
@@ -380,11 +403,18 @@ pub mod panel {
                     }
                 });
                 ui.separator();
-                // Everything below scrolls. The header stays put, so the way
-                // out is always on screen however long the page is.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, contents);
+                match fit {
+                    // Everything below scrolls. The header stays put, so the
+                    // way out is always on screen however long the page is.
+                    Fit::Scrolling => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, contents);
+                    }
+                    // No scroll area at all, so nothing can decide the body is
+                    // a point too tall and scroll a screen that fits.
+                    Fit::Fixed => contents(ui),
+                }
             });
         went_back
     }

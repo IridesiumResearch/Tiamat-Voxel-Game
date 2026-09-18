@@ -468,7 +468,23 @@ fn paint_tree(
     paint(
         ui, origin, tree, 0, &laid, form, local, views, icons, look, raised,
     );
-    ui.allocate_space(egui::vec2(laid.rect.w as f32, laid.rect.h as f32));
+    // **Claimed once, where it is.** Every widget in the walk claims its own
+    // rectangle with `allocate_rect`, which moves egui's cursor past it — so
+    // `allocate_space(tree height)` afterwards claimed the whole tree's height
+    // AGAIN, from wherever the last widget left the cursor. The sheet's
+    // scrolling body then saw content twice as tall as the room and scrolled
+    // it: the frame's top out of view, a half-length scrollbar, and empty
+    // space below. Reported by a mod author whose screen was laid into exactly
+    // the room it was given.
+    //
+    // `advance_cursor_after_rect` states where the tree ACTUALLY is instead of
+    // asking for more space at the cursor, so it says the same thing however
+    // much the walk claimed — including nothing at all, for a tree of pure
+    // painted labels.
+    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+        origin,
+        egui::vec2(laid.rect.w as f32, laid.rect.h as f32),
+    ));
 }
 
 /// Draws one dialog in its own window.
@@ -534,30 +550,41 @@ fn draw_form(
         //
         // No heading: a dialog's own title is inside its tree, where the mod
         // put it, and the `id` here is the namespaced form the server named.
-        close |= crate::panel::sheet_with(ctx, form, None, Some("Close"), |ui| {
-            // The room the sheet handed over, which inside its scrolling body
-            // is the viewport rather than the endless height a scroll area can
-            // hold. Measured rather than assumed: the clip rectangle, which is
-            // the other candidate, is a few points WIDER than the room.
-            let room = ui.available_size();
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a window's size in points, which is small and positive"
-            )]
-            let size = (room.x.max(1.0) as i32, room.y.max(1.0) as i32);
-            paint_tree(
-                ui,
-                size,
-                tree,
-                &ruler,
-                form,
-                local,
-                views,
-                icons,
-                look,
-                &mut raised,
-            );
-        });
+        // **`Fit::Fixed`, because a screen is laid into exactly the room it
+        // is given** and so can never have anything to scroll. Left scrolling,
+        // a rounding point either way is enough to put a scrollbar on a screen
+        // that fits, which is how the inventory came to scroll inside a sheet
+        // built to hold it.
+        close |= crate::panel::sheet_with(
+            ctx,
+            form,
+            None,
+            Some("Close"),
+            crate::panel::Fit::Fixed,
+            |ui| {
+                // The room the sheet handed over, below its bar. Measured
+                // rather than assumed: the clip rectangle, which is the other
+                // candidate, is a few points WIDER than the room.
+                let room = ui.available_size();
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a window's size in points, which is small and positive"
+                )]
+                let size = (room.x.max(1.0) as i32, room.y.max(1.0) as i32);
+                paint_tree(
+                    ui,
+                    size,
+                    tree,
+                    &ruler,
+                    form,
+                    local,
+                    views,
+                    icons,
+                    look,
+                    &mut raised,
+                );
+            },
+        );
     }
 
     if close {
@@ -1525,7 +1552,7 @@ fn paint_slot(
 
 #[cfg(test)]
 mod tests {
-    use tiamot_core::ui::{Align, Direction};
+    use tiamot_core::ui::{Align, Build, Direction};
 
     use super::*;
 
@@ -1577,6 +1604,85 @@ mod tests {
         assert_eq!(prompt_size((4000, 4000), area), sheet);
         // And a floor, so a tree that measures to nothing is still clickable.
         assert_eq!(prompt_size((0, 0), area), (160, 120));
+    }
+
+    #[test]
+    fn a_painted_screen_claims_its_height_once() {
+        // **Every widget in the walk claims its own rectangle**, which moves
+        // egui's cursor past it. Asking for the whole tree's height again
+        // afterwards therefore claimed it TWICE, and the sheet's scrolling
+        // body — seeing content twice as tall as the room — scrolled a screen
+        // that had been laid out to fit: the frame's top out of view, a
+        // half-length scrollbar, and empty space below. Reported by a mod
+        // author whose inventory scrolled inside its own sheet.
+        let tree = Build::of(
+            Node::new(Widget::Container {
+                direction: Direction::Column,
+                gap: 4,
+                padding: 8,
+                align: Align::Stretch,
+            }),
+            (0..6)
+                .map(|n| {
+                    Build::leaf(Widget::Button {
+                        text: format!("row {n}"),
+                    })
+                })
+                .collect(),
+        )
+        .flatten();
+
+        let ctx = egui::Context::default();
+        crate::app::install_fonts(&ctx);
+        let art = crate::pictures::Resolved::default();
+        let fonts = crate::fonts::Fonts::new();
+        let look = Look {
+            art: &art,
+            fonts: &fonts,
+        };
+        let ruler = EguiRuler { ctx: &ctx, look };
+        let views = BTreeMap::new();
+        let mut local = Local::default();
+        let mut raised = Vec::new();
+        let size = (400, 300);
+
+        let mut claimed = 0.0;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |root| {
+            paint_tree(
+                root,
+                size,
+                &tree,
+                &ruler,
+                "mod:screen",
+                &mut local,
+                &views,
+                Icons::default(),
+                look,
+                &mut raised,
+            );
+            claimed = root.min_rect().height();
+        });
+
+        let height = f32::from(u16::try_from(size.1).expect("a test size"));
+        // Two-sided, so neither half can pass vacuously: claiming nothing at
+        // all would leave a screen sitting on top of whatever came next, and
+        // claiming it twice is the bug.
+        assert!(
+            claimed >= height - 1.0,
+            "a screen must claim the room it was laid into; claimed {claimed} of {height}"
+        );
+        assert!(
+            claimed <= height + 1.0,
+            "a screen claimed {claimed} points for a {height}-point tree, which is \
+             the double count that makes a sheet scroll"
+        );
     }
 
     /// Draws `tree` as a screen into a headless egui and returns what it
