@@ -375,6 +375,57 @@ fn face_normal(hit: vec3<f32>, cell_xz: vec2<f32>, span: vec2<f32>, face_y: f32)
     return vec3<f32>(0.0, 0.0, select(-1.0, 1.0, offset.y > 0.0));
 }
 
+// The sky along one view ray: a gradient, the sun's glow, and its disc.
+//
+// # Why the horizon keeps the colour it already had
+//
+// The frame is cleared to one sky colour and the world's fog fades INTO that
+// colour — "fog and background must agree or the horizon has a seam exactly
+// where the fog was supposed to hide one". So the gradient's horizon is that
+// same colour, exactly, and only the zenith moves. Terrain still dissolves
+// into a sky that matches it, and looking up gains the depth the reference
+// images have.
+//
+// # Where the colours come from
+//
+// From the keyframes a mod already registered (charter rule 1): the zenith is
+// the mod's own sky colour deepened, the glow is the mod's own sun colour.
+// Nothing here invents a palette — it renders the one that was declared more
+// faithfully than a flat fill could. A mod that wants to state its zenith
+// outright is an additive keyframe field, and this is what every world written
+// before that gets.
+fn sky_along(direction: vec3<f32>) -> vec3<f32> {
+    let horizon = clouds.sky.xyz;
+    // Deeper and bluer overhead. Multiplying rather than lerping to a constant
+    // keeps a mod's own hue: a green sky stays green, and merely darkens.
+    let zenith = horizon * vec3<f32>(0.52, 0.66, 0.96);
+    let up = clamp(direction.y, 0.0, 1.0);
+    // The band near the horizon is where the interesting colour lives, so the
+    // gradient is weighted towards it rather than linear in height.
+    var colour = mix(horizon, zenith, pow(up, 0.55));
+
+    let toward_sun = -clouds.sun_direction.xyz;
+    let alignment = clamp(dot(direction, toward_sun), 0.0, 1.0);
+    // The glow, which is most of what reads as golden hour: a wide warm halo
+    // around the sun, and a tight one on it.
+    //
+    // **Only mode 3 may blow out.** It draws into a float target and its post
+    // chain tonemaps, so a sun brighter than white is a sun that survives as
+    // one. Modes 1 and 2 write straight to an sRGB surface and CLIP, so the
+    // same numbers there do not make a brighter sun — they make a wider white
+    // hole, and the brightness washes into everything sampled near it. Two
+    // screenshot tests that had nothing to do with the sky failed on exactly
+    // that: a block's faces all read 0.84–0.96 and lost their own shading.
+    let headroom = select(1.0, 2.6, clouds.quality.w >= 3.0);
+    colour = colour + clouds.sun.xyz * pow(alignment, 8.0) * 0.17 * headroom;
+    colour = colour + clouds.sun.xyz * pow(alignment, 128.0) * 0.42 * headroom;
+    // And the disc. Small, and deliberately not a texture: it is the one
+    // object in the sky whose SIZE a player judges everything else against.
+    let disc = smoothstep(0.9994, 0.9997, alignment);
+    colour = mix(colour, clouds.sun.xyz * 1.6, disc);
+    return colour;
+}
+
 struct Painted {
     @location(0) colour: vec4<f32>,
     @builtin(frag_depth) depth: f32,
@@ -409,9 +460,20 @@ fn fragment_main(in: Varyings) -> Painted {
         return out;
     }
 
-    let found = march(origin, direction, reach);
+    // No deck, or the player turned clouds off: the sky is still the sky.
+    // `cell` of zero is how the pass says there is nothing to march.
+    var found: Hit;
+    found.hit = false;
+    if (cell > 0.0) {
+        found = march(origin, direction, reach);
+    }
     if (!found.hit) {
-        discard;
+        // **Painted, not discarded.** Half of each reference image is sky, and
+        // a flat fill behind perfect cubes would not read like them. At the far
+        // plane, so anything in the world is in front of it.
+        out.colour = vec4<f32>(sky_along(direction), 1.0);
+        out.depth = 1.0;
+        return out;
     }
 
     let cell_xz = floor(found.position.xz / cell) * cell + cell * 0.5;

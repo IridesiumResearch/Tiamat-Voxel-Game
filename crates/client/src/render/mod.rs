@@ -1546,6 +1546,19 @@ impl Renderer {
         self.clouds.advance(seconds);
     }
 
+    /// Draws the deck, and hands slot 0 back.
+    ///
+    /// **The rebind is the point.** The cloud pass binds its own layout at
+    /// slot 0, and everything drawn after it in the same pass — the glass, the
+    /// fluid, the particles — inherits whatever slot 0 was left as. Without
+    /// handing it back the fluid draw is validated against the cloud layout
+    /// and the frame dies, which is the same shape as the crash that particles
+    /// beside a selection caused: a pair nobody drew together.
+    fn draw_clouds(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.clouds.draw(pass, self.post.is_some());
+        pass.set_bind_group(0, &self.bind_group, &[]);
+    }
+
     /// Writes the cloud pass's view of this frame.
     fn prepare_clouds(&mut self, camera: &Camera, view_projection: glam::Mat4) {
         let (x, y, z) = camera.position.to_world();
@@ -2845,7 +2858,7 @@ impl Renderer {
             // terrain in both directions — high ground reaches into it and a
             // player above looks down on the tops — and drawing it here means
             // the glass, the fluid and the particles still sort against it.
-            self.clouds.draw(&mut pass, self.post.is_some());
+            self.draw_clouds(&mut pass);
 
             // Glass first of the two blended passes, then the milk. Both
             // inherit slot 1 from the chunk loop above, which is what the

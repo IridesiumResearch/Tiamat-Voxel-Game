@@ -5023,16 +5023,22 @@ fn a_pond_against_the_sky_is_still_drawn_in_mode_3() {
     // **The pixels are found, not guessed.** In mode 2 — which draws water
     // over sky correctly — a pixel that is sky without the pond and something
     // else with it is water with nothing but sky behind it. That set is where
-    // the report says mode 3 goes wrong, and the frame's own top-left corner
-    // says what sky looks like.
+    // the report says mode 3 goes wrong.
+    //
+    // **What sky looks like is asked PER ROW**, not once from the top-left
+    // corner. The sky is a gradient — deeper overhead, the horizon's own
+    // colour at eye level, brighter near the sun — so one sample from the top
+    // of the frame describes only the top of the frame, and matching against
+    // it found nothing at all. The leftmost column of each row is the sky at
+    // that height, for a scene whose terrain does not reach the left edge.
     let close =
         |a: [u8; 4], b: [u8; 4]| (0..3).all(|c| (i32::from(a[c]) - i32::from(b[c])).abs() <= 6);
     renderer.set_lighting_mode(LightingMode::Classic);
     let bare = frame_with(&mut renderer, false);
     let pond = frame_with(&mut renderer, true);
-    let sky = bare.pixel(2, 2).expect("pixel");
     let mut over_sky = Vec::new();
     for y in 0..HEIGHT {
+        let sky = bare.pixel(1, y).expect("pixel");
         for x in 0..WIDTH {
             let without = bare.pixel(x, y).expect("pixel");
             let with = pond.pixel(x, y).expect("pixel");
@@ -5393,4 +5399,81 @@ fn how_long_a_cloud_frame_takes() {
             with / bare.max(0.001)
         );
     }
+}
+
+#[test]
+fn the_sky_is_a_gradient_and_the_horizon_still_matches_the_fog() {
+    // **Half of each reference image is sky**, and this client cleared it to
+    // one flat colour. Perfect cubes lit gold against a flat fill do not read
+    // like those images, which is why the sky is drawn rather than cleared.
+    //
+    // The constraint that shapes it: the world's fog fades INTO the sky
+    // colour, and "fog and background must agree or the horizon has a seam
+    // exactly where the fog was supposed to hide one". So the gradient's
+    // HORIZON is that same colour and only the zenith moves.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // No deck at all: this is the sky on its own, in every world.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: None,
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+
+    // Straight up, then level, so the two ends of the gradient are sampled
+    // rather than inferred.
+    let mut up = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
+    };
+    // **The CENTRE of each frame, not the top of it.** Past about 60 degrees
+    // the top of the frame has tipped over vertical and is looking back down
+    // the other side, so it samples the horizon again — which is how the first
+    // version of this test read the zenith as brighter than the horizon.
+    let middle = |frame: &Image| {
+        average(
+            frame,
+            WIDTH / 2 - 16,
+            HEIGHT / 2 - 16,
+            WIDTH / 2 + 16,
+            HEIGHT / 2 + 16,
+        )
+    };
+    up.look(0.0, 1.2);
+    let overhead = middle(&target.capture(&mut renderer, &up).expect("capture"));
+
+    let mut level = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
+    };
+    level.look(0.0, 0.25);
+    let near_horizon = middle(&target.capture(&mut renderer, &level).expect("capture"));
+    println!("overhead {overhead:?} horizon {near_horizon:?}");
+
+    // Deeper overhead than at the horizon — the gradient exists.
+    assert!(
+        overhead[2] < near_horizon[2] || overhead[0] < near_horizon[0] - 0.03,
+        "the sky should deepen overhead; overhead {overhead:?} horizon {near_horizon:?}"
+    );
+
+    // And it is still BLUE overhead rather than having been darkened into
+    // something else: a mod's own hue survives, because the zenith is its sky
+    // colour multiplied rather than mixed towards a constant.
+    assert!(
+        overhead[2] > overhead[0],
+        "the zenith should keep its blue, got {overhead:?}"
+    );
+
+    // The horizon still agrees with what fog fades into, within the eighth of
+    // the frame the terrain has not reached. A drift here is the seam the
+    // comment on `sky_colour` warns about.
+    let flat = client::render::sky_colour();
+    assert!(
+        (near_horizon[2] - flat[2]).abs() < 0.12,
+        "the horizon drifted from the fog's colour; horizon {near_horizon:?} fog {flat:?}"
+    );
 }

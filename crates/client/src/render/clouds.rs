@@ -243,19 +243,41 @@ impl Pass {
     /// Nothing to draw is the ordinary case: most worlds register no deck, and
     /// a player may have turned clouds off.
     pub fn prepare(&mut self, gpu: &Gpu, frame: &Frame) {
-        let Some(layer) = self.deck.layer.filter(|_| self.deck.quality.draws()) else {
-            self.draws = false;
-            return;
-        };
+        // **The pass always draws, because it paints the sky.** A deck is what
+        // may be absent — most worlds register none, and a player may have
+        // turned clouds off — and `cell` of zero is how the shader is told to
+        // march nothing and paint the gradient alone.
         self.draws = true;
         let quality = self.deck.quality;
+        let layer = self
+            .deck
+            .layer
+            .filter(|_| quality.draws())
+            .unwrap_or(CloudLayer {
+                base: 0.0,
+                thickness: 0.0,
+                cell: 0.0,
+                detail: 1,
+                frequency: 1.0,
+                octaves: 1,
+                towers: 0.0,
+                drift: [0.0; 2],
+                evolve: 0.0,
+                colour: [1.0; 3],
+                shade: [0.5; 3],
+            });
         let state = self.deck.clouds.unwrap_or(Clouds {
             cover: 0.0,
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
         });
-        let cell = (layer.cell * quality.cell_scale()).max(1.0);
+        // Zero stays zero: it is the shader's "no deck".
+        let cell = if layer.cell > 0.0 {
+            (layer.cell * quality.cell_scale()).max(1.0)
+        } else {
+            0.0
+        };
         let small = (cell / f32::from(layer.detail.max(1))).max(0.5);
         let base = state.base.unwrap_or(layer.base);
         #[expect(
@@ -362,7 +384,10 @@ fn pipeline(
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // **`LessEqual`, not `Less`.** The depth buffer is cleared to
+                // 1.0 and the sky is painted AT 1.0, so `Less` would throw
+                // away every sky pixel — the one thing this pass must not do.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
