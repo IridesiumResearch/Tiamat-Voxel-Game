@@ -1569,3 +1569,132 @@ fn sanitised_brings_a_mods_mistakes_into_range() {
     assert_eq!(with(1000.0).to_bits(), Abilities::MAX_SPEED.to_bits());
     assert_eq!(with(0.75).to_bits(), 0.75_f32.to_bits());
 }
+
+/// A floor with one grip everywhere: the scene above, slicker.
+struct Slick {
+    scene: Scene,
+    grip: f32,
+}
+
+impl Solid for Slick {
+    fn solid(&self, x: i32, y: i32, z: i32) -> bool {
+        self.scene.solid(x, y, z)
+    }
+
+    fn friction(&self, x: i32, y: i32, z: i32) -> f32 {
+        if self.solid(x, y, z) { self.grip } else { 1.0 }
+    }
+}
+
+/// Walks for `on` ticks, lets go for `off`, and returns the distance covered
+/// at the moment of letting go and at the end.
+fn walk_then_release(solid: &impl Solid, on: usize, off: usize) -> (f32, f32) {
+    let tuning = Tuning::DEFAULT;
+    let walk = Intent {
+        walk: [0.0, 1.0],
+        jump: false,
+        gait: Gait::Walk,
+        fly: false,
+    };
+    let start = Body::at([24.0, 0.0, 0.0]);
+    let mut body = start;
+    for _ in 0..on {
+        body = step(solid, body, walk, &tuning);
+    }
+    let released = body.position[2] - start.position[2];
+    let idle = Intent {
+        walk: [0.0, 0.0],
+        ..walk
+    };
+    for _ in 0..off {
+        body = step(solid, body, idle, &tuning);
+    }
+    (released, body.position[2] - start.position[2])
+}
+
+#[test]
+fn ordinary_grip_steps_bit_for_bit_what_no_grip_did() {
+    // `friction = 1` must take no arithmetic at all — the determinism goldens
+    // were hashed without it.
+    let plain = walk_then_release(&Scene::new(0), 20, 20);
+    let gripped = walk_then_release(
+        &Slick {
+            scene: Scene::new(0),
+            grip: 1.0,
+        },
+        20,
+        20,
+    );
+    assert_eq!(plain.0.to_bits(), gripped.0.to_bits());
+    assert_eq!(plain.1.to_bits(), gripped.1.to_bits());
+}
+
+#[test]
+fn ice_is_slow_to_start_and_slow_to_stop() {
+    let (stone_on, stone_end) = walk_then_release(&Scene::new(0), 10, 40);
+    let (ice_on, ice_end) = walk_then_release(
+        &Slick {
+            scene: Scene::new(0),
+            grip: 0.1,
+        },
+        10,
+        40,
+    );
+    let stone_slide = stone_end - stone_on;
+    let ice_slide = ice_end - ice_on;
+    assert!(
+        ice_on < stone_on * 0.8,
+        "ten ticks from rest went {ice_on} cells on ice and {stone_on} on stone"
+    );
+    assert!(
+        ice_slide > stone_slide * 3.0,
+        "let go, a body slid {ice_slide} cells on ice and {stone_slide} on stone"
+    );
+    // And it still stops in the end: 0.1 is slick, not frictionless.
+    let (_, later) = walk_then_release(
+        &Slick {
+            scene: Scene::new(0),
+            grip: 0.1,
+        },
+        10,
+        400,
+    );
+    let (_, much_later) = walk_then_release(
+        &Slick {
+            scene: Scene::new(0),
+            grip: 0.1,
+        },
+        10,
+        401,
+    );
+    assert!(
+        (much_later - later).abs() < 1e-4,
+        "still sliding after 400 ticks"
+    );
+}
+
+#[test]
+fn grip_changes_how_fast_you_get_there_not_where_the_gait_tops_out() {
+    // The gait's cap still holds on ice: slow to reach, same top speed.
+    let tuning = Tuning::DEFAULT;
+    let ice = Slick {
+        scene: Scene::new(0),
+        grip: 0.3,
+    };
+    let walk = Intent {
+        walk: [0.0, 1.0],
+        jump: false,
+        gait: Gait::Walk,
+        fly: false,
+    };
+    let mut body = Body::at([24.0, 0.0, 0.0]);
+    for _ in 0..200 {
+        body = step(&ice, body, walk, &tuning);
+    }
+    let speed = body.velocity[2];
+    assert!(
+        (speed - tuning.walk_speed).abs() < 0.01,
+        "on ice a walk topped out at {speed}, not the walk speed {}",
+        tuning.walk_speed
+    );
+}

@@ -1210,6 +1210,12 @@ pub struct App {
     /// through a fern, which is exactly the jitter prediction exists to remove.
     /// Sorted, so the sweep's per-cell lookup is a scan of a handful of `u16`s.
     passable: Vec<u16>,
+    /// How slick each floor is, as `(id, friction)` sorted by id.
+    ///
+    /// **Stepped with, on every prediction and replay**, for the reason
+    /// `passable` is: the server slides a body on ice, and a client that did
+    /// not would be corrected on every step. Contract §2.
+    friction: Vec<(u16, f32)>,
     /// A chunk being meshed across frames, if one is part-built.
     ///
     /// At most one: the budget is spent depth-first, so a second chunk is not
@@ -1402,6 +1408,7 @@ impl App {
             seed: None,
             transparent: mesher::Sight::default(),
             passable: Vec::new(),
+            friction: Vec::new(),
             pictures: crate::pictures::Pictures::new(),
             fonts: crate::fonts::Fonts::new(),
             meshing: None,
@@ -1616,7 +1623,8 @@ impl App {
             self.tick += 1;
             if let Some(predictor) = self.predictor.as_mut() {
                 let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
-                    .passing(&self.passable);
+                    .passing(&self.passable)
+                    .gripping(&self.friction);
                 predictor.predict(&voxels, self.tick, intent, &tuning);
             }
         }
@@ -1774,7 +1782,8 @@ impl App {
         // back where a falling one would have been, and the correction would
         // arrive as a lurch every time the server's state message landed.
         let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
-            .passing(&self.passable);
+            .passing(&self.passable)
+            .gripping(&self.friction);
         predictor.reconcile(&voxels, state, &tuning);
         let divergence = predictor.divergence();
         // Asked after the replay rather than before: what matters is whether the
@@ -2570,6 +2579,21 @@ impl App {
                 .map(|entry| entry.id)
                 .collect();
             ids.sort_unstable();
+            ids
+        };
+        // And how slick each floor is. Only the ones that are not ordinary,
+        // like the server's table, so the two look up the same entries.
+        self.friction = {
+            #[expect(
+                clippy::float_cmp,
+                reason = "ordinary grip is the sentinel the step itself skips on"
+            )]
+            let mut ids: Vec<(u16, f32)> = table
+                .iter()
+                .filter(|entry| entry.friction != 1.0)
+                .map(|entry| (entry.id, entry.friction))
+                .collect();
+            ids.sort_unstable_by_key(|(id, _)| *id);
             ids
         };
     }
@@ -5091,7 +5115,8 @@ impl App {
             let tuning = self.abilities.tuning(&Tuning::DEFAULT);
             if let Some(predictor) = self.predictor.as_mut() {
                 let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
-                    .passing(&self.passable);
+                    .passing(&self.passable)
+                    .gripping(&self.friction);
                 predictor.predict(&voxels, self.tick, intent, &tuning);
                 // **Asked on the PREDICTION path, not only on the replay.** The
                 // first version of this instrument watched `reconcile` alone, so
@@ -6989,6 +7014,7 @@ mod tests {
                 sway: false,
                 billboard: false,
                 billboard_cross: false,
+                friction: 1.0,
                 tint: None,
                 step_sound: None,
             },
@@ -7003,6 +7029,7 @@ mod tests {
                 sway: false,
                 billboard: false,
                 billboard_cross: false,
+                friction: 1.0,
                 tint: None,
                 step_sound: None,
             },
@@ -7041,6 +7068,7 @@ mod tests {
             sway: false,
             billboard: false,
             billboard_cross: false,
+            friction: 1.0,
             tint: None,
             step_sound: None,
         }];

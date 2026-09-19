@@ -349,6 +349,14 @@ pub struct BlockRules {
     /// that turns to face the camera: `billboard = "cross"`. Implies
     /// `billboard`. Presentation only; see `docs/subnode-contract.md` §8.4.
     pub billboard_cross: bool,
+    /// How much of the ordinary grip a body standing on it gets: ice.
+    ///
+    /// `1.0` is ordinary and what a mod that says nothing gets; `0.0` is a
+    /// floor that neither slows nor pushes. Validated 0..=1 at registration.
+    /// Read at sub-node resolution under the centre of a body's feet, and it
+    /// travels to the client, which predicts the slide — see
+    /// `docs/subnode-contract.md` §2.
+    pub friction: f32,
     /// How this material's colour varies across the world, if a mod said.
     ///
     /// **Presentation only.** Nothing on the server reads it — it travels with

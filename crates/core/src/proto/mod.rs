@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 66;
+pub const PROTOCOL_VERSION: u32 = 67;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,14 @@ pub const PROTOCOL_VERSION: u32 = 66;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v67 (World 27): `MaterialDef` carries `friction`, a floor's share of the
+// ordinary grip. The client predicts its own slide on ice, so it must know.
+// v66 (Life 1 and 9): appended `ServerMessage::Abilities`, what a mod lets one
+// player do — fly, how fast, whether they sprint. The predictor steps with it.
+// v65: appended `ServerMessage::ModelTable`, a mod's registered models.
+// v64: appended the cloud deck's messages: the deck at join, and its cover.
+// v63: appended `ServerMessage::Theme`, a mod's look on the engine's screens.
+// v62: a HUD script says how much room it needs (`reserve`).
 // v61 (HUD pictures): appended `ServerMessage::PictureTable`, the pictures a
 // mod registered so a client fetches them before a HUD script names one.
 // v60 (weather W4b): appended `ServerMessage::Precipitation`, the shape of the
@@ -833,7 +841,7 @@ impl Tint {
               refuses both — and are left apart because the wire is positional \
               and a fifth kind should not renumber the four"
 )]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaterialDef {
     /// The sound a footstep on this material makes, if a mod named one.
     ///
@@ -897,6 +905,13 @@ pub struct MaterialDef {
     /// Whether those sprites are two FIXED crossed cards instead of one that
     /// turns to the camera. Presentation only; implies `billboard`.
     pub billboard_cross: bool,
+    /// A floor's share of the ordinary grip, 0..=1: ice.
+    ///
+    /// **Not presentation.** The client predicts its own movement, so it has
+    /// to slide where the server does or every step on ice is a correction —
+    /// the same reason `passable` travels. Validated on arrival, because a
+    /// server is not trusted (charter rule 14) and this reaches the physics.
+    pub friction: f32,
     /// How this material's colour varies across the world, if a mod said.
     ///
     /// `None` — every material until a mod says otherwise (charter rule 1) —
@@ -3142,6 +3157,35 @@ fn check_actions(actions: &[ActionDef]) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// **A floor's grip reaches the client's own physics**, like a speed: outside
+/// 0..=1 a body loses more than all its speed in a tick, and a NaN poisons its
+/// position for good. World ask 27.
+fn check_materials(materials: &[MaterialDef]) -> Result<(), ProtocolError> {
+    if let Some(bad) = materials
+        .iter()
+        .find(|material| !(0.0..=1.0).contains(&material.friction))
+    {
+        return Err(ProtocolError::Unusable {
+            what: format!(
+                "material `{}` has friction {}, outside 0 to 1",
+                bad.name, bad.friction
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// A speed reaches the client's own physics, and a non-finite one makes a
+/// predicted body's position NaN for good.
+fn check_abilities(abilities: AbilitiesDef) -> Result<(), ProtocolError> {
+    if !abilities.speed.is_finite() {
+        return Err(ProtocolError::Unusable {
+            what: format!("abilities.speed is {}, not a number", abilities.speed),
+        });
+    }
+    Ok(())
+}
+
 /// Checks a decoded server message before a client acts on it.
 ///
 /// The mirror of [`validate_client_message`], and it exists for charter rule
@@ -3230,15 +3274,8 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         // a predicted body's position NaN and it never comes back — the same
         // hazard `PlayerState` has, from a different message, and charter rule
         // 14 says a server is not trusted merely for being the server.
-        ServerMessage::Abilities { abilities } => {
-            if !abilities.speed.is_finite() {
-                return Err(ProtocolError::FieldTooLarge {
-                    field: "abilities.speed",
-                    len: 0,
-                    limit: 0,
-                });
-            }
-        }
+        ServerMessage::MaterialTable { materials } => check_materials(materials)?,
+        ServerMessage::Abilities { abilities } => check_abilities(*abilities)?,
         ServerMessage::Theme { theme } => check_theme(theme.as_ref())?,
         ServerMessage::PictureTable { pictures } => check_pictures(pictures)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
@@ -3280,7 +3317,6 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         | ServerMessage::ChunkUnload { .. }
         | ServerMessage::EntityStateDelta { .. }
         | ServerMessage::Disconnect { .. }
-        | ServerMessage::MaterialTable { .. }
         | ServerMessage::ToolTable { .. }
         | ServerMessage::ChunkLight { .. }
         | ServerMessage::ChunkFluid { .. }
@@ -4558,6 +4594,36 @@ mod tests {
     }
 
     #[test]
+    fn a_material_table_with_a_friction_outside_zero_to_one_is_refused() {
+        // A floor's grip reaches the client's own physics (World 27): a NaN
+        // poisons a predicted body for good, and anything past 1 makes a body
+        // lose more than all its speed in a tick.
+        let with = |friction: f32| ServerMessage::MaterialTable {
+            materials: vec![MaterialDef {
+                id: 3,
+                name: "core:ice".to_owned(),
+                texture: None,
+                placeable: true,
+                transparent: false,
+                cutout: false,
+                passable: false,
+                sway: false,
+                billboard: false,
+                billboard_cross: false,
+                friction,
+                tint: None,
+                step_sound: None,
+            }],
+        };
+        for fine in [0.0, 0.05, 1.0] {
+            assert!(validate_server_message(&with(fine)).is_ok(), "{fine}");
+        }
+        for bad in [f32::NAN, f32::INFINITY, -0.1, 1.5] {
+            assert!(validate_server_message(&with(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn a_material_table_round_trips_with_and_without_textures() {
         // A material with no texture is normal, not exceptional: `engine:air`
         // has none and never will. Encoding it as an absent hash rather than a
@@ -4575,6 +4641,7 @@ mod tests {
                     sway: false,
                     billboard: false,
                     billboard_cross: false,
+                    friction: 1.0,
                     tint: None,
                     step_sound: None,
                 },
@@ -4589,6 +4656,7 @@ mod tests {
                     sway: false,
                     billboard: false,
                     billboard_cross: false,
+                    friction: 1.0,
                     tint: None,
                     step_sound: None,
                 },

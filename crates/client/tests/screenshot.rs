@@ -954,6 +954,7 @@ fn a_declared_tint_colours_the_world_and_stays_where_the_world_is() {
         sway: false,
         billboard: false,
         billboard_cross: false,
+        friction: 1.0,
         tint: Some(Tint {
             strength: 255,
             scale: 24,
@@ -3115,6 +3116,7 @@ fn a_swaying_material_moves_with_the_clock_and_a_still_one_does_not() {
             sway,
             billboard: false,
             billboard_cross: false,
+            friction: 1.0,
             tint: None,
         }]
     };
@@ -3202,6 +3204,7 @@ fn a_billboard_turns_to_face_the_camera_from_any_side() {
         sway: false,
         billboard: true,
         billboard_cross: false,
+        friction: 1.0,
         tint: None,
     }]);
     upload_with(
@@ -3310,6 +3313,7 @@ fn glass_beside_a_sprite_still_draws_from_its_own_chunk() {
         sway: false,
         billboard,
         billboard_cross: false,
+        friction: 1.0,
         tint: None,
     };
     renderer.set_tints(&[
@@ -3414,6 +3418,7 @@ fn a_biome_colour_blends_across_a_chunk_edge_instead_of_tiling_it() {
         sway: false,
         billboard: false,
         billboard_cross: false,
+        friction: 1.0,
         tint: Some(Tint {
             strength: 0,
             scale: 24,
@@ -4364,6 +4369,7 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             sway: false,
             billboard: false,
             billboard_cross: false,
+            friction: 1.0,
             tint: None,
             texture: None,
         },
@@ -4378,6 +4384,7 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             sway: false,
             billboard: false,
             billboard_cross: false,
+            friction: 1.0,
             tint: None,
             texture: None,
         },
@@ -4392,6 +4399,7 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             sway: false,
             billboard: false,
             billboard_cross: false,
+            friction: 1.0,
             tint: None,
             texture: Some([7u8; 32]),
         },
@@ -4585,6 +4593,7 @@ fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
         sway: false,
         billboard: true,
         billboard_cross: false,
+        friction: 1.0,
         tint: None,
     }]);
     upload_with(
@@ -4815,6 +4824,7 @@ fn a_biome_colour_brighter_than_one_brightens_the_world() {
         sway: false,
         billboard: false,
         billboard_cross: false,
+        friction: 1.0,
         tint: Some(Tint {
             strength: 0,
             scale: 24,

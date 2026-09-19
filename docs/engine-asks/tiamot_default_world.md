@@ -31,14 +31,6 @@ moves fluid INTO a block whose terrain is that block's, it clears the
 block's cells first, as a dig would. The mod would declare it on every
 `passable` plant and drop the sweep.
 
-## 27. Friction per block (2026-09-14)
-
-The Frozen Wastes' crevasses have "slick, near-frictionless blue ice
-walls", and ice underfoot should slide. Nothing in `register_block` says how
-a body grips a block, so ice walks like stone. A `friction` on the block —
-a share of the normal grip, default 1 — read by the movement code for the
-block under a body and the block it is pressed against, is the ask.
-
 ## 24. Shade under a canopy (2026-09-14) — the chunk-arriving half LANDED (engine deba305); foliage still passes light as glass
 
 **Seen.** The rainforest's brief has its canopy block 85-90% of direct

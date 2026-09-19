@@ -113,6 +113,12 @@ pub struct Voxels<'a, S: ChunkLookup, F: FluidLookup = Dry> {
     /// for every view that has no opinion, which is every ray cast and every
     /// test.
     passable: &'a [u16],
+    /// Materials a body grips less than ordinarily, as `(world id, friction)`
+    /// sorted by id — Sub-Node Contract §2.
+    ///
+    /// Borrowed for the reason `passable` is. Empty for every view with no
+    /// opinion, which answers ordinary grip everywhere.
+    friction: &'a [(u16, f32)],
 }
 
 impl<'a, S: ChunkLookup> Voxels<'a, S, Dry> {
@@ -129,6 +135,7 @@ impl<'a, S: ChunkLookup> Voxels<'a, S, Dry> {
             origin: std::cell::Cell::new(origin),
             absent: std::cell::Cell::new(false),
             passable: &[],
+            friction: &[],
         }
     }
 }
@@ -146,6 +153,17 @@ impl<'a, S: ChunkLookup, F: FluidLookup> Voxels<'a, S, F> {
         self
     }
 
+    /// The same view, told which materials a body grips less than ordinarily.
+    ///
+    /// **Only the stepping view needs this**, like [`Self::passing`]. The table
+    /// must be sorted by id, which is how both ends build it; an unsorted one
+    /// answers ordinary grip for some slick material rather than failing.
+    #[must_use]
+    pub const fn gripping(mut self, friction: &'a [(u16, f32)]) -> Self {
+        self.friction = friction;
+        self
+    }
+
     /// Views geometry and fluid together, in a frame anchored at `origin`.
     ///
     /// What steps a player. The two sources are separate because they are
@@ -158,6 +176,7 @@ impl<'a, S: ChunkLookup, F: FluidLookup> Voxels<'a, S, F> {
             origin: std::cell::Cell::new(origin),
             absent: std::cell::Cell::new(false),
             passable: &[],
+            friction: &[],
         }
     }
 
@@ -275,6 +294,24 @@ impl<S: ChunkLookup, F: FluidLookup> Solid for Voxels<'_, S, F> {
         }
     }
 
+    /// The friction of the material in this cell, or ordinary grip.
+    ///
+    /// Contract §2: a cell that stops no body is not stood on, so air, a
+    /// passable plant and an absent chunk all answer 1.
+    fn friction(&self, x: i32, y: i32, z: i32) -> f32 {
+        if self.friction.is_empty() {
+            return 1.0;
+        }
+        match self.material(x, y, z) {
+            Some(material) if !material.is_air() && !self.passable.contains(&material.get()) => {
+                self.friction
+                    .binary_search_by_key(&material.get(), |(id, _)| *id)
+                    .map_or(1.0, |found| self.friction[found].1)
+            }
+            _ => 1.0,
+        }
+    }
+
     /// Follows the body into its new origin.
     ///
     /// The frame is only meaningful next to the origin a body's coordinates are
@@ -384,6 +421,54 @@ mod tests {
         fn chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
             self.0.get(&pos)
         }
+    }
+
+    #[test]
+    fn grip_is_the_cells_own_and_a_passable_cell_is_ordinary() {
+        // **Sub-Node Contract §2: grip is the CELL's.** One block, half ice and
+        // half stone, answers per cell; a tuft on the ice is not stood on; an
+        // absent chunk is not stood on either.
+        const ICE: MaterialId = MaterialId(11);
+        const STONE: MaterialId = MaterialId(12);
+        const GRASS: MaterialId = MaterialId(13);
+
+        let origin = ChunkPos::new(0, 0, 0);
+        let mut chunk = Chunk::new(origin, MaterialId::AIR);
+        // Block (4, 4, 4): its cells x = 12 are ice, x = 13..15 stone — a Mixed
+        // block — and a grass cell in block (5, 4, 4).
+        for y in 12..15 {
+            for z in 12..15 {
+                chunk
+                    .set_subnode(SubNodePos::new(12, y, z), ICE)
+                    .expect("in chunk");
+                for x in 13..15 {
+                    chunk
+                        .set_subnode(SubNodePos::new(x, y, z), STONE)
+                        .expect("in chunk");
+                }
+            }
+        }
+        chunk
+            .set_subnode(SubNodePos::new(15, 12, 12), GRASS)
+            .expect("in chunk");
+        let world = Loaded::default().insert(chunk);
+
+        let slick = [(ICE.get(), 0.1)];
+        let grass = [GRASS.get()];
+        let view = Voxels::new(&world, origin).passing(&grass).gripping(&slick);
+
+        assert_eq!(view.friction(12, 13, 13).to_bits(), 0.1_f32.to_bits());
+        assert_eq!(view.friction(13, 13, 13).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(view.friction(15, 12, 12).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(view.friction(0, 0, 0).to_bits(), 1.0_f32.to_bits(), "air");
+        assert_eq!(
+            view.friction(9_000, 9_000, 9_000).to_bits(),
+            1.0_f32.to_bits(),
+            "an absent chunk"
+        );
+        // Untold, even ice is ordinary: every view with no opinion.
+        let plain = Voxels::new(&world, origin);
+        assert_eq!(plain.friction(12, 13, 13).to_bits(), 1.0_f32.to_bits());
     }
 
     #[test]

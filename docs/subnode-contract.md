@@ -139,6 +139,32 @@ enterable; the shape you see is the shape you collide with.
   walking over single subnodes I also glitch; when walking around full blocks on
   the surface I am fine" — full blocks are three sub-nodes and are never stepped
   at all, which is why they behaved.
+- **Grip is the CELL's, and it is read under the centre of the feet.** *(Added
+  2026-09-19.)* A material may declare `friction`, a share of the ordinary grip
+  from 0 to 1: ice is slick, and everything else is 1. A grounded body takes the
+  friction of the one cell directly below the centre of its feet — at sub-node
+  resolution, so a block chiselled half from ice and half from stone is slick
+  where the ice is and not where the stone is. A cell that stops no body there
+  (air, a `passable` material, a chunk not yet arrived) is ordinary grip: a
+  body is not on it.
+
+  One cell rather than the footprint's worst or its average, because both of
+  those would make grip change as a body's edge crossed a seam it is not
+  standing on, and a body straddling ice and stone would slide on neither
+  consistently. The centre is where the body's weight is.
+
+  Grip scales how much horizontal speed a tick loses AND the push that replaces
+  it, together: `kept = 1 − (1 − f) × g`, `push = a × g`. So a slick floor is
+  slow to start on, slow to stop on and slow to turn on, and its top speed is
+  the gait's own: the balance of push against loss would settle a little
+  above it, and the gait's cap holds it there, reached more slowly.
+  At `g = 0` nothing is lost and nothing pushes: a body keeps whatever speed it
+  arrived with. A `friction` of exactly 1 takes no arithmetic at all, so a
+  world with no slick material steps bit-for-bit as before.
+
+  **Walls have no grip to scale.** Movement already slides along a wall rather
+  than sticking to it (below), so "a slick wall" needs nothing; only the floor
+  is read.
 - Movement resolves one axis at a time (X, then Y, then Z), which is what makes
   a body slide along a wall rather than stick to it.
 - **Movement must never put a body inside geometry.** This is the invariant that

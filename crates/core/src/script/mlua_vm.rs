@@ -3199,6 +3199,10 @@ impl ScriptVm for MluaVm {
                         sway: flag(entry.as_ref(), "sway"),
                         billboard: billboard_of(entry.as_ref()).0,
                         billboard_cross: billboard_of(entry.as_ref()).1,
+                        friction: entry
+                            .as_ref()
+                            .and_then(|entry| entry.get::<Option<f32>>("friction").ok().flatten())
+                            .unwrap_or(1.0),
                     },
                 )
             })
@@ -8019,6 +8023,24 @@ fn register_item(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
     Ok(next)
 }
 
+/// `friction` on a block spec: a share of the ordinary grip, 0 to 1 (World 27).
+///
+/// Refused rather than clamped outside that: above 1 a body would lose more
+/// than all its speed in a tick and bounce, and a mod asking for 2 has misread
+/// the scale.
+fn friction_of(id: &str, spec: &Table) -> mlua::Result<Option<f32>> {
+    let friction: Option<f32> = spec.get("friction")?;
+    if let Some(friction) = friction
+        && !(friction.is_finite() && (0.0..=1.0).contains(&friction))
+    {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): friction is a share of the ordinary grip from 0 (ice \
+             with nothing to push against) to 1 (the default), got {friction}"
+        )));
+    }
+    Ok(friction)
+}
+
 fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
     let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
     if frozen {
@@ -8078,8 +8100,12 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
                 "register_block(\"{id}\"): dominance must be a positive number, got {dominance}"
             )));
         }
+        let friction = friction_of(&id, spec)?;
         let drops: Option<Table> = spec.get("drops")?;
         let entry = lua.create_table()?;
+        if let Some(friction) = friction {
+            entry.set("friction", friction)?;
+        }
 
         step_sound_of(owner, spec, &entry)?;
 
@@ -8816,7 +8842,7 @@ const FLUID_FIELDS: [&str; 8] = [
 /// accepted them would be an API promising behaviour nothing implements.
 const ITEM_FIELDS: [&str; 4] = ["id", "name", "texture", "description"];
 
-const BLOCK_FIELDS: [&str; 17] = [
+const BLOCK_FIELDS: [&str; 18] = [
     "id",
     "name",
     "drops",
@@ -8834,6 +8860,7 @@ const BLOCK_FIELDS: [&str; 17] = [
     "passable",
     "sway",
     "billboard",
+    "friction",
 ];
 
 /// Keys the `textures` sub-table accepts.
@@ -12807,6 +12834,48 @@ mod dig_rules_tests {
         // of the field existing on `BlockRules` rather than beside it.
         assert!((rules[1].resistance().hardness - 0.5).abs() < 1e-6);
         assert!((rules[1].resistance().dominance - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn friction_defaults_to_ordinary_and_is_refused_outside_zero_to_one() {
+        // World ask 27. Ordinary grip for a block that says nothing, the
+        // number as given for one that does, and a refusal naming the field
+        // for one that has misread the scale.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "core",
+            r#"
+            game.register_block{ id = "stone" }
+            game.register_block{ id = "ice", friction = 0.05 }
+            "#,
+        )
+        .expect("load");
+        let rules = vm.registered_block_rules();
+        let of = |block: &str| {
+            rules
+                .iter()
+                .find(|rule| rule.block == block)
+                .map(|rule| rule.friction)
+                .expect("registered")
+        };
+        assert_eq!(of("core:stone").to_bits(), 1.0_f32.to_bits());
+        assert_eq!(of("core:ice").to_bits(), 0.05_f32.to_bits());
+
+        for bad in ["2", "-0.5", "0/0"] {
+            let mut refused = self::vm();
+            let err = load(
+                &mut refused,
+                "core",
+                &format!(r#"game.register_block{{ id = "glue", friction = {bad} }}"#),
+            )
+            .expect_err("friction outside 0..=1 should be refused");
+            assert!(
+                detail_of(&err).contains("friction"),
+                "the error should name the field: {}",
+                detail_of(&err)
+            );
+        }
     }
 
     #[test]

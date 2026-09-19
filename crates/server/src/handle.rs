@@ -112,6 +112,8 @@ fn material_table(
                 sway: rules.get(name).is_some_and(|rules| rules.sway),
                 billboard: rules.get(name).is_some_and(|rules| rules.billboard),
                 billboard_cross: rules.get(name).is_some_and(|rules| rules.billboard_cross),
+                // Not presentation: the client predicts its own slide on it.
+                friction: rules.get(name).map_or(1.0, |rules| rules.friction),
                 // Colour variation, which is the client's alone: it multiplies
                 // the texture by a field sampled from world position, and
                 // nothing here ever looks at the answer.
@@ -2020,6 +2022,34 @@ impl ServerHandle {
             ids
         };
 
+        // And how slick each floor is — Contract §2 — keyed exactly as
+        // `passable` is and for the same reason. Only the materials that are
+        // not ordinary: a body on anything else takes no arithmetic, and the
+        // step looks this up once per grounded body per tick.
+        let friction: Vec<(u16, f32)> = {
+            let rules = host
+                .as_ref()
+                .map(|loaded| loaded.vm().registered_block_rules())
+                .unwrap_or_default();
+            #[expect(
+                clippy::float_cmp,
+                reason = "ordinary grip is the sentinel the step itself skips on"
+            )]
+            let mut ids: Vec<(u16, f32)> = rules
+                .iter()
+                .filter(|rule| rule.friction != 1.0)
+                .filter_map(|rule| {
+                    let runtime = registry
+                        .iter()
+                        .find(|(_, name)| *name == rule.block)
+                        .map(|(id, _)| id)?;
+                    Some((world.materials().to_world(runtime).ok()?, rule.friction))
+                })
+                .collect();
+            ids.sort_unstable_by_key(|(id, _)| *id);
+            ids
+        };
+
         // The same materials in the id space the chunks in memory hold, for
         // `game.surface_at` to look through a tuft: `lease.rs` reads chunks
         // without translation and says why.
@@ -3208,7 +3238,8 @@ impl ServerHandle {
                                     wet,
                                     player.origin,
                                 )
-                                .passing(&passable);
+                                .passing(&passable)
+                                .gripping(&friction);
                                 let before = player.body;
                                 player.body =
                                     tiamot_core::phys::step(&voxels, player.body, intent, &tuning);
@@ -4784,7 +4815,13 @@ impl ServerHandle {
                                 .map(str::to_owned)
                                 .collect();
                             for domain in occupied {
-                                mobs.tick(&domain, &world, ponds.get(&domain).unwrap_or(&dry), &passable);
+                                mobs.tick(
+                                    &domain,
+                                    &world,
+                                    ponds.get(&domain).unwrap_or(&dry),
+                                    &passable,
+                                    &friction,
+                                );
                             }
                         }
 

@@ -207,6 +207,20 @@ pub trait Solid {
         self.solid(x, y, z)
     }
 
+    /// How much of the ordinary grip the cell gives a body standing on it, from
+    /// 0 (ice with nothing to push against) to 1.
+    ///
+    /// **Sub-Node Contract §2: grip is the cell's, read under the centre of the
+    /// feet.** Only asked of the cell a grounded body stands on, and a cell that
+    /// stops no body there — air, a passable plant, a chunk still in flight —
+    /// answers 1, because a body is not on it.
+    ///
+    /// Defaults to 1, so every implementation with no opinion steps exactly as
+    /// it did, and [`step`] takes no arithmetic at all for it.
+    fn friction(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        1.0
+    }
+
     /// Whether the world actually knows what is at this cell.
     ///
     /// **Absence and solidity are different questions, and only one of them is a
@@ -663,6 +677,28 @@ pub fn step_shaped(
     } else {
         tuning.air_drag
     };
+    if body.on_ground && !intent.fly {
+        // **The floor's grip** — Sub-Node Contract §2: the one cell under the
+        // centre of the feet, probed where `standing_on_ground` probes. It
+        // scales the speed a tick loses and the push that replaces it
+        // together, so a slick floor is slow to start, stop and turn on.
+        let grip = solid.friction(
+            floor_to_i32(body.position[0]),
+            floor_to_i32(body.position[1] - SKIN * 2.0),
+            floor_to_i32(body.position[2]),
+        );
+        // Exactly one takes no arithmetic, so a world with no slick material
+        // steps bit-for-bit what it always did — the determinism goldens.
+        #[expect(
+            clippy::float_cmp,
+            reason = "ordinary grip is a sentinel here, not a measurement"
+        )]
+        let ordinary = grip == 1.0;
+        if !ordinary {
+            acceleration *= grip;
+            friction = 1.0 - (1.0 - friction) * grip;
+        }
+    }
     let mut top_speed = intent.gait.top_speed(tuning);
     if intent.fly {
         // **Flight steers like walking, not like a jump.** A flying body is off

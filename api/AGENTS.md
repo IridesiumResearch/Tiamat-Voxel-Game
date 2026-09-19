@@ -1262,6 +1262,13 @@ rather than clamped, everybody told at once. That is the bed that ends the
 night. One clock for the world; a sky that differs for one player is
 `game.set_sky_modifier`.
 
+**A floor can be slick: `friction` on `register_block`,** a share of the
+ordinary grip from 0 to 1. Ice at 0.1 is slow to start on and glides several
+blocks after the keys are let go. It is read per sub-node under the centre of
+the feet, it slides mobs as well as players, and the client predicts it, so do
+not build ice by pushing bodies from a tick hook — that is the rubber-banding
+version.
+
 **A player's movement is yours to limit, and flight yours to grant.**
 `game.set_player_abilities(uuid, { fly, speed, sprint })` — a Creative world
 where everybody flies, cold that slows, hunger that stops a sprint. Replaced

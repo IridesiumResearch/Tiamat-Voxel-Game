@@ -2284,6 +2284,7 @@ mod tests {
                 sway: false,
                 billboard: false,
                 billboard_cross: false,
+                friction: 1.0,
                 tint: None,
             })
             .collect()
