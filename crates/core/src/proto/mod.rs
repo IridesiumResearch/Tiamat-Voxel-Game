@@ -2199,8 +2199,11 @@ pub enum ServerMessage {
 pub struct ThemeDef {
     /// The mod that set it, for attribution in the settings screen.
     pub mod_id: String,
-    /// A font id in the font table, or `None` for the client's own face.
+    /// A font id for headings and buttons, or `None` for the client's own.
     pub font: Option<String>,
+    /// A font id for text read as sentences, or `None` to use `font` for
+    /// everything — see [`crate::modload::Theme::text_font`].
+    pub text_font: Option<String>,
     /// The nine-slice frame around a sheet, by content hash.
     pub sheet: Option<ContentHash>,
     /// The nine-slice frame around a button, by content hash.
@@ -2759,8 +2762,13 @@ fn check_occupancy(edit: &Edit) -> Result<(), ProtocolError> {
 fn check_theme(theme: Option<&ThemeDef>) -> Result<(), ProtocolError> {
     let Some(theme) = theme else { return Ok(()) };
     check_len("theme_mod_id", theme.mod_id.len(), MAX_ID_BYTES)?;
-    if let Some(font) = theme.font.as_deref() {
-        check_len("theme_font", font.len(), MAX_ID_BYTES)?;
+    for (field, id) in [
+        ("theme_font", theme.font.as_deref()),
+        ("theme_text_font", theme.text_font.as_deref()),
+    ] {
+        if let Some(id) = id {
+            check_len(field, id.len(), MAX_ID_BYTES)?;
+        }
     }
     Ok(())
 }

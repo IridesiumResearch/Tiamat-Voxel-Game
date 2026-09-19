@@ -43,8 +43,11 @@ use tiamot_core::ui::Colour;
 pub struct Theme {
     /// The mod that set it, for attribution.
     pub mod_id: String,
-    /// The font id to draw engine text in, if one arrived.
+    /// The font id for headings and buttons, if one arrived.
     pub font: Option<String>,
+    /// The font id for text read as sentences — chat, a text field, prose.
+    /// `None` means `font` covers everything, which is a one-face theme.
+    pub text_font: Option<String>,
     /// The nine-slice frame around a sheet.
     pub sheet: Option<ContentHash>,
     /// The nine-slice frame around a button.
@@ -112,6 +115,7 @@ impl Theme {
         Self {
             mod_id: def.mod_id.clone(),
             font: def.font.clone(),
+            text_font: def.text_font.clone(),
             sheet: def.sheet,
             button: def.button,
             colours: Palette {
@@ -150,12 +154,30 @@ impl Theme {
         ctx: &egui::Context,
         fonts: &crate::fonts::Fonts,
     ) -> Option<egui::FontFamily> {
+        Self::face(ctx, fonts, self.font.as_deref())
+    }
+
+    /// The family for text read as sentences, falling back to the display
+    /// face and then to the client's own.
+    #[must_use]
+    pub fn text_family(
+        &self,
+        ctx: &egui::Context,
+        fonts: &crate::fonts::Fonts,
+    ) -> Option<egui::FontFamily> {
+        Self::face(ctx, fonts, self.text_font.as_deref()).or_else(|| self.family(ctx, fonts))
+    }
+
+    /// One named face, if egui has it bound.
+    fn face(
+        ctx: &egui::Context,
+        fonts: &crate::fonts::Fonts,
+        id: Option<&str>,
+    ) -> Option<egui::FontFamily> {
         // **`bound_family`, not `family`.** This goes into a `FontId` that egui
         // will lay text out with, and a family egui has not picked up yet is a
         // panic rather than a fallback. See `fonts::Fonts::bound_family`.
-        self.font
-            .as_deref()
-            .and_then(|id| fonts.bound_family(ctx, id))
+        id.and_then(|id| fonts.bound_family(ctx, id))
     }
 
     /// Lays this theme over egui's visuals and text styles.
@@ -174,7 +196,8 @@ impl Theme {
         if self.is_none() {
             return;
         }
-        let family = self.family(ctx, fonts);
+        let display = self.family(ctx, fonts);
+        let body = self.text_family(ctx, fonts);
         // **Both styles, not the active one.** A mod's palette is not a
         // light/dark preference, and a theme that applied to one of them would
         // vanish the moment the platform said the other.
@@ -183,9 +206,16 @@ impl Theme {
             if let Some(background) = self.colours.background {
                 visuals.window_fill = background;
                 visuals.panel_fill = background;
-                // Behind a text box and a dropdown's list, which would
-                // otherwise stay the client's grey inside a themed sheet.
                 visuals.extreme_bg_color = background;
+            }
+            // **A text field is not the sheet.** `extreme_bg_color` is the
+            // fill behind a text box and a dropdown's list, and setting it to
+            // the sheet's own fill made both INVISIBLE — a themed chat input
+            // could not be found at all. Reported from the window. The button
+            // colour is a shade above the sheet by construction, which is
+            // exactly what a field wants, so it takes that where there is one.
+            if let Some(button) = self.colours.button {
+                visuals.extreme_bg_color = button;
             }
             if let Some(text) = self.colours.text {
                 visuals.override_text_color = Some(text);
@@ -198,6 +228,19 @@ impl Theme {
                 visuals.widgets.noninteractive.weak_bg_fill = fill;
             }
             if let Some(accent) = self.colours.accent {
+                // **A resting control needs an outline to be a control.** egui
+                // gives inactive widgets no stroke, so under a theme a tick
+                // box, a dropdown, a slider and an unframed glyph button are
+                // a shade off the sheet and read as text. The ones wearing the
+                // theme's button frame were fine; these are what is left, and
+                // a hairline in the accent is what makes them match.
+                //
+                // `noninteractive` also draws egui's separators, which become
+                // the accent too — asked for, and the right answer: a rule
+                // across a themed sheet should be the theme's.
+                let hairline = egui::Stroke::new(1.0, accent);
+                visuals.widgets.inactive.bg_stroke = hairline;
+                visuals.widgets.noninteractive.bg_stroke = hairline;
                 // Hovered, held and selected — the three states a player reads
                 // as "this one". Kept together because a theme colouring only
                 // one of them looks like a bug in the widget, not a palette.
@@ -207,8 +250,17 @@ impl Theme {
                 visuals.widgets.active.weak_bg_fill = accent;
                 visuals.selection.bg_fill = accent;
             }
-            if let Some(family) = &family {
-                for existing in style.text_styles.values_mut() {
+            for (kind, existing) in &mut style.text_styles {
+                // **Two faces, because a theme's own is usually a display
+                // one.** A capital is right for a sheet's title and hard
+                // reading for every line anyone says in chat; `text_font` is
+                // what a mod names for prose, and falls back to the display
+                // face when it names none.
+                let wanted = match kind {
+                    egui::TextStyle::Heading | egui::TextStyle::Button => display.as_ref(),
+                    _ => body.as_ref(),
+                };
+                if let Some(family) = wanted {
                     // **Size is kept and only the face changes.** A theme that
                     // resized the interface could make the settings screen
                     // unreadable, and the player already has a scale slider.
@@ -350,13 +402,17 @@ impl Local {
         let sheet = picture(&declared.sheet);
         let button = picture(&declared.button);
 
-        let font = read(&declared.font).and_then(|bytes| {
-            let id = format!("{}:theme_font", listing.id);
-            // `offer` parses before egui is handed anything — see
-            // `crate::fonts` — so a file that is not a font is refused here
-            // rather than inside the atlas rebuild.
-            self.fonts.offer(id.clone(), bytes).then_some(id)
-        });
+        // `offer` parses before egui is handed anything — see `crate::fonts` —
+        // so a file that is not a font is refused here rather than inside the
+        // atlas rebuild.
+        let mut face = |slot: &Option<String>, what: &str| {
+            read(slot).and_then(|bytes| {
+                let id = format!("{}:theme_{what}", listing.id);
+                self.fonts.offer(id.clone(), bytes).then_some(id)
+            })
+        };
+        let font = face(&declared.font, "font");
+        let text_font = face(&declared.text_font, "text_font");
 
         let colour = |text: &Option<String>| {
             text.as_deref()
@@ -366,6 +422,7 @@ impl Local {
         self.theme = Theme {
             mod_id: listing.id.clone(),
             font,
+            text_font,
             sheet,
             button,
             colours: Palette {
@@ -393,6 +450,7 @@ mod tests {
         ThemeDef {
             mod_id: "iron".to_owned(),
             font: Some("engine:theme_font".to_owned()),
+            text_font: None,
             sheet: Some([7; 32]),
             button: None,
             colours: tiamot_core::proto::ThemePalette {
@@ -628,6 +686,123 @@ mod tests {
             after.selection.bg_fill,
             egui::Color32::from_rgba_unmultiplied(0xB0, 0x8D, 0x57, 0x80)
         );
+    }
+
+    #[test]
+    fn a_theme_with_one_face_puts_it_on_everything() {
+        // A theme that names no `text_font` is a one-face theme, and that is
+        // what every theme written before the second face existed is. The
+        // fallback has to be the display face and not the client's own, or
+        // adding the field would have silently un-themed everybody's prose.
+        let ctx = egui::Context::default();
+        crate::app::install_fonts(&ctx);
+        let mut fonts = crate::fonts::Fonts::new();
+        assert!(fonts.offer("iron:theme_font".to_owned(), crate::app::HUD_FONT.to_vec()));
+        let _ = fonts.install(&ctx, crate::app::HUD_FONT);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+
+        let theme = Theme {
+            font: Some("iron:theme_font".to_owned()),
+            text_font: None,
+            ..Theme::none()
+        };
+        assert_eq!(
+            theme.text_family(&ctx, &fonts),
+            theme.family(&ctx, &fonts),
+            "with no second face, prose takes the display one"
+        );
+        assert!(
+            theme.family(&ctx, &fonts).is_some(),
+            "the fixture must bind"
+        );
+    }
+
+    #[test]
+    fn a_display_face_does_not_reach_the_text_a_player_reads() {
+        // **Reported from the window.** A theme's face is usually a display
+        // one — the mod author's is Cinzel Decorative — which is right for a
+        // sheet's title and unreadable for every line anyone says in chat.
+        // Headings and buttons take the display face; everything else takes
+        // the text face.
+        let ctx = egui::Context::default();
+        crate::app::install_fonts(&ctx);
+        let mut fonts = crate::fonts::Fonts::new();
+        assert!(fonts.offer("iron:theme_font".to_owned(), crate::app::HUD_FONT.to_vec()));
+        assert!(fonts.offer(
+            "iron:theme_text_font".to_owned(),
+            crate::app::HUD_FONT.to_vec()
+        ));
+        let _ = fonts.install(&ctx, crate::app::HUD_FONT);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+
+        let theme = Theme {
+            font: Some("iron:theme_font".to_owned()),
+            text_font: Some("iron:theme_text_font".to_owned()),
+            ..Theme::none()
+        };
+        theme.apply(&ctx, &fonts);
+        let style = ctx.global_style();
+        let family = |kind: &egui::TextStyle| style.text_styles[kind].family.clone();
+
+        assert_eq!(
+            family(&egui::TextStyle::Heading),
+            family(&egui::TextStyle::Button)
+        );
+        assert_ne!(
+            family(&egui::TextStyle::Body),
+            family(&egui::TextStyle::Heading),
+            "prose and a heading should not be the same face when a theme names two"
+        );
+        assert_eq!(
+            family(&egui::TextStyle::Body),
+            family(&egui::TextStyle::Small)
+        );
+    }
+
+    #[test]
+    fn a_text_field_is_never_the_same_colour_as_the_sheet() {
+        // **Reported from the window: a themed chat input could not be
+        // found.** `extreme_bg_color` is the fill behind a text box and a
+        // dropdown's list, and it was being set to `background` — the sheet's
+        // own fill — so a field was the sheet. A control a player cannot find
+        // is worse than an unthemed one.
+        let ctx = egui::Context::default();
+        let mut def = def();
+        def.colours.background = Some([0x13, 0x16, 0x19, 0xFF]);
+        def.colours.button = Some([0x2A, 0x20, 0x18, 0xFF]);
+        Theme::from_def(&def).apply(&ctx, &crate::fonts::Fonts::new());
+
+        let visuals = ctx.global_style().visuals.clone();
+        assert_ne!(
+            visuals.extreme_bg_color, visuals.window_fill,
+            "a text field must not be the same colour as the sheet it sits on"
+        );
+
+        // And a resting control has an outline, so a tick box or a dropdown
+        // reads as a control rather than as text.
+        assert!(
+            visuals.widgets.inactive.bg_stroke.width > 0.0,
+            "a resting widget needs an outline under a theme"
+        );
+        assert_eq!(
+            visuals.widgets.inactive.bg_stroke.color,
+            egui::Color32::from_rgba_unmultiplied(0xB0, 0x8D, 0x57, 0x80),
+            "the outline should be the theme's accent"
+        );
+    }
+
+    #[test]
+    fn a_theme_with_no_button_colour_leaves_the_field_where_it_was() {
+        // Non-vacuous the other way: the fix takes the BUTTON colour, and a
+        // theme that names none must not silently get a field in some third
+        // colour nobody asked for.
+        let ctx = egui::Context::default();
+        let before = ctx.global_style().visuals.extreme_bg_color;
+        let mut def = def();
+        def.colours.background = None;
+        def.colours.button = None;
+        Theme::from_def(&def).apply(&ctx, &crate::fonts::Fonts::new());
+        assert_eq!(ctx.global_style().visuals.extreme_bg_color, before);
     }
 
     #[test]

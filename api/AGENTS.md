@@ -494,7 +494,8 @@ frame for sheets, one for buttons, and five colours.
 
 ```toml
 [theme]
-font = "fonts/Cinzel.ttf"
+font = "fonts/Cinzel.ttf"            # headings and buttons
+text_font = "fonts/Spectral.ttf"     # chat, text fields, prose
 sheet = "art/frame_iron.png"
 button = "art/button_brass.png"
 
@@ -509,8 +510,15 @@ accent = "#b08d57"
 Every field is optional and anything you leave out stays the client's own, so a
 theme that is only a palette is a theme — and a theme cannot make a screen
 unreadable, because every part of it is an override with a default underneath.
-A frame's border is a THIRD of the image, the same rule `style.nine_slice`
-uses. **One theme applies at a time: the last mod in load order that declares
+**Two faces, because a theme's own is usually a display one.** `font` goes on
+headings and buttons; `text_font` goes on everything read as sentences. Name
+only `font` and it covers both, which is what a one-face theme means — but a
+display capital is hard reading for every line anyone says in chat.
+
+**A frame is drawn 18 points deep whatever your art's resolution is**, and your
+contents are kept clear of it, so you do not need to pad your own tree to
+escape the trim. Draw the border as a third of your image, the rule
+`style.nine_slice` uses; the engine scales it to suit. **One theme applies at a time: the last mod in load order that declares
 one**, so a mod that depends on another paints over it.
 
 In a world the theme is pushed on join and its files ride the font and picture

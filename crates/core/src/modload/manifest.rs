@@ -96,10 +96,28 @@ pub struct WorldOption {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme {
-    /// A font file inside the mod's directory, drawn in place of the client's
-    /// own on every engine screen.
+    /// A font file inside the mod's directory, drawn on HEADINGS and BUTTONS.
+    ///
+    /// A theme's face is usually a display one — a capital, an ornament — and
+    /// that is right for a sheet's title and wrong for anything read as
+    /// sentences. See [`Theme::text_font`].
     #[serde(default)]
     pub font: Option<String>,
+    /// A second face, for text read as sentences: chat, a text field, the
+    /// settings pages' prose.
+    ///
+    /// # Why a theme needs two
+    ///
+    /// One face on everything means chat is drawn in whatever the sheet's
+    /// title is drawn in, and a display capital is hard reading at body size
+    /// over a world. Reported by a mod author whose face is Cinzel
+    /// Decorative: right for the pause screen's buttons, unreadable for every
+    /// line anyone says.
+    ///
+    /// Left out, `font` covers everything, which is what a theme with one
+    /// face means and what every theme written before this got.
+    #[serde(default)]
+    pub text_font: Option<String>,
     /// A nine-slice image for the frame around a sheet — the inventory, the
     /// pause screen, a settings page. Its border is a THIRD of the image, the
     /// rule `Style::nine_slice` already uses.
@@ -242,6 +260,7 @@ impl Theme {
         };
         for (field, path) in [
             ("font", self.font.as_deref()),
+            ("text_font", self.text_font.as_deref()),
             ("sheet", self.sheet.as_deref()),
             ("button", self.button.as_deref()),
         ] {

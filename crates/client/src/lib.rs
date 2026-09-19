@@ -341,6 +341,24 @@ pub mod panel {
     /// edges on a 4:3 monitor.
     const WIDEST: f32 = 0.9;
 
+    /// How deep a theme's frame is drawn, in points.
+    ///
+    /// # Why a number here and not a third of the art
+    ///
+    /// `paint_nine_slice` cuts its border at a third of the SOURCE IMAGE, and
+    /// it was drawn at scale 1 — so a 108-pixel frame gave 36 points of trim
+    /// and a 512-pixel one would give 170. The drawn border tracked the art's
+    /// resolution and nothing else, which is why a sheet's bar and every
+    /// engine screen's text ran onto the trim: the content was inset by the
+    /// window's own six-point margin and the trim came in six times that far.
+    /// Reported by a mod author whose inventory only cleared it by padding
+    /// its own tree by 24.
+    ///
+    /// So the engine says how deep a frame is and scales the art to suit. A
+    /// mod draws whatever it likes at whatever resolution it likes; this is
+    /// the room it gets, and the room the content stays clear of.
+    const FRAME_BORDER: f32 = 18.0;
+
     /// The panel's size in points, for a window `area` points across.
     #[must_use]
     pub fn size(area: (f32, f32)) -> (f32, f32) {
@@ -576,6 +594,15 @@ pub mod panel {
             // this is what it may not exceed, so a screen that asks for more
             // scrolls instead of growing.
             .max_height(height)
+            // **A framed sheet keeps its contents off the trim.** Without a
+            // frame this is egui's own margin and nothing changes.
+            .frame(
+                egui::Frame::window(&ctx.global_style()).inner_margin(if frame.is_some() {
+                    egui::Margin::same(FRAME_BORDER as i8)
+                } else {
+                    ctx.global_style().spacing.window_margin
+                }),
+            )
             .show(ctx, |ui| {
                 ui.set_min_size(egui::vec2(width, height));
                 // **Behind the contents, and outside the window's own
@@ -585,11 +612,16 @@ pub mod panel {
                 // the page it is a frame for, and a settings list would start
                 // an inch further down for having a border.
                 if let Some(frame) = frame {
+                    // Scaled so its border lands on `FRAME_BORDER` whatever
+                    // the art's resolution is, and painted OUTSIDE the
+                    // content — which is inset by the same amount above, so
+                    // the two meet exactly and nothing is drawn on the trim.
+                    let third = (frame.height as f32 / 3.0).max(1.0);
                     crate::pictures::paint_nine_slice(
                         &ui.painter().clone(),
                         frame.texture,
-                        ui.max_rect().expand(ui.spacing().window_margin.leftf()),
-                        1.0,
+                        ui.max_rect().expand(FRAME_BORDER),
+                        FRAME_BORDER / third,
                         (frame.width, frame.height),
                     );
                 }
@@ -728,6 +760,46 @@ pub mod panel {
                 "a reserve took {small} of a small window and {large} of a large one"
             );
             assert!((small - 130.0 / 1080.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn a_frames_border_does_not_depend_on_its_arts_resolution() {
+            // **The bug this constant exists for.** `paint_nine_slice` cuts at
+            // a third of the SOURCE image, so at scale 1 a 108-pixel frame
+            // gives 36 points of trim and a 512-pixel one gives 170. The
+            // content was inset by the window's six-point margin either way,
+            // so a sheet's bar ran onto the trim — and how badly depended on
+            // what resolution the mod happened to export at, which is not
+            // something a mod author should have to reason about.
+            //
+            // The scale is chosen so the border lands on `FRAME_BORDER`
+            // whatever the art is. Two very different images, one answer.
+            for height in [48u32, 108, 512, 1024] {
+                let third = height as f32 / 3.0;
+                let scale = FRAME_BORDER / third;
+                let drawn = third * scale;
+                assert!(
+                    (drawn - FRAME_BORDER).abs() < 0.01,
+                    "a {height}-pixel frame drew a {drawn}-point border"
+                );
+            }
+        }
+
+        #[test]
+        fn a_frame_is_drawn_outside_the_room_its_contents_get() {
+            // The two have to meet exactly: the frame is painted at the
+            // content's rectangle expanded by the border, and the content is
+            // inset by the same border. Any other pair either leaves a gap of
+            // sheet between the trim and the text, or runs the text onto the
+            // trim — which is what it did.
+            let content =
+                egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 600.0));
+            let painted = content.expand(FRAME_BORDER);
+            assert!(
+                (painted.width() - content.width() - FRAME_BORDER * 2.0).abs() < 0.01,
+                "the frame should be exactly one border wider on each side"
+            );
+            assert!(painted.contains_rect(content));
         }
 
         #[test]

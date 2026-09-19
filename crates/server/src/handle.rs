@@ -5945,14 +5945,18 @@ fn build_theme(
         hash.map(|hash| (format!("engine:theme_{what}"), hash))
     };
 
-    let font = hash_of(&theme.font, "font").map(|(id, file)| {
-        fonts.push(tiamot_core::proto::FontDef {
-            id: id.clone(),
-            mod_id: mod_id.to_owned(),
-            file: Some(file),
-        });
-        id
-    });
+    let mut font_of = |slot: &Option<String>, what: &str| {
+        hash_of(slot, what).map(|(id, file)| {
+            fonts.push(tiamot_core::proto::FontDef {
+                id: id.clone(),
+                mod_id: mod_id.to_owned(),
+                file: Some(file),
+            });
+            id
+        })
+    };
+    let font = font_of(&theme.font, "font");
+    let text_font = font_of(&theme.text_font, "text_font");
     // A frame is named by HASH, which is how the client resolves a picture —
     // but it still goes in the table, because the table is what makes the
     // client ASK for the bytes. Left out of it, the hash would name something
@@ -5975,6 +5979,7 @@ fn build_theme(
     tiamot_core::proto::ThemeDef {
         mod_id: mod_id.to_owned(),
         font,
+        text_font,
         sheet,
         button,
         colours: tiamot_core::proto::ThemePalette {
