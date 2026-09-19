@@ -12,107 +12,115 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-## W13. Three kinds of cloud: fair weather, storm, and the mega storm (2026-09-19)
+## W13. Cloud genera: cumulus, stratocumulus, altocumulus, cumulonimbus (2026-09-19, revised)
 
-**Seen, by the designer.** The heaps from W12 are right, and the next step is
-"more detailed and picturesque", with three kinds: regular everyday
-beautiful clouds, storm clouds, and mega storm clouds.
+**Revised the same day, before any of it was built.** The first version
+asked for three kinds (fair, storm, mega storm). The designer then asked
+for more: the heaps are "pretty undetailed noise-wise", and the sky wants
+"somewhat realistic shapes like stratocumulus, altocumulus and cumulonimbus
+approximations". This replaces it. The first version's pictures and patch
+stay in `tiamot_weather/` (`cloud-kinds-*`) as the record.
 
-**Why the mod cannot.** The deck's SHAPE is registration-only
-(`register_clouds`: thickness, towers, frequency), so it is one shape for
-the whole world, for ever. Per player, `set_clouds` moves only `cover`,
-`darkness` and `base`. A storm over one player and fair weather over
-another cannot differ in shape, and nothing a mod sends can make an anvil.
+**Why the mod cannot.** The deck's shape is registration-only, one shape
+for the whole world; per player `set_clouds` moves `cover`, `darkness` and
+`base`. A sheet of stratocumulus, a mackerel sky and an anvil are shapes,
+and none of them can be sent.
 
-**Evidence.** A prototype of `clouds.wgsl` against 0d8e857, rendered in the
+**Evidence.** A prototype of `clouds.wgsl` against c160b05, rendered in the
 screenshot harness (a temporary ignored test, since removed), 960 x 540,
 Beautiful, Normal quality, Weather's deck (cell 16, thickness 160, 1/500,
-towers 0.2) with its base 400 over the camera:
+towers 0.2), base 400 over the camera:
 
-![fair, storm, mega storm](tiamot_weather/cloud-kinds-2026-09-19.png)
+![five skies](tiamot_weather/cloud-genera-2026-09-19.png)
 
-Rows: fair (cover 0.45), storm (cover 0.85, darkness 0.7, `storm` 1), mega
-storm (cover 0.35, darkness 0.55, `storm` 0.4, `supercells` 1). Columns:
-level, 30 degrees up, level and turned 90 degrees, and from 480 blocks over
-the deck. The patch is `tiamot_weather/cloud-kinds-prototype-2026-09-19.patch`;
-as before, a sketch to measure against, not a patch to merge. For the
-prototype the two numbers ride in `view.yz` from an environment variable;
-the real thing wants them in `Clouds`.
+Rows: fair cumulus (cover 0.45); stratocumulus (0.75, darkness 0.15);
+altocumulus over a few cumulus (0.8 and 0.2); a storm (stratocumulus 0.85,
+cumulonimbus 0.6, cumulus 0.2, darkness 0.7); a mega storm (cumulonimbus 1
+among cumulus, stratocumulus and altocumulus at 0.3, darkness 0.6).
+Columns: level, 30 degrees up, level and turned 90 degrees, and from 480
+blocks over the base. The patch is
+`tiamot_weather/cloud-genera-prototype-2026-09-19.patch`: a sketch to
+measure against, not a patch to merge. The three new numbers ride in
+`view.yzw` from an environment variable; the real thing wants them in
+`Clouds`.
 
-Frame time with the deck, ms, on this machine's adapter (the ratios are what travel):
+Frame time with the deck, ms, this machine's adapter (a bare sky is 0.6 to
+0.8):
 
-| | level | up | far | above |
+| | level | up | side | above |
 |---|---|---|---|---|
-| fair | 1.06 | 1.11 | 1.01 | 1.17 |
-| storm | 1.02 | 1.13 | 0.96 | 1.75 |
-| mega storm | 1.54 | 2.08 | 1.41 | 6.43 |
+| cumulus | 1.09 | 1.10 | 0.93 | 1.19 |
+| stratocumulus | 0.78 | 0.81 | 0.78 | 0.94 |
+| altocumulus | 1.50 | 1.96 | 1.48 | 1.82 |
+| storm | 1.53 | 1.93 | 1.57 | 11.27 |
+| mega storm | 2.81 | 4.19 | 2.72 | 10.90 |
 
-A bare sky is about 0.6 to 0.8 ms in the same harness. Fair and storm cost
-about what W12's deck does; the mega storm's view from above is the one to
-bring down (it marches the full height of a kilometre-tall slab).
+From the ground everything is within about twice today's deck. From above
+a cumulonimbus sky is the expensive one: the slab is a kilometre tall and
+every pixel marches it. A separate, tighter bound for the anvils (they are
+few and their lattice is known) would bring that down.
 
 ### The ask
 
-**Two per-player numbers on `set_clouds`, eased with the rest:**
+**Per-player cover per genus, on `set_clouds`, eased with the rest:**
 
 ```lua
 game.set_clouds(uuid, {
-    cover = 0.85, darkness = 0.7,
-    storm = 1.0,        -- 0 fair-weather heaps .. 1 storm masses. Default 0.
-    supercells = 0.0,   -- 0 none .. 1 a supercell in most of its lattice. Default 0.
+    cover = 0.2,            -- cumulus, as today
+    stratocumulus = 0.85,   -- 0..1, default 0
+    altocumulus = 0.0,      -- 0..1, default 0
+    cumulonimbus = 0.6,     -- 0..1, default 0; at 1, supercells
+    darkness = 0.7,
     ease_ticks = 600,
 })
 ```
 
-Numbers rather than a kind name, so a front arriving blends one sky into
-the next the way `cover` already does.
+Numbers, so a front arriving blends one sky into the next. `cover` keeps
+meaning cumulus, so a mod written for today's deck is unchanged.
 
-**What each does in the prototype:**
+**What each genus is in the prototype:**
 
-- **Fair (both 0): more detail.** Each heap is a bun, `pow(1 - d^2, 0.4)`,
-  steeper at the rim and fuller over the crown than W12's hemisphere. On it
-  ride two scales of florets: lobes a third of a heap across, which show
-  from a distance and so do not wait on `detail_mix`, and puffs an eighth
-  across near the camera. Both fade to nothing at the rim
-  (`smoothstep(0, 0.5, crown)`), so the silhouette is lumpy on top and the
-  base stays flat. That is the cauliflower.
-- **Storm.** Heaps 1.6 times as far apart and 1.3 times as wide, clumped
-  harder (the clump lattice's weight goes from 0.62 to 0.85), twice as tall,
-  and towers grow on half the heaps instead of three in ten. Masses, not
-  heaps.
-- **Storm light.** `darkness` weighted by height through the cloud, `1 -
-  0.6 * rel`, so the base is the darkest part and the tops keep their sun.
-  Today darkness greys the whole cloud evenly.
-- **Supercells.** On a lattice seven heaps wide, one roll per cell against
-  `0.4 * supercells`. Each is a tower 5.5 times the deck's thickness (880
-  blocks on Weather's deck) and about 700 across, its florets growing on
-  its flanks; an anvil blown downwind (sheared along the deck's own drift
-  would be better than the prototype's fixed offset), flat on top with an
-  overshooting dome over the tower, its underside flaring out of the tower
-  and rising towards the edge; and mammatus, the small puffs hanging under
-  the anvil's outer half. The anvil is the second interval `Column` has had
-  since W2.
-- **The slab bound** grows with both: `storm` raises the heaps' top, and
-  any `supercells` raises it to the anvil.
-
-**Known gaps in the prototype.** From above, an anvil's rim is a sharp
-edge (a table rather than a spreading sheet; its top could thin to nothing
-at the rim instead). The gold stripes on curved crowns from above are the
-stepped faces catching a low sun, present before this too.
+- **Every top gets a rind:** about one small cube of low-frequency value
+  noise (7 cycles per field unit), near the camera only. At the frequency
+  first tried (22) it turned every crown to confetti at 16-block cubes;
+  lower and gentler reads as lumps.
+- **Cumulus:** W12's heaps, as a bun (`pow(1 - d^2, 0.4)`, fuller over the
+  crown than a hemisphere), with florets from Worley cells a third of a
+  heap across (`F2 - F1`, rounded) riding the crown and fading at the rim.
+- **Stratocumulus:** low and thin (a third of the deck's thickness). Worley
+  cells drawn out into rolls across the wind (0.46 by 0.27 field units,
+  about 230 by 135 blocks on Weather's deck, so each cell spans a dozen
+  cubes and can be round), in patches; each cell a rounded cushion, with
+  grooves of sky between that close as cover rises. The cells must be many
+  cubes wide: at a quarter this size they were confetti.
+- **Altocumulus:** a mid-level layer (2.4 times the deck's thickness over
+  the base) of small cloudlets (Worley cells about 70 blocks), lined up in
+  wave bands the way a mackerel sky is, in patches. Lens-shaped: they grow
+  up more than down. This is the one that needs **a third interval**
+  (`Column.mid`), since it can sit under an anvil and over a heap in one
+  column. It is also the one the cube size limits most: from the ground it
+  reads as a dappled sheet, from above as tiles. A finer grid for this
+  layer alone would help; an 8-block grid for the whole deck did not, much.
+- **Cumulonimbus:** W13's first-version tower and anvil, on a lattice seven
+  heaps wide, more of them and larger as the value rises (at 1, supercells
+  of 880 blocks with mammatus). Florets from larger Worley cells on the
+  tower's flanks. The anvil's top now thins to nothing at its rim instead
+  of ending in a sheer edge.
+- **Storm light:** `darkness` weighted by height through the cloud (`1 -
+  0.6 * rel`), so bases are darkest and tops keep their sun.
 
 ### What Weather does once it lands
 
-Clear, cloudy, snow, ash and dust send fair; rain eases to `storm` 0.5;
-storm, blizzard and ash storm to `storm` 1. The mega storm is a rarer,
-stronger storm in the mod's own weather (the designer's call how rare), and
-sends `supercells` as it builds, so one can be watched coming for
-kilometres.
+Clear: a few cumulus, some altocumulus. Cloudy: cumulus, stratocumulus and
+altocumulus. Rain and snow: a thick stratocumulus sheet. Storm and blizzard:
+stratocumulus under cumulonimbus. Mega storm (twice a year, built in
+Weather 03f1925): cumulonimbus 1.
 
-**Acceptance.** In the harness's four views: fair heaps show florets at two
-scales over a flat base; storm masses are dark underneath with lit tops; a
-supercell reads from the ground as a tower under a spreading anvil. Fair
-and storm cost no more than W12's deck; the mega storm's worst view no more
-than twice it.
+**Acceptance.** In the harness's four views: a stratocumulus sheet of
+rounded cells with sky between; altocumulus as banded cloudlets from the
+ground; a cumulonimbus reading as a tower under a spreading anvil; crowns
+lumpy rather than smooth arcs. From the ground no genus costs more than
+twice today's deck.
 
 ## W11. Cloud shadows on the ground (deferred from W2, 2026-09-18)
 

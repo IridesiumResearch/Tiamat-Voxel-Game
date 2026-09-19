@@ -1,0 +1,383 @@
+diff --git a/crates/client/src/render/clouds.rs b/crates/client/src/render/clouds.rs
+old mode 100644
+new mode 100755
+index 950972a..a525a75
+--- a/crates/client/src/render/clouds.rs
++++ b/crates/client/src/render/clouds.rs
+@@ -304,7 +304,20 @@ impl Pass {
+             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
+             view_projection: frame.view_projection.to_cols_array_2d(),
+             camera: [camera[0], camera[1], camera[2], self.seconds],
+-            view: [frame.pixel_angle.max(1e-6), 0.0, 0.0, 0.0],
++            view: {
++                // PROTOTYPE (W13): stratocumulus, altocumulus, cumulonimbus.
++                let style: Vec<f32> = std::env::var("TIAMOT_PROTO_CLOUD_STYLE")
++                    .unwrap_or_default()
++                    .split(',')
++                    .filter_map(|x| x.trim().parse().ok())
++                    .collect();
++                [
++                    frame.pixel_angle.max(1e-6),
++                    style.first().copied().unwrap_or(0.0),
++                    style.get(1).copied().unwrap_or(0.0),
++                    style.get(2).copied().unwrap_or(0.0),
++                ]
++            },
+             sun_direction: [
+                 frame.sun_direction[0],
+                 frame.sun_direction[1],
+diff --git a/crates/client/src/render/clouds.wgsl b/crates/client/src/render/clouds.wgsl
+old mode 100644
+new mode 100755
+index 469d8b5..d5c9eea
+--- a/crates/client/src/render/clouds.wgsl
++++ b/crates/client/src/render/clouds.wgsl
+@@ -175,6 +175,8 @@ fn fbm(p: vec2<f32>, octaves: i32, seed: f32) -> f32 {
+ struct Column {
+     lower: vec2<f32>,
+     upper: vec2<f32>,
++    // PROTOTYPE (W13): a third interval, for a mid-level layer under an anvil.
++    mid: vec2<f32>,
+     // 0 at a heap's rim, 1 at its crown. The lighting reads it: thin cloud
+     // passes light and thick cloud does not.
+     density: f32,
+@@ -184,6 +186,7 @@ fn empty_column() -> Column {
+     var column: Column;
+     column.lower = vec2<f32>(0.0, -1.0);
+     column.upper = vec2<f32>(0.0, -1.0);
++    column.mid = vec2<f32>(0.0, -1.0);
+     column.density = 0.0;
+     return column;
+ }
+@@ -209,6 +212,39 @@ fn empty_column() -> Column {
+ // `detail_mix` is how much of the smaller scale applies, which fades with
+ // distance rather than switching off: a visible line where the detail starts
+ // is worse than no detail at all.
++// PROTOTYPE (W13): Worley cells. The nearest and second-nearest feature
++// point, and a hash of the nearest's cell. F2 - F1 is 0 on a border between
++// cells and grows towards a cell's middle: rounded cells with grooves between.
++fn cells(p: vec2<f32>, seed: f32) -> vec3<f32> {
++    let home = floor(p);
++    var f1 = 9.0;
++    var f2 = 9.0;
++    var tag = 0.0;
++    for (var j = -1; j <= 1; j = j + 1) {
++        for (var i = -1; i <= 1; i = i + 1) {
++            let id = home + vec2<f32>(f32(i), f32(j));
++            let r = hash4(id, seed);
++            let d = length(p - (id + 0.1 + 0.8 * r.xy));
++            if (d < f1) {
++                f2 = f1;
++                f1 = d;
++                tag = r.z;
++            } else if (d < f2) {
++                f2 = d;
++            }
++        }
++    }
++    return vec3<f32>(f1, f2, tag);
++}
++
++// PROTOTYPE (W13): four genera, each with its own cover per player.
++//
++//   cumulus         `cover`: heaps over a flat base, florets on the crowns
++//   stratocumulus   a low lumpy sheet of rounded cells in rolls, grooves between
++//   altocumulus     a mid-level mackerel sky of small cloudlets in wave bands
++//   cumulonimbus    towers with anvils; at 1, supercells
++//
++// Every top gets a fine rind of noise, so a crown is not a perfect arc.
+ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
+     let base = clouds.sun_direction.w;
+     let thickness = clouds.sun.w;
+@@ -216,109 +252,174 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
+     let frequency = clouds.weather.z;
+     let towers = clouds.weather.w;
+     let seed = clouds.motion.w;
++    let small_cube = clouds.shade.w;
++    let strato = clamp(clouds.view.y, 0.0, 1.0);
++    let alto = clamp(clouds.view.z, 0.0, 1.0);
++    let cb = clamp(clouds.view.w, 0.0, 1.0);
+ 
+-    // Drift is a rigid translation of the whole deck and evolution is a slow
+-    // change of shape; both are an offset on where the field is sampled, which
+-    // is the whole reason this costs nothing to animate.
+     let seconds = clouds.camera.w;
+     let drift = vec2<f32>(clouds.motion.x, clouds.motion.y) * seconds;
+     let evolve = clouds.motion.z * seconds;
+     let at = (cell_xz - drift) * frequency + vec2<f32>(evolve, -evolve);
+ 
+-    // Cover raises the water line rather than scaling the field, so a clear
+-    // sky is a few heaps and an overcast one is a ceiling with holes. The low
+-    // end goes BELOW zero: overcast should leave almost nothing.
+-    let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
+-
+-    let spacing = 0.42;
+-    let home = floor(at / spacing);
+-    var crown = 0.0;
+-    var tall = 0.0;
+-    // The nine cells a heap could reach this column from. Three by three
+-    // because a heap's radius may exceed its own cell — which is what lets
+-    // neighbouring heaps merge into a bank rather than sitting in a grid.
+-    for (var j = -1; j <= 1; j = j + 1) {
+-        for (var i = -1; i <= 1; i = i + 1) {
+-            let id = home + vec2<f32>(f32(i), f32(j));
+-            // **One hash for the roll, not a noise lookup.** A value noise
+-            // here is four hashes and an interpolation for a number that only
+-            // has to differ per heap, and the smooth field it would give is
+-            // not wanted: a heap is kept or dropped whole.
+-            let roll = hash4(id, seed);
+-            // **Heaps come in clumps, so the roll is not independent.** An
+-            // independent roll per heap scatters them evenly and the sky
+-            // fills with a sheet; correlating neighbours gives clumps with
+-            // clear sky between, which is what a fair-weather sky is.
+-            //
+-            // The correlation is one hash on a COARSER lattice rather than an
+-            // interpolated field: a field is four hashes for a number whose
+-            // only job is to make neighbours agree, and it cost more than the
+-            // whole rest of the column. The lattice's edges fall between
+-            // heaps rather than through them, because a heap is a disc and
+-            // the lattice is two and a half heaps wide.
+-            let clump = hash2(floor(id * 0.4), seed + 7.0);
+-            let raw = 0.62 * clump + 0.38 * roll.x;
+-            let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
+-            if (stem <= threshold) {
+-                continue;
+-            }
+-            let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
+-            let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
+-            let radius = spacing * (0.30 + 0.38 * sqrt(strength));
+-            let d = length(at - point) / radius;
+-            if (d < 1.0) {
+-                let h = sqrt(1.0 - d * d);
+-                if (h > crown) {
+-                    crown = h;
+-                    // Towers are a SHARE of heaps grown taller, not a second
+-                    // interval floating over a gap: the gap made shelves,
+-                    // which read as noise for the same reason the terraces
+-                    // did.
+-                    tall = 0.45 + 0.55 * strength + towers * select(0.0, 1.2, roll.w > 0.7);
++    // The rind: a cube or two of noise on every top, near only.
++    var rind = 0.0;
++    if (detail_mix > 0.0) {
++        rind = small_cube * 1.2 * detail_mix * (value2(at * 7.0, seed + 91.0) - 0.4);
++    }
++
++    var column = empty_column();
++    var low_top = base - 1.0;
++    var density = 0.0;
++
++    // ---------------------------------------------------------- cumulus
++    if (cover > 0.0) {
++        let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
++        let spacing = 0.42;
++        let home = floor(at / spacing);
++        var crown = 0.0;
++        var tall = 0.0;
++        for (var j = -1; j <= 1; j = j + 1) {
++            for (var i = -1; i <= 1; i = i + 1) {
++                let id = home + vec2<f32>(f32(i), f32(j));
++                let roll = hash4(id, seed);
++                let clump = hash2(floor(id * 0.4), seed + 7.0);
++                let raw = 0.62 * clump + 0.38 * roll.x;
++                let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
++                if (stem <= threshold) {
++                    continue;
++                }
++                let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
++                let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
++                let radius = spacing * (0.30 + 0.38 * sqrt(strength));
++                let d = length(at - point) / radius;
++                if (d < 1.0) {
++                    let h = pow(1.0 - d * d, 0.4);
++                    if (h > crown) {
++                        crown = h;
++                        tall = 0.45 + 0.55 * strength + towers * select(0.0, 1.2, roll.w > 0.7);
++                    }
+                 }
+             }
+         }
++        if (crown > 0.0) {
++            // Florets: lobes a third of a heap across, on the crown.
++            var lobe = 0.0;
++            if (crown > 0.08) {
++                let florets = cells(at / (spacing * 0.3), seed + 41.0);
++                lobe = clamp((florets.y - florets.x) * 2.2, 0.0, 1.0);
++                lobe = sqrt(lobe);
++            }
++            let shoulders = smoothstep(0.0, 0.5, crown);
++            let top = base + thickness * 0.55 * tall * (crown + 0.3 * lobe * shoulders) + rind * shoulders;
++            low_top = max(low_top, top);
++            density = max(density, crown);
++        }
+     }
+-    if (crown <= 0.0) {
+-        return empty_column();
++
++    // ---------------------------------------------------------- stratocumulus
++    // Rounded cells, drawn out into rolls across the wind, with grooves of
++    // sky between them that close as the sheet thickens. Low and thin.
++    if (strato > 0.0) {
++        let area = value2(at * 0.9, seed + 13.0);
++        if (area < strato * 1.15) {
++            let v = cells(at / vec2<f32>(0.46, 0.27), seed + 17.0);
++            let groove = mix(0.22, 0.06, strato);
++            let edge = v.y - v.x;
++            if (edge > groove && v.z < 0.55 + 0.5 * strato) {
++                let t = smoothstep(groove, groove + 0.45, edge);
++                let fade = smoothstep(strato * 1.15, strato * 1.15 - 0.15, area);
++                let top = base + thickness * 0.32 * (0.3 + 0.7 * sqrt(t)) * (0.5 + 0.5 * fade) + rind;
++                low_top = max(low_top, top);
++                density = max(density, t * 0.7);
++            }
++        }
+     }
+ 
+-    // The cauliflower: a second, smaller scale of heaps riding the crowns.
+-    // **Skipped outright when none of it applies**, which is most of a
+-    // horizon ray's length — nine hashes for a number about to be multiplied
+-    // by zero is the cheapest thing here to stop doing.
+-    var puff = 0.0;
+-    // Nothing to see on a heap's edge: the puff is worth at most `0.22 *
+-    // crown` of the top, so under a low crown it is a search for a number
+-    // that cannot move a cube.
+-    if (detail_mix * crown > 0.12) {
+-        let small = spacing * 0.25;
+-        let near = floor(at / small);
++    // ---------------------------------------------------------- cumulonimbus
++    // Towers with anvils on a lattice seven heaps wide. At 1 they are
++    // supercells: taller, wider, with mammatus under the anvil.
++    if (cb > 0.0) {
++        let big = 0.42 * 7.0;
++        let home_b = floor(at / big);
++        let scale = mix(0.55, 1.0, cb);
+         for (var j = -1; j <= 1; j = j + 1) {
+             for (var i = -1; i <= 1; i = i + 1) {
+-                let id = near + vec2<f32>(f32(i), f32(j));
+-                let jitter = hash4(id, seed + 21.0);
+-                let point = (id + 0.2 + 0.6 * jitter.xy) * small;
+-                let d = length(at - point) / (small * 0.75);
+-                puff = max(puff, sqrt(clamp(1.0 - d * d, 0.0, 1.0)));
++                let id = home_b + vec2<f32>(f32(i), f32(j));
++                let r = hash4(id, seed + 31.0);
++                if (r.x > 0.15 + 0.3 * cb) {
++                    continue;
++                }
++                let centre = (id + 0.3 + 0.4 * r.yz) * big;
++                let height = thickness * 5.5 * (0.8 + 0.2 * r.w) * scale;
++                let tower_r = big * 0.24 * scale;
++                let from_centre = length(at - centre);
++                let d_t = from_centre / tower_r;
++                // Florets on the tower's flanks: the same Worley cells, larger.
++                let florets = cells(at / (big * 0.05), seed + 43.0);
++                let lobe = sqrt(clamp((florets.y - florets.x) * 2.2, 0.0, 1.0));
++                if (d_t < 1.0) {
++                    let body = pow(1.0 - d_t * d_t, 0.32);
++                    let top = base + height * 0.88 * body + thickness * 0.8 * lobe * body * (1.0 - body * 0.6) + rind;
++                    if (top > low_top) {
++                        low_top = top;
++                        density = max(density, body);
++                    }
++                }
++                let shear = vec2<f32>(big * 0.16, big * 0.04) * scale;
++                let d_a = length((at - centre - shear) * vec2<f32>(0.75, 1.1)) / (big * 0.5 * scale);
++                if (d_a < 1.0) {
++                    let edge = sqrt(1.0 - d_a * d_a);
++                    let ceiling = base + height * 0.9;
++                    let dome = height * 0.1 * sqrt(clamp(1.0 - d_t * d_t * 2.2, 0.0, 1.0));
++                    // The anvil's top thins to nothing at its rim, rather than
++                    // ending in a sheer edge.
++                    let top = ceiling + height * 0.04 * edge + dome - height * 0.03 * (1.0 - edge);
++                    let from_tower = clamp(from_centre / (big * 0.5 * scale), 0.0, 1.0);
++                    let flare = height * 0.42 * pow(1.0 - from_tower, 2.0);
++                    let mammatus = thickness * 0.4 * cb * cb * lobe * edge * smoothstep(0.35, 0.8, d_a);
++                    let bottom = ceiling - height * 0.08 * edge - flare - mammatus;
++                    if (top - bottom > clouds.colour.w * 0.5) {
++                        column.upper = vec2<f32>(bottom, top);
++                        density = max(density, edge * 0.8);
++                    }
++                }
+             }
+         }
+     }
+ 
+-    var column: Column;
+-    // **The base is flat, always.** It is where players see the deck from, and
+-    // a base that followed the field was the whole of the terracing.
+-    let top = base + thickness * 0.55 * tall * (crown + 0.22 * puff * detail_mix * crown);
+-    column.lower = vec2<f32>(base, max(top, base + clouds.colour.w));
+-    column.upper = vec2<f32>(0.0, -1.0);
+-    column.density = crown;
++    // ---------------------------------------------------------- altocumulus
++    // A mid-level sheet of small cloudlets, in patches, lined up in bands the
++    // way a mackerel sky is. Thin, lens-shaped, bright.
++    if (alto > 0.0) {
++        let area = value2(at * 0.6 + vec2<f32>(5.0, 9.0), seed + 57.0);
++        if (area < alto * 1.1) {
++            let band = 0.5 + 0.5 * sin(dot(at, vec2<f32>(0.82, 0.57)) * 16.0 + value2(at * 2.0, seed + 3.0) * 4.0);
++            let v = cells(at / 0.14, seed + 61.0);
++            let edge = v.y - v.x;
++            if (band > 0.55 - 0.3 * alto && edge > 0.22) {
++                let t = smoothstep(0.22, 0.5, edge);
++                let fade = smoothstep(alto * 1.1, alto * 1.1 - 0.12, area);
++                let level = base + thickness * 2.4;
++                let depth = max(thickness * 0.2 * t * (0.4 + 0.6 * fade), clouds.colour.w);
++                column.mid = vec2<f32>(level - depth * 0.35, level + depth);
++                density = max(density, t * 0.5);
++            }
++        }
++    }
++
++    if (low_top > base) {
++        column.lower = vec2<f32>(base, max(low_top, base + clouds.colour.w));
++    }
++    column.density = density;
+     return column;
+ }
+ 
+ // Whether a height is inside either interval.
+ fn inside(column: Column, y: f32) -> bool {
+     return (y >= column.lower.x && y <= column.lower.y)
+-        || (y >= column.upper.x && y <= column.upper.y);
++        || (y >= column.upper.x && y <= column.upper.y)
++        || (y >= column.mid.x && y <= column.mid.y);
+ }
+ 
+ // Where a ray segment first enters solid cloud in one column, as a `t`, or a
+@@ -327,10 +428,12 @@ fn inside(column: Column, y: f32) -> bool {
+ fn enter_column(column: Column, origin_y: f32, dir_y: f32, t0: f32, t1: f32) -> vec2<f32> {
+     var best = -1.0;
+     var face = 0.0;
+-    for (var which = 0; which < 2; which = which + 1) {
++    for (var which = 0; which < 3; which = which + 1) {
+         var span = column.lower;
+         if (which == 1) {
+             span = column.upper;
++        } else if (which == 2) {
++            span = column.mid;
+         }
+         if (span.y <= span.x) {
+             continue;
+@@ -464,7 +567,11 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
+     // cost most in exactly the view that was already worst: from above the
+     // deck, where every pixel marches.
+     let deck_low = base;
+-    let deck_high = base + thickness * 0.55 * (1.0 + towers * 1.2) * 1.25 + cell0;
++    // PROTOTYPE (W13): the slab grows with the genera a player is under.
++    let heaps_high = thickness * 0.55 * (1.0 + towers * 1.2) * 1.35 + clouds.shade.w * 2.0;
++    let alto_high = select(0.0, thickness * 2.6, clouds.view.z > 0.0);
++    let cb_high = select(0.0, thickness * 5.5 * 1.15 * mix(0.55, 1.0, clamp(clouds.view.w, 0.0, 1.0)), clouds.view.w > 0.0);
++    let deck_high = base + max(heaps_high, max(alto_high, cb_high)) + cell0;
+     var t_enter = 0.0;
+     var t_leave = far;
+     if (abs(direction.y) < 0.00001) {
+@@ -755,7 +862,9 @@ fn fragment_main(in: Varyings) -> Painted {
+     // read from outside it. Rain seen at a distance is a curtain kilometres
+     // away, and precipitation spawns around the player's own camera.
+     let darkness = clouds.weather.y;
+-    lit = mix(lit, lit * vec3<f32>(0.30, 0.31, 0.38), darkness);
++    // PROTOTYPE: storm cloud is darkest at its base and keeps its sunlit tops.
++    let rel = clamp((found.position.y - clouds.sun_direction.w) / max(clouds.sun.w * 1.6, 1.0), 0.0, 1.0);
++    lit = mix(lit, lit * vec3<f32>(0.30, 0.31, 0.38), darkness * (1.0 - 0.6 * rel));
+ 
+     // Aerial perspective: distant cloud loses contrast into the horizon. Free,
+     // because the march already knows how far away the hit is.
