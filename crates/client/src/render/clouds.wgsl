@@ -116,6 +116,30 @@ fn hash2(cell: vec2<f32>, seed: f32) -> f32 {
     return f32(h) * (1.0 / 4294967296.0);
 }
 
+// Four independent numbers from ONE mix.
+//
+// **The field asks a cell four questions** — does a heap live here, where in
+// the cell is it, and is it a tall one — and four separate hashes is four
+// times the mixing for the same 32 bits of entropy. Eight bits each is 256
+// levels: plenty to place a heap inside its own cell, and plenty for a
+// coverage roll that only has to differ per heap.
+//
+// This is most of the field's cost, so it is most of what is worth making
+// cheap: the heap search reads nine cells and the detail search another nine.
+fn hash4(cell: vec2<f32>, seed: f32) -> vec4<f32> {
+    var h = bitcast<u32>(i32(cell.x)) * 374761393u
+        + bitcast<u32>(i32(cell.y)) * 668265263u
+        + bitcast<u32>(i32(seed)) * 2246822519u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    h = h ^ (h >> 16u);
+    return vec4<f32>(
+        f32(h & 255u),
+        f32((h >> 8u) & 255u),
+        f32((h >> 16u) & 255u),
+        f32((h >> 24u) & 255u),
+    ) * (1.0 / 255.0);
+}
+
 // Value noise with a smooth fade, which is enough for cloud: what a player
 // reads is the THRESHOLD, not the noise's own character.
 fn value2(p: vec2<f32>, seed: f32) -> f32 {
@@ -143,24 +167,47 @@ fn fbm(p: vec2<f32>, octaves: i32, seed: f32) -> f32 {
     return sum / max(total, 0.0001);
 }
 
-// One column's two intervals, as heights in world y. An empty interval has
-// `top <= bottom`, which every test below reads as "no cloud here".
+// One column's two intervals, as heights in world y, and how deep into a heap
+// it is.
+//
+// An empty interval has `top <= bottom`, which every test below reads as "no
+// cloud here".
 struct Column {
     lower: vec2<f32>,
     upper: vec2<f32>,
+    // 0 at a heap's rim, 1 at its crown. The lighting reads it: thin cloud
+    // passes light and thick cloud does not.
+    density: f32,
 };
 
 fn empty_column() -> Column {
     var column: Column;
     column.lower = vec2<f32>(0.0, -1.0);
     column.upper = vec2<f32>(0.0, -1.0);
+    column.density = 0.0;
     return column;
 }
 
 // The field at one column of the grid.
 //
-// `detail_mix` is how much of the small-cube rind applies, which fades with
-// distance rather than switching off — a visible line where the detail starts
+// # Heaps, not a thresholded height field
+//
+// The first version read a fractal field as a height: cloud where it crossed
+// a threshold, the top rising with the field's value. That gives CONTOURS —
+// terraced undersides following the field's own level lines, plateaus and
+// ramps for tops, and one continent with holes in it rather than clouds.
+// Reported from the window as "a noise pattern running through the sky", and
+// the mod author's side-by-side made it unarguable.
+//
+// So a cloud is a HEAP: points scattered on a grid, one heap each, and each
+// heap a hemisphere `sqrt(1 - d^2)` over a flat base. A hemisphere rises
+// steeply at the rim and rounds over the crown, which is what "bulbous" is.
+// The coverage roll is made AT THE POINT rather than per column, so a heap is
+// kept or dropped whole and is always round — the thing a per-column
+// threshold can never be.
+//
+// `detail_mix` is how much of the smaller scale applies, which fades with
+// distance rather than switching off: a visible line where the detail starts
 // is worse than no detail at all.
 fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let base = clouds.sun_direction.w;
@@ -169,7 +216,6 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let frequency = clouds.weather.z;
     let towers = clouds.weather.w;
     let seed = clouds.motion.w;
-    let octaves = i32(clouds.quality.z);
 
     // Drift is a rigid translation of the whole deck and evolution is a slow
     // change of shape; both are an offset on where the field is sampled, which
@@ -177,54 +223,95 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let seconds = clouds.camera.w;
     let drift = vec2<f32>(clouds.motion.x, clouds.motion.y) * seconds;
     let evolve = clouds.motion.z * seconds;
-    let at = (cell_xz - drift) * frequency;
+    let at = (cell_xz - drift) * frequency + vec2<f32>(evolve, -evolve);
 
-    // **Widened before it is compared.** Averaged octaves pile up around the
-    // middle — three of them leave a field of roughly 0.5 give or take 0.19 —
-    // so a threshold read straight off 0..1 does almost nothing for most of
-    // its range and then everything at once. Half a sky of cloud came out as
-    // a solid ceiling, which `a_half_covered_sky_has_cloud_and_sky_in_it`
-    // caught. Spreading the field first is what makes `cover` mean what it
-    // says.
-    let raw = fbm(at + vec2<f32>(evolve, -evolve), octaves, seed);
-    let stem = clamp((raw - 0.5) * 2.0 + 0.5, 0.0, 1.0);
     // Cover raises the water line rather than scaling the field, so a clear
-    // sky is a few islands and an overcast one is a ceiling with holes. The
-    // low end goes BELOW zero: overcast should leave almost nothing, and a
-    // threshold of zero still lets the field's floor through.
+    // sky is a few heaps and an overcast one is a ceiling with holes. The low
+    // end goes BELOW zero: overcast should leave almost nothing.
     let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
-    if (stem <= threshold) {
-        return empty_column();
-    }
-    let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
 
-    var column: Column;
-    // The lower lobe is most of the deck. Its underside is not the flat base:
-    // it lifts where the field is weak, which is what gives the stepped,
-    // blocky undersides the references are full of.
-    let lift = thickness * 0.18 * (1.0 - strength);
-    let rind = clouds.shade.w * detail_mix
-        * (fbm(at * 6.0 + vec2<f32>(11.0, 7.0), 2, seed + 91.0) * 2.0 - 1.0);
-    column.lower = vec2<f32>(
-        base + lift - rind,
-        base + thickness * (0.25 + 0.55 * strength) + rind,
-    );
-
-    // The anvil. Driven by a LOWER-frequency field than the stem, so it
-    // spreads wider than what holds it up — which is what "mushrooms out over
-    // its waist" means, and the one thing a single interval cannot do.
-    if (towers > 0.0) {
-        let spread = fbm(at * 0.45 + vec2<f32>(3.0, -5.0), max(octaves - 1, 1), seed + 53.0);
-        let lobe = clamp((spread - 0.5) * 2.2, 0.0, 1.0) * towers;
-        if (lobe > 0.02) {
-            let gap = thickness * 0.06 * (1.0 - lobe);
-            let floor_y = column.lower.y + gap;
-            column.upper = vec2<f32>(
-                floor_y - rind,
-                floor_y + thickness * lobe * 1.4 + rind,
-            );
+    let spacing = 0.42;
+    let home = floor(at / spacing);
+    var crown = 0.0;
+    var tall = 0.0;
+    // The nine cells a heap could reach this column from. Three by three
+    // because a heap's radius may exceed its own cell — which is what lets
+    // neighbouring heaps merge into a bank rather than sitting in a grid.
+    for (var j = -1; j <= 1; j = j + 1) {
+        for (var i = -1; i <= 1; i = i + 1) {
+            let id = home + vec2<f32>(f32(i), f32(j));
+            // **One hash for the roll, not a noise lookup.** A value noise
+            // here is four hashes and an interpolation for a number that only
+            // has to differ per heap, and the smooth field it would give is
+            // not wanted: a heap is kept or dropped whole.
+            let roll = hash4(id, seed);
+            // **Heaps come in clumps, so the roll is not independent.** An
+            // independent roll per heap scatters them evenly and the sky
+            // fills with a sheet; correlating neighbours gives clumps with
+            // clear sky between, which is what a fair-weather sky is.
+            //
+            // The correlation is one hash on a COARSER lattice rather than an
+            // interpolated field: a field is four hashes for a number whose
+            // only job is to make neighbours agree, and it cost more than the
+            // whole rest of the column. The lattice's edges fall between
+            // heaps rather than through them, because a heap is a disc and
+            // the lattice is two and a half heaps wide.
+            let clump = hash2(floor(id * 0.4), seed + 7.0);
+            let raw = 0.62 * clump + 0.38 * roll.x;
+            let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
+            if (stem <= threshold) {
+                continue;
+            }
+            let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
+            let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
+            let radius = spacing * (0.30 + 0.38 * sqrt(strength));
+            let d = length(at - point) / radius;
+            if (d < 1.0) {
+                let h = sqrt(1.0 - d * d);
+                if (h > crown) {
+                    crown = h;
+                    // Towers are a SHARE of heaps grown taller, not a second
+                    // interval floating over a gap: the gap made shelves,
+                    // which read as noise for the same reason the terraces
+                    // did.
+                    tall = 0.45 + 0.55 * strength + towers * select(0.0, 1.2, roll.w > 0.7);
+                }
+            }
         }
     }
+    if (crown <= 0.0) {
+        return empty_column();
+    }
+
+    // The cauliflower: a second, smaller scale of heaps riding the crowns.
+    // **Skipped outright when none of it applies**, which is most of a
+    // horizon ray's length — nine hashes for a number about to be multiplied
+    // by zero is the cheapest thing here to stop doing.
+    var puff = 0.0;
+    // Nothing to see on a heap's edge: the puff is worth at most `0.22 *
+    // crown` of the top, so under a low crown it is a search for a number
+    // that cannot move a cube.
+    if (detail_mix * crown > 0.12) {
+        let small = spacing * 0.25;
+        let near = floor(at / small);
+        for (var j = -1; j <= 1; j = j + 1) {
+            for (var i = -1; i <= 1; i = i + 1) {
+                let id = near + vec2<f32>(f32(i), f32(j));
+                let jitter = hash4(id, seed + 21.0);
+                let point = (id + 0.2 + 0.6 * jitter.xy) * small;
+                let d = length(at - point) / (small * 0.75);
+                puff = max(puff, sqrt(clamp(1.0 - d * d, 0.0, 1.0)));
+            }
+        }
+    }
+
+    var column: Column;
+    // **The base is flat, always.** It is where players see the deck from, and
+    // a base that followed the field was the whole of the terracing.
+    let top = base + thickness * 0.55 * tall * (crown + 0.22 * puff * detail_mix * crown);
+    column.lower = vec2<f32>(base, max(top, base + clouds.colour.w));
+    column.upper = vec2<f32>(0.0, -1.0);
+    column.density = crown;
     return column;
 }
 
@@ -304,6 +391,12 @@ struct Hit {
     face_y: f32,
     /// The grid this ray marched on.
     cell: f32,
+    /// How deep into a heap the hit was: 0 at the rim, 1 at the crown.
+    ///
+    /// **Carried out rather than looked up again.** The march has the column
+    /// in hand at the moment it hits; re-reading it in the fragment is the
+    /// whole field evaluated a second time for a number already known.
+    density: f32,
     /// The face that was crossed, as a unit normal.
     ///
     /// **Taken from the analyser, not from the hit's position.** Working it
@@ -315,6 +408,18 @@ struct Hit {
     /// there is nothing to infer.
     normal: vec3<f32>,
 };
+
+// The grid a ray should walk at `distance`, so that a cell covers about
+// `want` pixels.
+//
+// Quantised to powers of two so that two neighbouring rays at slightly
+// different distances land on the SAME grid rather than on two that disagree
+// by a fraction of a cell, which would shimmer as the camera moved.
+fn grid_for(base_cell: f32, distance: f32, want: f32) -> f32 {
+    let pixels = max(base_cell / max(distance * clouds.view.x, 0.000001), 0.0001);
+    let steps = clamp(want / pixels, 1.0, 32.0);
+    return base_cell * exp2(ceil(log2(steps)));
+}
 
 // Marches the grid and returns the first solid cell.
 //
@@ -339,16 +444,27 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     out.face_y = 0.0;
     out.cell = clouds.colour.w;
     out.normal = vec3<f32>(0.0, 1.0, 0.0);
+    out.density = 0.0;
 
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
+    let towers = clouds.weather.w;
     let base_cell = clouds.colour.w;
+    let cell0 = base_cell;
     let detail_reach = clouds.quality.y;
 
     // The slab the whole deck lives in, so a ray that never reaches it costs
-    // nothing. The top allows for the anvil, which rises above `thickness`.
-    let deck_low = base - thickness * 0.5;
-    let deck_high = base + thickness * 2.6;
+    // nothing.
+    //
+    // **Tight against what the field can actually reach.** The base is flat,
+    // so nothing is below it at all; the tallest a column can rise is the
+    // tallest heap times the most the detail can add. The old bound allowed
+    // for an anvil floating above a gap, a shape this field no longer makes —
+    // and it left every ray marching two hundred blocks of empty slab, which
+    // cost most in exactly the view that was already worst: from above the
+    // deck, where every pixel marches.
+    let deck_low = base;
+    let deck_high = base + thickness * 0.55 * (1.0 + towers * 1.2) * 1.25 + cell0;
     var t_enter = 0.0;
     var t_leave = far;
     if (abs(direction.y) < 0.00001) {
@@ -380,19 +496,26 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     // kilometre is under a pixel across, and a cube under a pixel cannot be
     // drawn — only aliased, because neighbouring columns differ by a whole
     // cell wherever the rind bites.
-    let pixels = max(base_cell / max(t_enter * clouds.view.x, 0.000001), 0.0001);
-    let steps = clamp(3.0 / pixels, 1.0, 32.0);
-    let cell = base_cell * exp2(ceil(log2(steps)));
+    // Grow the cell until it covers at least `WANTED` pixels. A cube at a
+    // kilometre is under a pixel across, and a cube under a pixel cannot be
+    // drawn — only aliased, because neighbouring columns differ by a whole
+    // cell wherever the detail bites.
+    //
+    // **Six, not three.** Three was measured by nobody; six was, at 960 x 540,
+    // and nothing visible was lost. The difference is a factor of two in cells
+    // walked along every ray.
+    let want = 6.0;
+    var cell = grid_for(base_cell, t_enter, want);
     out.cell = cell;
 
     // Set the analyser up on the cell the ray enters the slab in.
-    let entry = origin + direction * t_enter;
+    var entry = origin + direction * t_enter;
     var cell_index = floor(entry.xz / cell);
     let step = sign(direction.xz);
     // How far along the ray one whole cell of travel is, per axis. A ray with
     // no component on an axis never crosses one of its boundaries, which is
     // what the huge number stands for.
-    let delta = select(
+    var delta = select(
         vec2<f32>(1e30, 1e30),
         abs(vec2<f32>(cell, cell) / direction.xz),
         abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
@@ -427,6 +550,7 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
             out.t = found.x;
             out.position = origin + direction * found.x;
             out.face_y = found.y;
+            out.density = column.density;
             // A horizontal face if the ray met the column's top or bottom
             // inside this cell, and otherwise the wall it came in through. A
             // ray travelling downwards that meets a horizontal face met the
@@ -450,6 +574,34 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
             cell_index.y = cell_index.y + step.y;
             next.y = next.y + delta.y;
             entered = 1;
+        }
+
+        // **Coarsen as the ray GOES, not only where it came in.** A ray at the
+        // horizon enters the deck near and leaves it kilometres away, so a
+        // grid chosen once at entry walks hundreds of fine cells through air
+        // it can only ever see as a pixel or two — which is most of the cost
+        // of the worst view there is. When the cell it is walking has dropped
+        // under the pixel target, double it and re-seat.
+        let wanted = grid_for(base_cell, t, want);
+        if (wanted > cell) {
+            cell = wanted;
+            out.cell = cell;
+            entry = origin + direction * t;
+            cell_index = floor(entry.xz / cell);
+            delta = select(
+                vec2<f32>(1e30, 1e30),
+                abs(vec2<f32>(cell, cell) / direction.xz),
+                abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
+            );
+            let edge = (cell_index + max(step, vec2<f32>(0.0, 0.0))) * cell;
+            next = select(
+                vec2<f32>(1e30, 1e30),
+                t + (edge - entry.xz) / direction.xz,
+                abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
+            );
+            // The re-seat crossed no wall, so the next hit's face comes from
+            // the slab rather than from a boundary this grid never had.
+            entered = -1;
         }
     }
     return out;
@@ -565,7 +717,10 @@ fn fragment_main(in: Varyings) -> Painted {
         // cloud BASES, and the violet-grey belongs to the clouds far from it.
         // A model that shaded "up is lit, down is shaded" would get the one
         // hour this is judged on exactly backwards.
-        let sunward = clamp(facing * 0.5 + 0.5, 0.0, 1.0);
+        // **Wrapped**, so light reaches round a heap rather than stopping dead
+        // at its terminator. Cloud is not opaque and a hard terminator is the
+        // main thing that makes it read as rock.
+        let sunward = clamp((facing + 0.6) / 1.6, 0.0, 1.0);
         let warm = clouds.colour.xyz * clouds.sun.xyz;
         let cool = clouds.shade.xyz * clouds.sky.xyz;
         lit = mix(cool, warm, sunward * sunward);
@@ -581,6 +736,19 @@ fn fragment_main(in: Varyings) -> Painted {
         let grazing = 1.0 - abs(dot(normal, direction));
         let rim = pow(clamp(facing * 0.5 + 0.5, 0.0, 1.0), 6.0) * grazing;
         lit = lit + clouds.sun.xyz * rim * 0.9;
+    }
+
+    if (mode >= 1.0) {
+        // **Light that went in the sunward side comes out of the thin parts.**
+        // Real cloud is lit from within, and a surface model without it reads
+        // as carved rather than as vapour. Rims and the edges of a heap glow,
+        // most when the sun is behind them, and every side gets a little.
+        //
+        // Density comes off the hit rather than from another field lookup.
+        let thin = 1.0 - found.density;
+        let behind = pow(clamp(dot(direction, toward_sun), 0.0, 1.0), 3.0);
+        let scatter = thin * (0.25 + 0.75 * behind) + 0.12;
+        lit = lit + clouds.colour.xyz * clouds.sun.xyz * scatter * 0.55;
     }
 
     // Storm grey, and a dark haze under the deck — which is what makes a storm

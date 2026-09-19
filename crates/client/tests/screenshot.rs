@@ -5350,6 +5350,98 @@ fn a_half_covered_sky_has_cloud_and_sky_in_it_rather_than_one_flat_fill() {
     );
 }
 
+/// The deck Weather tuned after the first look: coarser, calmer, cheaper.
+///
+/// Their numbers in `docs/engine-asks/tiamot_weather.md` are measured against
+/// this, so anything measured here has to use it to be comparable.
+fn tuned_deck() -> tiamot_core::atmosphere::CloudLayer {
+    tiamot_core::atmosphere::CloudLayer {
+        base: 400.0,
+        thickness: 110.0,
+        cell: 16.0,
+        detail: 2,
+        frequency: 1.0 / 500.0,
+        octaves: 2,
+        towers: 0.2,
+        drift: [1.5, 0.4],
+        evolve: 1.0 / 2400.0,
+        colour: [1.0; 3],
+        shade: [0.42, 0.44, 0.58],
+    }
+}
+
+#[test]
+#[ignore = "a measurement, not a gate; run with --ignored --nocapture"]
+fn how_long_the_deck_costs_from_three_views() {
+    // **The mod author's own harness, so the numbers can be compared.**
+    // `docs/engine-asks/tiamot_weather.md` reports the deck's cost over a bare
+    // sky from three views — level at the horizon, thirty degrees up, and from
+    // above the deck looking down — and sets an acceptance against them. This
+    // measures the same three.
+    //
+    // Under llvmpipe, so the absolute numbers are not theirs and cannot be.
+    // What carries across is the SHAPE: which view is worst, and whether a
+    // change moved it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    let deck = tuned_deck();
+    let state = tiamot_core::atmosphere::Clouds {
+        cover: 0.55,
+        darkness: 0.0,
+        base: None,
+        ease_ticks: 0,
+    };
+
+    // The deck sits at 400; the third view is above it looking down, which is
+    // the worst case because every ray crosses the whole deck.
+    let views: [(&str, f64, f32); 3] = [
+        ("level", 40.0, 0.0),
+        ("30 degrees up", 40.0, 0.52),
+        ("above the deck", 640.0, -0.6),
+    ];
+
+    for (label, height, pitch) in views {
+        let mut camera = Camera {
+            position: Position::from_world(24.0, height, 20.0),
+            ..Camera::default()
+        };
+        camera.look(0.0, pitch);
+
+        let time = |renderer: &mut Renderer, camera: &Camera| {
+            let _ = target.capture(renderer, camera);
+            let start = std::time::Instant::now();
+            for _ in 0..8 {
+                let _ = target.capture(renderer, camera);
+            }
+            start.elapsed().as_secs_f64() * 1000.0 / 8.0
+        };
+
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: None,
+            clouds: None,
+            quality: client::render::clouds::Quality::Normal,
+            seed: 4242,
+        });
+        let bare = time(&mut renderer, &camera);
+
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: Some(deck),
+            clouds: Some(state),
+            quality: client::render::clouds::Quality::Normal,
+            seed: 4242,
+        });
+        let with = time(&mut renderer, &camera);
+        println!(
+            "{label:>16}: bare {bare:6.2} ms, deck {with:6.2} ms, added {:6.2} ms",
+            with - bare
+        );
+    }
+}
+
 #[test]
 #[ignore = "a measurement, not a gate; run with --ignored --nocapture"]
 fn how_long_a_cloud_frame_takes() {
@@ -5488,19 +5580,11 @@ fn the_sky_is_a_gradient_and_the_horizon_still_matches_the_fog() {
 /// A deck shaped like the reference images: heaped, towering, drifting.
 fn cumulus() -> tiamot_core::atmosphere::CloudLayer {
     tiamot_core::atmosphere::CloudLayer {
-        base: 180.0,
-        thickness: 110.0,
-        cell: 6.0,
-        detail: 2,
-        frequency: 1.0 / 220.0,
-        octaves: 4,
-        // High, because the references' hero cloud is a tower that mushrooms
-        // out over its own waist — that is what `towers` drives.
-        towers: 0.55,
-        drift: [1.5, 0.4],
-        evolve: 1.0 / 2400.0,
-        colour: [1.0; 3],
-        shade: [0.42, 0.44, 0.58],
+        // Weather's own tuned deck, with more towers: the mod chose coarse and
+        // calm for cost, and the golden hour is where the towers earn their
+        // keep.
+        towers: 0.45,
+        ..tuned_deck()
     }
 }
 
@@ -5542,11 +5626,16 @@ fn dump_the_golden_hour() {
 
     // Looking a little above the horizon, along the sun, as the references are
     // framed. Straight up would show one cloud and no horizon.
+    // **The deck Weather actually ships**, at the height it ships it, so what
+    // this writes is what a player sees rather than a fixture tuned to
+    // flatter. A shallow look at a low deck grazes along its flat base for
+    // hundreds of blocks and smears; a deck at 400 seen from the ground is
+    // the real geometry.
     let mut camera = Camera {
-        position: Position::from_world(24.0, 24.0, 20.0),
+        position: Position::from_world(24.0, 40.0, 20.0),
         ..Camera::default()
     };
-    camera.look(0.0, 0.16);
+    camera.look(0.0, 0.30);
 
     let shots: [(&str, f32, f32); 3] = [
         ("golden-hour-cover55", 0.55, 0.0),
