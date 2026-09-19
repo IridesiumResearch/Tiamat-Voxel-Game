@@ -1,0 +1,160 @@
+diff --git a/crates/client/src/render/clouds.wgsl b/crates/client/src/render/clouds.wgsl
+index b3f209c..15aade5 100644
+--- a/crates/client/src/render/clouds.wgsl
++++ b/crates/client/src/render/clouds.wgsl
+@@ -148,12 +148,15 @@ fn fbm(p: vec2<f32>, octaves: i32, seed: f32) -> f32 {
+ struct Column {
+     lower: vec2<f32>,
+     upper: vec2<f32>,
++    // PROTOTYPE: how deep into a heap this column is, 0 at its rim, 1 at its crown.
++    density: f32,
+ };
+ 
+ fn empty_column() -> Column {
+     var column: Column;
+     column.lower = vec2<f32>(0.0, -1.0);
+     column.upper = vec2<f32>(0.0, -1.0);
++    column.density = 0.0;
+     return column;
+ }
+ 
+@@ -179,52 +182,61 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
+     let evolve = clouds.motion.z * seconds;
+     let at = (cell_xz - drift) * frequency;
+ 
+-    // **Widened before it is compared.** Averaged octaves pile up around the
+-    // middle — three of them leave a field of roughly 0.5 give or take 0.19 —
+-    // so a threshold read straight off 0..1 does almost nothing for most of
+-    // its range and then everything at once. Half a sky of cloud came out as
+-    // a solid ceiling, which `a_half_covered_sky_has_cloud_and_sky_in_it`
+-    // caught. Spreading the field first is what makes `cover` mean what it
+-    // says.
+-    let raw = fbm(at + vec2<f32>(evolve, -evolve), octaves, seed);
+-    let stem = clamp((raw - 0.5) * 2.0 + 0.5, 0.0, 1.0);
+-    // Cover raises the water line rather than scaling the field, so a clear
+-    // sky is a few islands and an overcast one is a ceiling with holes. The
+-    // low end goes BELOW zero: overcast should leave almost nothing, and a
+-    // threshold of zero still lets the field's floor through.
++    // PROTOTYPE: HEAPS, not a thresholded field. Points scattered on a grid,
++    // one heap each, kept or dropped by the coverage field AT THE POINT so
++    // every heap is whole and round. Each heap is a hemisphere over a flat
++    // base; a second, smaller scale of puffs rides on the crowns.
+     let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
+-    if (stem <= threshold) {
++    let drifted = at + vec2<f32>(evolve, -evolve);
++    let spacing = 0.42;
++    let home = floor(drifted / spacing);
++    var crown = 0.0;
++    var tall = 0.0;
++    for (var j = -1; j <= 1; j = j + 1) {
++        for (var i = -1; i <= 1; i = i + 1) {
++            let id = home + vec2<f32>(f32(i), f32(j));
++            let jitter = vec2<f32>(hash2(id, seed + 3.0), hash2(id, seed + 5.0));
++            let point = (id + 0.15 + 0.7 * jitter) * spacing;
++            let raw = value2(point * 1.3, seed);
++            let stem = clamp((raw - 0.5) * 2.0 + 0.5, 0.0, 1.0);
++            if (stem <= threshold) {
++                continue;
++            }
++            let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
++            let radius = spacing * (0.35 + 0.45 * sqrt(strength));
++            let d = length(drifted - point) / radius;
++            if (d < 1.0) {
++                let h = sqrt(1.0 - d * d);
++                if (h > crown) {
++                    crown = h;
++                    let towering = hash2(id, seed + 9.0);
++                    tall = 0.45 + 0.55 * strength + towers * select(0.0, 1.2, towering > 0.7);
++                }
++            }
++        }
++    }
++    if (crown <= 0.0) {
+         return empty_column();
+     }
+-    let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
+-
+-    var column: Column;
+-    // The lower lobe is most of the deck. Its underside is not the flat base:
+-    // it lifts where the field is weak, which is what gives the stepped,
+-    // blocky undersides the references are full of.
+-    let lift = thickness * 0.18 * (1.0 - strength);
+-    let rind = clouds.shade.w * detail_mix
+-        * (fbm(at * 6.0 + vec2<f32>(11.0, 7.0), 2, seed + 91.0) * 2.0 - 1.0);
+-    column.lower = vec2<f32>(
+-        base + lift - rind,
+-        base + thickness * (0.25 + 0.55 * strength) + rind,
+-    );
+-
+-    // The anvil. Driven by a LOWER-frequency field than the stem, so it
+-    // spreads wider than what holds it up — which is what "mushrooms out over
+-    // its waist" means, and the one thing a single interval cannot do.
+-    if (towers > 0.0) {
+-        let spread = fbm(at * 0.45 + vec2<f32>(3.0, -5.0), max(octaves - 1, 1), seed + 53.0);
+-        let lobe = clamp((spread - 0.5) * 2.2, 0.0, 1.0) * towers;
+-        if (lobe > 0.02) {
+-            let gap = thickness * 0.06 * (1.0 - lobe);
+-            let floor_y = column.lower.y + gap;
+-            column.upper = vec2<f32>(
+-                floor_y - rind,
+-                floor_y + thickness * lobe * 1.4 + rind,
+-            );
++    // The cauliflower: small puffs on the crown, only where the heap is.
++    let small = spacing / 4.0;
++    let cell2 = floor(drifted / small);
++    var puff = 0.0;
++    if (detail_mix > 0.0) {
++    for (var j = -1; j <= 1; j = j + 1) {
++        for (var i = -1; i <= 1; i = i + 1) {
++            let id = cell2 + vec2<f32>(f32(i), f32(j));
++            let point = (id + 0.2 + 0.6 * vec2<f32>(hash2(id, seed + 21.0), hash2(id, seed + 23.0))) * small;
++            let d = length(drifted - point) / (small * 0.75);
++            puff = max(puff, sqrt(clamp(1.0 - d * d, 0.0, 1.0)));
+         }
+     }
++    }
++    var column: Column;
++    let top = base + thickness * 0.55 * tall * (crown + 0.22 * puff * detail_mix * crown);
++    column.lower = vec2<f32>(base, max(top, base + clouds.colour.w));
++    column.upper = vec2<f32>(0.0, -1.0);
++    column.density = crown;
+     return column;
+ }
+ 
+@@ -381,7 +393,7 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
+     // drawn — only aliased, because neighbouring columns differ by a whole
+     // cell wherever the rind bites.
+     let pixels = max(base_cell / max(t_enter * clouds.view.x, 0.000001), 0.0001);
+-    let steps = clamp(3.0 / pixels, 1.0, 32.0);
++    let steps = clamp(6.0 / pixels, 1.0, 32.0);
+     let cell = base_cell * exp2(ceil(log2(steps)));
+     out.cell = cell;
+ 
+@@ -565,7 +577,8 @@ fn fragment_main(in: Varyings) -> Painted {
+         // cloud BASES, and the violet-grey belongs to the clouds far from it.
+         // A model that shaded "up is lit, down is shaded" would get the one
+         // hour this is judged on exactly backwards.
+-        let sunward = clamp(facing * 0.5 + 0.5, 0.0, 1.0);
++        // PROTOTYPE: wrapped, so light reaches round the heap instead of stopping at its edge.
++        let sunward = clamp((facing + 0.6) / 1.6, 0.0, 1.0);
+         let warm = clouds.colour.xyz * clouds.sun.xyz;
+         let cool = clouds.shade.xyz * clouds.sky.xyz;
+         lit = mix(cool, warm, sunward * sunward);
+@@ -583,6 +596,17 @@ fn fragment_main(in: Varyings) -> Painted {
+         lit = lit + clouds.sun.xyz * rim * 0.9;
+     }
+ 
++    if (mode >= 1.0) {
++        // PROTOTYPE: fake subsurface scattering. Light that went IN through the
++        // sunward side comes out of the thin parts: rims and the edges of a heap
++        // glow when the sun is behind them, and every side gets some of it.
++        let column = column_at(floor(found.position.xz / found.cell) * found.cell + found.cell * 0.5, 0.0);
++        let thin = 1.0 - column.density;
++        let behind = pow(clamp(dot(direction, toward_sun), 0.0, 1.0), 3.0);
++        let scatter = thin * (0.25 + 0.75 * behind) + 0.12;
++        lit = lit + clouds.colour.xyz * clouds.sun.xyz * scatter * 0.55;
++    }
++
+     // Storm grey, and a dark haze under the deck — which is what makes a storm
+     // read from outside it. Rain seen at a distance is a curtain kilometres
+     // away, and precipitation spawns around the player's own camera.
