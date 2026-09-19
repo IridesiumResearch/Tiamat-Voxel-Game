@@ -3376,6 +3376,24 @@ impl ScriptVm for MluaVm {
         let _ = per_player.set(id, value);
     }
 
+    fn registered_models(&self) -> Vec<crate::model::ModelFile> {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.models") else {
+            return Vec::new();
+        };
+        registry
+            .sequence_values::<Table>()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                Some(crate::model::ModelFile {
+                    id: entry.get("id").ok()?,
+                    mod_id: entry.get("mod_id").ok()?,
+                    file: entry.get("file").ok()?,
+                    scale: entry.get("scale").ok().unwrap_or(1.0),
+                })
+            })
+            .collect()
+    }
+
     /// The cloud deck a mod registered, if one did.
     ///
     /// Lowest mod id wins where several register one, the rule
@@ -4397,6 +4415,94 @@ impl MluaVm {
     /// Its own method for the reason `install_font` and `install_picture`
     /// are: `install_sound` sat on clippy's hundred-line ceiling, and the
     /// thing that pushed it over was this one growing a second call shape.
+    /// `game.register_model`, Life mod's ask 0.
+    ///
+    /// # Why an entity could not look like anything
+    ///
+    /// `spawn_entity{ model = ... }` has always taken any string, and the
+    /// client draws exactly one: its own humanoid. Every other name draws
+    /// nothing — deliberately, because drawing a humanoid for an unknown name
+    /// would put a person where a mod meant a crate. So until a mod could push
+    /// one, every animal in every world was a white person with a name over
+    /// it.
+    ///
+    /// The `.glb` travels by hash like a texture and is parsed on the client
+    /// under the caps and the panic isolation `model::ingest` already has.
+    fn install_model(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        let owner = mod_id.to_owned();
+        let register = self
+            .lua
+            .create_function(move |lua, spec: Table| {
+                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: registration is closed"
+                    )));
+                }
+                for pair in spec.pairs::<Value, Value>() {
+                    let (key, _) = pair?;
+                    if let Value::String(name) = key {
+                        let name = name.to_string_lossy();
+                        if !MODEL_FIELDS.contains(&name.as_ref()) {
+                            return Err(mlua::Error::external(format!(
+                                "register_model: unknown field `{name}`"
+                            )));
+                        }
+                    }
+                }
+                let id: String = spec.get("id").map_err(|_| {
+                    mlua::Error::external("register_model: missing required field `id`")
+                })?;
+                let id = if id.contains(':') {
+                    id
+                } else {
+                    qualify_id(&owner, &id).map_err(mlua::Error::external)?
+                };
+                let file: String = spec.get("file").map_err(|_| {
+                    mlua::Error::external("register_model: missing required field `file`")
+                })?;
+                // **Clamped, not refused.** A scale a mod got wrong should
+                // cost it the size, not its animal — and the protocol refuses
+                // anything out of range on the way in, because a server's word
+                // for it is not a mod's.
+                let asked = spec.get::<Option<f32>>("scale")?.unwrap_or(1.0);
+                let scale = if asked.is_finite() {
+                    asked.clamp(crate::model::MIN_SCALE, crate::model::MAX_SCALE)
+                } else {
+                    1.0
+                };
+
+                let models: Table = lua.named_registry_value("tiamot.models")?;
+                // **Last registration of an id wins**, the rule a sound and a
+                // picture follow: a mod reloading its own model should replace
+                // it rather than double it.
+                for existing in models.clone().sequence_values::<Table>().flatten() {
+                    if existing.get::<String>("id").ok().as_deref() == Some(id.as_str()) {
+                        existing.set("file", file)?;
+                        existing.set("scale", scale)?;
+                        return Ok(());
+                    }
+                }
+                if models.raw_len() >= crate::model::MAX_MODELS {
+                    return Err(mlua::Error::external(format!(
+                        "register_model: a server may push at most {} models",
+                        crate::model::MAX_MODELS
+                    )));
+                }
+                let entry = lua.create_table()?;
+                entry.set("id", id)?;
+                entry.set("mod_id", owner.clone())?;
+                entry.set("file", file)?;
+                entry.set("scale", scale)?;
+                models.push(entry)?;
+                Ok(())
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_model", register)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     /// `game.register_sky` and `game.register_clouds` — what is overhead.
     ///
     /// The two together for the reason `install_hud_script` is its own method:
@@ -4705,6 +4811,7 @@ impl MluaVm {
             "tiamot.fluids",
             "tiamot.skies",
             "tiamot.clouds",
+            "tiamot.models",
         ] {
             let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
             self.lua
@@ -4993,6 +5100,7 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
 
         self.install_sky(mod_id, game)?;
+        self.install_model(mod_id, game)?;
 
         let owner = mod_id.to_owned();
         let key = Self::tick_key(mod_id);
@@ -8437,6 +8545,9 @@ const GRADE_MIN_GAMMA: f32 = 0.1;
 /// added: no day, no sun, no shadows, and every graphics setting looking the
 /// same because there was nothing lit to tell them apart.
 const SKY_FIELDS: [&str; 3] = ["day_length_ticks", "keyframes", "start_time"];
+
+/// Fields `register_model` accepts.
+const MODEL_FIELDS: [&str; 3] = ["id", "file", "scale"];
 
 /// Fields `register_clouds` accepts.
 ///

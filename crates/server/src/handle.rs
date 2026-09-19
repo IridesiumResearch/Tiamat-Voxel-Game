@@ -1807,6 +1807,35 @@ impl ServerHandle {
             .collect();
         info!(pictures = picture_table.len(), "picture table built");
 
+        // And the models: an entity that names one is drawn as it, and an
+        // entity that names one nobody pushed is drawn as nothing — which is
+        // what every animal in every world was until a mod could push one.
+        let model_table: Vec<tiamot_core::proto::ModelDef> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_models())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| {
+                let file = content_index.hash_of(&model.mod_id, &model.file);
+                if file.is_none() {
+                    error!(
+                        mod_id = %model.mod_id,
+                        path = %model.file,
+                        model = %model.id,
+                        "model declares a file that is not in the mod directory; clients will \
+                         draw nothing for entities that name it"
+                    );
+                }
+                tiamot_core::proto::ModelDef {
+                    id: model.id,
+                    mod_id: model.mod_id,
+                    file,
+                    scale: model.scale,
+                }
+            })
+            .collect();
+        info!(models = model_table.len(), "model table built");
+
         // The engine's own screens, wearing a mod's look (charter rule 1).
         let mut font_table = font_table;
         let mut picture_table = picture_table;
@@ -2330,6 +2359,7 @@ impl ServerHandle {
             sound_table,
             font_table,
             picture_table,
+            model_table,
             theme,
             cloud_layer,
             sound_bindings,

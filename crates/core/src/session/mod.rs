@@ -332,6 +332,9 @@ pub struct JoinContext<'a> {
     /// Every picture a mod registered, in load order, so the client fetches
     /// them before a HUD script names one. See [`crate::proto::PictureDef`].
     pub pictures: &'a [crate::proto::PictureDef],
+    /// Every model a mod registered, so a client can draw an entity that
+    /// names one. See [`crate::proto::ModelDef`].
+    pub models: &'a [crate::proto::ModelDef],
     /// How the loaded mods want the engine's own screens to look, or `None`
     /// for a mod set that says nothing — which is the client's own look.
     /// See [`crate::proto::ThemeDef`] and [`crate::modload::Theme`].
@@ -791,93 +794,7 @@ impl Session {
         // exists, and the table tells it which material wants which piece of
         // it, so the reverse order would have it looking up hashes it has not
         // been told about yet.
-        Response {
-            send: vec![
-                ServerMessage::ModManifest {
-                    mods: context.mods.to_vec(),
-                    set_fingerprint: context.mod_set_fingerprint,
-                },
-                ServerMessage::MaterialTable {
-                    materials: context.materials.to_vec(),
-                },
-                ServerMessage::ToolTable {
-                    tools: context.tools.to_vec(),
-                },
-                ServerMessage::FluidTable {
-                    fluids: context.fluids.to_vec(),
-                },
-                // The sky travels with the other registration tables rather
-                // than after the join, so a client has it before the first
-                // frame it draws. Arriving later would show one frame of
-                // whatever the client guessed.
-                ServerMessage::SkyTable {
-                    day_length_ticks: context.sky.0,
-                    keyframes: context.sky.1.to_vec(),
-                },
-                // Last of the registration tables, and appended here rather
-                // than slotted in beside the tools it resembles: the join
-                // sequence is pinned by tests on both sides of the wire, and
-                // inserting into the middle of it renumbers every message after
-                // the insertion point for no benefit.
-                ServerMessage::ActionTable {
-                    actions: context.actions.to_vec(),
-                },
-                // And the sounds, last: a client fetches the files by hash
-                // afterwards, so this is the message that tells it what to ask
-                // for.
-                ServerMessage::SoundTable {
-                    sounds: context.sounds.to_vec(),
-                },
-                // And the HUD scripts, after every table a HUD reads. A script
-                // asking what the player is carrying before the material table
-                // had arrived would draw a hotbar of numbers — and it is only
-                // one message later, so the ordering is free.
-                ServerMessage::HudScripts {
-                    scripts: context.hud_scripts.to_vec(),
-                },
-                // After the sound table it refers to, so a client never holds a
-                // binding to a sound it has not been told exists.
-                ServerMessage::SoundBindings {
-                    bindings: context.sound_bindings.to_vec(),
-                },
-                // And the fonts. Last of the tables, and fetched by hash after
-                // the join like the sounds: a world whose lettering has not
-                // arrived draws in the client's own font, which is a world
-                // somebody can play. One that waited for a typeface is not.
-                ServerMessage::FontTable {
-                    fonts: context.fonts.to_vec(),
-                },
-                // And a mod's options last, for the reason the action table is
-                // near the end: the join sequence is pinned by tests on both
-                // sides of the wire, and appending is the only edit that does
-                // not renumber every message after it.
-                ServerMessage::ModSettings {
-                    settings: context.settings.to_vec(),
-                },
-                // And the pictures, appended for the same reason: fetched by
-                // hash after the join, so a HUD's first frame has asked for
-                // its art rather than found it never arrived.
-                ServerMessage::PictureTable {
-                    pictures: context.pictures.to_vec(),
-                },
-                // And the look, appended last for the same reason and sent
-                // AFTER both tables it names into: a client that applied a
-                // theme before the table carrying its frame arrived would ask
-                // for a picture id nothing answered to yet.
-                ServerMessage::Theme {
-                    theme: context.theme.cloned(),
-                },
-                // And the cloud deck, appended for the same reason. What a
-                // player is UNDER is latest state and rides the drain like
-                // the sky modifier; the deck itself is registration and comes
-                // once, here.
-                ServerMessage::CloudLayer {
-                    layer: context.cloud_layer,
-                },
-            ],
-            close: false,
-            action: Action::None,
-        }
+        join_burst(context)
     }
 
     fn handle_join(&mut self, context: &JoinContext<'_>) -> Response {
@@ -1036,6 +953,115 @@ impl Session {
     }
 }
 
+/// Everything a client is told the moment it authenticates.
+///
+/// # A table, not a procedure
+///
+/// `handle_auth` is a sequence of checks; this is a list of messages, and
+/// it grows every time the engine gains something a client has to be told
+/// about. Keeping them in one function meant every new table had to be paid
+/// for by shortening an unrelated check, which is the wrong thing to be
+/// optimising — and clippy's line ceiling was the thing asking.
+///
+/// **Order is load-bearing and pinned by tests on both sides of the wire**
+/// (`session`'s own index assertions and `bot/tests/join_flow.rs` by name).
+/// Appending is the only edit that does not renumber everything after it.
+fn join_burst(context: &JoinContext<'_>) -> Response {
+    Response {
+        send: vec![
+            ServerMessage::ModManifest {
+                mods: context.mods.to_vec(),
+                set_fingerprint: context.mod_set_fingerprint,
+            },
+            ServerMessage::MaterialTable {
+                materials: context.materials.to_vec(),
+            },
+            ServerMessage::ToolTable {
+                tools: context.tools.to_vec(),
+            },
+            ServerMessage::FluidTable {
+                fluids: context.fluids.to_vec(),
+            },
+            // The sky travels with the other registration tables rather
+            // than after the join, so a client has it before the first
+            // frame it draws. Arriving later would show one frame of
+            // whatever the client guessed.
+            ServerMessage::SkyTable {
+                day_length_ticks: context.sky.0,
+                keyframes: context.sky.1.to_vec(),
+            },
+            // Last of the registration tables, and appended here rather
+            // than slotted in beside the tools it resembles: the join
+            // sequence is pinned by tests on both sides of the wire, and
+            // inserting into the middle of it renumbers every message after
+            // the insertion point for no benefit.
+            ServerMessage::ActionTable {
+                actions: context.actions.to_vec(),
+            },
+            // And the sounds, last: a client fetches the files by hash
+            // afterwards, so this is the message that tells it what to ask
+            // for.
+            ServerMessage::SoundTable {
+                sounds: context.sounds.to_vec(),
+            },
+            // And the HUD scripts, after every table a HUD reads. A script
+            // asking what the player is carrying before the material table
+            // had arrived would draw a hotbar of numbers — and it is only
+            // one message later, so the ordering is free.
+            ServerMessage::HudScripts {
+                scripts: context.hud_scripts.to_vec(),
+            },
+            // After the sound table it refers to, so a client never holds a
+            // binding to a sound it has not been told exists.
+            ServerMessage::SoundBindings {
+                bindings: context.sound_bindings.to_vec(),
+            },
+            // And the fonts. Last of the tables, and fetched by hash after
+            // the join like the sounds: a world whose lettering has not
+            // arrived draws in the client's own font, which is a world
+            // somebody can play. One that waited for a typeface is not.
+            ServerMessage::FontTable {
+                fonts: context.fonts.to_vec(),
+            },
+            // And a mod's options last, for the reason the action table is
+            // near the end: the join sequence is pinned by tests on both
+            // sides of the wire, and appending is the only edit that does
+            // not renumber every message after it.
+            ServerMessage::ModSettings {
+                settings: context.settings.to_vec(),
+            },
+            // And the pictures, appended for the same reason: fetched by
+            // hash after the join, so a HUD's first frame has asked for
+            // its art rather than found it never arrived.
+            ServerMessage::PictureTable {
+                pictures: context.pictures.to_vec(),
+            },
+            // And the look, appended last for the same reason and sent
+            // AFTER both tables it names into: a client that applied a
+            // theme before the table carrying its frame arrived would ask
+            // for a picture id nothing answered to yet.
+            ServerMessage::Theme {
+                theme: context.theme.cloned(),
+            },
+            // And the cloud deck, appended for the same reason. What a
+            // player is UNDER is latest state and rides the drain like
+            // the sky modifier; the deck itself is registration and comes
+            // once, here.
+            ServerMessage::CloudLayer {
+                layer: context.cloud_layer,
+            },
+            // And the models, appended for the same reason: fetched by
+            // hash after the join, so an entity that names one is drawn as
+            // soon as its geometry lands rather than holding up the world.
+            ServerMessage::ModelTable {
+                models: context.models.to_vec(),
+            },
+        ],
+        close: false,
+        action: Action::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1050,6 +1076,7 @@ mod tests {
             cert_fingerprint: &FINGERPRINT,
             theme: None,
             cloud_layer: None,
+            models: &[],
             mods,
             mod_set_fingerprint: 0xCAFE,
             materials: &[],
@@ -1181,7 +1208,8 @@ mod tests {
         // not been told about.
         assert!(matches!(sent[14], ServerMessage::Theme { .. }));
         assert!(matches!(sent[15], ServerMessage::CloudLayer { .. }));
-        assert!(matches!(sent[16], ServerMessage::JoinWorld { .. }));
+        assert!(matches!(sent[16], ServerMessage::ModelTable { .. }));
+        assert!(matches!(sent[17], ServerMessage::JoinWorld { .. }));
     }
 
     #[test]

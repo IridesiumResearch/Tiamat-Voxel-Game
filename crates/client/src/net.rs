@@ -208,6 +208,20 @@ pub enum Event {
         values: tiamot_core::hud::Values,
     },
 
+    /// A model a mod pushed, parsed and ready to upload.
+    ///
+    /// One event per model rather than one for the table, for the reason a
+    /// HUD script has one each: the table names hashes and each file completes
+    /// when it completes.
+    Model {
+        /// The qualified id an entity names.
+        id: String,
+        /// Multiplies the model's own size.
+        scale: f32,
+        /// The geometry, its skeleton and its clips.
+        model: Box<tiamot_core::model::Model>,
+    },
+
     /// The cloud deck a mod registered, or `None` for a world with none.
     ///
     /// Registration state: one message in the join burst, like the sky's
@@ -1007,6 +1021,7 @@ async fn session(
     let mut awaited_pictures: Vec<tiamot_core::proto::ContentHash> = Vec::new();
     // Fonts a server registered, waiting for their files.
     let mut awaited_fonts: Vec<tiamot_core::proto::FontDef> = Vec::new();
+    let mut awaited_models: Vec<tiamot_core::proto::ModelDef> = Vec::new();
     send.impair(impairment);
 
     let _ = events.send(Event::Connected {
@@ -1326,6 +1341,14 @@ async fn session(
                         for font in awaited_fonts.iter().filter(|font| font.file == Some(hash)) {
                             offer_font(font, &cache, &events);
                         }
+
+                        // And a model, `filter` for the same reason: two mods
+                        // shipping the same `.glb` share one hash, and `find`
+                        // would draw one of their entities and leave the other
+                        // invisible.
+                        for model in awaited_models.iter().filter(|m| m.file == Some(hash)) {
+                            offer_model(model, &cache, &events);
+                        }
                     }
                     Ok(false) => {}
                     Err(reason) => {
@@ -1619,6 +1642,29 @@ async fn session(
                 }
             }
 
+            ServerMessage::ModelTable { models } => {
+                // The same pipeline as a font: by hash, after the join, and a
+                // client that already has the bytes asks for nothing. What is
+                // different is what the bytes are handed to — a glTF parser,
+                // on input a server chose, which is why `model::ingest` caps
+                // every count before it allocates and parses under
+                // `catch_unwind`.
+                let wanted: Vec<tiamot_core::proto::ContentHash> =
+                    models.iter().filter_map(|model| model.file).collect();
+                let missing = cache.missing(&wanted);
+                for model in &models {
+                    offer_model(model, &cache, &events);
+                }
+                awaited_models = models;
+                if !missing.is_empty()
+                    && let Err(err) = send
+                        .write(&ClientMessage::ContentRequest { hashes: missing })
+                        .await
+                {
+                    say(format!("could not ask for the models: {err}"));
+                }
+            }
+
             ServerMessage::CloudLayer { layer } => {
                 let _ = events.send(Event::CloudLayer(layer));
             }
@@ -1880,6 +1926,55 @@ fn offer_font(
     let _ = events.send(Event::Font {
         id: font.id.clone(),
         bytes,
+    });
+}
+
+/// Parses a mod's model, if its bytes have arrived.
+///
+/// Quiet when they have not: this is called both when the table names a hash
+/// and when that hash finishes downloading, and exactly one of those finds
+/// bytes.
+///
+/// Charter rule 14: server-pushed and hostile. `model::load_isolated` caps
+/// every count before it allocates and parses inside `catch_unwind`, and
+/// `fuzz/fuzz_targets/gltf_ingest.rs` drives the same entry point. A model
+/// that will not parse disables THAT model with a warning naming the mod, and
+/// entities using it draw nothing — which is what they did before it was
+/// pushed at all.
+fn offer_model(
+    model: &tiamot_core::proto::ModelDef,
+    cache: &ContentCache,
+    events: &mpsc::UnboundedSender<Event>,
+) {
+    let Some(hash) = model.file else {
+        // The server logged it; there is nothing to fetch.
+        return;
+    };
+    let Some(bytes) = cache.get(&hash) else {
+        return;
+    };
+    let id = model.id.clone();
+    let mod_id = model.mod_id.clone();
+    let scale = model.scale;
+    let events = events.clone();
+    // A real worker: parsing geometry is milliseconds, and this task is the
+    // network pump.
+    tokio::task::spawn_blocking(move || {
+        match tiamot_core::model::load_isolated(&bytes, &tiamot_core::model::Limits::default()) {
+            Ok(model) => {
+                let _ = events.send(Event::Model {
+                    id,
+                    scale,
+                    model: Box::new(model),
+                });
+            }
+            Err(err) => {
+                let _ = events.send(Event::Warning(format!(
+                    "`{mod_id}`'s model `{id}` would not load and nothing will be drawn for it: \
+                     {err}"
+                )));
+            }
+        }
     });
 }
 

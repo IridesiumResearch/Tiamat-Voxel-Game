@@ -138,6 +138,8 @@ pub struct Shared {
     pub font_table: Vec<tiamot_core::proto::FontDef>,
     /// The pictures the mods registered, sent on join.
     pub picture_table: Vec<tiamot_core::proto::PictureDef>,
+    /// Every model the loaded mods push. See [`tiamot_core::proto::ModelDef`].
+    pub model_table: Vec<tiamot_core::proto::ModelDef>,
     /// How the loaded mods want the engine's own screens to look, or `None`.
     pub theme: Option<tiamot_core::proto::ThemeDef>,
     /// The cloud deck a mod registered, or `None` for a world with none.
@@ -2806,6 +2808,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 sounds: &shared.sound_table,
                 fonts: &shared.font_table,
                 pictures: &shared.picture_table,
+                models: &shared.model_table,
                 theme: shared.theme.as_ref(),
                 cloud_layer: shared.cloud_layer,
                 hud_scripts: &shared.hud_scripts,
@@ -3328,6 +3331,7 @@ mod tests {
             sound_table: Vec::new(),
             font_table: Vec::new(),
             picture_table: Vec::new(),
+            model_table: Vec::new(),
             theme: None,
             cloud_layer: None,
             hud_scripts: Vec::new(),

@@ -195,6 +195,8 @@ struct Seen {
     cloud_layer: Option<Option<tiamot_core::atmosphere::CloudLayer>>,
     /// How much cloud this player was last told they are under.
     clouds: Option<tiamot_core::atmosphere::Clouds>,
+    /// Models that arrived and parsed: id, scale, vertices, clips.
+    models: Vec<(String, f32, usize, usize)>,
     hud_values: std::collections::BTreeMap<String, tiamot_core::hud::Values>,
     /// Which sound each named event plays, as the server last said.
     bindings: Vec<tiamot_core::proto::SoundBinding>,
@@ -225,6 +227,10 @@ impl Seen {
             | Event::Precipitation(_) => {}
             Event::HudReserve(reserve) => self.hud_reserve = Some(reserve),
             Event::Theme(theme) => self.theme = theme,
+            Event::Model { id, scale, model } => {
+                self.models
+                    .push((id, scale, model.vertices.len(), model.clips.len()));
+            }
             Event::CloudLayer(layer) => self.cloud_layer = Some(layer),
             Event::Clouds(clouds) => self.clouds = clouds,
             // A mod's font. Same reasoning as the picture above.
@@ -1185,4 +1191,85 @@ fn a_mods_cloud_deck_and_a_players_cover_both_reach_a_client() {
     let clouds = seen.clouds.expect("told a cover");
     assert!((clouds.cover - 0.55).abs() < 0.01);
     assert_eq!(clouds.ease_ticks, 600);
+}
+
+/// A mod directory whose one mod registers a model.
+fn modelled_mods(name: &str) -> PathBuf {
+    let mods = scratch(&format!("{name}-mods"));
+    let dir = mods.join("zoo");
+    std::fs::create_dir_all(dir.join("models")).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"zoo\"\nname = \"Zoo\"\nversion = \"1.0.0\"\n",
+    )
+    .expect("manifest");
+    // A real `.glb`, from the fuzz corpus: the engine's own humanoid exported.
+    // A fixture of made-up bytes would be indexed and then refused by the
+    // reader, which is a different test.
+    let glb = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/gltf_ingest/humanoid.glb");
+    std::fs::copy(&glb, dir.join("models/cow.glb")).expect("copy the glb");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+game.register_model{ id = "cow", file = "models/cow.glb", scale = 3.0 }
+"#,
+    )
+    .expect("init");
+    mods
+}
+
+#[test]
+fn a_mods_model_reaches_a_client_and_parses() {
+    // **Life mod's ask 0**: `spawn_entity{ model = ... }` took any string and
+    // the client drew exactly one, its own humanoid — so every animal in every
+    // world was a white person with a name over it.
+    //
+    // What is under test is the whole path a mod's geometry takes: registered
+    // in Lua, hashed at freeze, named in the join burst, fetched by hash, and
+    // parsed through the same reader and the same caps the engine's own rig
+    // goes through (charter rule 14).
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("model-world"),
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(modelled_mods("model")),
+        enabled_mods: None,
+        seed: Some(4242),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start");
+    let home = Home::new("model");
+    let mut connection = home.open(&server);
+    let mut seen = Seen::default();
+
+    assert!(
+        pump(&mut connection, &mut seen, |seen| !seen.models.is_empty()),
+        "the model never arrived; warnings={:?}",
+        seen.warnings
+    );
+
+    let (id, scale, vertices, clips) = seen.models[0].clone();
+    assert_eq!(
+        id, "zoo:cow",
+        "an unqualified id should be qualified against the mod that registered it"
+    );
+    assert!(
+        (scale - 3.0).abs() < 0.001,
+        "the scale did not survive the wire"
+    );
+    assert!(
+        vertices > 0,
+        "the model parsed to no geometry, so nothing would be drawn for it"
+    );
+    // The corpus file is the engine's rig, which is animated; a model with no
+    // clips is legal and draws rigid, so this asserts the CLIPS survived
+    // rather than that every model must have them.
+    assert!(clips > 0, "the clips did not survive the reader");
 }

@@ -195,6 +195,58 @@ impl Model {
     }
 }
 
+/// A model a mod asked the engine to push to clients.
+///
+/// The mod names a file; the server turns it into a content hash at freeze,
+/// exactly as it does a sound's or a font's. Nothing here is the geometry —
+/// the bytes travel through the content pipeline, and a mod that names a file
+/// it does not have gets a logged error and a client that draws nothing for
+/// that model.
+///
+/// # Why a mod needs this at all
+///
+/// `game.spawn_entity{ model = ... }` takes any string, and the client draws
+/// exactly one: its own humanoid. Every other name draws NOTHING, deliberately
+/// — "a server naming another is naming something it has not pushed yet, and
+/// drawing a humanoid for it would put a person where a mod meant a crate".
+/// So until a mod can push one, every animal in every world is a white person
+/// with a name over it. Life mod's ask 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelFile {
+    /// The qualified id an entity names, e.g. `"my_mod:cow"`.
+    pub id: String,
+    /// The mod that registered it, and whose directory `file` is relative to.
+    pub mod_id: String,
+    /// The file inside that mod's directory, e.g. `"models/cow.glb"`.
+    pub file: String,
+    /// Multiplies the model's own size.
+    ///
+    /// **A number rather than a re-export.** The reader takes model space in
+    /// cells, and a model built at one unit to the yard is a third the size it
+    /// should be; asking an author to re-export their art to fit the engine's
+    /// unit is asking them to keep two copies of it.
+    pub scale: f32,
+}
+
+/// The most models one server may push.
+///
+/// # Why a cap, and why this one
+///
+/// Every model is geometry held on the GPU for as long as the session lasts,
+/// and unlike a texture it carries a skeleton and its clips. Sixty-four is
+/// past what a game needs — the animals, the monsters and the props of a
+/// whole world — and far short of what would make a join a download.
+pub const MAX_MODELS: usize = 64;
+
+/// The largest a model may be scaled, and the smallest.
+///
+/// Generous both ways: a scale is a mod correcting its export's unit, and
+/// units differ by factors of a hundred in the wild. Bounded because it is
+/// multiplied into a vertex position a client draws.
+pub const MAX_SCALE: f32 = 64.0;
+/// See [`MAX_SCALE`].
+pub const MIN_SCALE: f32 = 0.01;
+
 /// What a model is allowed to be, before any of it is allocated.
 ///
 /// # Why these are a struct and not constants

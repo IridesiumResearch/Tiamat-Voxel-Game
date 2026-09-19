@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 64;
+pub const PROTOCOL_VERSION: u32 = 65;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -585,6 +585,27 @@ pub struct PictureDef {
     /// not in its directory — nothing is fetched and the HUD draws its
     /// "not arrived" box, which is the honest picture of the mistake.
     pub file: Option<ContentHash>,
+}
+
+/// A model a mod registered, as the client needs to see it.
+///
+/// The `.glb` travels through the content pipeline by hash like a texture, so
+/// a client that already has the bytes fetches nothing. **It is hostile input**
+/// (charter rule 14): a client parses geometry from servers it does not trust,
+/// which is why `crate::model::ingest` caps every count before it allocates,
+/// runs under `catch_unwind`, and has `fuzz/fuzz_targets/gltf_ingest.rs` on
+/// the same entry point.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelDef {
+    /// The qualified id an entity names, e.g. `"my_mod:cow"`.
+    pub id: String,
+    /// The mod that registered it, for attribution when it will not load.
+    pub mod_id: String,
+    /// The content hash of the `.glb`, or `None` if the mod named a file that
+    /// is not in its directory — the client draws nothing rather than guessing.
+    pub file: Option<ContentHash>,
+    /// Multiplies the model's own size. See [`crate::model::ModelFile::scale`].
+    pub scale: f32,
 }
 
 /// A sound a mod registered, as the client needs to see it.
@@ -2142,6 +2163,17 @@ pub enum ServerMessage {
         /// The state, or `None` for a clear sky.
         clouds: Option<crate::atmosphere::Clouds>,
     },
+    /// Every model a mod registered, so a client can draw an entity that names
+    /// one.
+    ///
+    /// **Appended at the end** (protocol v65). Sent in the join burst and
+    /// fetched by hash afterwards, like the fonts and the pictures: a world
+    /// whose animals have not arrived yet draws nothing where they are, which
+    /// is a world somebody can play. Bounded by [`crate::model::MAX_MODELS`].
+    ModelTable {
+        /// The models.
+        models: Vec<ModelDef>,
+    },
 }
 
 /// A mod's look, as the client is told about it.
@@ -2733,6 +2765,30 @@ fn check_theme(theme: Option<&ThemeDef>) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Models, checked as what a server sent (charter rule 14).
+///
+/// The BYTES are checked where they are parsed — `model::ingest` caps every
+/// count before allocating. This checks the table: how many, how long their
+/// names are, and that a scale is a number a vertex can be multiplied by.
+fn check_models(models: &[ModelDef]) -> Result<(), ProtocolError> {
+    check_len("models", models.len(), crate::model::MAX_MODELS)?;
+    for model in models {
+        check_len("model_id", model.id.len(), MAX_ID_BYTES)?;
+        check_len("model_mod_id", model.mod_id.len(), MAX_ID_BYTES)?;
+        if !model.scale.is_finite()
+            || model.scale < crate::model::MIN_SCALE
+            || model.scale > crate::model::MAX_SCALE
+        {
+            return Err(ProtocolError::FieldTooLarge {
+                field: "model_scale",
+                len: 0,
+                limit: 0,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn check_hud_scripts(scripts: &[HudScriptDef]) -> Result<(), ProtocolError> {
     check_len("hud_scripts", scripts.len(), MAX_HUD_SCRIPTS)?;
     for script in scripts {
@@ -3098,6 +3154,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::ActionTable { actions } => check_actions(actions)?,
         ServerMessage::SoundTable { sounds } => check_sounds(sounds)?,
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
+        ServerMessage::ModelTable { models } => check_models(models)?,
         ServerMessage::Theme { theme } => check_theme(theme.as_ref())?,
         ServerMessage::PictureTable { pictures } => check_pictures(pictures)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
@@ -4330,6 +4387,9 @@ mod tests {
         assert_eq!(layer[0], 49);
         let clouds = encode(&ServerMessage::Clouds { clouds: None }).expect("encode");
         assert_eq!(clouds[0], 50);
+        // Protocol v65: the models a mod pushed.
+        let models = encode(&ServerMessage::ModelTable { models: Vec::new() }).expect("encode");
+        assert_eq!(models[0], 51);
     }
 
     #[test]

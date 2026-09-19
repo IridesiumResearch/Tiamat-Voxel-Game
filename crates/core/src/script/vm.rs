@@ -1634,6 +1634,14 @@ pub trait ScriptVm: Sized {
     /// a rule that is arbitrary but fixed beats one that depends on load order.
     fn registered_sky(&self) -> Option<Sky>;
 
+    /// Every model a mod registered, in registration order.
+    ///
+    /// Empty is a world whose entities all use the engine's own rig, which is
+    /// every world written before `game.register_model` existed.
+    fn registered_models(&self) -> Vec<crate::model::ModelFile> {
+        Vec::new()
+    }
+
     /// The cloud deck a mod registered, if any.
     ///
     /// `None` is a world with no clouds, which is most of them. The same

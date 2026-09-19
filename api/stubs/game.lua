@@ -2002,6 +2002,48 @@ function game.register_hud_script(file) end
 ---@field file string Required. Path to the Lua file inside your mod directory.
 ---@field reserve number? Virtual pixels at the bottom of the canvas to keep the engine's sheets clear of. Default 0, clamped to 540.
 
+---Registers a model entities can be drawn as. Registration window only.
+---
+---**Until this existed every mob was a white person.**
+---`game.spawn_entity{ model = ... }` takes any string, and the client draws
+---exactly one: the engine's own humanoid. Every other name draws NOTHING —
+---deliberately, because drawing a humanoid for an unknown name would put a
+---person where you meant a crate.
+---
+---```lua
+---game.register_model{ id = "cow", file = "models/cow.glb", scale = 3.0 }
+---
+---game.spawn_entity{ model = "my_mod:cow", x = 10, y = 70, z = 4 }
+---```
+---
+---An unqualified `id` is qualified against your mod, as every other id here
+---is. The file must be a self-contained `.glb` — embedded binary, no external
+---`uri` — inside your mod's directory, and it travels to clients by hash like
+---a texture, so a client that already has it downloads nothing.
+---
+---**Clips are matched to the engine's animation tags by NAME**: `idle`,
+---`walk`, `run`, `swing`, `swim`, `sneak`. A tag with no clip falls back to
+---`idle`; a model with no clips at all is drawn rigid, which is right for a
+---crate. `scale` multiplies the model's own size, for art exported at one
+---unit to the yard rather than to the engine's cell.
+---
+---A model that will not parse disables THAT model, with a warning naming your
+---mod, and entities using it draw nothing. It is hostile input like every
+---pushed asset (charter rule 14): counts are capped before anything is
+---allocated and the parse is isolated, so a bad file cannot take the client
+---with it.
+---
+---At most 64 models per server.
+---
+---@param spec Tiamot.ModelSpec
+function game.register_model(spec) end
+
+---Fields accepted by `game.register_model`.
+---@class Tiamot.ModelSpec
+---@field id string Required. Unqualified means your own mod's namespace.
+---@field file string Required. A self-contained `.glb` inside your mod directory.
+---@field scale number? Multiplies the model's size. Default 1, from 0.01 to 64.
+
 ---Declares this world's cloud deck. Registration window only.
 ---
 ---**One deck per world**, and where several mods register one the lowest mod

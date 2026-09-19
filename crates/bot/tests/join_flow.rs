@@ -160,6 +160,9 @@ fn a_bot_completes_the_whole_join_flow() {
             // keyframes. What a player is UNDER rides the drain instead, so it
             // is not in the burst. Appended, as ever.
             "CloudLayer",
+            // Protocol v65: the models a mod pushed, fetched by hash after the
+            // join like the fonts. Appended, as ever.
+            "ModelTable",
             "JoinWorld",
         ];
         assert!(
@@ -564,6 +567,7 @@ fn describe(message: &ServerMessage) -> &'static str {
         ServerMessage::PictureTable { .. } => "PictureTable",
         ServerMessage::Theme { .. } => "Theme",
         ServerMessage::CloudLayer { .. } => "CloudLayer",
+        ServerMessage::ModelTable { .. } => "ModelTable",
         ServerMessage::JoinWorld { .. } => "JoinWorld",
         ServerMessage::Disconnect { .. } => "Disconnect",
         _ => "other",

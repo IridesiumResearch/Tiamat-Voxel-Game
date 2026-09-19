@@ -1011,6 +1011,16 @@ pub struct Renderer {
     /// chunks, after the body, so drawing them is an instance index rather than
     /// a second buffer and a second binding.
     entities_at: Vec<skinned::Figure>,
+    /// A pass per model a mod pushed, by qualified id.
+    ///
+    /// **Beside the humanoid rather than replacing it.** The player is always
+    /// the engine's rig and must stay LAST in its figure list, which is what
+    /// `draw_first` leaves out in first person; folding every model into one
+    /// list would put that invariant at the mercy of whichever mob spawned
+    /// next. A mod's model has no player in it and draws all of them.
+    models: std::collections::BTreeMap<String, skinned::Skinned>,
+    /// Where each of those models' entities are this frame.
+    model_figures: std::collections::BTreeMap<String, Vec<skinned::Figure>>,
     /// The outline pipeline, and the line segments it draws this frame.
     selection_pipeline: wgpu::RenderPipeline,
     /// The chunk-border overlay: the same line pipeline, its own buffer.
@@ -1162,6 +1172,8 @@ impl Renderer {
             drawn: 0,
             cast: 0,
             entities_at: Vec::new(),
+            models: std::collections::BTreeMap::new(),
+            model_figures: std::collections::BTreeMap::new(),
             hands_at: Vec::new(),
             // First person, no player figure, nothing behind it.
             body_at: None,
@@ -1274,6 +1286,50 @@ impl Renderer {
         } else {
             total
         }
+    }
+
+    /// Takes a model a mod pushed, ready for entities that name it.
+    ///
+    /// **The scale is baked into the vertices here**, once, rather than
+    /// carried to the shader: a model is uploaded when it arrives and drawn
+    /// every frame after, so a multiply per vertex at load is free and a
+    /// multiply per vertex per frame is not.
+    ///
+    /// Replacing a model that is already loaded drops the old one's buffers,
+    /// which is what a mod reloading its own art should do.
+    pub fn add_model(&mut self, id: &str, mut model: tiamot_core::model::Model, scale: f32) {
+        if (scale - 1.0).abs() > f32::EPSILON {
+            for vertex in &mut model.vertices {
+                for axis in &mut vertex.position {
+                    *axis *= scale;
+                }
+            }
+        }
+        self.models
+            .insert(id.to_owned(), skinned::Skinned::new(&self.gpu, model));
+    }
+
+    /// Whether a model of this id has arrived and been uploaded.
+    #[must_use]
+    pub fn has_model(&self, id: &str) -> bool {
+        self.models.contains_key(id)
+    }
+
+    /// Forgets every model a server pushed.
+    ///
+    /// A model belongs to the server that pushed it, the same rule a font
+    /// follows — see `fonts::Fonts::clear`.
+    pub fn clear_models(&mut self) {
+        self.models.clear();
+        self.model_figures.clear();
+    }
+
+    /// Where each mod model's entities are this frame, camera-relative.
+    pub fn set_model_figures(
+        &mut self,
+        figures: std::collections::BTreeMap<String, Vec<skinned::Figure>>,
+    ) {
+        self.model_figures = figures;
     }
 
     /// Where every entity in view is this frame, camera-relative, in blocks.
@@ -2763,6 +2819,11 @@ impl Renderer {
         let figures = std::mem::take(&mut self.entities_at);
         self.skinned.prepare(&self.gpu, &figures);
         self.entities_at = figures;
+        let posed = std::mem::take(&mut self.model_figures);
+        for (id, pass) in &mut self.models {
+            pass.prepare(&self.gpu, posed.get(id).map_or(&[][..], Vec::as_slice));
+        }
+        self.model_figures = posed;
 
         let mut encoder = self
             .gpu
@@ -2827,9 +2888,17 @@ impl Renderer {
             // Figures, in their own pipeline. After the terrain because they
             // are opaque and depth-tested either way, and before the fluid
             // because the fluid is blended and has to come last.
-            if self.skinned.drawn() > 0 {
+            let any_model = self.models.values().any(|model| model.drawn() > 0);
+            if self.skinned.drawn() > 0 || any_model {
                 pass.set_pipeline(pass_targets.skinned);
                 pass.set_bind_group(0, &self.bind_group, &[]);
+                // A mod's models first, then the engine's rig — the player is
+                // the LAST figure of the humanoid's list and `draw_first` is
+                // what leaves them out in first person, so nothing may be
+                // appended to it.
+                for model in self.models.values() {
+                    model.draw(&mut pass);
+                }
                 self.skinned
                     .draw_first(&mut pass, self.visible_figures(self.skinned.drawn()));
 

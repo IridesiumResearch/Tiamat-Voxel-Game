@@ -4521,6 +4521,7 @@ impl App {
             Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
             Event::Theme(theme) => self.theme = crate::theme::Theme::of(theme.as_ref()),
 
+            Event::Model { id, scale, model } => self.renderer.add_model(&id, *model, scale),
             Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
             // **Replaced, not merged.** The server sends a mod's whole set
             // each time it changes, so a value a mod stopped sending stops
