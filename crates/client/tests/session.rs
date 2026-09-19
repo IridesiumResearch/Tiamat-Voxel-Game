@@ -273,21 +273,6 @@ fn pixels_beyond(
     differing as f32 / counted.max(1) as f32
 }
 
-/// Whether a frame has ground in the bottom of it.
-///
-/// # It used to ask whether the frame varied at all
-///
-/// That worked while the sky was one flat colour: anything that was not a
-/// blank fill was a world. **The sky is drawn now** — a gradient deepening
-/// overhead, a glow around the sun — so a frame of nothing but sky varies
-/// comfortably more than the old threshold, and the counter-example this
-/// helper exists for stopped being able to fail. Caught by CI's macOS runner,
-/// which is the only one with an adapter real enough to run these.
-///
-/// So it asks the question the assertion actually means: the sky is BLUER
-/// than it is red, everywhere and at every height, because the zenith is the
-/// horizon's own colour scaled rather than mixed towards something else.
-/// Ground is not. The bottom of the frame is where ground is if there is any.
 /// Whether a frame has anything in it but a wash.
 ///
 /// **Colour is not available as a discriminator**, which two attempts proved:
@@ -374,49 +359,46 @@ fn singleplayer_joins_its_own_server_and_draws_the_world() {
 
     let target = Offscreen::new(app.renderer().gpu(), WIDTH, HEIGHT);
     let camera = *app.camera();
+    // **Without the hand, in both frames.** The viewmodel is always on screen
+    // in first person, so it would make the two differ with no world at all.
+    app.renderer().set_hands(Vec::new());
     let frame = target.capture(app.renderer(), &camera).expect("capture");
 
-    // **The check checks itself first.** A "did the world draw" test that cannot
-    // fail is worse than none, and the heuristic this file used before was
-    // replaced precisely because it answered the wrong question — so the
-    // replacement is made to say NO about a frame that genuinely has no world in
-    // it, on this machine, this driver and this frame size, before it is trusted
-    // to say yes about one that does.
-    //
-    // **A renderer with no world in it**, rather than a camera pointed at the
-    // sky. Pointing up used to give the clear colour and nothing else, and
-    // that stopped being true the day the sky was DRAWN: a gradient deepening
-    // overhead with a glow around the sun varies far more than this heuristic's
-    // threshold, so the counter-example quietly became one that could not fail.
-    // CI's macOS runner caught it — the only leg with an adapter real enough
-    // to run this file.
-    //
-    // Emptying the renderer is the thing that cannot draw a world by
-    // construction, whichever way the camera is pointed and whatever the sky
-    // is doing.
-    // **And with no hand in it.** The viewmodel is always on screen in first
-    // person, so a frame of nothing but world is not a frame of nothing — and
-    // the counter-example is about whether the WORLD drew. Caught by this very
-    // assertion the day the hand landed, which is what it is for.
-    app.renderer().set_hands(Vec::new());
+    // **The world frame against the same renderer with the world taken out**
+    // — same camera, same sky, same sun. The question is whether the WORLD
+    // drew, and asking it of one frame's own variation stopped working the day
+    // the sky was painted: the cloud pass paints the gradient whether or not a
+    // deck is registered, and a sky-only frame read 9 of 255 across the frame
+    // on lavapipe and more than the old threshold of 16 on CI's macOS and
+    // Windows adapters, red there from `55607e7` on. Two frames that differ
+    // only by the world cannot be fooled by anything the sky does.
     app.renderer().clear();
     let sky_only = target.capture(app.renderer(), &camera).expect("capture");
+
+    // **The check checks itself first**: two captures of the empty renderer
+    // must agree, or "differs from the empty frame" could pass on a renderer
+    // whose output is simply not stable — dithering, a sun that moved.
+    let sky_again = target.capture(app.renderer(), &camera).expect("capture");
+    let noise = pixels_beyond(&sky_only, &sky_again, 16);
     assert!(
-        !shows_a_world(&sky_only),
-        "a renderer holding no chunks at all still reads as a world, so this test cannot fail \
-         and proves nothing"
+        noise < 0.001,
+        "two captures of an empty renderer differ in {:.2}% of pixels, so a difference from it \
+         proves nothing",
+        noise * 100.0
     );
 
+    let world = pixels_beyond(&frame, &sky_only, 16);
     assert!(
-        shows_a_world(&frame),
-        "the frame is entirely sky; the client joined but drew nothing. \
-         camera {:?} pitch {:.2} yaw {:.2}, {} meshed, {} pending, {} drawn, predicting {}",
+        world > 0.05,
+        "only {:.2}% of the frame differs from the same renderer with no world in it; the client \
+         joined but drew nothing. camera {:?} pitch {:.2} yaw {:.2}, {} meshed, {} pending, \
+         predicting {}",
+        world * 100.0,
         camera.position,
         camera.pitch,
         camera.yaw,
         app.meshed_chunks(),
         app.pending_chunks(),
-        app.renderer().drawn(),
         app.predicting(),
     );
 
