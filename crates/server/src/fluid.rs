@@ -553,12 +553,37 @@ impl Fluidics {
         // The layer goes in FIRST: `in_a_body` asks the world what a block
         // holds, and this chunk's own water is most of the answer for every
         // block in it.
-        let filled: Vec<BlockPos> = layer
-            .blocks()
-            .enumerate()
-            .filter(|(_, value)| !value.is_empty())
-            .map(|(index, _)| block_at(pos, index))
-            .collect();
+        // **A chunk uniformly full of one fluid in empty ground wakes
+        // nothing**, and it is provably nothing rather than nearly nothing.
+        //
+        // `in_a_body` needs `BODY_BLOCKS` brimming blocks that touch, which is
+        // three including the block itself — so two brimming neighbours are
+        // enough. In a chunk like this every block brims, and the fewest
+        // in-chunk neighbours any block has is three, at a corner. So every
+        // block in it is in a body, whatever is or is not loaded around it,
+        // and asking four thousand times costs up to thirteen world lookups
+        // each to arrive at an answer the shape of the chunk already gave.
+        //
+        // **This is the deep ocean.** A sea sixty to a hundred and twenty
+        // blocks deep puts hundreds of these chunks in a player's view, and
+        // the mod author measured the fluid tick at 45 to 100 ms of a 50 ms
+        // budget with 213 ticks over in ninety seconds. Every one of those
+        // blocks was found settled and dropped; finding it was the whole cost.
+        let settled = layer.uniformly_full().is_some()
+            && terrain
+                .resident(pos)
+                .and_then(tiamot_core::Chunk::is_uniform)
+                .is_some_and(|material| material == tiamot_core::MaterialId::AIR);
+        let filled: Vec<BlockPos> = if settled {
+            Vec::new()
+        } else {
+            layer
+                .blocks()
+                .enumerate()
+                .filter(|(_, value)| !value.is_empty())
+                .map(|(index, _)| block_at(pos, index))
+                .collect()
+        };
         self.layers.insert(pos, layer);
         let Self {
             layers,
@@ -917,6 +942,97 @@ mod tests {
                 .iter()
                 .any(|flow| flow.pos == block && flow.was.is_empty()),
             "the same write was reported twice"
+        );
+    }
+
+    #[test]
+    fn a_chunk_of_open_sea_wakes_nothing_and_a_falling_one_still_does() {
+        // **World mod ask 26, measured in their own world**: the deep ocean
+        // put everywhere ran 213 of 601 ticks over budget, with the fluid tick
+        // at 45 to 100 ms of a 50 ms budget. `chunk_loaded` walked every
+        // non-empty block asking whether it was part of a body — up to
+        // thirteen world lookups each, 4,096 times a chunk, for hundreds of
+        // chunks in a player's view. Every one was found settled and dropped;
+        // finding it was the whole cost.
+        //
+        // A chunk uniformly full of one fluid in empty ground cannot have a
+        // block that is not in a body: `in_a_body` needs two brimming
+        // neighbours and the fewest any block has in-chunk is three, at a
+        // corner. So it is skipped outright.
+        let mut fluids = Fluids::new();
+        let milk = fluids
+            .register(tiamot_core::fluid::Registered {
+                name: "test:sea".into(),
+                waterlogs_at: 14,
+                tick_rate: 1,
+                evaporates: 0,
+                color: [255, 255, 255],
+                material: tiamot_core::MaterialId(4),
+                opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+            })
+            .expect("register");
+
+        let full = Fluid::new(milk, MAX_VOLUME);
+        let sea = tiamot_core::fluid::FluidLayer::from_blocks(std::iter::repeat_n(
+            full,
+            tiamot_core::BLOCKS_PER_CHUNK,
+        ));
+        assert!(
+            sea.uniformly_full().is_some(),
+            "the fixture is meant to be a chunk of open sea"
+        );
+
+        // A real world, because the fast path is only sound when the TERRAIN
+        // is known to be empty: what cannot be read cannot be counted on, and
+        // an unloaded chunk is solid by Sub-Node Contract §4.2.
+        let dir = std::env::temp_dir().join("tiamot-fluid-open-sea");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("world.sqlite");
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let mut registry = tiamot_core::Registry::new();
+        let db = tiamot_core::persist::WorldDb::open(&path, &mut registry).expect("open");
+        let mut world = crate::world::World::open(db, 1).expect("world");
+        let pos = ChunkPos::new(0, 0, 0);
+        world
+            .chunk(tiamot_core::domain::OVERWORLD, pos, &mut crate::world::Air)
+            .expect("an empty chunk of terrain");
+
+        let mut fluidics = Fluidics::new(fluids);
+        fluidics.chunk_loaded(
+            pos,
+            sea.clone(),
+            &world.solid(tiamot_core::domain::OVERWORLD),
+        );
+        assert_eq!(
+            fluidics.active(),
+            0,
+            "a chunk of open sea woke the solver, which is the whole of ask 26"
+        );
+
+        // **Non-vacuous, and the property that must not be lost.** One block
+        // short of full is milk that was saved mid-flow, and it has to carry
+        // on flowing when it comes back — Sub-Node Contract §4.5. A fast path
+        // that skipped it would drain nothing and freeze a waterfall.
+        let mut falling = sea;
+        falling.set(
+            tiamot_core::coords::LocalBlock::new(3, 4, 5),
+            Fluid::new(milk, MAX_VOLUME - 1),
+        );
+        assert!(
+            falling.uniformly_full().is_none(),
+            "one block short of full is not a settled sea"
+        );
+        let mut fluidics = Fluidics::new(Fluids::new());
+        fluidics.chunk_loaded(
+            ChunkPos::new(1, 0, 0),
+            falling,
+            &crate::world::Solid::empty(),
+        );
+        assert!(
+            fluidics.active() > 0,
+            "milk saved mid-flow was not woken, so it would never settle"
         );
     }
 

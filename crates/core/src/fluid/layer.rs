@@ -54,6 +54,36 @@ impl FluidLayer {
         }
     }
 
+    /// The fluid this chunk is uniformly FULL of, if it is.
+    ///
+    /// # Why a scan and not a storage variant
+    ///
+    /// The note above says there is no uniform-and-full case "on purpose",
+    /// because a third variant costs a branch on every read. That still holds
+    /// — this is not one. It is a question asked ONCE, when a chunk loads, to
+    /// decide whether the solver has to look at the chunk at all.
+    ///
+    /// **A deep ocean made the question worth asking.** Waking a chunk walks
+    /// every non-empty block and asks whether it is part of a body, which is
+    /// up to thirteen world lookups each; a sea sixty to a hundred and twenty
+    /// blocks deep puts hundreds of such chunks in a player's view, and it was
+    /// measured at 45 to 100 ms of a 50 ms tick. Four thousand byte
+    /// comparisons to answer it is nothing beside that.
+    #[must_use]
+    pub fn uniformly_full(&self) -> Option<Fluid> {
+        let Storage::Dense { blocks, filled } = &self.storage else {
+            return None;
+        };
+        if *filled as usize != BLOCKS_PER_CHUNK {
+            return None;
+        }
+        let first = blocks[0];
+        if first.is_empty() || first.volume() < crate::UNITS_PER_BLOCK {
+            return None;
+        }
+        blocks.iter().all(|block| *block == first).then_some(first)
+    }
+
     /// What a chunk-local block holds.
     #[must_use]
     pub fn get(&self, local: LocalBlock) -> Fluid {
