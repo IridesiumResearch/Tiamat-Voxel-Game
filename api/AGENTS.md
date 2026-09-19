@@ -84,6 +84,19 @@ end end
 If you need a trig value, the engine has `game.heading(dx, dz)`. Do not reach
 for `math.atan`, `math.sin` or `^`.
 
+The same rule has a quieter form: **if the step already measured it, read it
+rather than re-derive it.** `game.entity` reports what the physics actually
+acted on this tick, and a mod's own reconstruction is not the same number:
+
+| Read this | Instead of | Because |
+|---|---|---|
+| `e.submerged` | probing the blocks round a body | a body's box is not a block, and the engine's answer is the one that moved it |
+| `e.fell` | watching `velocity.y` for a landing | vertical speed is clamped at terminal velocity, so a fall of forty blocks and one of four hundred land at the same number — and water slows a body before it touches down |
+| `e.facing` | `math.sin(e.yaw)` | libm, so two servers throw the same item to different places |
+
+`fell` is blocks, and it is set on the one tick a body lands and zero on every
+other, so a fall rule is one `if` in a tick hook with nothing to remember.
+
 ### 2. Quantities are integer units, 27 to a block
 
 A block is 3x3x3 sub-nodes. Every inventory quantity, every drop, every cost is
@@ -120,6 +133,14 @@ cell, what it is made of and what is in the hand, `game.get_block` works inside
 it, and returning `""` says you handled it. Return `nil` for blocks that are not
 yours, so the next mod — and in the end the engine's own "nothing selected"
 warning — gets its turn.
+
+**Between events, `game.looking_at(uuid)` says what a player's crosshair is
+on** — the same `{ x, y, z, domain, material }` a use event carries, plus the
+face. Use it when you need the answer *now* rather than when somebody pressed
+something: a label under the crosshair, a key bound to "interact with what I am
+pointing at". It casts the engine's own ray, bounded by the player's reach;
+walking one in Lua from `game.entity(body).facing` is per-sample work at the
+wrong altitude, and the engine already has the traversal.
 
 **A HUD script's pictures must be registered: `game.register_picture{ file }`.**
 A dialog's tree is its own manifest and its pictures are fetched when it

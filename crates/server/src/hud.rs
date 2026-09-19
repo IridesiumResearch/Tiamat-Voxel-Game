@@ -43,4 +43,22 @@ impl tiamot_core::hud::Access for Shared {
         self.endpoint.set_hud_values(&uuid, mod_id, values);
         true
     }
+
+    fn is_operator(&self, player: [u8; 32]) -> bool {
+        // The engine's own list, which is the whole point: a mod keeping a
+        // second one is a mod that will disagree with the server one day.
+        self.endpoint.is_operator(&PlayerUuid::from_bytes(player))
+    }
+
+    fn chat_to(&self, player: [u8; 32], text: &str) -> bool {
+        let uuid = PlayerUuid::from_bytes(player);
+        if !self.endpoint.is_online(&uuid) {
+            return false;
+        }
+        // The same queue a refusal goes out on: bounded, drained on that
+        // player's own connection task, and dropped past the cap rather than
+        // allowed to grow for a client that reads slower than a mod writes.
+        self.endpoint.tell(&uuid, text.to_owned());
+        true
+    }
 }

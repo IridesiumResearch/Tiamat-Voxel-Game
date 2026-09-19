@@ -69,6 +69,14 @@ pub struct Lease {
     /// through it. Read under the lease, which is the order the tick already
     /// takes them in.
     fluid: Option<Arc<std::sync::RwLock<crate::fluid::Ponds>>>,
+    /// The players' authoritative bodies, for `looking_at` to find an eye and
+    /// the direction it is pointing.
+    ///
+    /// **These and not the mirrors in the entity store**, for the reason
+    /// `ent::Access::move_player` gives: the mirror is a copy the tick
+    /// overwrites, and its `pitch` is the drawn figure's rather than the
+    /// camera's. The body carries `look` as the wire sent it.
+    bodies: Option<Arc<crate::transport::PlayerBodies>>,
 }
 
 impl Default for Lease {
@@ -86,6 +94,7 @@ impl Lease {
             allowance: Arc::new(std::sync::atomic::AtomicU32::new(path::TICK_BUDGET)),
             passable: Arc::new(Vec::new()),
             fluid: None,
+            bodies: None,
         }
     }
 
@@ -101,6 +110,17 @@ impl Lease {
         passable.sort_unstable();
         self.passable = Arc::new(passable);
         self.fluid = Some(fluid);
+        self
+    }
+
+    /// The bodies `looking_at` casts from.
+    ///
+    /// Set once at startup, before [`Self::handle`] is taken, like
+    /// [`Self::with_terrain`]. A lease without them answers `None` to every
+    /// `looking_at`, which is what a test with no players should hear.
+    #[must_use]
+    pub fn with_players(mut self, bodies: Arc<crate::transport::PlayerBodies>) -> Self {
+        self.bodies = Some(bodies);
         self
     }
 
@@ -124,6 +144,7 @@ impl Lease {
             allowance: Arc::clone(&self.allowance),
             passable: Arc::clone(&self.passable),
             fluid: self.fluid.clone(),
+            bodies: self.bodies.clone(),
         }
     }
 
@@ -168,6 +189,7 @@ pub struct Shared {
     allowance: Arc<std::sync::atomic::AtomicU32>,
     passable: Arc<Vec<u16>>,
     fluid: Option<Arc<std::sync::RwLock<crate::fluid::Ponds>>>,
+    bodies: Option<Arc<crate::transport::PlayerBodies>>,
 }
 
 impl Shared {
@@ -362,6 +384,83 @@ impl sight::Access for Shared {
         }
         None
     }
+
+    fn looking_at(&self, uuid: [u8; 32]) -> Option<sight::Looked> {
+        let bodies = self.bodies.as_ref()?;
+        // The body first, and the lock dropped before the world's: the tick
+        // takes them in this order too, and a mod call that took them the other
+        // way round would be the one ordering that can deadlock.
+        let (domain, origin, eye, direction) = {
+            let bodies = bodies.lock().ok()?;
+            let player = bodies.get(&tiamot_core::PlayerUuid::from_bytes(uuid))?;
+            (
+                player.domain.clone(),
+                player.origin,
+                player.body.eye(),
+                look_direction(player.look),
+            )
+        };
+
+        let slot = self.slot.lock().ok()?;
+        let world = slot.as_ref()?;
+        // **Not `.passing(...)`.** A tuft of grass is passable to a body and
+        // is still something you can point at and dig, so targeting reads the
+        // terrain as it is rather than as a walk through it does.
+        let terrain = world.solid(&domain);
+        let voxels = tiamot_core::phys::Voxels::new(&terrain, origin);
+        let hit =
+            tiamot_core::phys::ray::cast(&voxels, eye, direction, tiamot_core::phys::ray::REACH)?;
+
+        // The hit is in the body's own chunk frame (charter rule 7); everything
+        // a mod speaks is absolute. Getting this conversion wrong is how a mod
+        // acts on a block a chunk away, so it is one named step.
+        let corner = tiamot_core::BlockPos::from_chunk_corner(origin);
+        let per = tiamot_core::SUBNODES_PER_AXIS as i32;
+        let cell = tiamot_core::SubNodePos::new(
+            corner.x * per + hit.cell[0],
+            corner.y * per + hit.cell[1],
+            corner.z * per + hit.cell[2],
+        );
+        // Resident only, as `block_at` is: a ray that left the loaded world
+        // found nothing, rather than making the server generate a chunk from
+        // inside a mod call.
+        let material = terrain
+            .resident(cell.chunk())
+            .and_then(|chunk| chunk.get_subnode(cell))?;
+        Some(sight::Looked {
+            domain,
+            cell,
+            material,
+            face: hit.normal,
+        })
+    }
+}
+
+/// The unit vector a player's `look` points along.
+///
+/// **The camera's yaw, not the drawn figure's.** A body counts yaw the other
+/// way round and `ent::figure_yaw` converts between them; casting from the
+/// converted angle would put the ray at the mirror image of where the player is
+/// looking, which is the mistake `figure_yaw` was written to fix in the other
+/// direction and would be invisible at yaw zero.
+///
+/// `detgen::trig` and not `f32::sin_cos`: a mod acts on this answer, so it
+/// becomes world state, and charter rule 4 does not exempt it the way it
+/// exempts the client's own camera.
+fn look_direction(look: [f32; 2]) -> [f32; 3] {
+    use tiamot_core::detgen::trig;
+    let turn = std::f32::consts::TAU;
+    let yaw = look[0] * turn;
+    let pitch = look[1] * turn;
+    let cos_pitch = trig::cos(pitch);
+    // The negated x, for the reason `Camera::forward` gives: the world is
+    // right-handed with +y up and +z north, so east is -x and a growing yaw
+    // has to swing the forward vector that way.
+    [
+        -cos_pitch * trig::sin(yaw),
+        trig::sin(pitch),
+        cos_pitch * trig::cos(yaw),
+    ]
 }
 
 impl path::Access for Shared {
@@ -465,6 +564,9 @@ mod tests {
     fn world() -> World {
         let mut registry = tiamot_core::Registry::new();
         registry.register("test:stone").expect("register");
+        // A second material, so a test can tell east from west by what it hit
+        // rather than only by whether it hit anything.
+        registry.register("test:chalk").expect("register");
         let db = tiamot_core::persist::WorldDb::open_in_memory(&mut registry).expect("open");
         World::open(db, 1).expect("world")
     }
@@ -520,6 +622,136 @@ mod tests {
             handle.line_of_sight(tiamot_core::domain::OVERWORLD, [0.0; 3], [1.0, 0.0, 0.0]),
             Sighting::Unavailable
         );
+    }
+
+    /// A world with a wall of stone three blocks north of the body below.
+    fn wall() -> World {
+        let mut world = world();
+        world
+            .chunk(
+                tiamot_core::domain::OVERWORLD,
+                ChunkPos::new(0, 0, 0),
+                &mut Empty,
+            )
+            .expect("the chunk loads");
+        for x in 0..16 {
+            for y in 0..16 {
+                place(
+                    &mut world,
+                    tiamot_core::BlockPos::new(x, y, 10),
+                    MaterialId(1),
+                );
+            }
+        }
+        world
+    }
+
+    /// One player, standing at cell (24, 24, 24) — block (8, 8, 8) — looking
+    /// where `look` points.
+    fn watcher(look: [f32; 2]) -> (tiamot_core::PlayerUuid, Arc<crate::transport::PlayerBodies>) {
+        let uuid = tiamot_core::PlayerUuid::from_bytes([9; 32]);
+        let mut sim = crate::transport::endpoint::PlayerSim::spawned_at(
+            tiamot_core::BlockPos::new(8, 8, 8),
+            0,
+        );
+        sim.body.position = [24.0, 24.0, 24.0];
+        sim.look = look;
+        let bodies = Arc::new(crate::transport::PlayerBodies::new(
+            [(uuid, sim)].into_iter().collect(),
+        ));
+        (uuid, bodies)
+    }
+
+    #[test]
+    fn a_crosshair_names_the_cell_it_is_on_in_world_coordinates() {
+        // The conversion out of the body's chunk frame is the part worth a
+        // test: a mod acting on a cell a chunk away from the one somebody is
+        // pointing at is a bug that only shows up away from the origin.
+        let (uuid, bodies) = watcher([0.0, 0.0]);
+        let lease = Lease::new().with_players(Arc::clone(&bodies));
+        let handle = lease.handle();
+
+        let (_world, looked) = lease.lending(wall(), || handle.looking_at(*uuid.as_bytes()));
+        let looked = looked.expect("the wall is three blocks north and within reach");
+        assert_eq!(looked.cell.z, 30, "the near face of the wall is cell z 30");
+        assert_eq!(looked.material, MaterialId(1));
+        assert_eq!(
+            looked.face,
+            [0, 0, -1],
+            "the face points back out of the wall, so a placement goes in front of it"
+        );
+        assert_eq!(looked.domain, tiamot_core::domain::OVERWORLD);
+    }
+
+    #[test]
+    fn looking_the_other_way_finds_nothing() {
+        // Half a turn of yaw. If the yaw conversion were mirrored — the
+        // mistake `ent::figure_yaw` exists to make and unmake — this would hit
+        // the wall, and the test above would pass anyway.
+        let (uuid, bodies) = watcher([0.5, 0.0]);
+        let lease = Lease::new().with_players(bodies);
+        let handle = lease.handle();
+
+        let (_world, looked) = lease.lending(wall(), || handle.looking_at(*uuid.as_bytes()));
+        assert_eq!(looked, None, "a body facing south found the wall behind it");
+    }
+
+    #[test]
+    fn a_quarter_turn_of_yaw_looks_east_and_not_west() {
+        // The other half of the same trap, and the one yaw zero cannot catch:
+        // east is -x in this world (+y is up and +z is north, so +x is west),
+        // and a forward vector written with the wrong sign turns the view left
+        // when the mouse goes right. `Camera::forward` carries the same note
+        // because it was written that way once.
+        let (uuid, bodies) = watcher([0.25, 0.0]);
+        let lease = Lease::new().with_players(bodies);
+        let handle = lease.handle();
+
+        // One block either side of the body, in different materials.
+        let mut world = wall();
+        place(
+            &mut world,
+            tiamot_core::BlockPos::new(6, 9, 8),
+            MaterialId(1),
+        );
+        place(
+            &mut world,
+            tiamot_core::BlockPos::new(10, 9, 8),
+            MaterialId(2),
+        );
+
+        let (_world, looked) = lease.lending(world, || handle.looking_at(*uuid.as_bytes()));
+        let looked = looked.expect("a block one either side, and one of them is east");
+        assert_eq!(
+            looked.material,
+            MaterialId(1),
+            "a quarter turn of yaw looked west; east is -x"
+        );
+        assert_eq!(looked.cell.x, 20, "the near face of the east block");
+        assert_eq!(looked.face, [1, 0, 0]);
+    }
+
+    #[test]
+    fn a_crosshair_on_nothing_is_nothing_and_so_is_no_world() {
+        // Straight up: the sky is not a target, and neither is an unlent world.
+        let (uuid, bodies) = watcher([0.0, 0.2]);
+        let lease = Lease::new().with_players(bodies);
+        let handle = lease.handle();
+        assert_eq!(
+            handle.looking_at(*uuid.as_bytes()),
+            None,
+            "answered from outside a lend"
+        );
+        let (_world, looked) = lease.lending(wall(), || handle.looking_at(*uuid.as_bytes()));
+        assert_eq!(looked, None);
+    }
+
+    #[test]
+    fn a_lease_with_no_players_answers_nothing_rather_than_panicking() {
+        let lease = Lease::new();
+        let handle = lease.handle();
+        let (_world, looked) = lease.lending(wall(), || handle.looking_at([9; 32]));
+        assert_eq!(looked, None);
     }
 
     /// A room with a floor and a pillar in it.

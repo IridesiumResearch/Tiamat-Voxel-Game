@@ -1725,8 +1725,17 @@ fn stack_of(lua: &mlua::Lua, spec: &Table) -> mlua::Result<Option<crate::invento
     let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
     let shape = shape_of(spec)?;
     let units = units_of(spec, shape)?;
-    Ok(crate::inventory::Stack::new(material, units)
-        .map(|stack| crate::inventory::Stack { shape, ..stack }))
+    // **And its `detail`**, which `game.give` has always read and this did
+    // not: a named sword dropped on death came back a plain sword and merged
+    // with the others. Life mod's ask 4.
+    let detail = detail_of(spec)?;
+    Ok(
+        crate::inventory::Stack::new(material, units).map(|stack| crate::inventory::Stack {
+            shape,
+            detail,
+            ..stack
+        }),
+    )
 }
 
 /// One stack, as a mod reads it.
@@ -5304,8 +5313,9 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))
     }
 
-    /// `game.get_block`, `game.get_light` and `game.surface_at`: the world,
-    /// read. Split from `install_frozen_api`, which is at the line limit.
+    /// `game.get_block`, `game.get_light`, `game.surface_at` and
+    /// `game.looking_at`: the world, read. Split from `install_frozen_api`,
+    /// which is at the line limit.
     fn install_readers(&self, game: &Table) -> Result<(), ScriptError> {
         game.set("get_block", self.block_reader()?)
             .map_err(|err| self.vm_error(&err))?;
@@ -5313,7 +5323,47 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("surface_at", self.surface_reader()?)
             .map_err(|err| self.vm_error(&err))?;
+        game.set("looking_at", self.crosshair_reader()?)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
+    }
+
+    /// The `game.looking_at` function — Life mod's ask 5.
+    ///
+    /// Answers in the shape a `UseEvent` already has, deliberately: a mod that
+    /// handles both should not have to convert between two spellings of "what
+    /// is under the crosshair".
+    fn crosshair_reader(&self) -> Result<mlua::Function, ScriptError> {
+        let sight = std::sync::Arc::clone(&self.sight);
+        self.lua
+            .create_function(move |lua, uuid: String| {
+                let player = player_of(&uuid, "looking_at")?;
+                let looked = sight
+                    .lock()
+                    .map_err(|_| {
+                        mlua::Error::external(
+                            "the world lease is poisoned; the simulation thread panicked",
+                        )
+                    })?
+                    .as_ref()
+                    .and_then(|access| access.looking_at(player));
+                let Some(looked) = looked else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let out = lua.create_table()?;
+                out.set("x", looked.cell.x)?;
+                out.set("y", looked.cell.y)?;
+                out.set("z", looked.cell.z)?;
+                out.set("domain", looked.domain)?;
+                out.set("material", looked.material.0)?;
+                let face = lua.create_table()?;
+                face.set("x", looked.face[0])?;
+                face.set("y", looked.face[1])?;
+                face.set("z", looked.face[2])?;
+                out.set("face", face)?;
+                Ok(mlua::Value::Table(out))
+            })
+            .map_err(|err| self.vm_error(&err))
     }
 
     /// The `game.surface_at` function, built once per mod environment.
@@ -5948,6 +5998,12 @@ impl MluaVm {
                 velocity.set("z", entity.velocity.0[2])?;
                 out.set("velocity", velocity)?;
                 out.set("on_ground", entity.on_ground)?;
+                // What the step measured, rather than what a mod could
+                // guess from it. `submerged` is the fraction the physics itself
+                // scaled every fluid force by this tick; `fell` is blocks, on
+                // the one tick a body lands, and zero on every other.
+                out.set("submerged", entity.submerged)?;
+                out.set("fell", entity.fell)?;
                 out.set("source", entity.source)?;
                 out.set("model", entity.model)?;
                 // The same shape `game.inventory` reports a stack in, so a mod
@@ -6571,7 +6627,50 @@ impl MluaVm {
                     .unwrap_or(false))
             })
             .map_err(|err| self.vm_error(&err))?;
-        game.set("set_hud", set).map_err(|err| self.vm_error(&err))
+        game.set("set_hud", set)
+            .map_err(|err| self.vm_error(&err))?;
+
+        // `game.is_operator(uuid)` — Life mod's ask 8. A mod's admin powers
+        // belong to the people the server already trusts, and the only way to
+        // say so was to keep a parallel list certain to disagree one day.
+        let slot = std::sync::Arc::clone(&self.hud);
+        let is_operator = self
+            .lua
+            .create_function(move |_, uuid: String| {
+                let player = player_of(&uuid, "is_operator")?;
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.is_operator(player)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("is_operator", is_operator)
+            .map_err(|err| self.vm_error(&err))?;
+
+        // `game.chat_to(uuid, text)` — Life mod's ask 3, and a bug report:
+        // the stubs' own worked example has called this for months and
+        // nothing registered it.
+        let slot = std::sync::Arc::clone(&self.hud);
+        let chat_to = self
+            .lua
+            .create_function(move |_, (uuid, text): (String, String)| {
+                let player = player_of(&uuid, "chat_to")?;
+                if text.len() > crate::proto::MAX_CHAT_BYTES {
+                    return Err(mlua::Error::external(format!(
+                        "chat_to: a line is at most {} bytes",
+                        crate::proto::MAX_CHAT_BYTES
+                    )));
+                }
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.chat_to(player, &text)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("chat_to", chat_to)
+            .map_err(|err| self.vm_error(&err))
     }
 
     /// Puts `game.storage` on the `game` table.
@@ -13632,6 +13731,35 @@ mod entity_tests {
         assert!((entity.drive.walk[0] - 1.0).abs() < f32::EPSILON);
         assert!((entity.transform.yaw - 1.5).abs() < f32::EPSILON);
         assert_eq!(entity.anim, crate::ent::AnimTag::RUN);
+    }
+
+    #[test]
+    fn the_mirror_reports_what_the_step_measured_rather_than_what_a_mod_can_guess() {
+        // `submerged` and `fell` exist because the two things a mod derives
+        // from `velocity` and `on_ground` are both wrong: a body's box is not a
+        // block, so a mod's own fluid probe disagrees with the one the physics
+        // acted on, and vertical speed is clamped at terminal velocity, so
+        // every long fall lands at the same number.
+        let (mut vm, store) = vm_with_entities();
+        load(&mut vm, "faller", "game.register_on_tick(function() end)").expect("load");
+        let _ = vm.freeze();
+
+        vm.eval_in("faller", "id = game.spawn_entity{ pos = {x=0,y=64,z=0} }")
+            .expect("spawn");
+        {
+            let mut entities = store.entities.lock().expect("lock");
+            let (_, entity) = entities.iter_mut().next().expect("one entity");
+            entity.submerged = 0.75;
+            entity.fell = 12.5;
+        }
+
+        vm.eval_in(
+            "faller",
+            "local e = game.entity(id)\n\
+             assert(e.submerged == 0.75, 'submerged read ' .. tostring(e.submerged))\n\
+             assert(e.fell == 12.5, 'fell read ' .. tostring(e.fell))",
+        )
+        .expect("read back");
     }
 
     #[test]

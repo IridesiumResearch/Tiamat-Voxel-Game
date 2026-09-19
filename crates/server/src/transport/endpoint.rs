@@ -494,6 +494,22 @@ pub struct PlayerSim {
     /// to be told to keep swinging for a moment or the tag is gone before the
     /// next update is sent and nobody ever sees it. See `SWING_TICKS`.
     pub swung_on: u64,
+    /// How far this body has descended since it last left the ground, cells.
+    ///
+    /// An accumulated DELTA and not the height it jumped from, because a body's
+    /// y is local to a chunk (charter rule 7) and renormalises mid-fall: a
+    /// remembered absolute height would be wrong by a chunk the moment the body
+    /// crossed one, which is exactly what a long fall does.
+    pub falling: f32,
+    /// What that accumulator held on the tick this body landed, in BLOCKS.
+    ///
+    /// Zero on every tick but one. See `ent::Entity::fell`, which is where a
+    /// mod reads it.
+    pub fell: f32,
+    /// How much of the body the last step found inside fluid, 0..1.
+    ///
+    /// See `ent::Entity::submerged`.
+    pub submerged: f32,
     /// The tick the current `look` came with.
     ///
     /// Inputs are sent three times over for redundancy, so they arrive out of
@@ -528,10 +544,46 @@ impl PlayerSim {
             tool: None,
             anim: tiamot_core::ent::AnimTag::IDLE,
             swung_on: 0,
+            falling: 0.0,
+            fell: 0.0,
+            submerged: 0.0,
             look: [0.0; 2],
             look_tick: 0,
         }
     }
+}
+
+/// Accumulates a body's descent, and settles up on the tick it lands.
+///
+/// **Measured from the motion, not from the speed.** A mod can see `on_ground`
+/// and `velocity` and so can write this itself — Life does — but what it gets
+/// is wrong twice over: vertical speed is clamped at
+/// `Tuning::terminal_velocity`, so every fall past about forty blocks lands at
+/// the same number, and a body that drops through water is slowed by the milk
+/// before it touches down (`phys::swim`). The distance fallen is the only
+/// honest answer, and the engine is the only thing that sees every tick of it.
+///
+/// A body that is climbing, flying or swimming upward adds nothing: only the
+/// descent counts, so a jump up a cliff and a step off it are the same fall.
+/// A body that never left the ground never fell either, so walking down a
+/// staircase raises nothing.
+pub fn measure_fall(player: &mut PlayerSim, before: &tiamot_core::phys::Body) {
+    // Cleared first, so the value is one tick wide whatever happens below.
+    player.fell = 0.0;
+    let dropped = before.position[1] - player.body.position[1];
+    if !player.body.on_ground {
+        if dropped > 0.0 {
+            player.falling += dropped;
+        }
+        return;
+    }
+    if !before.on_ground {
+        // The tick of the landing. The last step's own descent is part of the
+        // fall: without it a one-tick drop off a ledge measures zero.
+        let total = player.falling + dropped.max(0.0);
+        player.fell = total / tiamot_core::SUBNODES_PER_AXIS as f32;
+    }
+    player.falling = 0.0;
 }
 
 /// The tag a client should draw a body with, from what it was asked to do and
@@ -3299,6 +3351,84 @@ mod fly_permission_tests {
         // The permission is not the state: being allowed to fly is not flying,
         // or an operator could never walk.
         assert!(!intent_from_wire([0.0; 3], bits::JUMP, true).fly);
+    }
+}
+
+#[cfg(test)]
+mod fall_tests {
+    use super::*;
+
+    /// A body at a height, off the ground, with nothing else set.
+    fn sim() -> PlayerSim {
+        PlayerSim::spawned_at(tiamot_core::BlockPos::new(0, 64, 0), 0)
+    }
+
+    /// One tick of falling, from `from` to `to` cells, landing or not.
+    fn tick(player: &mut PlayerSim, from: f32, to: f32, landed: bool) {
+        let mut before = player.body;
+        before.position[1] = from;
+        player.body.position[1] = to;
+        player.body.on_ground = landed;
+        measure_fall(player, &before);
+    }
+
+    #[test]
+    fn a_fall_is_measured_in_blocks_of_descent() {
+        // Twenty-seven cells is nine blocks, whatever speed it was doing when
+        // it got there: the point of the field is that terminal velocity does
+        // not tell you how far anybody fell.
+        let mut player = sim();
+        player.body.on_ground = false;
+        tick(&mut player, 100.0, 90.0, false);
+        assert_eq!(player.fell, 0.0, "reported a fall before landing");
+        tick(&mut player, 90.0, 80.0, false);
+        tick(&mut player, 80.0, 73.0, true);
+        assert!(
+            (player.fell - 9.0).abs() < 1e-5,
+            "fell {} blocks, expected the whole 27 cells of descent",
+            player.fell
+        );
+        assert_eq!(player.falling, 0.0, "the accumulator was not reset");
+    }
+
+    #[test]
+    fn a_landing_is_one_tick_wide() {
+        // A mod reads this from a tick hook and should not have to remember
+        // whether it already saw it.
+        let mut player = sim();
+        player.body.on_ground = false;
+        tick(&mut player, 100.0, 91.0, true);
+        assert!(player.fell > 0.0);
+        tick(&mut player, 91.0, 91.0, true);
+        assert_eq!(player.fell, 0.0, "the landing was still being reported");
+    }
+
+    #[test]
+    fn a_body_that_never_left_the_ground_never_fell() {
+        // Walking down a step is not a fall. The body is on the ground when the
+        // tick begins and on the ground when it ends, so nothing is reported —
+        // which is the whole of the rule, and it is what keeps a staircase from
+        // raising a landing on every tread.
+        //
+        // The cost is that a drop short enough to finish inside one tick is
+        // never reported. That drop is a block and a bit at twenty ticks a
+        // second, which is below anything a fall rule cares about.
+        let mut player = sim();
+        player.body.on_ground = true;
+        tick(&mut player, 100.0, 97.0, true);
+        assert_eq!(player.fell, 0.0, "a step down was reported as a fall");
+    }
+
+    #[test]
+    fn climbing_adds_nothing() {
+        // Only descent counts, so a jump up a cliff and a step off it are the
+        // same fall. Otherwise flying up and landing would hurt.
+        let mut player = sim();
+        player.body.on_ground = false;
+        tick(&mut player, 80.0, 100.0, false);
+        tick(&mut player, 100.0, 120.0, false);
+        tick(&mut player, 120.0, 120.0, true);
+        assert_eq!(player.fell, 0.0, "a climb was reported as a fall");
     }
 }
 

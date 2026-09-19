@@ -1172,6 +1172,42 @@ function game.get_block(position) end
 ---@return { y: integer, material: integer, occupancy: integer, fluid: integer|nil, volume: integer|nil }|nil
 function game.surface_at(spec) end
 
+---What a connected player's crosshair is on, within their reach. `nil` if there
+---is nothing.
+---
+---**The server casts the ray, not the client.** `on_dig`, `on_place` and
+---`on_use` all tell you the cell somebody pressed a control on, and those are
+---events: a mod that wants to know what a player is pointing at *now* — to show
+---a label, to decide whether X should sleep in that bed or cook at that
+---campfire three blocks away — has no event to wait for. Walking the ray
+---yourself from `game.entity(body).facing` is per-sample work in Lua, at 20 Hz,
+---per player; this is the same traversal the crosshair itself uses, in Rust.
+---
+---Cells, three to a block, as `on_use` reports them — so a mod handling both
+---reads one shape. `face` is the side the ray came in through, pointing back
+---out of the surface, so `x + face.x` is where a block placed against it would
+---go.
+---
+---Bounded by the player's own reach. You cannot use this to probe at a
+---distance, and that is the point.
+---
+---`nil` means there is nothing to act on, and it does not say which kind of
+---nothing: not connected, looking at the sky, looking into terrain that has not
+---loaded, or asked from `on_generate` where there is no world lent.
+---
+---```lua
+---game.register_on_key(function(event)
+---    if event.action ~= "mymod:interact" then return end
+---    local at = game.looking_at(event.player)
+---    if at and at.material == beds[at.material] then
+---        sleep(event.player, at)
+---    end
+---end)
+---```
+---@param player string The player's UUID, in hex.
+---@return { x: integer, y: integer, z: integer, domain: string, material: integer, face: { x: integer, y: integer, z: integer } }|nil
+function game.looking_at(player) end
+
 ---The light at a block, right now.
 ---
 ---**Frozen phase only** — there is no world during registration, and asking
@@ -1397,7 +1433,7 @@ function game.give(player, spec) end
 ---reaches the server when it changes.
 ---
 ---The table is the same shape `game.inventory` reports a stack in:
----`{ material, units, blocks, nodes, count, shape }`.
+---`{ material, units, blocks, nodes, count, shape, detail }`.
 ---@param player string A player UUID in hex.
 ---@return table|nil held
 function game.held(player) end
@@ -1886,6 +1922,54 @@ function game.stop_loop(id) end
 ---@param values table<string, number|string|boolean>
 ---@return boolean shown
 function game.set_hud(player, values) end
+
+---Whether the server already trusts this player with operator powers.
+---
+---**The server's own list, not a second one.** A mod that wants admin commands
+---of its own would otherwise keep its own roster of who may run them, and two
+---lists of trusted people disagree the first time an operator is added to one
+---of them. This is the same answer `/op` gives and the same answer the engine
+---uses to decide whether a player may fly.
+---
+---`false` for a player who is not here, so a stale UUID grants nothing.
+---
+---```lua
+---game.register_on_chat(function(event)
+---    if event.text == "!weather clear" then
+---        if not game.is_operator(event.player) then
+---            game.chat_to(event.player, "that is an operator command")
+---            return ""
+---        end
+---        set_weather("clear")
+---        return ""
+---    end
+---end)
+---```
+---@param player string The player's UUID, in hex.
+---@return boolean operator
+function game.is_operator(player) end
+
+---Sends one line of chat to one player. Returns whether it was delivered.
+---
+---A private message from your mod: nobody else sees it, and it arrives in the
+---same chat log the player reads everything else in. Use it for the answers
+---that belong to one person — why a command was refused, what a sign said,
+---what they just picked up.
+---
+---`false` if that player is not connected. There is no queue: a line for
+---somebody who has gone is dropped rather than held, because a message that
+---arrives after a rejoin is about a situation that no longer exists. If you
+---want it to survive a logout, put it in `game.storage` and say it on join.
+---
+---At most 512 bytes, which is the same limit a player's own line has.
+---
+---```lua
+---game.chat_to(uuid, "you are carrying " .. n .. " stones")
+---```
+---@param player string The player's UUID, in hex.
+---@param text string
+---@return boolean sent
+function game.chat_to(player, text) end
 
 ---Registers a HUD script this mod wants clients to run. Registration window only.
 ---
@@ -2776,6 +2860,14 @@ function game.register_on_punch(callback) end
 ---return value is ignored. Act on the world instead, with `game.set_block` or
 ---`game.set_fluid`. An error still disables your mod, as everywhere else.
 ---
+---# It can read the world
+---
+---`game.get_block`, `game.get_fluid` and `game.surface_at` all answer inside
+---this callback, so you can look at what is around the block the flow stopped
+---at rather than guessing from where the fluid is. They did not until
+---2026-09-19: the tick held the world while it called you, and every read came
+---back nil.
+---
 ---# It is budgeted, and it is not exhaustive
 ---
 ---At most 64 blocked flows are reported per fluid tick, and the surplus is
@@ -3414,9 +3506,25 @@ function game.transfer_entity(id, domain, position) end
 ---
 ---`item` is the stack an entity IS, for something lying on the ground, in the
 ---same shape `game.inventory` reports one — `{ material, units, blocks, nodes,
----count, shape }` — so reading an item off the floor and handing it to a player
----moves one table between two calls.
----@return { pos: { x: number, y: number, z: number }, yaw: number, pitch: number, facing: { x: number, y: number, z: number }, velocity: { x: number, y: number, z: number }, on_ground: boolean, source: string, model: string|nil, item: table|nil, anim: integer, health: integer|nil, max_health: integer|nil, owner: string|nil, nametag: string|nil, nametag_player: string|nil }|nil
+---count, shape, detail }` — so reading an item off the floor and handing it to
+---a player moves one table between two calls. `detail` survives the drop: an
+---item your mod named keeps its name on the ground and gets it back when
+---somebody picks it up.
+---
+---`submerged` is how much of the body is in fluid, 0 for dry and 1 for under —
+---the very number the physics scaled this tick's buoyancy, drag and swim speed
+---by. **Read it rather than probing blocks yourself:** a body's box is not a
+---block, so your answer and the engine's would disagree, and the engine's is
+---the one that moved it.
+---
+---`fell` is how far the body fell, in BLOCKS, on the one tick it lands, and
+---zero on every other tick — so a fall rule is `if e.fell > 3 then` in a tick
+---hook, with nothing to remember. **Falling speed cannot tell you this.**
+---Vertical speed is clamped at terminal velocity, so a fall of forty blocks and
+---a fall of four hundred land at exactly the same number, and a body dropping
+---through water is slowed by the water before it touches down. Walking down a
+---step raises nothing: a body that never left the ground never fell.
+---@return { pos: { x: number, y: number, z: number }, yaw: number, pitch: number, facing: { x: number, y: number, z: number }, velocity: { x: number, y: number, z: number }, on_ground: boolean, submerged: number, fell: number, source: string, model: string|nil, item: table|nil, anim: integer, health: integer|nil, max_health: integer|nil, owner: string|nil, nametag: string|nil, nametag_player: string|nil }|nil
 function game.entity(id) end
 
 ---Changes an entity. Returns whether anything changed.

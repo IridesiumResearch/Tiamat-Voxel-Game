@@ -173,6 +173,34 @@ pub trait Access: Send + Sync {
     /// merging, because a mod computes what it wants shown and says so —
     /// merging makes "this value is gone now" impossible to express.
     fn set_hud(&self, mod_id: &str, player: [u8; 32], values: Values) -> bool;
+
+    /// Whether this player is one the server already trusts.
+    ///
+    /// **The engine's list, not a second one.** A mod's admin powers belong to
+    /// the people running the server, and the only way to say so was to keep a
+    /// parallel list in the mod's own storage — bootstrapped the same way,
+    /// changed by its own commands, and certain to disagree with the engine's
+    /// one day. Life mod's ask 8.
+    ///
+    /// `false` for a player who is not connected, which is the same answer as
+    /// for one who is not an operator: a mod asking about somebody who is not
+    /// there should not be told they have powers.
+    fn is_operator(&self, player: [u8; 32]) -> bool {
+        let _ = player;
+        false
+    }
+
+    /// Says one line to one player, in their own chat.
+    ///
+    /// **The stubs promised this for months and nothing registered it** — the
+    /// worked example under `open_container` calls `game.chat_to`, which did
+    /// not exist. Life mod's ask 3, and a bug report rather than a request.
+    ///
+    /// Returns whether the player was there to tell.
+    fn chat_to(&self, player: [u8; 32], text: &str) -> bool {
+        let _ = (player, text);
+        false
+    }
 }
 
 /// How many values one mod may send one player.

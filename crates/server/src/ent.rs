@@ -45,6 +45,25 @@ use crate::world::World;
 /// `entities_in_radius` by source can ask for exactly the players.
 pub const PLAYER_SOURCE: &str = "engine:player";
 
+/// What one tick's physics left a player's body doing.
+///
+/// A struct rather than four more parameters, because they always travel
+/// together, always come from the same step, and separately they put
+/// [`Population::sync_player`] over clippy's argument ceiling — which in this
+/// case the lint was right about: a call reading `velocity, true, 0.0, 0.0`
+/// says nothing about which zero is which.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Motion {
+    /// How fast it is going, in cells per tick.
+    pub velocity: Velocity,
+    /// Whether the step left it standing on something.
+    pub on_ground: bool,
+    /// How much of its box is in fluid, 0..1. See `ent::Entity::submerged`.
+    pub submerged: f32,
+    /// Blocks fallen, on the tick of a landing only. See `ent::Entity::fell`.
+    pub fell: f32,
+}
+
 /// Every live entity, and the bookkeeping the tick needs around them.
 #[derive(Debug, Default)]
 pub struct Population {
@@ -216,8 +235,7 @@ impl Population {
         &mut self,
         uuid: tiamot_core::PlayerUuid,
         transform: Transform,
-        velocity: Velocity,
-        on_ground: bool,
+        motion: Motion,
         anim: tiamot_core::ent::AnimTag,
         hands: tiamot_core::ent::Hands,
     ) -> EntityId {
@@ -225,8 +243,10 @@ impl Population {
             && let Some(entity) = self.entities.get_mut(id)
         {
             entity.transform = transform;
-            entity.velocity = velocity;
-            entity.on_ground = on_ground;
+            entity.velocity = motion.velocity;
+            entity.on_ground = motion.on_ground;
+            entity.submerged = motion.submerged;
+            entity.fell = motion.fell;
             entity.anim = anim;
             entity.hands = hands;
             return id;
@@ -235,8 +255,10 @@ impl Population {
         // `self.entities.spawn`, not `self.spawn`: the latter marks the chunk
         // for saving, which is the one thing a mirror must never do.
         let mut entity = Entity::at(transform, PLAYER_SOURCE);
-        entity.velocity = velocity;
-        entity.on_ground = on_ground;
+        entity.velocity = motion.velocity;
+        entity.on_ground = motion.on_ground;
+        entity.submerged = motion.submerged;
+        entity.fell = motion.fell;
         entity.anim = anim;
         entity.hands = hands;
         entity.model = Some(tiamot_core::ent::HUMANOID_MODEL.to_owned());
@@ -898,8 +920,11 @@ mod tests {
         population.sync_player(
             tiamot_core::PlayerUuid::from_bytes([7; 32]),
             Transform::at(ChunkPos::new(0, 0, 0), [8.5, 0.0, 8.0]),
-            tiamot_core::ent::Velocity([0.0; 3]),
-            true,
+            Motion {
+                velocity: tiamot_core::ent::Velocity([0.0; 3]),
+                on_ground: true,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::IDLE,
             tiamot_core::ent::Hands::default(),
         );
@@ -1366,8 +1391,11 @@ mod tests {
         population.sync_player(
             uuid,
             somewhere(home),
-            Velocity::default(),
-            true,
+            Motion {
+                velocity: Velocity::default(),
+                on_ground: true,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::IDLE,
             tiamot_core::ent::Hands::default(),
         );
@@ -1395,8 +1423,11 @@ mod tests {
         population.sync_player(
             uuid,
             somewhere(ChunkPos::new(0, 0, 0)),
-            Velocity::default(),
-            true,
+            Motion {
+                velocity: Velocity::default(),
+                on_ground: true,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::IDLE,
             tiamot_core::ent::Hands::default(),
         );
@@ -1409,8 +1440,11 @@ mod tests {
             population.sync_player(
                 uuid,
                 somewhere(ChunkPos::new(step, 0, 0)),
-                Velocity::default(),
-                true,
+                Motion {
+                    velocity: Velocity::default(),
+                    on_ground: true,
+                    ..Motion::default()
+                },
                 tiamot_core::ent::AnimTag::WALK,
                 tiamot_core::ent::Hands::default(),
             );
@@ -1431,16 +1465,22 @@ mod tests {
         let first = population.sync_player(
             uuid,
             somewhere(ChunkPos::new(0, 0, 0)),
-            Velocity::default(),
-            true,
+            Motion {
+                velocity: Velocity::default(),
+                on_ground: true,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::IDLE,
             tiamot_core::ent::Hands::default(),
         );
         let again = population.sync_player(
             uuid,
             somewhere(ChunkPos::new(3, 0, 0)),
-            Velocity([1.0, 0.0, 0.0]),
-            false,
+            Motion {
+                velocity: Velocity([1.0, 0.0, 0.0]),
+                on_ground: false,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::WALK,
             tiamot_core::ent::Hands::default(),
         );
@@ -1464,8 +1504,11 @@ mod tests {
             population.sync_player(
                 uuid,
                 somewhere(ChunkPos::new(0, 0, 0)),
-                Velocity::default(),
-                true,
+                Motion {
+                    velocity: Velocity::default(),
+                    on_ground: true,
+                    ..Motion::default()
+                },
                 tiamot_core::ent::AnimTag::IDLE,
                 tiamot_core::ent::Hands::default(),
             );
@@ -1498,8 +1541,11 @@ mod tests {
         let id = population.sync_player(
             uuid,
             somewhere(home),
-            Velocity::default(),
-            true,
+            Motion {
+                velocity: Velocity::default(),
+                on_ground: true,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::IDLE,
             tiamot_core::ent::Hands::default(),
         );
@@ -1524,8 +1570,11 @@ mod tests {
         population.sync_player(
             player(),
             somewhere(home),
-            Velocity::default(),
-            true,
+            Motion {
+                velocity: Velocity::default(),
+                on_ground: true,
+                ..Motion::default()
+            },
             tiamot_core::ent::AnimTag::IDLE,
             tiamot_core::ent::Hands::default(),
         );

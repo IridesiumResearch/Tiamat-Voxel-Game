@@ -144,6 +144,8 @@ fn v1_to_v2(v1: EntityV1) -> crate::ent::Entity {
         transform: v1.transform,
         velocity: v1.velocity,
         on_ground: false,
+        submerged: 0.0,
+        fell: 0.0,
         drive: crate::phys::Intent::default(),
         collider: v1.collider,
         model: v1.model,

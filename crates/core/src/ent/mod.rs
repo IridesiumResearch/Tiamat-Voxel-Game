@@ -112,6 +112,35 @@ pub struct Entity {
     /// would be storing the answer to a question the next tick asks anyway.
     #[serde(skip)]
     pub on_ground: bool,
+    /// How much of its box is inside fluid, 0 for dry and 1 for under.
+    ///
+    /// **The step already measures this**, once per tick, before anything
+    /// moves: every fluid effect scales by it, which is why there is no
+    /// threshold between walking and swimming. Mirrored here so a mod can read
+    /// the same number rather than re-derive a worse one — the only thing a mod
+    /// could do for itself is probe blocks around a body it does not know the
+    /// shape of, and that answer disagrees with the one the physics acted on.
+    ///
+    /// Between-tick state, like `on_ground`, and for the same reason: it is the
+    /// answer to a question the next tick asks again.
+    #[serde(skip)]
+    pub submerged: f32,
+    /// How far it fell, in BLOCKS, on the tick it landed — otherwise zero.
+    ///
+    /// **One tick wide.** It is set on the tick `on_ground` goes true and
+    /// cleared on the next, so a mod reads it from
+    /// [`register_on_tick`](crate::script) or an entity hook and does not have
+    /// to remember anything.
+    ///
+    /// Blocks, not cells, because a fall is quoted in blocks everywhere a
+    /// player would talk about one. The distance is the body's own descent
+    /// accumulated while it was off the ground, which is the one measurement a
+    /// mod cannot make for itself: vertical speed is clamped at terminal
+    /// velocity, so a fall of forty blocks and a fall of four hundred land at
+    /// exactly the same speed, and fluid slows a body before it touches down
+    /// (see [`phys::swim::breaks_a_fall`](crate::phys::swim::breaks_a_fall)).
+    #[serde(skip)]
+    pub fell: f32,
     /// What a mod is asking it to do this tick.
     ///
     /// **The engine moves bodies; something else says where they are trying to
@@ -205,6 +234,8 @@ impl Entity {
             transform,
             velocity: Velocity::default(),
             on_ground: false,
+            submerged: 0.0,
+            fell: 0.0,
             drive: crate::phys::Intent::default(),
             collider: None,
             model: None,

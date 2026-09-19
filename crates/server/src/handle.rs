@@ -2665,7 +2665,8 @@ impl ServerHandle {
                     // so the only safe handle is one that is empty except while
                     // it is deliberately lent.
                     let sight = crate::lease::Lease::new()
-                        .with_terrain(passable_runtime, std::sync::Arc::clone(&fluidics));
+                        .with_terrain(passable_runtime, std::sync::Arc::clone(&fluidics))
+                        .with_players(std::sync::Arc::clone(&shared.bodies));
 
                     // Plans a mod has asked to stamp, and has not seen land
                     // yet. Owned here rather than by the VM because the tick is
@@ -3184,6 +3185,19 @@ impl ServerHandle {
                                     intent,
                                     &tiamot_core::phys::Tuning::DEFAULT,
                                 );
+                                crate::transport::measure_fall(player, &before);
+                                // How wet, measured where the body ENDED UP.
+                                // The step measures it where the body started,
+                                // because a force has to be computed from the
+                                // place it acts on; a mod asking "is this
+                                // player in the water" means now. One box of
+                                // block lookups, a dozen of them.
+                                player.submerged = tiamot_core::phys::submersion(
+                                    &voxels,
+                                    &tiamot_core::phys::Shape::HUMANOID
+                                        .aabb(player.body.position),
+                                )
+                                .fraction;
                                 // What a client draws this body doing, decided
                                 // where both halves are known: what was asked
                                 // for, and what came of it.
@@ -3282,8 +3296,14 @@ impl ServerHandle {
                                             ),
                                             pitch: player.look[1] * turn,
                                         },
-                                        tiamot_core::ent::Velocity(player.body.velocity),
-                                        player.body.on_ground,
+                                        crate::ent::Motion {
+                                            velocity: tiamot_core::ent::Velocity(
+                                                player.body.velocity,
+                                            ),
+                                            on_ground: player.body.on_ground,
+                                            submerged: player.submerged,
+                                            fell: player.fell,
+                                        },
                                         player.anim,
                                         // Read fresh, like the position above:
                                         // a hand is a view of a live inventory
@@ -4987,6 +5007,19 @@ impl ServerHandle {
                                     }
                                 }
                             }
+                            // **Gathered first, dispatched under the
+                            // lease.** Every field below needs the world
+                            // mutably — `block_cells` may load a chunk — and
+                            // the hook needs the world LENT, which is a move.
+                            // The two cannot overlap, so the reads happen here
+                            // and the callbacks happen after, in one lend.
+                            // Until this was split, every `game.get_block`
+                            // inside `on_fluid_flow` returned nil: 1,208 of
+                            // 1,208 in the world mod's flood, which is what
+                            // World ask 37 reported. The dig, place and use
+                            // hooks were given the same treatment in 7579e22.
+                            let mut flows: Vec<tiamot_core::script::FluidFlowEvent> =
+                                Vec::with_capacity(blocked.len());
                             for event in blocked {
                                 let Some(name) = fluidics
                                     .read()
@@ -5025,17 +5058,28 @@ impl ServerHandle {
                                         occupancy |= 1 << index;
                                     }
                                 }
-                                let verdict =
-                                    source.fluid_blocked(&tiamot_core::script::FluidFlowEvent {
-                                        from: event.from,
-                                        into: event.into,
-                                        fluid: name,
-                                        volume: event.volume,
-                                        blocked_by: material,
-                                        occupancy,
-                                        meets,
-                                    });
-                                for (mod_id, err) in &verdict.faults {
+                                flows.push(tiamot_core::script::FluidFlowEvent {
+                                    from: event.from,
+                                    into: event.into,
+                                    fluid: name,
+                                    volume: event.volume,
+                                    blocked_by: material,
+                                    occupancy,
+                                    meets,
+                                });
+                            }
+                            if !flows.is_empty() {
+                                let (returned, faults) = sight.lending(world, || {
+                                    let mut faults: Vec<(String, tiamot_core::script::ScriptError)> =
+                                        Vec::new();
+                                    for event in &flows {
+                                        let verdict = source.fluid_blocked(event);
+                                        faults.extend(verdict.faults);
+                                    }
+                                    faults
+                                });
+                                world = returned;
+                                for (mod_id, err) in &faults {
                                     error!(mod_id = %mod_id, "mod disabled after an on_fluid_flow failure: {err}");
                                 }
                             }

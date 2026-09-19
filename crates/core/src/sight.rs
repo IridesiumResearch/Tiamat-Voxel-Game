@@ -131,6 +131,54 @@ pub trait Access: Send + Sync {
         let _ = (domain, column, from, depth, skip);
         None
     }
+
+    /// The cell a connected player's crosshair is on, within their reach.
+    ///
+    /// **The server's own ray, not the client's word for it.** A client already
+    /// sends the cell it is pointing at when a control is pressed, and that is
+    /// what `on_dig`, `on_place` and `on_use` are built on — but those are
+    /// events, and a mod that wants to know what somebody is looking at *now*
+    /// has no event to wait for. Walking the ray in Lua is the alternative and
+    /// it is the wrong altitude: per-cell sampling from a script, every tick,
+    /// for a traversal the engine already has at Rust speed
+    /// ([`crate::phys::ray`], the same one the crosshair uses).
+    ///
+    /// Bounded by [`crate::phys::ray::REACH`], which is the player's own reach
+    /// — so this answers the question a use is about and cannot be turned into
+    /// a long-range probe.
+    ///
+    /// `None` for a player who is not connected, for a crosshair on nothing
+    /// within reach, for terrain that is not loaded, and when there is no world
+    /// lent. A mod cannot tell those apart, and does not need to: each of them
+    /// means "there is nothing to act on".
+    ///
+    /// Defaulted, because a VM with no server behind it has no players.
+    fn looking_at(&self, uuid: [u8; 32]) -> Option<Looked> {
+        let _ = uuid;
+        None
+    }
+}
+
+/// What a player's crosshair is on, from [`Access::looking_at`].
+///
+/// Cells, and not blocks, because that is what every other targeting answer in
+/// the API is: `on_dig`, `on_place` and `on_use` all name the cell under the
+/// crosshair, three to a block (charter rule 5). A mod holding both should not
+/// have to convert between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Looked {
+    /// The space the player is in, so a reader knows which world to ask.
+    pub domain: String,
+    /// The cell under the crosshair, in world sub-node coordinates.
+    pub cell: crate::coords::SubNodePos,
+    /// What that cell is made of.
+    pub material: crate::MaterialId,
+    /// The face it was entered through, pointing back out of the surface.
+    ///
+    /// The same convention [`crate::phys::ray::Hit::normal`] uses, and here for
+    /// the same reason it is there: `cell + face` is where a thing placed
+    /// against what somebody is pointing at would go.
+    pub face: [i32; 3],
 }
 
 /// What [`Access::surface_at`] looks past on its way down.

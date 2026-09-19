@@ -13,7 +13,7 @@ pub mod stream;
 
 pub use endpoint::{
     PlayerBodies, SWING_TICKS, Shared, TransportError, accept_loop, anim_from_motion, bind,
-    server_config,
+    measure_fall, server_config,
 };
 pub use frame::FrameError;
 pub use impair::{Impairment, Link};
