@@ -3729,6 +3729,63 @@ impl App {
         self.config.hud_visible
     }
 
+    /// Moves this client to another simulation space.
+    ///
+    /// Its own method because it is a PROCEDURE — throw the world away,
+    /// tell the predictor it is adrift, drop every mesh — sitting inside a
+    /// dispatch table, and it was thirty of the table's hundred lines.
+    fn enter_domain(&mut self, domain: &str) {
+        self.entering = Some(domain.to_owned());
+        // **The prediction goes with the chunks.** Left alone it
+        // keeps the footing it had in the space being left, and
+        // walks on the spot against an empty store — audibly, since
+        // footsteps are gated on being grounded.
+        if let Some(predictor) = self.predictor.as_mut() {
+            predictor.adrift();
+        }
+        self.stride = 0.0;
+        // **Everything, and the meshes with it.** The store's
+        // positions all mean different chunks now, so a mesh kept
+        // for any of them draws terrain from a place the player has
+        // left, standing exactly where they are. `ChunkUnload` does
+        // this one position at a time; a switch does it for the
+        // lot, which is why it is one message rather than a
+        // thousand.
+        let drawn: Vec<_> = self.store.positions().collect();
+        for pos in drawn {
+            self.renderer.remove_chunk(&self.drawn_at(pos));
+        }
+        self.store.clear();
+        self.entities.clear();
+        self.particles.clear();
+        tracing::info!(%domain, "moved to another domain");
+    }
+
+    /// Takes one asset that has arrived: art, a typeface or geometry.
+    ///
+    /// Three that travel the same pipeline and are held until something draws
+    /// them, grouped for the reason the weather events are: this dispatch
+    /// table keeps growing and it sits on clippy's line ceiling, so every
+    /// asset the engine gains was being paid for by shortening an unrelated
+    /// arm.
+    ///
+    /// A font is QUEUED rather than installed — installing rebuilds egui's
+    /// glyph atlas, and this is the network pump.
+    fn adopt_asset(&mut self, event: crate::net::Event) {
+        match event {
+            crate::net::Event::Picture { hash, image } => self.pictures.insert(hash, image),
+            crate::net::Event::Font { id, bytes } => self.adopt_font(&id, bytes),
+            crate::net::Event::Model { id, scale, model } => {
+                self.renderer.add_model(&id, *model, scale);
+            }
+            // Unreachable by construction: the caller matched these three. An
+            // arm rather than an `unreachable!`, because a fourth asset added
+            // to the caller and forgotten here should do nothing rather than
+            // kill the client's network pump.
+            _ => {}
+        }
+    }
+
     /// Takes one weather event.
     ///
     /// Five arms in one, because `pump_network` is at clippy's hundred-line
@@ -4409,12 +4466,9 @@ impl App {
             } => self.connected_to(&address, &fingerprint, first_use),
 
             Event::Materials { table, images } => self.adopt_atlas(&table, &images),
-            // A dialog's art, arriving whenever it arrives. Held until
-            // something draws it — see `crate::pictures`.
-            Event::Picture { hash, image } => self.pictures.insert(hash, image),
-            // Queued, not installed: installing rebuilds egui's glyph
-            // atlas and this is the network pump. See `client::fonts`.
-            Event::Font { id, bytes } => self.adopt_font(&id, bytes),
+            Event::Picture { .. } | Event::Font { .. } | Event::Model { .. } => {
+                self.adopt_asset(event);
+            }
 
             Event::Joined {
                 spawn,
@@ -4471,32 +4525,7 @@ impl App {
                 }
             }
 
-            Event::DomainChanged { domain } => {
-                self.entering = Some(domain.clone());
-                // **The prediction goes with the chunks.** Left alone it
-                // keeps the footing it had in the space being left, and
-                // walks on the spot against an empty store — audibly, since
-                // footsteps are gated on being grounded.
-                if let Some(predictor) = self.predictor.as_mut() {
-                    predictor.adrift();
-                }
-                self.stride = 0.0;
-                // **Everything, and the meshes with it.** The store's
-                // positions all mean different chunks now, so a mesh kept
-                // for any of them draws terrain from a place the player has
-                // left, standing exactly where they are. `ChunkUnload` does
-                // this one position at a time; a switch does it for the
-                // lot, which is why it is one message rather than a
-                // thousand.
-                let drawn: Vec<_> = self.store.positions().collect();
-                for pos in drawn {
-                    self.renderer.remove_chunk(&self.drawn_at(pos));
-                }
-                self.store.clear();
-                self.entities.clear();
-                self.particles.clear();
-                tracing::info!(%domain, "moved to another domain");
-            }
+            Event::DomainChanged { domain } => self.enter_domain(&domain),
 
             Event::Edit(edit) => {
                 self.store.apply(&edit);
@@ -4521,7 +4550,6 @@ impl App {
             Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
             Event::Theme(theme) => self.theme = crate::theme::Theme::of(theme.as_ref()),
 
-            Event::Model { id, scale, model } => self.renderer.add_model(&id, *model, scale),
             Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
             // **Replaced, not merged.** The server sends a mod's whole set
             // each time it changes, so a value a mod stopped sending stops
