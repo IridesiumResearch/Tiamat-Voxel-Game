@@ -1170,6 +1170,12 @@ pub struct App {
     hosting: Option<String>,
     /// Whether the server has said this player may fly.
     may_fly: bool,
+    /// What a mod and the operator list have decided this player may do.
+    ///
+    /// See [`App::adopt_abilities`]. The engine's defaults until a server says
+    /// otherwise, which is also what a server with no mod that sets them
+    /// leaves it at.
+    abilities: tiamot_core::phys::Abilities,
     /// Whether flight is on.
     flying: bool,
     /// What the connection reported about the server's certificate.
@@ -1400,6 +1406,7 @@ impl App {
             fonts: crate::fonts::Fonts::new(),
             meshing: None,
             may_fly: false,
+            abilities: tiamot_core::phys::Abilities::DEFAULT,
             flying: false,
             world_paused: false,
             stride: 0.0,
@@ -1599,13 +1606,18 @@ impl App {
         // be stripped here because the queue stripped it too; neither does now,
         // and the cooldown in the simulation is what keeps a repeated press
         // from launching twice.
-        let intent = self.previous_intent;
+        // **The same filter and the same tuning the server will use.** A mod
+        // may have slowed this player or taken their flight away, and a replay
+        // that ignored it would part company with the server exactly where the
+        // correction is meant to bring the two back together.
+        let intent = self.abilities.allow(self.previous_intent);
+        let tuning = self.abilities.tuning(&Tuning::DEFAULT);
         for _ in 0..gap {
             self.tick += 1;
             if let Some(predictor) = self.predictor.as_mut() {
                 let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
                     .passing(&self.passable);
-                predictor.predict(&voxels, self.tick, intent, &Tuning::DEFAULT);
+                predictor.predict(&voxels, self.tick, intent, &tuning);
             }
         }
         // Whatever is left after the bound is a renumber, as before: past that
@@ -1751,6 +1763,7 @@ impl App {
         if self.displacement != [0, 0, 0] {
             return;
         }
+        let tuning = self.abilities.tuning(&Tuning::DEFAULT);
         let Some(predictor) = self.predictor.as_mut() else {
             return;
         };
@@ -1762,7 +1775,7 @@ impl App {
         // arrive as a lurch every time the server's state message landed.
         let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
             .passing(&self.passable);
-        predictor.reconcile(&voxels, state, &Tuning::DEFAULT);
+        predictor.reconcile(&voxels, state, &tuning);
         let divergence = predictor.divergence();
         // Asked after the replay rather than before: what matters is whether the
         // ticks being re-simulated consulted geometry the client does not have,
@@ -4493,6 +4506,8 @@ impl App {
 
             Event::Fluids { fluids } => self.adopt_fluids(&fluids),
 
+            Event::Abilities { abilities } => self.adopt_abilities(abilities),
+
             // **The GRANTED radius, which is what the fog is drawn from.**
             // Using the configured one instead would end the world in clear
             // air whenever the server gave less than was asked for — and
@@ -5068,10 +5083,16 @@ impl App {
 
             let mut touched_absent = false;
             let mut ground = None;
+            // What a mod has granted, applied here as the server applies it in
+            // its own step: the client predicts what the server WILL do, not
+            // what the keys said. `phys::Abilities` says why this is on the
+            // wire at all.
+            let intent = self.abilities.allow(intent);
+            let tuning = self.abilities.tuning(&Tuning::DEFAULT);
             if let Some(predictor) = self.predictor.as_mut() {
                 let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
                     .passing(&self.passable);
-                predictor.predict(&voxels, self.tick, intent, &Tuning::DEFAULT);
+                predictor.predict(&voxels, self.tick, intent, &tuning);
                 // **Asked on the PREDICTION path, not only on the replay.** The
                 // first version of this instrument watched `reconcile` alone, so
                 // "I never saw the marker" ruled out nothing about the ticks a
@@ -5565,6 +5586,31 @@ impl App {
     #[must_use]
     pub const fn may_fly(&self) -> bool {
         self.may_fly
+    }
+
+    /// What a mod and the operator list have between them decided this player
+    /// may do.
+    ///
+    /// **Kept so the PREDICTOR can use it.** The client steps its own body
+    /// ahead of the server, and a speed the server applied and the client did
+    /// not is a disagreement every tick — continuous rubber-banding, which is
+    /// the seam this repo has been bitten at before. `may_fly` moves with it,
+    /// so the flight key and the flight the server honours stay one answer.
+    fn adopt_abilities(&mut self, abilities: tiamot_core::phys::Abilities) {
+        self.abilities = abilities;
+        self.may_fly = abilities.fly;
+        if !abilities.fly {
+            // A grant taken away while somebody is in the air: stop flying
+            // now, rather than sending a bit the server refuses and falling
+            // back to the correction.
+            self.flying = false;
+        }
+    }
+
+    /// The abilities the predictor steps with.
+    #[must_use]
+    pub const fn abilities(&self) -> tiamot_core::phys::Abilities {
+        self.abilities
     }
 
     /// Records which server this is, and says so if it was never seen before.

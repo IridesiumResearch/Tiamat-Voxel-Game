@@ -881,6 +881,31 @@ impl tiamot_core::ent::Access for Shared {
         true
     }
 
+    fn set_abilities(
+        &self,
+        uuid: [u8; 32],
+        abilities: Option<tiamot_core::phys::Abilities>,
+    ) -> bool {
+        // **The authoritative body, not the mirror** — the same reason
+        // `move_player` writes here: the mirror is a copy the tick overwrites,
+        // so a grant written to it would do nothing, silently.
+        let uuid = tiamot_core::PlayerUuid::from_bytes(uuid);
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return false;
+        };
+        let Some(player) = bodies.get_mut(&uuid) else {
+            return false;
+        };
+        let granted = abilities.map(tiamot_core::phys::Abilities::sanitised);
+        if player.granted != granted {
+            player.granted = granted;
+            // Unsent, so the tick puts it on the wire: a client that predicts
+            // its own movement has to know, or it disagrees every tick.
+            player.abilities_sent = false;
+        }
+        true
+    }
+
     fn within(&self, centre: [f64; 3], radius: f64, source: Option<&str>) -> Vec<EntityId> {
         let Ok(population) = self.population.read() else {
             return Vec::new();

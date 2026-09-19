@@ -3977,18 +3977,66 @@ impl MluaVm {
         Ok(())
     }
 
-    /// `game.bind_sound`, `game.cue`, `game.play_loop` and `game.stop_loop`.
+    /// `game.set_player_abilities(uuid, spec)` — Life mod's asks 1 and 9.
     ///
-    /// # The cue is the standardisation
-    ///
-    /// `register_sound` says a file exists. A BINDING says when it plays. Two
-    /// steps rather than one is what turns a pile of `play_sound` calls into a
-    /// system: the engine and every mod emit named events, and any mod binds
-    /// any sound to any of them without either side knowing the other exists.
-    ///
-    /// A mod wanting a noise on jumping does not have to find the jump code —
-    /// there is none it could reach — and the engine does not have to know
-    /// anybody wanted one.
+    /// Its own method for the line limit, and the seam is natural: everything
+    /// else installed beside it reads or writes an entity, and this writes the
+    /// authoritative body a player's own inputs step.
+    fn install_abilities(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.entities);
+        let set = self
+            .lua
+            .create_function(move |_, (uuid, spec): (String, Option<Table>)| {
+                let player = player_of(&uuid, "set_player_abilities")?;
+                let abilities = match spec {
+                    None => None,
+                    Some(spec) => {
+                        for pair in spec.clone().pairs::<Value, Value>() {
+                            let (key, _) = pair?;
+                            if let Value::String(name) = key
+                                && !ABILITY_FIELDS.contains(&name.to_string_lossy().as_ref())
+                            {
+                                return Err(mlua::Error::external(format!(
+                                    "set_player_abilities: unknown field `{}`. The fields are \
+                                     {ABILITY_FIELDS:?}.",
+                                    name.to_string_lossy()
+                                )));
+                            }
+                        }
+                        // **Every field, every call, with the engine's own
+                        // default for anything left out** — this is replaced
+                        // whole like `set_hud`, so a mod that stops saying
+                        // `speed` means "no longer slowed" rather than "keep
+                        // the last number".
+                        let default = crate::phys::Abilities::DEFAULT;
+                        let speed: f32 = spec.get("speed").unwrap_or(default.speed);
+                        if !speed.is_finite() || speed < 0.0 {
+                            return Err(mlua::Error::external(format!(
+                                "set_player_abilities: `speed` is a multiplier of 0 or more, got \
+                                 {speed}. 1 is unchanged and 0 is rooted."
+                            )));
+                        }
+                        Some(crate::phys::Abilities {
+                            fly: spec.get("fly").unwrap_or(default.fly),
+                            speed,
+                            sprint: spec.get("sprint").unwrap_or(default.sprint),
+                        })
+                    }
+                };
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .map(|store| store.set_abilities(player, abilities))
+                    })
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_player_abilities", set)
+            .map_err(|err| self.vm_error(&err))
+    }
+
     /// `game.set_time_of_day(t)` — Life mod's ask 2, and the other half of
     /// `game.time_of_day`.
     ///
@@ -4017,6 +4065,18 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))
     }
 
+    /// `game.bind_sound`, `game.cue`, `game.play_loop` and `game.stop_loop`.
+    ///
+    /// # The cue is the standardisation
+    ///
+    /// `register_sound` says a file exists. A BINDING says when it plays. Two
+    /// steps rather than one is what turns a pile of `play_sound` calls into a
+    /// system: the engine and every mod emit named events, and any mod binds
+    /// any sound to any of them without either side knowing the other exists.
+    ///
+    /// A mod wanting a noise on jumping does not have to find the jump code —
+    /// there is none it could reach — and the engine does not have to know
+    /// anybody wanted one.
     fn install_cues(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
         let owner = mod_id.to_owned();
         let bind = self
@@ -6305,6 +6365,7 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("select_slot", select)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_abilities(game)?;
 
         let slot = std::sync::Arc::clone(&self.entities);
         let shove = self
@@ -8728,6 +8789,13 @@ const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "defa
 /// every other registration applies, and for the reason `register_fluid` gives:
 /// a misspelled field is a mod that thinks it configured something.
 const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator"];
+
+/// Fields `game.set_player_abilities` accepts.
+///
+/// Checked so a typo is an error rather than a silent default, for the reason
+/// `register_fluid` gives: a misspelled field is a mod that thinks it
+/// configured something.
+const ABILITY_FIELDS: [&str; 3] = ["fly", "speed", "sprint"];
 
 const FLUID_FIELDS: [&str; 8] = [
     "id",

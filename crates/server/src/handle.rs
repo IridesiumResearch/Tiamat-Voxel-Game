@@ -3181,8 +3181,18 @@ impl ServerHandle {
                             // an answer — so a domain with no store of its own
                             // borrows an empty one rather than the overworld's.
                             let dry = crate::fluid::Fluidics::default();
-                            for player in bodies.values_mut() {
-                                let intent = player.inputs.take(tick);
+                            for (uuid, player) in bodies.iter_mut() {
+                                // **What a mod has granted, applied here and
+                                // nowhere else.** Life asks 1 and 9: a Creative
+                                // world where everybody flies, and a cold that
+                                // slows you. The client predicts with exactly
+                                // these numbers — see `phys::Abilities` — so
+                                // the same two functions run on both ends over
+                                // the same values.
+                                let abilities = player.abilities(shared.is_operator(uuid));
+                                let tuning =
+                                    abilities.tuning(&tiamot_core::phys::Tuning::DEFAULT);
+                                let intent = abilities.allow(player.inputs.take(tick));
                                 // Bound to the domain this body is in before
                                 // the physics sees it: `ChunkLookup` takes a
                                 // position and no domain, so a body would
@@ -3200,12 +3210,8 @@ impl ServerHandle {
                                 )
                                 .passing(&passable);
                                 let before = player.body;
-                                player.body = tiamot_core::phys::step(
-                                    &voxels,
-                                    player.body,
-                                    intent,
-                                    &tiamot_core::phys::Tuning::DEFAULT,
-                                );
+                                player.body =
+                                    tiamot_core::phys::step(&voxels, player.body, intent, &tuning);
                                 crate::transport::measure_fall(player, &before);
                                 // How wet, measured where the body ENDED UP.
                                 // The step measures it where the body started,
@@ -4291,6 +4297,42 @@ impl ServerHandle {
                                     tiamot_core::proto::ServerMessage::SelectSlot { slot },
                                 ),
                             );
+                        }
+
+                        // **What a mod has granted, to whoever has not been
+                        // told yet.** Life asks 1 and 9. The same shape the HUD
+                        // values take — a flag beside the value, cleared when
+                        // it is sent — so a mod setting the same abilities
+                        // every tick costs nothing on the wire, and one that
+                        // changes them costs one message.
+                        //
+                        // Sent AFTER the mods have run, so a change made this
+                        // tick goes out this tick rather than next.
+                        {
+                            let unsent: Vec<(tiamot_core::PlayerUuid, tiamot_core::phys::Abilities)> =
+                                shared.bodies.lock().map_or_else(
+                                    |_| Vec::new(),
+                                    |mut bodies| {
+                                        bodies
+                                            .iter_mut()
+                                            .filter(|(_, player)| !player.abilities_sent)
+                                            .map(|(uuid, player)| {
+                                                player.abilities_sent = true;
+                                                (*uuid, player.abilities(shared.is_operator(uuid)))
+                                            })
+                                            .collect()
+                                    },
+                                );
+                            for (uuid, abilities) in unsent {
+                                shared.push_entity_messages(
+                                    &uuid,
+                                    std::iter::once(
+                                        tiamot_core::proto::ServerMessage::Abilities {
+                                            abilities: abilities.into(),
+                                        },
+                                    ),
+                                );
+                            }
                         }
 
                         // **Destroys, after the transfers.** In that order on

@@ -312,6 +312,144 @@ pub struct Intent {
     pub fly: bool,
 }
 
+/// What a mod has granted, or taken away from, one player.
+///
+/// **Life mod's asks 1 and 9, which are one thing.** A Creative world wants
+/// everybody to fly, and flight is a permission the operator list holds — so a
+/// creative world on a dedicated server has grounded builders unless the host
+/// makes every one of them an operator, with everything else that implies. And
+/// the same mod's design says cold slows you a little and an empty hunger bar
+/// stops you sprinting, neither of which a mod could say at all: a player's
+/// body is stepped from their own inputs, and `game.set_entity` on their mirror
+/// is overwritten every tick.
+///
+/// # Why it is on the wire
+///
+/// **Because the client predicts.** A server that quietly halved somebody's
+/// walk speed would disagree with their own client every single tick, and the
+/// player would rubber-band continuously — the exact seam this repo has been
+/// bitten at before, where four values the mod API accepted and the protocol
+/// carried were ignored by the client. So this travels, and both ends step with
+/// [`Self::tuning`] and filter with [`Self::allow`]: the same two functions,
+/// over the same numbers, in the same order.
+///
+/// # Determinism
+///
+/// Charter rule 4 applies: `speed` multiplies simulation state. It is an `f32`
+/// on the wire and multiplied, never re-derived, so both ends have the same
+/// bits. `sanitised` is what keeps a mod's NaN out of a body's position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Abilities {
+    /// Whether this player may fly.
+    ///
+    /// OR-ed with the operator list by the server before it is sent, so what
+    /// arrives here is the answer rather than one half of it.
+    pub fly: bool,
+    /// Multiplier on every gait's top speed, and on the acceleration that
+    /// reaches it.
+    ///
+    /// **Both, because the acceleration is derived from the speed** — see
+    /// `Tuning::ground_acceleration`, which is `v × (1 − f) / f`. Scaling only
+    /// the top speed would change how long a body takes to get there, so a
+    /// slowed player would also feel sluggish to start, which is a second
+    /// effect nobody asked for.
+    ///
+    /// `1.0` is unchanged. `0.0` is rooted, which is a legitimate thing for a
+    /// mod to want.
+    pub speed: f32,
+    /// Whether the sprint key does anything.
+    ///
+    /// `false` walks instead, rather than refusing to move: an empty hunger bar
+    /// should stop somebody running, not stop them.
+    pub sprint: bool,
+}
+
+impl Abilities {
+    /// What every player has until a mod says otherwise.
+    pub const DEFAULT: Self = Self {
+        fly: false,
+        speed: 1.0,
+        sprint: true,
+    };
+
+    /// The most a mod may multiply a speed by.
+    ///
+    /// Sixteen times a walk is a bound rather than a taste: a body moving
+    /// faster than this crosses more than a chunk in a tick, and the sweep
+    /// would have to walk hundreds of cells to find what it hit — the same
+    /// reasoning `Tuning::terminal_velocity` is a cap for.
+    pub const MAX_SPEED: f32 = 16.0;
+
+    /// These abilities with anything a mod got wrong brought into range.
+    ///
+    /// **Clamped rather than refused**, like every other registration: a mod
+    /// that typed one number wrong should lose that number and not its whole
+    /// effect. A non-finite speed becomes `1.0` — charter rule 4 forbids a NaN
+    /// reaching simulation state, and there is no sensible number to round one
+    /// to, so it reads as "unsaid".
+    #[must_use]
+    pub fn sanitised(self) -> Self {
+        Self {
+            speed: if self.speed.is_finite() {
+                self.speed.clamp(0.0, Self::MAX_SPEED)
+            } else {
+                1.0
+            },
+            ..self
+        }
+    }
+
+    /// The tuning a body with these abilities is stepped with.
+    #[must_use]
+    pub fn tuning(self, base: &Tuning) -> Tuning {
+        // **Exactly one, and the comparison is deliberate.** This is not an
+        // approximation test: `1.0` is the value `DEFAULT` holds and the value
+        // a mod that said nothing leaves, and returning the base unchanged for
+        // it means a world with no mod touching movement steps bit-for-bit what
+        // it always did. Anything else — including 0.9999999 — takes the
+        // multiply, which is the honest answer for a number somebody chose.
+        #[expect(
+            clippy::float_cmp,
+            reason = "the default is a sentinel here, not a measurement: see above"
+        )]
+        let unchanged = self.speed == 1.0;
+        if unchanged {
+            return *base;
+        }
+        Tuning {
+            walk_speed: base.walk_speed * self.speed,
+            sprint_speed: base.sprint_speed * self.speed,
+            sneak_speed: base.sneak_speed * self.speed,
+            ground_acceleration: base.ground_acceleration * self.speed,
+            air_acceleration: base.air_acceleration * self.speed,
+            ..*base
+        }
+    }
+
+    /// The intent with what this player may not do taken out of it.
+    ///
+    /// Run on BOTH ends, over the same abilities, so the client predicts what
+    /// the server will do rather than what the keys said.
+    #[must_use]
+    pub fn allow(self, intent: Intent) -> Intent {
+        Intent {
+            fly: intent.fly && self.fly,
+            gait: if intent.gait == Gait::Sprint && !self.sprint {
+                Gait::Walk
+            } else {
+                intent.gait
+            },
+            ..intent
+        }
+    }
+}
+
+impl Default for Abilities {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// A body being simulated.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Body {

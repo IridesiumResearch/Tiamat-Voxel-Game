@@ -510,6 +510,20 @@ pub struct PlayerSim {
     ///
     /// See `ent::Entity::submerged`.
     pub submerged: f32,
+    /// What a mod has granted this player, or `None` for nothing said.
+    ///
+    /// Life asks 1 and 9. `None` rather than `Abilities::DEFAULT` so that
+    /// "this mod set nothing" is distinguishable from "this mod set the
+    /// defaults" — which matters for the send below, where nothing said means
+    /// nothing to tell a client beyond the operator answer it already has.
+    ///
+    /// Forgotten when the player leaves, because `PlayerSim` is.
+    pub granted: Option<tiamot_core::phys::Abilities>,
+    /// Whether the abilities above have been sent since they last changed.
+    ///
+    /// The same shape `HudSlot::sent` has, and for the same reason: a mod
+    /// setting the same abilities every tick must cost nothing on the wire.
+    pub abilities_sent: bool,
     /// The tick the current `look` came with.
     ///
     /// Inputs are sent three times over for redundancy, so they arrive out of
@@ -519,6 +533,27 @@ pub struct PlayerSim {
 }
 
 impl PlayerSim {
+    /// What this player may actually do: the mod's grant, plus the server's.
+    ///
+    /// **OR-ed, not replaced.** An operator is allowed to fly whatever a mod
+    /// says, and a mod may grant flight to somebody who is not an operator —
+    /// which is the whole of Life ask 9, a Creative world whose builders are
+    /// not all administrators.
+    ///
+    /// Sanitised here rather than at the setter, so a value that arrived from
+    /// a mod cannot reach the step even if some later path forgets.
+    #[must_use]
+    pub fn abilities(&self, operator: bool) -> tiamot_core::phys::Abilities {
+        let granted = self
+            .granted
+            .unwrap_or(tiamot_core::phys::Abilities::DEFAULT)
+            .sanitised();
+        tiamot_core::phys::Abilities {
+            fly: granted.fly || operator,
+            ..granted
+        }
+    }
+
     /// A body standing at a block position, at rest.
     #[must_use]
     pub fn spawned_at(spawn: tiamot_core::BlockPos, tick: u64) -> Self {
@@ -547,6 +582,8 @@ impl PlayerSim {
             falling: 0.0,
             fell: 0.0,
             submerged: 0.0,
+            granted: None,
+            abilities_sent: false,
             look: [0.0; 2],
             look_tick: 0,
         }
@@ -672,9 +709,11 @@ pub fn intent_from_wire(
         jump: actions & bits::JUMP != 0,
         gait,
         // **Asked AND allowed.** Every client can set the bit; only a player
-        // the server has made an operator gets it honoured. Charter rule 2: a
-        // client says what it wants and the server decides what happens, which
-        // is the same rule that refuses a placement into occupied space.
+        // the server has made an operator, or a mod has granted it to, gets it
+        // honoured. Charter rule 2: a client says what it wants and the server
+        // decides what happens, which is the same rule that refuses a placement
+        // into occupied space. The tick applies the same rule again through
+        // `PlayerSim::abilities`, over the same grant.
         fly: may_fly && actions & bits::FLY != 0,
     }
 }
@@ -1980,6 +2019,24 @@ impl Shared {
         self.operators.contains(uuid)
     }
 
+    /// Whether this player may fly: the operator list, or a mod's grant.
+    ///
+    /// Read on the network thread, where an input arrives — see
+    /// [`intent_from_wire`], which is where the bit is refused. The tick
+    /// applies the same rule again through `PlayerSim::abilities`, and the two
+    /// agreeing is not a coincidence: both read the same grant.
+    #[must_use]
+    pub fn may_fly(&self, uuid: &PlayerUuid) -> bool {
+        if self.operators.contains(uuid) {
+            return true;
+        }
+        self.bodies
+            .lock()
+            .ok()
+            .and_then(|bodies| bodies.get(uuid).map(|player| player.abilities(false).fly))
+            .unwrap_or(false)
+    }
+
     pub fn ensure_inventory(&self, uuid: PlayerUuid) {
         if let Ok(mut inventories) = self.inventories.lock() {
             inventories
@@ -3062,7 +3119,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     shared.queue_input(
                         &uuid,
                         *tick,
-                        intent_from_wire(*movement, *actions, shared.is_operator(&uuid)),
+                        intent_from_wire(*movement, *actions, shared.may_fly(&uuid)),
                         *look,
                     );
                 }

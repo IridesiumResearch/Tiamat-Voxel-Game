@@ -1450,3 +1450,117 @@ fn letting_go_of_sneak_at_a_brink_does_not_tip_a_body_in() {
         );
     }
 }
+
+/// Horizontal distance a body walks on flat ground in `ticks`.
+fn distance_walked(abilities: Abilities, gait: Gait, ticks: usize) -> f32 {
+    let scene = Scene::new(0);
+    let tuning = abilities.tuning(&Tuning::DEFAULT);
+    let intent = abilities.allow(Intent {
+        walk: [0.0, 1.0],
+        jump: false,
+        gait,
+        fly: false,
+    });
+    let start = Body::at([24.0, 0.0, 0.0]);
+    let mut body = start;
+    for _ in 0..ticks {
+        body = step(&scene, body, intent, &tuning);
+    }
+    let dx = body.position[0] - start.position[0];
+    let dz = body.position[2] - start.position[2];
+    (dx * dx + dz * dz).sqrt()
+}
+
+#[test]
+fn default_abilities_step_with_the_base_tuning_bit_for_bit() {
+    // A world with no mod touching movement must step exactly what it always
+    // did, which is why `1.0` returns the base rather than multiplying by it.
+    let tuning = Abilities::DEFAULT.tuning(&Tuning::DEFAULT);
+    assert_eq!(tuning, Tuning::DEFAULT);
+}
+
+#[test]
+fn a_speed_multiplier_scales_distance_and_zero_roots() {
+    let full = distance_walked(Abilities::DEFAULT, Gait::Walk, 60);
+    let half = distance_walked(
+        Abilities {
+            speed: 0.5,
+            ..Abilities::DEFAULT
+        },
+        Gait::Walk,
+        60,
+    );
+    let rooted = distance_walked(
+        Abilities {
+            speed: 0.0,
+            ..Abilities::DEFAULT
+        },
+        Gait::Walk,
+        60,
+    );
+    assert!(full > 1.0, "the fixture never moved: {full}");
+    // Acceleration is scaled with the top speed, so the whole curve halves.
+    assert!(
+        (half / full - 0.5).abs() < 0.02,
+        "half speed walked {half} against {full}"
+    );
+    assert!(rooted < 1e-6, "a rooted body walked {rooted}");
+}
+
+#[test]
+fn a_refused_sprint_walks_rather_than_stopping() {
+    let no_sprint = Abilities {
+        sprint: false,
+        ..Abilities::DEFAULT
+    };
+    let walked = distance_walked(Abilities::DEFAULT, Gait::Walk, 60);
+    let refused = distance_walked(no_sprint, Gait::Sprint, 60);
+    assert!(
+        (refused - walked).abs() < 1e-4,
+        "{refused} against {walked}"
+    );
+    // Asked of the filter directly rather than by comparing distances: on flat
+    // ground a sprint settles at the walk speed (the ground acceleration was
+    // derived from `walk_speed`, and sprint only raises the cap), so distance
+    // alone cannot tell a refused sprint from an honoured one.
+    let sprint = Intent {
+        walk: [0.0, 1.0],
+        jump: false,
+        gait: Gait::Sprint,
+        fly: false,
+    };
+    assert_eq!(no_sprint.allow(sprint).gait, Gait::Walk);
+    assert_eq!(Abilities::DEFAULT.allow(sprint).gait, Gait::Sprint);
+    // Sneak is not sprint, and is left alone.
+    let sneak = Intent {
+        walk: [0.0, 1.0],
+        jump: false,
+        gait: Gait::Sneak,
+        fly: true,
+    };
+    let allowed = no_sprint.allow(sneak);
+    assert_eq!(allowed.gait, Gait::Sneak);
+    assert!(!allowed.fly, "flight was not granted, so it is taken out");
+    let flier = Abilities {
+        fly: true,
+        ..Abilities::DEFAULT
+    };
+    assert!(flier.allow(sneak).fly);
+}
+
+#[test]
+fn sanitised_brings_a_mods_mistakes_into_range() {
+    let with = |speed| {
+        Abilities {
+            speed,
+            ..Abilities::DEFAULT
+        }
+        .sanitised()
+        .speed
+    };
+    assert_eq!(with(f32::NAN).to_bits(), 1.0_f32.to_bits());
+    assert_eq!(with(f32::INFINITY).to_bits(), 1.0_f32.to_bits());
+    assert_eq!(with(-3.0).to_bits(), 0.0_f32.to_bits());
+    assert_eq!(with(1000.0).to_bits(), Abilities::MAX_SPEED.to_bits());
+    assert_eq!(with(0.75).to_bits(), 0.75_f32.to_bits());
+}

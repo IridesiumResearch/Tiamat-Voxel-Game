@@ -2000,6 +2000,42 @@ function game.set_hud(player, values) end
 ---@return boolean operator
 function game.is_operator(player) end
 
+---Sets what one player may do: fly, how fast they move, whether they may sprint.
+---
+---**Replaced whole, every call.** A field you leave out goes back to the
+---engine's default, so a mod that stops saying `speed` means "no longer
+---slowed" rather than "keep the last number". `nil` clears everything you set.
+---Compute what somebody may do from your own state and say it; calling this
+---every tick with the same values costs nothing on the wire.
+---
+---- `fly` (default `false`) — OR-ed with the operator list: an operator flies
+---  whatever you say, and a player you grant it to flies without being one.
+---  That is a Creative world whose builders are not all administrators.
+---- `speed` (default `1`) — a multiplier on every gait's top speed and the
+---  acceleration that reaches it. `0` roots the player in place; anything over
+---  16 is clamped. Negative or NaN is an error.
+---- `sprint` (default `true`) — `false` makes the sprint key walk, rather than
+---  stopping anybody.
+---
+---The client is told and predicts with the same numbers, so a slowed player
+---does not rubber-band. An unknown field is an error, so a typo is not a
+---setting you think you made. Forgotten when the player leaves.
+---
+---Returns `false` for a player who is not here.
+---
+---```lua
+----- Cold slows you a little; an empty stomach stops you running.
+---game.set_player_abilities(uuid, {
+---    speed = cold and 0.8 or 1,
+---    sprint = hunger > 0,
+---    fly = creative,
+---})
+---```
+---@param player string The player's UUID, in hex.
+---@param abilities { fly: boolean?, speed: number?, sprint: boolean? }|nil
+---@return boolean told
+function game.set_player_abilities(player, abilities) end
+
 ---Sends one line of chat to one player. Returns whether it was delivered.
 ---
 ---A private message from your mod: nobody else sees it, and it arrives in the

@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 65;
+pub const PROTOCOL_VERSION: u32 = 66;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -2174,6 +2174,69 @@ pub enum ServerMessage {
         /// The models.
         models: Vec<ModelDef>,
     },
+    /// What this player may do, as a mod and the operator list between them
+    /// have decided.
+    ///
+    /// **Appended at the end** (protocol v66). Life mod's asks 1 and 9.
+    ///
+    /// # Why the client is told at all
+    ///
+    /// Because the client predicts its own movement, and a server that quietly
+    /// halved somebody's walk speed would disagree with their own client every
+    /// tick — continuous rubber-banding, from the seam this repo has been
+    /// bitten at before. Both ends step with `phys::Abilities::tuning` and
+    /// filter with `phys::Abilities::allow`, over the same numbers.
+    ///
+    /// Sent in the join burst and again whenever a mod changes them, like the
+    /// HUD values. `fly` arrives already OR-ed with the operator list, so it is
+    /// the answer and not one half of it — `Joined::may_fly` is the same answer
+    /// at join time and stays because the handshake needs it before any mod has
+    /// spoken.
+    Abilities {
+        /// What the player may now do.
+        abilities: AbilitiesDef,
+    },
+}
+
+/// [`phys::Abilities`](crate::phys::Abilities) as it travels.
+///
+/// A wire type of its own rather than the physics one, for the reason every
+/// other one here is: the simulation type may grow a field that means nothing
+/// to a client, and a protocol whose shape is whatever a struct happens to hold
+/// is a protocol nobody can version.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AbilitiesDef {
+    /// Whether this player may fly. Already OR-ed with the operator list.
+    pub fly: bool,
+    /// Multiplier on every gait's top speed and the acceleration reaching it.
+    pub speed: f32,
+    /// Whether the sprint key does anything.
+    pub sprint: bool,
+}
+
+impl From<crate::phys::Abilities> for AbilitiesDef {
+    fn from(abilities: crate::phys::Abilities) -> Self {
+        Self {
+            fly: abilities.fly,
+            speed: abilities.speed,
+            sprint: abilities.sprint,
+        }
+    }
+}
+
+impl From<AbilitiesDef> for crate::phys::Abilities {
+    /// **Sanitised on the way in**, because this crosses a trust boundary: a
+    /// server is not trusted by a client (charter rule 14), and a `speed` of
+    /// NaN reaching the predictor is a body whose position becomes NaN and
+    /// never comes back.
+    fn from(def: AbilitiesDef) -> Self {
+        Self {
+            fly: def.fly,
+            speed: def.speed,
+            sprint: def.sprint,
+        }
+        .sanitised()
+    }
 }
 
 /// A mod's look, as the client is told about it.
@@ -3163,6 +3226,19 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::SoundTable { sounds } => check_sounds(sounds)?,
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
         ServerMessage::ModelTable { models } => check_models(models)?,
+        // **A speed reaches the client's own physics.** A non-finite one makes
+        // a predicted body's position NaN and it never comes back — the same
+        // hazard `PlayerState` has, from a different message, and charter rule
+        // 14 says a server is not trusted merely for being the server.
+        ServerMessage::Abilities { abilities } => {
+            if !abilities.speed.is_finite() {
+                return Err(ProtocolError::FieldTooLarge {
+                    field: "abilities.speed",
+                    len: 0,
+                    limit: 0,
+                });
+            }
+        }
         ServerMessage::Theme { theme } => check_theme(theme.as_ref())?,
         ServerMessage::PictureTable { pictures } => check_pictures(pictures)?,
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
@@ -4568,5 +4644,37 @@ mod tests {
         let mut truncated = bytes.clone();
         truncated.truncate(bytes.len() - 1);
         assert!(decode::<ClientMessage>(&truncated).is_err());
+    }
+
+    #[test]
+    fn abilities_with_a_non_finite_speed_are_refused_and_sanitised() {
+        // A speed reaches the client's own predictor, and a NaN there is a
+        // body whose position never comes back. Refused at validation, and
+        // brought into range by the conversion as well, so a path that skips
+        // validation still cannot poison the step.
+        let poison = ServerMessage::Abilities {
+            abilities: AbilitiesDef {
+                fly: false,
+                speed: f32::NAN,
+                sprint: true,
+            },
+        };
+        assert!(validate_server_message(&poison).is_err());
+        let fine = ServerMessage::Abilities {
+            abilities: crate::phys::Abilities::DEFAULT.into(),
+        };
+        assert!(validate_server_message(&fine).is_ok());
+
+        let wild = AbilitiesDef {
+            fly: true,
+            speed: 1.0e9,
+            sprint: false,
+        };
+        let adopted = crate::phys::Abilities::from(wild);
+        assert!(adopted.fly && !adopted.sprint);
+        assert_eq!(
+            adopted.speed.to_bits(),
+            crate::phys::Abilities::MAX_SPEED.to_bits()
+        );
     }
 }

@@ -1262,6 +1262,15 @@ rather than clamped, everybody told at once. That is the bed that ends the
 night. One clock for the world; a sky that differs for one player is
 `game.set_sky_modifier`.
 
+**A player's movement is yours to limit, and flight yours to grant.**
+`game.set_player_abilities(uuid, { fly, speed, sprint })` — a Creative world
+where everybody flies, cold that slows, hunger that stops a sprint. Replaced
+whole each call (a field left out is the default again), `fly` is OR-ed with the
+operator list, and the client predicts with the same numbers so nobody
+rubber-bands. Do not try this with `game.set_entity` on a player's body: the
+body is stepped from the player's own inputs and your write is overwritten the
+next tick.
+
 **Your sea is drawn at the horizon.** A chunk past the detail radius arrives as
 a summary — one material a cell — and until 2026-09-19 a summary held no fluid,
 so a generated ocean read as its floor with a hole over it until you walked into

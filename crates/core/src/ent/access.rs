@@ -207,6 +207,29 @@ pub trait Access: Send + Sync {
     /// entity, or no such domain — so a mod is told about the mistakes it can
     /// fix and finds out the rest from `on_domain_enter`.
     fn transfer(&self, id: EntityId, domain: &str, to: [f64; 3]) -> bool;
+
+    /// Replaces what a mod has granted one player, or clears it with `None`.
+    ///
+    /// **Life asks 1 and 9, which are one thing.** Flight is a permission the
+    /// operator list holds, so a Creative world on a dedicated server has
+    /// grounded builders unless every one of them is made an operator; and a
+    /// design where cold slows you and hunger stops you sprinting could not be
+    /// expressed at all, because a player's body is stepped from their own
+    /// inputs and their mirror is overwritten every tick.
+    ///
+    /// Replaced whole, like [`crate::hud::Access::set_hud`], and forgotten when
+    /// the player leaves: a mod computes what somebody may do and says so, and
+    /// merging would make "this is no longer true" impossible to express.
+    ///
+    /// `fly` is OR-ed with the operator list rather than replacing it — an
+    /// operator flies whatever a mod says.
+    ///
+    /// Returns whether the player was there to tell. Defaulted, because a VM
+    /// with no server behind it has no players.
+    fn set_abilities(&self, uuid: [u8; 32], abilities: Option<crate::phys::Abilities>) -> bool {
+        let _ = (uuid, abilities);
+        false
+    }
 }
 
 #[cfg(test)]

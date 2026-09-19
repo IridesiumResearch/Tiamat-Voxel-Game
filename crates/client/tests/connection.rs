@@ -204,6 +204,8 @@ struct Seen {
     loops: Vec<String>,
     /// Chunks the server sent a horizon for.
     summaries: Vec<tiamot_core::ChunkPos>,
+    /// What the server said this player may do.
+    abilities: Option<tiamot_core::phys::Abilities>,
 }
 
 impl Seen {
@@ -231,6 +233,10 @@ impl Seen {
                 self.models
                     .push((id, scale, model.vertices.len(), model.clips.len()));
             }
+            // What a mod granted. This test's server has no such mod, so what
+            // arrives is the engine's own defaults — recorded so the arm is
+            // not a silent `{}` that would hide the message going missing.
+            Event::Abilities { abilities } => self.abilities = Some(abilities),
             Event::CloudLayer(layer) => self.cloud_layer = Some(layer),
             Event::Clouds(clouds) => self.clouds = clouds,
             // A mod's font. Same reasoning as the picture above.

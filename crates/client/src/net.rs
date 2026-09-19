@@ -121,6 +121,16 @@ pub enum Event {
         /// Which slot, zero-based. Ignored if the player does not have it.
         slot: u16,
     },
+    /// What this player may do, as a mod and the operator list have decided.
+    ///
+    /// **Applied to the PREDICTOR**, which is the whole reason it is sent: the
+    /// client steps its own body ahead of the server, so a speed the server
+    /// applied and the client did not is a disagreement every single tick and
+    /// a player who rubber-bands continuously. See `phys::Abilities`.
+    Abilities {
+        /// What the player may now do.
+        abilities: tiamot_core::phys::Abilities,
+    },
     /// The connection is up and the certificate has been accepted.
     Connected {
         /// The address connected to.
@@ -1640,6 +1650,15 @@ async fn session(
                     finish(format!("could not ask for the fonts: {err}"));
                     break;
                 }
+            }
+
+            ServerMessage::Abilities { abilities } => {
+                // Sanitised by the `From` impl, because this crosses a trust
+                // boundary: a `speed` of NaN reaching the predictor makes a
+                // body's position NaN and it never comes back.
+                let _ = events.send(Event::Abilities {
+                    abilities: abilities.into(),
+                });
             }
 
             ServerMessage::ModelTable { models } => {
