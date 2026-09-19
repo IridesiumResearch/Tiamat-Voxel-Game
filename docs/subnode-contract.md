@@ -281,6 +281,42 @@ volume per block and nothing writes a partial cell mask for fluid. The unit
 changed; the resolution did not. The 27× state cost the scope decision ruled out
 is not reopened by this section.
 
+**A summary carries the fluid standing in a chunk** (added 2026-09-19, World
+ask 28). A chunk beyond the detail radius is drawn from its LOD summary, which
+held one material a cell and nothing about fluid — so a sea seen from a hill was
+its FLOOR, a hole in the world the shape of the pool, until the player came
+close enough for the real chunk and its layer to arrive. A block holding fluid
+and no terrain now reads as the material that fluid is DRAWN as
+(`fluid::Registered::material`), so the horizon meshes a sea exactly as it
+meshes a hillside and nothing on the wire, in the client or in the mesher had to
+learn about fluid. Terrain wins where both are present, and a block less than
+half full reads as air — spray at the bottom of a fall is not a sea. The
+summary rows for a chunk are dropped when its fluid layer is saved, as they are
+when its blocks are.
+
+**A fluid may attenuate light** (added 2026-09-19, World ask 25). §3 is written
+about blocks, and a block of fluid is air in the block store — so sunlight fell
+through a hundred blocks of sea at full strength and the deep ocean's plains
+were lit like a meadow. `light_falloff` on `register_fluid` is levels lost per
+block of it, default 0, and 0 is exactly the old behaviour including daylight's
+free fall straight down. Anything above 0 both ends that free fall and sets the
+rate, so one level a block means a shaft of water is dark fifteen blocks down
+while the shaft of air beside it is lit to its floor. A block that starts or
+stops holding such a fluid is relit exactly as an edited block is, on the same
+budget and the same broadcast.
+
+**A passable cell does not count toward occupancy** (added 2026-09-19, World ask
+29). `passable` is a collision flag — §2 — and a body walks through grass, ferns
+and vines. Counting their cells against capacity made a block of grass hold one
+to three cells less water than the empty block beside it, so every plant under
+water stood in a pocket of air, and the sea's own growth stood in pockets. The
+rule is therefore `27 − (occupied cells that are not passable)`: a block holding
+nothing but a tuft takes a whole block of water AND keeps its tuft. Nothing about
+how it is drawn changes, because the mesher already fills every free cell of a
+wet block with fluid and takes the surface height from the volume alone (§4.4).
+A fluid and a solid still never share a cell in the store; what shares is the
+BLOCK, which is the resolution fluid has always had.
+
 ### 4.2 The update rule
 
 Conserved, and applied to one block at a time in a fixed order. Stop early when

@@ -609,6 +609,15 @@ pub struct World {
     /// symptom than a slow server.
     computed: u64,
     served: u64,
+    /// What each registered fluid is drawn as, for the horizon.
+    ///
+    /// **Summaries carry the sea** (World ask 28): a block holding fluid and no
+    /// terrain reads as the block that fluid is drawn as, so a chunk beyond the
+    /// detail radius shows its pool instead of a hole the shape of one. This is
+    /// the table that turns a fluid id into that material, set once after the
+    /// registries freeze. Empty until then, and an empty table means every
+    /// summary is exactly what it was.
+    fluids: tiamot_core::fluid::Fluids,
 }
 
 impl World {
@@ -635,7 +644,18 @@ impl World {
             domains: BTreeMap::new(),
             computed: 0,
             served: 0,
+            fluids: tiamot_core::fluid::Fluids::new(),
         })
+    }
+
+    /// Says what each fluid is drawn as, so summaries can carry the sea.
+    ///
+    /// Set once, after the registries freeze, beside
+    /// [`Self::set_sparse_domains`] — a fluid is a string until there is a
+    /// registry to look it up in (charter rule 8). See World ask 28 and
+    /// [`tiamot_core::lod::Summary::of_wet`].
+    pub fn set_fluids(&mut self, fluids: tiamot_core::fluid::Fluids) {
+        self.fluids = fluids;
     }
 
     /// Says which domains hold no voxels.
@@ -1129,8 +1149,12 @@ impl World {
         if let Some(stored) = self.summary_stored(domain, level, pos)? {
             return Ok(stored);
         }
-        let chunk = source.generate(domain, pos, self.seed);
-        let chain = Self::encode_chain(&chunk);
+        // `_with_fluid`, because an ocean is placed by the generator and a
+        // summary that dropped it would draw the sea floor with a hole over it
+        // — World ask 28. Every source that places no fluid gets the default
+        // empty layer and is unchanged.
+        let (chunk, fluid) = source.generate_with_fluid(domain, pos, self.seed);
+        let chain = Self::encode_chain(&chunk, &fluid, &self.fluids);
         self.adopt_summaries(domain, level, pos, &chain)
     }
 
@@ -1174,10 +1198,22 @@ impl World {
         // Resident first: a chunk the simulation is already holding is the
         // authoritative one, and it may hold edits this tick that the database
         // has not been told about yet.
+        // **The fluid row beside the chunk row.** A summary carries the sea
+        // (World ask 28), and what the database holds is the answer for a chunk
+        // nobody is standing in — which is every chunk a horizon is made of. A
+        // pond the solver is actively moving is inside the detail radius and is
+        // drawn from the real chunk, not from this.
+        let wet = self
+            .db
+            .load_chunk_fluid_in(domain, pos)?
+            .unwrap_or_else(tiamot_core::fluid::FluidLayer::empty);
         let chain = match self.domains.get(domain).and_then(|s| s.cache.get(&pos)) {
-            Some(chunk) => Self::encode_chain(chunk),
+            Some(chunk) => lod::Summary::chain_wet(chunk, &wet, &self.fluids)
+                .iter()
+                .map(|summary| (summary.level(), lod::codec::encode(summary)))
+                .collect(),
             None => match self.db.load_chunk_in(domain, pos)? {
-                Some(chunk) => Self::encode_chain(&chunk),
+                Some(chunk) => Self::encode_chain(&chunk, &wet, &self.fluids),
                 None => return Ok(None),
             },
         };
@@ -1230,8 +1266,12 @@ impl World {
     ///
     /// Pure, so the workers compute the same bytes off the tick.
     #[must_use]
-    pub fn encode_chain(chunk: &Chunk) -> Vec<(u8, Vec<u8>)> {
-        lod::Summary::chain(chunk)
+    pub fn encode_chain(
+        chunk: &Chunk,
+        fluid: &tiamot_core::fluid::FluidLayer,
+        fluids: &tiamot_core::fluid::Fluids,
+    ) -> Vec<(u8, Vec<u8>)> {
+        lod::Summary::chain_wet(chunk, fluid, fluids)
             .iter()
             .map(|summary| (summary.level(), lod::codec::encode(summary)))
             .collect()

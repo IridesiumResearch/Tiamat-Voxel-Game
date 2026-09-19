@@ -139,6 +139,11 @@ pub struct Shared {
 pub struct Ponds {
     fluids: Fluids,
     absorbency: Absorbency,
+    /// The passable materials, sorted, in the id space the chunks hold.
+    ///
+    /// See [`Fluidics::set_passable`]. Held here so a domain made on first use
+    /// gets them, exactly as it gets the absorbency.
+    passable: std::sync::Arc<Vec<u16>>,
     domains: std::collections::BTreeMap<String, Fluidics>,
 }
 
@@ -149,7 +154,22 @@ impl Ponds {
         Self {
             fluids,
             absorbency,
+            passable: std::sync::Arc::new(Vec::new()),
             domains: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Records which materials a fluid flows straight through.
+    ///
+    /// Set after the registries freeze, with the absorbency, and for the same
+    /// reason: `passable` is a flag on a block and a block is a string until
+    /// there is a registry to look it up in.
+    pub fn set_passable(&mut self, passable: Vec<u16>) {
+        let mut passable = passable;
+        passable.sort_unstable();
+        self.passable = std::sync::Arc::new(passable);
+        for fluidics in self.domains.values_mut() {
+            fluidics.set_passable(std::sync::Arc::clone(&self.passable));
         }
     }
 
@@ -158,6 +178,7 @@ impl Ponds {
         self.domains.entry(domain.to_owned()).or_insert_with(|| {
             let mut fluidics = Fluidics::new(self.fluids.clone());
             fluidics.set_absorbency(self.absorbency.clone());
+            fluidics.set_passable(std::sync::Arc::clone(&self.passable));
             fluidics
         })
     }
@@ -332,7 +353,15 @@ pub struct Fluidics {
     fluids: Fluids,
     /// Each registered fluid's own settings, built once from `fluids`.
     tunings: tiamot_core::fluid::Tunings,
+    /// Whether any registered fluid dims the light passing through it.
+    ///
+    /// Built once from `fluids`, like the tunings, because the lighting pass
+    /// asks it before every block and the answer cannot change after the
+    /// registries freeze. See `light::Glowing::any_falloff`.
+    any_falloff: bool,
     absorbency: Absorbency,
+    /// The materials a fluid flows through rather than round.
+    passable: std::sync::Arc<Vec<u16>>,
     solver: Solver,
     /// Writes a MOD made, waiting to go out with the next tick's changes.
     ///
@@ -349,13 +378,18 @@ impl Fluidics {
     /// A store for a world whose mods registered these fluids.
     #[must_use]
     pub fn new(fluids: Fluids) -> Self {
+        let any_falloff = fluids
+            .iter_registered()
+            .any(|(_, entry)| entry.light_falloff > 0);
         Self {
             layers: HashMap::new(),
             dirty: std::collections::BTreeSet::new(),
             loaded: std::collections::BTreeSet::new(),
             tunings: Self::tunings_of(&fluids),
+            any_falloff,
             fluids,
             absorbency: Absorbency::default(),
+            passable: std::sync::Arc::new(Vec::new()),
             solver: Solver::new(),
             written: Vec::new(),
         }
@@ -418,6 +452,24 @@ impl Fluidics {
     /// registry to look it up in (charter rule 8).
     pub fn set_absorbency(&mut self, absorbency: Absorbency) {
         self.absorbency = absorbency;
+    }
+
+    /// Records which materials a fluid flows straight through — World ask 29.
+    ///
+    /// **A passable cell does not displace fluid.** A tuft of grass holds one
+    /// to three of a block's twenty-seven cells, so a block of it under water
+    /// took that much less water than the empty block beside it and the plant
+    /// stood in a pocket of air. It now holds a full block of water and the
+    /// plant, which is also what a body swimming through it feels: `submersion`
+    /// reads the same layer.
+    ///
+    /// **Runtime ids, not world ids**, unlike the absorbency table beside it:
+    /// this is compared against what a chunk IN MEMORY holds, which is the
+    /// runtime space (`lease.rs` says the same thing about `surface_at`).
+    /// Sorted, and read by linear scan — it holds a handful of ids and beating
+    /// a hash for that many is not close.
+    pub fn set_passable(&mut self, passable: std::sync::Arc<Vec<u16>>) {
+        self.passable = passable;
     }
 
     /// What one material does to fluid touching it.
@@ -596,6 +648,7 @@ impl Fluidics {
             terrain: *terrain,
             layers,
             absorbency,
+            passable: &self.passable,
         };
         for block in filled {
             if !tiamot_core::fluid::in_a_body(&view, tunings, block) {
@@ -680,6 +733,7 @@ impl Fluidics {
             terrain: world.solid(domain),
             layers: &mut self.layers,
             absorbency: &self.absorbency,
+            passable: &self.passable,
         };
         changes.extend(solver.tick(&mut view, &self.tunings, VISITS_PER_TICK, seed, fluid_tick));
         self.solver = solver;
@@ -758,6 +812,7 @@ struct Wet<'a> {
     terrain: crate::world::Solid<'a>,
     layers: &'a mut HashMap<ChunkPos, FluidLayer>,
     absorbency: &'a Absorbency,
+    passable: &'a [u16],
 }
 
 impl Neighbourhood for Wet<'_> {
@@ -773,7 +828,13 @@ impl Neighbourhood for Wet<'_> {
     /// as floor.
     fn occupancy(&self, pos: BlockPos) -> Option<u32> {
         let chunk = self.terrain.resident(pos.chunk())?;
-        Some(chunk.get_block_local(pos.local()).filled_cells())
+        let block = chunk.get_block_local(pos.local());
+        if self.passable.is_empty() {
+            return Some(block.filled_cells());
+        }
+        // World ask 29: a plant does not displace the water round it. See
+        // `Fluidics::set_passable`.
+        Some(block.blocking_cells(|material| self.passable.binary_search(&material.0).is_ok()))
     }
 
     /// Sub-Node Contract §4.3: how many cells this block drinks per tick.
@@ -829,6 +890,16 @@ impl crate::light::Glowing for Fluidics {
     fn material(&self, fluid: tiamot_core::fluid::FluidId) -> Option<tiamot_core::MaterialId> {
         self.fluids().get(fluid).map(|entry| entry.material)
     }
+
+    fn falloff(&self, fluid: tiamot_core::fluid::FluidId) -> u8 {
+        self.fluids()
+            .get(fluid)
+            .map_or(0, |entry| entry.light_falloff)
+    }
+
+    fn any_falloff(&self) -> bool {
+        self.any_falloff
+    }
 }
 
 /// Builds the fluid registry from what the mods registered.
@@ -866,6 +937,7 @@ pub fn fluids_from_rules(
             color: rule.color,
             material,
             opacity: rule.opacity,
+            light_falloff: rule.light_falloff,
         }) {
             tracing::warn!(fluid = %rule.fluid, "could not register a fluid: {err}");
         }
@@ -912,6 +984,7 @@ mod tests {
                 color: [255, 255, 255],
                 material: tiamot_core::MaterialId(4),
                 opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+                light_falloff: 0,
             })
             .expect("register");
         let mut fluidics = Fluidics::new(fluids);
@@ -969,6 +1042,7 @@ mod tests {
                 color: [255, 255, 255],
                 material: tiamot_core::MaterialId(4),
                 opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+                light_falloff: 0,
             })
             .expect("register");
 

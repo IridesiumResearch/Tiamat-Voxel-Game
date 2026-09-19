@@ -496,6 +496,18 @@ pub struct FluidRules {
     /// [`FluidRules::DEFAULT_OPACITY`] is what every fluid drew as before this
     /// field existed.
     pub opacity: f32,
+    /// Levels of light a block of this fluid takes out of what reaches it.
+    ///
+    /// **World ask 25.** A block of fluid is air in the block store (Sub-Node
+    /// Contract §4), so sunlight fell through a hundred blocks of sea at full
+    /// strength — the deep ocean's brief asks for "total light extinction" on
+    /// its plains and got noon.
+    ///
+    /// Zero, the default, is "like air": a fluid that changes nothing, which is
+    /// what every fluid was. One is a level a block, which also ends daylight's
+    /// free fall straight down — so a sea is dark fifteen blocks under the
+    /// surface and a pond is not. Three is dark five blocks down.
+    pub light_falloff: u8,
 }
 
 impl FluidRules {

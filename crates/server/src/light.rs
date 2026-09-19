@@ -428,6 +428,7 @@ impl Lighting {
             memo: std::cell::Cell::new(None),
             fluid,
             fluid_memo: std::cell::Cell::new(None),
+            any_falloff: fluid.any_falloff(),
         };
         pass(&mut lit);
         let layer = lit.layer;
@@ -479,6 +480,30 @@ pub trait Glowing {
 
     /// What a full block of a fluid is drawn as, for [`Emissions::of`].
     fn material(&self, fluid: tiamot_core::fluid::FluidId) -> Option<MaterialId>;
+
+    /// Levels a block of this fluid takes out of the light reaching it.
+    ///
+    /// World ask 25. `0` is "like air", which is what every fluid was until a
+    /// mod said otherwise, and is what keeps a world with no falloff in it
+    /// lighting exactly as it did — see
+    /// [`propagate::Neighbourhood::falloff`](tiamot_core::light::Neighbourhood::falloff).
+    ///
+    /// Defaulted, so a test fixture and [`Dry`] say nothing about it.
+    fn falloff(&self, fluid: tiamot_core::fluid::FluidId) -> u8 {
+        let _ = fluid;
+        0
+    }
+
+    /// Whether ANY registered fluid takes light out of what passes through it.
+    ///
+    /// Read once when a pass starts, not per block. A flood asks `falloff` once
+    /// a visit and a relight visits a chunk's blocks eighteen times over, so
+    /// this is what keeps a world whose water is ordinary water from reaching
+    /// into the fluid layer seventy-six thousand times to be told nothing —
+    /// exactly the gate `Emissions::any` is for the question beside it.
+    fn any_falloff(&self) -> bool {
+        false
+    }
 }
 
 /// A world with no fluid in it at all.
@@ -563,6 +588,9 @@ struct Lit<'a> {
     /// because a dry chunk is the overwhelmingly common case and re-asking is
     /// the probe this exists to skip.
     fluid_memo: std::cell::Cell<Option<(ChunkPos, Option<&'a tiamot_core::fluid::FluidLayer>)>>,
+    /// Whether any registered fluid dims what passes through it, resolved once
+    /// when the pass starts. See [`Glowing::any_falloff`].
+    any_falloff: bool,
 }
 
 impl<'a> Lit<'a> {
@@ -615,6 +643,38 @@ impl Lit<'_> {
         self.fluid
             .material(held.fluid())
             .map_or(Light::DARK, |material| self.lighting.emissions.of(material))
+    }
+
+    /// What the fluid at a block takes out of the light arriving in it.
+    ///
+    /// The same memo `fluid_emission` uses, and the same shape: one probe per
+    /// chunk rather than per block, because a flood asks this once per visit
+    /// and a relight visits a chunk's blocks eighteen times over.
+    ///
+    /// **Gated on any fluid declaring a falloff at all**, so a world whose
+    /// water is ordinary water pays one bool per call and never reaches for the
+    /// layer — which is every world until somebody asks for a dark sea.
+    fn fluid_falloff(&self, pos: BlockPos) -> u8 {
+        if !self.any_falloff {
+            return 0;
+        }
+        let chunk = pos.chunk();
+        let layer = match self.fluid_memo.get() {
+            Some((at, layer)) if at == chunk => layer,
+            _ => {
+                let layer = self.fluid.layer(chunk);
+                self.fluid_memo.set(Some((chunk, layer)));
+                layer
+            }
+        };
+        let Some(layer) = layer else {
+            return 0;
+        };
+        let held = layer.get(pos.local());
+        if held.is_empty() {
+            return 0;
+        }
+        self.fluid.falloff(held.fluid())
     }
 
     /// The light at a block, from the centre layer where it lives there.
@@ -680,6 +740,10 @@ impl Neighbourhood for Lit<'_> {
 
     fn light(&self, pos: BlockPos) -> Light {
         self.level(pos)
+    }
+
+    fn falloff(&self, pos: BlockPos) -> u8 {
+        self.fluid_falloff(pos)
     }
 
     fn set_light(&mut self, pos: BlockPos, level: Light) {

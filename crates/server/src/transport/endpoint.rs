@@ -1300,6 +1300,31 @@ impl Shared {
         next as f32 / length as f32
     }
 
+    /// Winds the day to a fraction of it, and says whether the clock moved.
+    ///
+    /// Life mod's ask 2: a bed that ends the night. Wrapped rather than
+    /// clamped, so a mod adding a quarter of a day crosses midnight instead of
+    /// stopping at it; a non-finite fraction is refused rather than turned into
+    /// a tick count nobody meant.
+    ///
+    /// `false` for a world whose mods registered no sky. There is no day to
+    /// set, which is not an error.
+    pub fn set_day_fraction(&self, fraction: f32) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.sky_day_length == 0 || !fraction.is_finite() {
+            return false;
+        }
+        let length = f64::from(self.sky_day_length);
+        // `rem_euclid` on the f64, so a negative fraction winds backwards into
+        // the previous day rather than landing on tick zero.
+        let wrapped = f64::from(fraction).rem_euclid(1.0);
+        // `as u64` after the wrap, where the value is `0.0..1.0` times the
+        // length and cannot saturate.
+        let tick = (wrapped * length) as u64 % u64::from(self.sky_day_length);
+        self.time_of_day.store(tick, Ordering::Relaxed);
+        true
+    }
+
     /// Where the day stands now, without advancing it.
     #[must_use]
     pub fn day_fraction(&self) -> f32 {
@@ -3355,6 +3380,71 @@ mod fly_permission_tests {
 }
 
 #[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    /// A shared whose sky lasts a thousand ticks.
+    fn dawn() -> Shared {
+        let mut shared = super::tests::shared();
+        shared.sky_day_length = 1000;
+        shared
+    }
+
+    #[test]
+    fn the_clock_can_be_wound_and_read_back() {
+        // Life ask 2: a bed that ends the night. A mod could read the clock and
+        // not set it.
+        let shared = dawn();
+        assert!(shared.set_day_fraction(0.25));
+        assert!((shared.day_fraction() - 0.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn winding_past_midnight_wraps_rather_than_stopping_at_it() {
+        // `game.set_time_of_day(game.time_of_day() + 0.3)` is the natural way
+        // to write "three hours later", and it crosses midnight most nights.
+        let shared = dawn();
+        assert!(shared.set_day_fraction(0.9));
+        assert!(shared.set_day_fraction(0.9 + 0.3));
+        assert!(
+            (shared.day_fraction() - 0.2).abs() < 1e-3,
+            "wound to {}, expected 0.2",
+            shared.day_fraction()
+        );
+        // And backwards, into the previous day rather than onto tick zero.
+        assert!(shared.set_day_fraction(-0.25));
+        assert!(
+            (shared.day_fraction() - 0.75).abs() < 1e-3,
+            "wound back to {}, expected 0.75",
+            shared.day_fraction()
+        );
+    }
+
+    #[test]
+    fn a_world_with_no_sky_has_no_day_to_set() {
+        // Not an error: a world whose mods registered no sky has a clock that
+        // never moved in the first place.
+        let shared = super::tests::shared();
+        assert!(!shared.set_day_fraction(0.5));
+        assert_eq!(shared.day_fraction(), 0.0);
+    }
+
+    #[test]
+    fn a_time_that_is_not_a_number_is_refused() {
+        // Charter rule 4's habit: `0/0` in Lua is a quiet NaN, and `NaN as u64`
+        // is zero — a mod that divided by zero would set midnight and never
+        // find out why.
+        let shared = dawn();
+        assert!(shared.set_day_fraction(0.5));
+        assert!(!shared.set_day_fraction(f32::NAN));
+        assert!(
+            (shared.day_fraction() - 0.5).abs() < 1e-3,
+            "a NaN moved the clock"
+        );
+    }
+}
+
+#[cfg(test)]
 mod fall_tests {
     use super::*;
 
@@ -3444,7 +3534,7 @@ mod tests {
         )
     }
 
-    fn shared() -> Shared {
+    pub(super) fn shared() -> Shared {
         Shared {
             identities: Mutex::new(IdentityRegistry::default()),
             cert_fingerprint: [0xAB; 32],

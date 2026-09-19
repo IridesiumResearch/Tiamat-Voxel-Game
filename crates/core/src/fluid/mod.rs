@@ -384,6 +384,11 @@ pub struct Registered {
     /// charter rule 4 in the same way a fog is. See
     /// [`crate::script::FluidRules::opacity`].
     pub opacity: f32,
+    /// Levels of light a block of this fluid takes out of what reaches it.
+    ///
+    /// See [`crate::script::FluidRules::light_falloff`]. Zero is "like air" and
+    /// is what every fluid was before World ask 25.
+    pub light_falloff: u8,
 }
 
 /// Every fluid the mods registered, by id.
@@ -470,6 +475,9 @@ impl Fluids {
             // Never drawn, so this is arbitrary too; the engine default is the
             // one that says nothing was chosen.
             opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+            // A fluid nobody registered must not rearrange the light of a world
+            // that merely had a mod disabled.
+            light_falloff: 0,
         })?;
         self.placeholders.insert(id);
         Ok(id)
@@ -623,6 +631,7 @@ mod tests {
                 tick_rate: 1,
                 material: MaterialId(4),
                 opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                light_falloff: 0,
             })
             .expect("first registration");
         assert_eq!(milk, FluidId(1), "zero is reserved for 'no fluid'");
@@ -642,6 +651,7 @@ mod tests {
             tick_rate: 1,
             material: MaterialId(4),
             opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+            light_falloff: 0,
         };
         fluids.register(entry()).expect("first");
         assert!(matches!(
@@ -663,6 +673,7 @@ mod tests {
                     tick_rate: 1,
                     material: MaterialId(1),
                     opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                    light_falloff: 0,
                 })
                 .expect("within the limit");
         }
@@ -675,6 +686,7 @@ mod tests {
                 tick_rate: 1,
                 material: MaterialId(1),
                 opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                light_falloff: 0,
             }),
             Err(RegisterError::Full { .. })
         ));

@@ -389,6 +389,78 @@ impl Schematic {
     }
 }
 
+/// Cell columns in one block: nine, three by three.
+const CELL_COLUMNS: usize = (SUBNODES_PER_AXIS * SUBNODES_PER_AXIS) as usize;
+
+/// Everything [`ChunkBuffer::fill_cover`] carries from one block to the next
+/// that is the same for the whole chunk.
+///
+/// A struct because the per-block half is its own function and would otherwise
+/// take nine parameters; the two things that genuinely CHANGE between blocks —
+/// what is occupied under each cell column, and what each one still owes a run
+/// — stay as their own arguments, so the seam is where the state is.
+struct Cover<'a> {
+    /// What a run is made of.
+    material: MaterialId,
+    /// How tall a run is, in cells, already clamped.
+    cells: u32,
+    /// Whether a run may continue into the block above: `cells` over three.
+    may_carry: bool,
+    /// Where a run is allowed, sampled at its base cell.
+    take: Option<&'a super::density::Density>,
+    /// The world seed `take` is evaluated with.
+    seed: u64,
+    /// The chunk's corner, in world blocks.
+    origin: [i32; 3],
+    /// `take`, evaluated over one block's 27 cells.
+    fine: Vec<f32>,
+    /// Reused between evaluations, so a chunk allocates once.
+    scratch: super::density::Scratch,
+    /// One block's cells, read whole and written back whole.
+    block_cells: Cells,
+}
+
+/// Grows one cover run up a cell column, and answers what would not fit.
+///
+/// Split out because [`ChunkBuffer::fill_cover`] runs it twice per column —
+/// once for what the block below owed and once for a run starting here — and
+/// the two must stop on exactly the same rule, or a carried flower would push
+/// through the ceiling its own base would have stopped at.
+///
+/// Returns the cells still owed: non-zero only when the run reached the top of
+/// the block with cells left. A run that met something owes nothing, because it
+/// has found its ceiling.
+fn grow(
+    cells_of: &mut Cells,
+    written: &mut bool,
+    (cx, cz): (u32, u32),
+    from: u32,
+    mut left: u32,
+    material: MaterialId,
+) -> u32 {
+    let mut cy = from;
+    while left > 0 && cy < SUBNODES_PER_AXIS {
+        let index = subnode_index(cx, cy, cz);
+        if cells_of[index] != MaterialId::AIR {
+            return 0;
+        }
+        cells_of[index] = material;
+        *written = true;
+        left -= 1;
+        cy += 1;
+    }
+    left
+}
+
+/// The tallest run [`ChunkBuffer::fill_cover`] will grow, in cells.
+///
+/// Three blocks. Two is what the Flower Forest's brief asks for — alliums and
+/// peonies against a poppy's one — and the third is headroom for a mod that
+/// wants a reed or a sapling out of the same pass. A cap and not a free number
+/// because the run is per cell column: nine columns a block, 4,096 blocks a
+/// chunk, so what this bounds is how much of a chunk one call may write.
+pub const MAX_COVER_CELLS: u32 = SUBNODES_PER_AXIS * 3;
+
 /// What [`ChunkBuffer::fill_fluid_terraced`] fills.
 #[derive(Clone, Copy)]
 pub struct Terraces<'a> {
@@ -1210,11 +1282,27 @@ impl ChunkBuffer {
     /// For every cell column, at the LOWEST cell in each block that is empty
     /// with an occupied cell below it, and where `take` is positive at that
     /// cell (everywhere, with no `take`), that cell and up to `cells - 1`
-    /// empty cells above it become `material` — never crossing into the block
-    /// above, and never overwriting a cell that holds something. Where the
-    /// surface is a block's top cell the run is that one cell. Cover written
-    /// by this call is not a surface for it: a run never stands on another
-    /// run.
+    /// empty cells above it become `material` — stopping at the first cell
+    /// that holds something, and never overwriting one. Where the surface is a
+    /// block's top cell and `cells` is one, the run is that one cell. Cover
+    /// written by this call is not a surface for it: a run never stands on
+    /// another run.
+    ///
+    /// # A run may be taller than the block it starts in
+    ///
+    /// It did not used to be, and the reason it did not was that a tuft two
+    /// stacked blocks tall highlights and digs apart. That is still true and
+    /// it is still the common case — but the Flower Forest's brief asks for
+    /// "single- AND two-block flowers", and an allium is the tall one. A run
+    /// that fills its block and still has cells owed carries on into the block
+    /// above, through empty cells, and stops where it meets anything. So a
+    /// three-cell `cells` is exactly what it was, and a six-cell one is a
+    /// flower a player breaks in two goes.
+    ///
+    /// **It is cut at the chunk's ceiling.** The block above the top block is
+    /// somebody else's chunk and is not available at generation — the same
+    /// reason the bottom cell row gets no cover. One block row in sixteen, and
+    /// only for a run tall enough to reach out of it.
     ///
     /// **The lowest, not every one**, which matters only for a block holding
     /// two surfaces at once — a one-cell shelf, air over stone over air over
@@ -1224,9 +1312,10 @@ impl ChunkBuffer {
     /// interleaved with the ground they grow from, inside one block, which is
     /// the thing this call exists to avoid.
     ///
-    /// `cells` is clamped to 1..=3. `take` is evaluated at cell resolution and
-    /// only in the blocks that hold a surface, the economy the detail fill
-    /// makes.
+    /// `cells` is clamped to `1..=`[`MAX_COVER_CELLS`]. `take` is evaluated at
+    /// cell resolution and only in the blocks that hold a surface, the economy
+    /// the detail fill makes — and a carried run is not re-gated by it, since
+    /// `take` decided once whether this plant grows here.
     ///
     /// The chunk's bottom cell row has nothing below it to look at, so a
     /// surface exactly on the chunk floor gets no cover from this chunk: the
@@ -1243,7 +1332,13 @@ impl ChunkBuffer {
         take: Option<&super::density::Density>,
         seed: u64,
     ) -> Result<(), BufferError> {
-        let cells = cells.clamp(1, SUBNODES_PER_AXIS);
+        // **A run taller than a block is a different plant, and says so by
+        // being taller than a block.** Up to three cells it stays where it
+        // started, because a two-cell tuft that spilled into the block above
+        // would highlight and dig apart — the thing this call was written to
+        // avoid, and every mod's grass asks for two. Over three it is a flower
+        // the brief calls two blocks tall, and the spill is the point.
+        let cells = cells.clamp(1, MAX_COVER_CELLS);
         // **Nothing to stand on, and nothing to look at.** Cover grows where an
         // empty cell sits on an occupied one, and a buffer holding one material
         // everywhere has no such cell anywhere in it — the chunk floor is the
@@ -1261,95 +1356,147 @@ impl ChunkBuffer {
         {
             return Ok(());
         }
-        let origin = [
-            self.pos.x * CHUNK_BLOCKS as i32,
-            self.pos.y * CHUNK_BLOCKS as i32,
-            self.pos.z * CHUNK_BLOCKS as i32,
-        ];
-        let mut fine = vec![0.0f32; SUBNODES_PER_BLOCK];
-        let mut scratch = super::density::Scratch::default();
-        let mut block_cells: Cells = EMPTY_CELLS;
+        let mut pass = Cover {
+            material,
+            cells,
+            may_carry: cells > SUBNODES_PER_AXIS,
+            take,
+            seed,
+            origin: [
+                self.pos.x * CHUNK_BLOCKS as i32,
+                self.pos.y * CHUNK_BLOCKS as i32,
+                self.pos.z * CHUNK_BLOCKS as i32,
+            ],
+            fine: vec![0.0f32; SUBNODES_PER_BLOCK],
+            scratch: super::density::Scratch::default(),
+            block_cells: EMPTY_CELLS,
+        };
 
         for z in 0..CHUNK_BLOCKS {
             for x in 0..CHUNK_BLOCKS {
                 // Whether the cell under each of this column's nine cell
                 // columns is occupied, carried up block by block. Starts
                 // false: the chunk floor has no cell below it.
-                let mut below = [false; (SUBNODES_PER_AXIS * SUBNODES_PER_AXIS) as usize];
+                let mut below = [false; CELL_COLUMNS];
+                // Cells each cell column still owes a run that filled the
+                // block under this one — the two-block flower of World ask 32.
+                // Per cell column and reset with `below`, so a run only ever
+                // continues straight up out of itself.
+                let mut owed = [0u32; CELL_COLUMNS];
                 for y in 0..CHUNK_BLOCKS {
-                    let local = LocalBlock::new(x, y, z);
-                    for cz in 0..SUBNODES_PER_AXIS {
-                        for cy in 0..SUBNODES_PER_AXIS {
-                            for cx in 0..SUBNODES_PER_AXIS {
-                                block_cells[subnode_index(cx, cy, cz)] =
-                                    self.get_subnode(local, cx, cy, cz);
-                            }
-                        }
-                    }
-                    // The bases: empty cells standing on an occupied one.
-                    // Read BEFORE anything is written, so a run this call
-                    // writes is never the ground for another.
-                    let mut bases: [Option<u32>; (SUBNODES_PER_AXIS * SUBNODES_PER_AXIS) as usize] =
-                        [None; (SUBNODES_PER_AXIS * SUBNODES_PER_AXIS) as usize];
-                    let mut any = false;
-                    for cz in 0..SUBNODES_PER_AXIS {
-                        for cx in 0..SUBNODES_PER_AXIS {
-                            let column = (cz * SUBNODES_PER_AXIS + cx) as usize;
-                            let mut under = below[column];
-                            for cy in 0..SUBNODES_PER_AXIS {
-                                let here =
-                                    block_cells[subnode_index(cx, cy, cz)] != MaterialId::AIR;
-                                if !here && under && bases[column].is_none() {
-                                    bases[column] = Some(cy);
-                                    any = true;
-                                }
-                                under = here;
-                            }
-                            below[column] = under;
-                        }
-                    }
-                    if !any {
-                        continue;
-                    }
-                    if let Some(take) = take {
-                        let cell_region = super::noise::Region3d {
-                            origin_x: (origin[0] + x as i32) as f32,
-                            origin_y: (origin[1] + y as i32) as f32,
-                            origin_z: (origin[2] + z as i32) as f32,
-                            step: 1.0 / SUBNODES_PER_AXIS as f32,
-                            width: SUBNODES_PER_AXIS as usize,
-                            height: SUBNODES_PER_AXIS as usize,
-                            depth: SUBNODES_PER_AXIS as usize,
-                        };
-                        take.evaluate_with(seed, &cell_region, &mut fine, &mut scratch)?;
-                    }
-                    let mut written = false;
-                    for cz in 0..SUBNODES_PER_AXIS {
-                        for cx in 0..SUBNODES_PER_AXIS {
-                            let column = (cz * SUBNODES_PER_AXIS + cx) as usize;
-                            let Some(base) = bases[column] else {
-                                continue;
-                            };
-                            if take.is_some() && fine[subnode_index(cx, base, cz)] <= 0.0 {
-                                continue;
-                            }
-                            // Up from the base, inside this block, through
-                            // empty cells only.
-                            for cy in base..(base + cells).min(SUBNODES_PER_AXIS) {
-                                let index = subnode_index(cx, cy, cz);
-                                if block_cells[index] != MaterialId::AIR {
-                                    break;
-                                }
-                                block_cells[index] = material;
-                                written = true;
-                            }
-                        }
-                    }
-                    if written {
-                        self.set_block_cells(local, &block_cells);
-                    }
+                    self.cover_block(LocalBlock::new(x, y, z), &mut pass, &mut below, &mut owed)?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// One block of [`Self::fill_cover`]: find its surfaces, grow what the
+    /// block below owed, and start what starts here.
+    ///
+    /// Split out to stay inside the line limit, and the split is where the
+    /// state is: `below` and `owed` are the only things one block hands the
+    /// next, and everything else in `pass` is the same for the whole chunk.
+    ///
+    /// # Errors
+    ///
+    /// [`BufferError`] if `take` cannot be evaluated.
+    fn cover_block(
+        &mut self,
+        local: LocalBlock,
+        pass: &mut Cover<'_>,
+        below: &mut [bool; CELL_COLUMNS],
+        owed: &mut [u32; CELL_COLUMNS],
+    ) -> Result<(), BufferError> {
+        for cz in 0..SUBNODES_PER_AXIS {
+            for cy in 0..SUBNODES_PER_AXIS {
+                for cx in 0..SUBNODES_PER_AXIS {
+                    pass.block_cells[subnode_index(cx, cy, cz)] =
+                        self.get_subnode(local, cx, cy, cz);
+                }
+            }
+        }
+        // The bases: empty cells standing on an occupied one. Read BEFORE
+        // anything is written, so a run this call writes is never the ground
+        // for another.
+        let mut bases: [Option<u32>; CELL_COLUMNS] = [None; CELL_COLUMNS];
+        let mut any = false;
+        for cz in 0..SUBNODES_PER_AXIS {
+            for cx in 0..SUBNODES_PER_AXIS {
+                let column = (cz * SUBNODES_PER_AXIS + cx) as usize;
+                let mut under = below[column];
+                for cy in 0..SUBNODES_PER_AXIS {
+                    let here = pass.block_cells[subnode_index(cx, cy, cz)] != MaterialId::AIR;
+                    if !here && under && bases[column].is_none() {
+                        bases[column] = Some(cy);
+                        any = true;
+                    }
+                    under = here;
+                }
+                below[column] = under;
+            }
+        }
+        // A block with no surface in it still has to be walked when a run is
+        // arriving from below, and a run that ended in the block under this
+        // one leaves nothing owed.
+        if !any && owed.iter().all(|owe| *owe == 0) {
+            return Ok(());
+        }
+        if any && let Some(take) = pass.take {
+            let cell_region = super::noise::Region3d {
+                origin_x: (pass.origin[0] + local.x as i32) as f32,
+                origin_y: (pass.origin[1] + local.y as i32) as f32,
+                origin_z: (pass.origin[2] + local.z as i32) as f32,
+                step: 1.0 / SUBNODES_PER_AXIS as f32,
+                width: SUBNODES_PER_AXIS as usize,
+                height: SUBNODES_PER_AXIS as usize,
+                depth: SUBNODES_PER_AXIS as usize,
+            };
+            take.evaluate_with(pass.seed, &cell_region, &mut pass.fine, &mut pass.scratch)?;
+        }
+        let mut written = false;
+        for cz in 0..SUBNODES_PER_AXIS {
+            for cx in 0..SUBNODES_PER_AXIS {
+                let column = (cz * SUBNODES_PER_AXIS + cx) as usize;
+                // **What the block below owed, first.** It starts at this
+                // block's floor by construction: a run only owes cells when it
+                // filled its own block to the top, so the cell under this one
+                // is cover and the continuation is straight up out of it. Not
+                // gated by `take` — that decided once, at the base, whether
+                // this plant grows here at all.
+                let debt = std::mem::take(&mut owed[column]);
+                if debt > 0 {
+                    owed[column] = grow(
+                        &mut pass.block_cells,
+                        &mut written,
+                        (cx, cz),
+                        0,
+                        debt,
+                        pass.material,
+                    );
+                }
+                let Some(base) = bases[column] else {
+                    continue;
+                };
+                if pass.take.is_some() && pass.fine[subnode_index(cx, base, cz)] <= 0.0 {
+                    continue;
+                }
+                // Up from the base, through empty cells only. What does not
+                // fit in this block is owed to the next, and a run that ran
+                // into something owes nothing — it has met its ceiling.
+                let left = grow(
+                    &mut pass.block_cells,
+                    &mut written,
+                    (cx, cz),
+                    base,
+                    pass.cells,
+                    pass.material,
+                );
+                owed[column] = if pass.may_carry { left } else { 0 };
+            }
+        }
+        if written {
+            self.set_block_cells(local, &pass.block_cells);
         }
         Ok(())
     }
@@ -1734,9 +1881,16 @@ impl ChunkBuffer {
     /// it, so a lip on a chunk edge is the same from either side. Returns how
     /// many blocks became lips.
     ///
+    /// **Both are read on the world plane `y = 0.5`**, whatever chunk is
+    /// asking — not on the chunk's own floor. `LEVEL_SLICE` below says why, and
+    /// it is load-bearing. Give both fields terms that do not read `y`.
+    ///
     /// # Errors
     ///
     /// [`BufferError::Density`] if a field will not evaluate.
+    /// [`BufferError::TerracedWithinReadsHeight`] if `within` answers
+    /// differently on the slice than over this chunk, which means it reads
+    /// height and the fill would lay nothing.
     pub fn fill_fluid_terraced(
         &mut self,
         seed: u64,
@@ -1746,6 +1900,10 @@ impl ChunkBuffer {
         /// The plane every chunk layer reads the level on: the centre of the
         /// blocks at `y = 0`, chosen because it is the same one everywhere.
         const LEVEL_SLICE: f32 = 0.5;
+        // `TerracedWithinReadsHeight` spells the number out, because a message
+        // that said "the canonical slice" would send a mod author here to find
+        // out which one. This is what keeps the two from drifting apart.
+        const _: () = assert!(LEVEL_SLICE == 0.5);
         let side = CHUNK_BLOCKS as i32;
         let padded = (side + 2 * PAD) as usize;
         let (x0, y0, z0) = (self.pos.x * side, self.pos.y * side, self.pos.z * side);
@@ -1807,6 +1965,22 @@ impl ChunkBuffer {
         if let Some(within) = terraces.within
             && within.bounds(seed, &region).is_all_empty()
         {
+            // **And a field that reads `y` is told so rather than quietly
+            // given nothing.** The slice is `y = 0.5` for every chunk in the
+            // world (see `LEVEL_SLICE` above), so a `within` carrying a depth
+            // band — the Underground River's did — reads as "nowhere" down
+            // there and lays no water anywhere, with no message. World ask 35
+            // is that report, and its sentence is "with no message".
+            //
+            // Sound in the direction that matters: `is_all_empty` on the
+            // chunk's own span is a bound, so if it holds there is genuinely no
+            // water here and the silence is correct. Only the disagreement
+            // complains, which is exactly the case where the slice threw an
+            // answer away. One interval evaluation, in the branch that was
+            // about to do nothing anyway.
+            if !within.bounds(seed, &slab).is_all_empty() {
+                return Err(BufferError::TerracedWithinReadsHeight { floor: y0 });
+            }
             return Ok(0);
         }
         let tops = terraced_tops(seed, terraces, &region, padded)?;
@@ -2064,6 +2238,23 @@ pub enum BufferError {
     /// A density program could not be evaluated over this chunk.
     #[error(transparent)]
     Density(#[from] super::density::DensityError),
+    /// A terraced fill's `within` answers differently at different heights.
+    ///
+    /// Both of a terraced fill's fields are read on one plane for the whole
+    /// world, because whether a column is in the body — and how high its water
+    /// stands — are facts about the COLUMN, and reading them per chunk layer
+    /// makes two layers of one column disagree by a block. A field that reads
+    /// `y` therefore answers about somewhere else entirely, and the failure
+    /// used to be silent: no water, anywhere, with nothing said.
+    #[error(
+        "fill_fluid_terraced reads `within` on the world plane y = 0.5, and this field answers \
+         differently there than it does over the chunk at y = {floor} — so it reads height, and \
+         the fill would lay nothing anywhere. Give `within` a field that does not read y."
+    )]
+    TerracedWithinReadsHeight {
+        /// The floor of the chunk that disagreed with the slice, world blocks.
+        floor: i32,
+    },
 }
 
 #[cfg(test)]
@@ -2884,6 +3075,103 @@ mod tests {
         }
     }
 
+    /// The cell above `(local, cx, cy, cz)`, or `None` at the chunk ceiling.
+    fn over(
+        buffer: &ChunkBuffer,
+        local: LocalBlock,
+        cx: u32,
+        cy: u32,
+        cz: u32,
+    ) -> Option<MaterialId> {
+        if cy + 1 < SUBNODES_PER_AXIS {
+            Some(buffer.get_subnode(local, cx, cy + 1, cz))
+        } else if local.y + 1 < CHUNK_BLOCKS {
+            Some(buffer.get_subnode(LocalBlock::new(local.x, local.y + 1, local.z), cx, 0, cz))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn a_cover_run_taller_than_a_block_carries_into_the_one_above() {
+        // World ask 32: the Flower Forest's brief asks for single- AND
+        // two-block flowers, and an allium is the tall one. Six cells, so
+        // every run must cross a block boundary somewhere — the slope puts
+        // the surface at all three cell heights, so the crossing happens from
+        // each of them.
+        const ALLIUM: MaterialId = MaterialId(11);
+        let mut buffer = sloped_ground();
+        buffer.fill_cover(ALLIUM, 6, None, 7).expect("cover");
+
+        let mut crossings = 0;
+        let mut tallest = 0;
+        for z in 0..CHUNK_BLOCKS {
+            for x in 0..CHUNK_BLOCKS {
+                // Walk each cell column of this block column from the floor,
+                // measuring every unbroken run of allium in it.
+                for cx in 0..SUBNODES_PER_AXIS {
+                    for cz in 0..SUBNODES_PER_AXIS {
+                        let mut run = 0;
+                        let mut spans_a_block = false;
+                        for cell in 0..CHUNK_BLOCKS * SUBNODES_PER_AXIS {
+                            let local = LocalBlock::new(x, cell / SUBNODES_PER_AXIS, z);
+                            let cy = cell % SUBNODES_PER_AXIS;
+                            if buffer.get_subnode(local, cx, cy, cz) == ALLIUM {
+                                if run > 0 && cy == 0 {
+                                    spans_a_block = true;
+                                }
+                                run += 1;
+                                continue;
+                            }
+                            if run > 0 {
+                                tallest = tallest.max(run);
+                                crossings += u32::from(spans_a_block);
+                            }
+                            run = 0;
+                            spans_a_block = false;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(crossings > 0, "no run crossed a block boundary");
+        assert_eq!(
+            tallest, 6,
+            "the tallest run should be the six cells asked for"
+        );
+    }
+
+    #[test]
+    fn a_carried_run_still_stops_at_the_first_thing_it_meets() {
+        // The rule the carry must not break: a run stops where it meets
+        // anything, in the block above exactly as in its own. A ceiling one
+        // block over the ground leaves room for three cells and no more.
+        const IVY: MaterialId = MaterialId(12);
+        let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
+        // Floor at block 0, ceiling at block 2, so blocks 1 is the only air.
+        for z in 0..CHUNK_BLOCKS {
+            for x in 0..CHUNK_BLOCKS {
+                buffer.set_block(LocalBlock::new(x, 0, z), STONE);
+                buffer.set_block(LocalBlock::new(x, 2, z), STONE);
+            }
+        }
+        buffer.fill_cover(IVY, 9, None, 7).expect("cover");
+
+        let block = LocalBlock::new(4, 1, 4);
+        for cy in 0..SUBNODES_PER_AXIS {
+            assert_eq!(
+                buffer.get_subnode(block, 1, cy, 1),
+                IVY,
+                "the gap should be full of ivy at cell {cy}"
+            );
+        }
+        assert_eq!(
+            over(&buffer, block, 1, 2, 1),
+            Some(STONE),
+            "the run wrote through the ceiling"
+        );
+    }
+
     #[test]
     fn cover_stands_on_the_ground_inside_one_block_and_is_never_stacked() {
         // Every cover cell either stands on ground, or stands on a cover cell
@@ -3251,6 +3539,72 @@ mod tests {
             )
             .expect("fills");
         buffer
+    }
+
+    #[test]
+    fn a_terraced_within_that_reads_height_is_refused_rather_than_ignored() {
+        // World ask 35. The Underground River's `within` carried the caves'
+        // depth band; both fields are read on the world plane y = 0.5, where
+        // that band is nothing, so no column was ever in the river and the
+        // fill laid no water — "with no message", which is the part of the
+        // report this fixes. The slice itself is not the bug and must not
+        // move: it is what stops two layers of one column answering a block
+        // apart and leaving a sheet of water hanging over an air gap on the
+        // chunk seam.
+        use super::super::density::{Axis, Density, Op};
+        let mut buffer = ChunkBuffer::new(ChunkPos::new(0, 4, 0), MaterialId::AIR);
+        let level = Density::compile(vec![Op::Constant(70.0)]).expect("compiles");
+        // Positive only above y = 40, which is nothing at y = 0.5 and most of
+        // a chunk whose floor is y = 64.
+        let deep = Density::compile(vec![
+            Op::Coordinate(Axis::Y),
+            Op::Constant(40.0),
+            Op::Subtract,
+        ])
+        .expect("compiles");
+        let err = buffer
+            .fill_fluid_terraced(
+                7,
+                &Terraces {
+                    level: &level,
+                    within: Some(&deep),
+                    fluid: crate::fluid::FluidId(1),
+                    lip: None,
+                },
+            )
+            .expect_err("a `within` that reads y should be refused");
+        assert!(
+            matches!(err, BufferError::TerracedWithinReadsHeight { floor: 64 }),
+            "{err}"
+        );
+        // And the message says where the plane is, because "the canonical
+        // slice" would send whoever reads it looking for which one.
+        assert!(format!("{err}").contains("y = 0.5"), "{err}");
+    }
+
+    #[test]
+    fn a_terraced_within_that_is_simply_empty_here_is_not_an_error() {
+        // The other side of it: a field that says "no body in this chunk" and
+        // means it must still cost nothing and say nothing. Only a field that
+        // ANSWERS DIFFERENTLY at the two heights is a mistake.
+        use super::super::density::{Density, Op};
+        let mut buffer = ChunkBuffer::new(ChunkPos::new(0, 4, 0), MaterialId::AIR);
+        let level = Density::compile(vec![Op::Constant(70.0)]).expect("compiles");
+        let nowhere = Density::compile(vec![Op::Constant(-1.0)]).expect("compiles");
+        assert_eq!(
+            buffer
+                .fill_fluid_terraced(
+                    7,
+                    &Terraces {
+                        level: &level,
+                        within: Some(&nowhere),
+                        fluid: crate::fluid::FluidId(1),
+                        lip: None,
+                    },
+                )
+                .expect("an empty body is not an error"),
+            0
+        );
     }
 
     #[test]

@@ -64,18 +64,51 @@ use super::noise::{
 /// How many operations one density program may hold.
 ///
 /// A bound rather than a limit anybody should meet: a hand-written field is a
-/// dozen nodes and this is two orders above that. It exists because the program
+/// dozen nodes and this is orders above that. It exists because the program
 /// arrives from a script and a runaway table should be refused with a message
 /// rather than allocated. (512 until the coast's code field — eighteen strata
-/// and four zones over a coastline read eight times — came to 658.)
-pub const MAX_OPS: usize = 1024;
+/// and four zones over a coastline read eight times — came to 658; 1,024 until
+/// the world mod's shore programs reached 985 and 939 and its reefs, blowholes
+/// and tidal gutters had to come out of the world to fit. World ask 30.)
+///
+/// **The cap is not the budget, and the numbers say why.** Measured over a 16³
+/// region (`cargo run --release -p tiamot-core --example density_cap`, on the
+/// machine this was written on):
+///
+/// | program | ms a chunk | of a 50 ms tick |
+/// |---|---|---|
+/// | 1,000 ops, 1 noise read | 0.85 | 1.7% |
+/// | 1,000 ops, 5 noise reads | 2.36 | 4.7% |
+/// | 1,000 ops, 16 noise reads | 6.18 | 12.4% |
+/// | 4,000 ops, 1 noise read | 2.32 | 4.6% |
+/// | 4,000 ops, 17 noise reads | 8.20 | 16.4% |
+///
+/// Read off those: **one noise read is about 0.34 ms and a thousand arithmetic
+/// operations about 0.5 ms**, so a noise node is worth roughly seven hundred
+/// arithmetic ones. Quadrupling the cap therefore buys a mod three thousand
+/// more operations for about 1.5 ms a chunk in the worst case — and a program
+/// that spends the room on noise was already the expensive thing at the old
+/// cap. What actually bounds generation is the serve clock the tick keeps
+/// (`docs/performance-targets.md`), which meters chunks however costly each one
+/// is; this number only decides when a program is refused outright.
+///
+/// Raising it moves [`Interval::widened`]'s margin, which is derived from it
+/// for exactly that reason: a bound too narrow by an ulp is a bound that can
+/// put a hole in a world.
+pub const MAX_OPS: usize = 4096;
 
 /// How many array buffers may be live at once.
 ///
-/// Each is `region.len()` floats, so this is the memory bound: eight buffers
-/// over a chunk at block resolution is 128 KiB. An expression needing more is
-/// almost certainly a mistake, and one that is not can be split.
-pub const MAX_DEPTH: usize = 8;
+/// Each is `region.len()` floats, so this is the memory bound: sixteen buffers
+/// over a chunk at block resolution is 256 KiB. **A refusal bound, not an
+/// allocation** — `Scratch` grows to what a program actually uses and is reused
+/// between chunks, so a program with three live values pays for three.
+///
+/// Eight until World ask 30, whose real content is that reuse trades operations
+/// for buffers: a value read twice has to stay live between its two uses, and
+/// the world mod's shore programs were already at eight. Raising both is what
+/// makes either of them usable.
+pub const MAX_DEPTH: usize = 16;
 
 /// The range a density program can take over a box, as `[low, high]`.
 ///
@@ -127,12 +160,21 @@ impl Interval {
     /// Interval arithmetic in `f32` rounds to nearest, which can move an end
     /// the WRONG way by half an ulp per operation, and a bound that is too
     /// narrow by one ulp is still a bound that can put a hole in a world.
-    /// [`MAX_OPS`] caps the program at 1024 operations, so `1024 × 2⁻²³` relative
-    /// covers the accumulation with room to spare; the absolute term covers an
-    /// interval that straddles zero, where relative means nothing.
+    /// [`MAX_OPS`] caps the program, and half an ulp is `2⁻²⁴` relative in
+    /// `f32`, so `MAX_OPS × 2⁻²⁴` covers the whole accumulation; the absolute
+    /// term covers an interval that straddles zero, where relative means
+    /// nothing.
+    ///
+    /// **Derived from the cap and not written out**, because it was written out
+    /// (`6.2e-5`, which is 1,024 ops' worth) and raising the cap would have
+    /// left it silently too narrow — a bound that is not a bound, and the one
+    /// mistake in this file that puts a hole in a world rather than an error on
+    /// a screen.
     fn widened(self) -> Self {
+        /// Half an ulp, relative, per operation, for the whole program.
+        const MARGIN: f32 = MAX_OPS as f32 / 16_777_216.0;
         let magnitude = self.low.abs().max(self.high.abs());
-        let margin = magnitude * 6.2e-5 + 1e-6;
+        let margin = magnitude * MARGIN + 1e-6;
         Self {
             low: self.low - margin,
             high: self.high + margin,

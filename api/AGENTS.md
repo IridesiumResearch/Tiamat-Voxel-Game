@@ -1102,14 +1102,22 @@ them. A billboard alpha-tests on its own.
 block a sample is in, so a two-cell run written by `fill_density` lands half in
 one block and half in the next, and the sampled fill misses most of it in
 stripes that follow the contours. `fill_cover` stands a run on every surface the
-buffer already holds, inside one block:
+buffer already holds:
 
 ```lua
 game.register_on_generate(function(buf, pos)
     buf:fill_density(surface, dirt, { detail = "smooth" })   -- the ground first
     buf:fill_cover(grass, { cells = 2, take = tufts })       -- then what grows on it
+    buf:fill_cover(allium, { cells = 6, take = rare })       -- and a two-block flower
 end)
 ```
+
+**Up to three cells a run stays in the block it started in; over three it
+carries into the block above, up to nine.** The short case is the rule that
+keeps a tuft from being two stacked blocks that highlight and dig apart, and it
+is what every grass wants. The tall case is the two-block flower — an allium, a
+peony — and there the spill is the point. A tall run is cut at the chunk's
+ceiling, one block row in sixteen.
 
 Call it AFTER the fills that make the ground — it reads what they wrote. `take`
 is a density sampled at the run's base cell: positive means a run goes there, so
@@ -1211,6 +1219,17 @@ Everything here is true as of 2026-09-18 and is the kind of thing that is
 cheaper to read than to discover. None of it is a rule the engine wants; each is
 work that has not been done, and each will move.
 
+**A density program may hold 4,096 operations and 16 live buffers.** It was
+1,024 and 8 until 2026-09-19, and the world mod's shore programs sat at 985 and
+939 with three biomes in them — which is why its reefs lost their tidal gutters
+and its cliffs their blowholes. Nothing remembers a subtree it has already
+emitted, so a helper called twice is compiled twice: `a * (1 - w) + b * w` emits
+`w` twice, and a ring re-emits its radius at every call. Budget for that.
+What a program costs is its NOISE reads, not its length: one is about 0.34 ms a
+chunk and a thousand arithmetic operations about 0.5 ms, so a noise node is
+worth roughly seven hundred arithmetic ones. Spend the room on arithmetic
+freely and on noise carefully.
+
 **An open sheet covers the bottom of the screen, and your HUD has to say so.**
 The inventory, the pause screen and a mod's dialog are all one sheet: three
 quarters of the window's height, four by three, centred. That leaves an eighth
@@ -1236,6 +1255,28 @@ so until 2026-09-17: the solver took one set from whichever fluid registered
 first, alphabetically, so a reference mod you never thought about could be
 setting your sea's speed. Nothing to design around now; it is here so that a
 world made before then is understood if its water seems to have changed pace.
+
+**The day is yours to wind.** `game.time_of_day()` reads it and
+`game.set_time_of_day(t)` sets it — 0 midnight, 0.25 dawn, 0.5 noon, wrapped
+rather than clamped, everybody told at once. That is the bed that ends the
+night. One clock for the world; a sky that differs for one player is
+`game.set_sky_modifier`.
+
+**Your sea is drawn at the horizon.** A chunk past the detail radius arrives as
+a summary — one material a cell — and until 2026-09-19 a summary held no fluid,
+so a generated ocean read as its floor with a hole over it until you walked into
+the detail radius. A block holding fluid and no terrain now reads as the block
+that fluid is drawn as, which is the same one you named in `register_fluid`.
+Nothing to do: place the sea and it is there to the horizon.
+
+**A fluid can take the light out of what passes through it**, with
+`light_falloff` on `register_fluid` — levels lost per block, default 0. Zero is
+"like air", which is what every fluid was: a block of fluid is air in the block
+store, so sunlight fell to a sea floor a hundred blocks down at full strength.
+One is a level a block, which also ends daylight's free fall straight down, so a
+shaft of water is dark fifteen blocks under the surface and a shaft of air is
+not. A passable cell does not displace fluid either, so a plant under water is
+saturated rather than standing in a bubble of air.
 
 **Two fluids never mix, and the first one there keeps the space.** A block holds
 one fluid and a volume of it, so a move into a block holding a different fluid

@@ -234,6 +234,27 @@ pub trait Access: Send + Sync {
     /// day rather than an error.
     fn time_of_day(&self) -> f32;
 
+    /// Winds the day to `fraction`, and tells everybody.
+    ///
+    /// **The other half of [`Self::time_of_day`]**, and here for the same
+    /// reason: a mod that can read the clock and not set it cannot skip a
+    /// night, which is the one thing every game with a bed does. Life mod's
+    /// ask 2 — its sleep already heals, clears afflictions and sets home, and
+    /// this is what lets it end the night as well.
+    ///
+    /// `fraction` is `0.0..1.0`, midnight to midnight, wrapped rather than
+    /// clamped: a mod adding a quarter of a day to the current time should
+    /// cross midnight rather than stop at it.
+    ///
+    /// Returns whether the clock moved. `false` for a world whose mods
+    /// registered no sky — there is no day to set, which is not an error.
+    ///
+    /// Defaulted, because a VM with no server behind it has no clock.
+    fn set_time_of_day(&self, fraction: f32) -> bool {
+        let _ = fraction;
+        false
+    }
+
     /// Stops a looping sound by the id the mod gave it.
     ///
     /// Returns how many players were told. Stopping one that is not running is

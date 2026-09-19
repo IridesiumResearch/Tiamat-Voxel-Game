@@ -68,6 +68,24 @@ pub trait Neighbourhood {
     /// being an error: a flood reaching the edge of the loaded region has
     /// nowhere to write, and that is the bound working rather than a failure.
     fn set_light(&mut self, pos: BlockPos, level: Light);
+
+    /// Levels the block at `pos` takes out of light ARRIVING in it, per block.
+    ///
+    /// **Fluid, and only fluid.** A block of water is air as far as the block
+    /// store is concerned (Sub-Node Contract §4), so sunlight fell through a
+    /// hundred blocks of sea at full strength — the deep ocean's brief asks for
+    /// "total light extinction" on its plains and got noon. World ask 25: a mod
+    /// says `light_falloff` on `register_fluid` and the sea goes dark with
+    /// depth, while a shallow one stays bright.
+    ///
+    /// Zero is "like air", which is the default and is every world that has not
+    /// asked otherwise — and zero is exactly the value that leaves the
+    /// straight-down sunlight shortcut in [`arriving`] alone, so a world with
+    /// no falloff in it lights bit-for-bit as it always did.
+    fn falloff(&self, pos: BlockPos) -> u8 {
+        let _ = pos;
+        0
+    }
 }
 
 /// An inclusive box of blocks.
@@ -190,19 +208,35 @@ fn crosses(world: &impl Neighbourhood, from: BlockPos, face: usize) -> Option<Bl
     crosses_from(world, world.faces(from)?, from, face)
 }
 
-/// The level one channel arrives at across a face.
+/// The level one channel arrives at across a face, into a block that takes
+/// `falloff` levels out of whatever reaches it.
 ///
 /// **Sunlight falling straight down does not attenuate**, which is what makes an
 /// open shaft lit to its floor rather than fading out after fifteen blocks. Every
 /// other direction, and every other channel, loses [`ATTENUATION`] per block.
-fn arriving(channel: usize, level: u8, face: usize) -> u8 {
+///
+/// `falloff` is a fluid's ([`Neighbourhood::falloff`]), and it does two things
+/// at once, which is the whole of its design:
+///
+/// - it **ends the free fall of daylight**, so a sea is not lit to its floor;
+/// - it **sets the rate**, `max(ATTENUATION, falloff)`, so one level a block is
+///   "like air in every direction" and three is a sea dark five blocks down.
+///
+/// The `max` rather than a sum is what makes the number mean what a mod reads:
+/// "levels lost per block of it". A sum would charge a block of water the air's
+/// level and then the fluid's, so `light_falloff = 1` would dim twice as fast
+/// as a block of air beside it and the field would be off by one for ever.
+///
+/// Zero leaves every branch exactly as it was, which is why a world with no
+/// falloff in it hashes to the same light it always did.
+fn arriving(channel: usize, level: u8, face: usize, falloff: u8) -> u8 {
     const SUN: usize = 0;
     const DOWN: usize = 2; // face_negative(1)
 
-    if channel == SUN && face == DOWN && level == MAX_LEVEL {
+    if falloff == 0 && channel == SUN && face == DOWN && level == MAX_LEVEL {
         return MAX_LEVEL;
     }
-    level.saturating_sub(ATTENUATION)
+    level.saturating_sub(ATTENUATION.max(falloff))
 }
 
 /// Seeds a block's own emission, and pushes it into its neighbours.
@@ -233,7 +267,12 @@ fn seed_emission(world: &mut impl Neighbourhood, pos: BlockPos, queue: &mut VecD
         let current = world.light(next);
         let mut updated = current;
         for channel in 0..CHANNELS {
-            let arrives = arriving(channel, emission.channel(channel), face);
+            let arrives = arriving(
+                channel,
+                emission.channel(channel),
+                face,
+                world.falloff(next),
+            );
             if arrives > updated.channel(channel) {
                 updated = updated.with_channel(channel, arrives);
             }
@@ -274,9 +313,13 @@ pub fn flood(world: &mut impl Neighbourhood, queue: &mut VecDeque<BlockPos>) {
             };
 
             let current = world.light(next);
+            // Asked once for all three channels: in the server's adapter this
+            // reaches the fluid layer, and the memo behind it only pays off if
+            // the question is asked once per block rather than once per channel.
+            let into = world.falloff(next);
             let mut updated = current;
             for channel in 0..CHANNELS {
-                let arrives = arriving(channel, level.channel(channel), face);
+                let arrives = arriving(channel, level.channel(channel), face, into);
                 if arrives > updated.channel(channel) {
                     updated = updated.with_channel(channel, arrives);
                 }
@@ -448,7 +491,14 @@ pub fn roofed(world: &mut impl Neighbourhood, region: Region) {
             let delivered = world
                 .faces(roof)
                 .and_then(|faces| crosses_from(world, faces, roof, down))
-                .map_or(0, |_| arriving(SUN, world.light(roof).channel(SUN), down));
+                .map_or(0, |_| {
+                    arriving(
+                        SUN,
+                        world.light(roof).channel(SUN),
+                        down,
+                        world.falloff(floor),
+                    )
+                });
             if delivered >= had || world.emission(floor).channel(SUN) >= had {
                 continue;
             }
@@ -513,7 +563,7 @@ fn remove(
             // attenuate, so a block below a removed sky source has the same
             // level rather than a lower one — a "strictly dimmer" test leaves
             // the whole column lit under a roof that was just built.
-            if level <= arriving(channel, had, face) {
+            if level <= arriving(channel, had, face, world.falloff(next)) {
                 world.set_light(next, world.light(next).with_channel(channel, 0));
                 queue.push_back((next, level));
             } else {
@@ -543,6 +593,8 @@ mod tests {
         light: BTreeMap<(i32, i32, i32), Light>,
         /// Blocks whose faces are only partly open, by face mask.
         masked: BTreeMap<(i32, i32, i32), Faces>,
+        /// Blocks holding a fluid that dims what reaches them.
+        dimming: BTreeMap<(i32, i32, i32), u8>,
     }
 
     impl Box3 {
@@ -553,6 +605,7 @@ mod tests {
                 emitters: BTreeMap::new(),
                 light: BTreeMap::new(),
                 masked: BTreeMap::new(),
+                dimming: BTreeMap::new(),
             }
         }
 
@@ -568,6 +621,17 @@ mod tests {
 
         fn set_solid(&mut self, pos: BlockPos, solid: bool) {
             self.solid.insert((pos.x, pos.y, pos.z), solid);
+        }
+
+        /// Fills a box with a fluid whose `light_falloff` is `levels`.
+        fn flood_with(&mut self, min: BlockPos, max: BlockPos, levels: u8) {
+            for y in min.y..=max.y {
+                for z in min.z..=max.z {
+                    for x in min.x..=max.x {
+                        self.dimming.insert((x, y, z), levels);
+                    }
+                }
+            }
         }
 
         fn lamp(&mut self, pos: BlockPos, level: Light) {
@@ -614,6 +678,13 @@ mod tests {
                 self.light.insert((pos.x, pos.y, pos.z), level);
             }
         }
+
+        fn falloff(&self, pos: BlockPos) -> u8 {
+            self.dimming
+                .get(&(pos.x, pos.y, pos.z))
+                .copied()
+                .unwrap_or(0)
+        }
     }
 
     fn open_box(size: i32) -> Box3 {
@@ -636,6 +707,83 @@ mod tests {
                 "sunlight faded at y = {y} in an open column"
             );
         }
+    }
+
+    #[test]
+    fn a_fluid_that_dims_ends_daylights_free_fall() {
+        // World ask 25. Water is air as far as the block store is concerned,
+        // so an open column of sea was lit to its floor at full daylight — the
+        // deep ocean's brief asks for "total light extinction" a hundred blocks
+        // down and got noon. One level a block: the surface keeps its sun, and
+        // fifteen blocks down there is none.
+        let mut world = open_box(20);
+        world.flood_with(BlockPos::new(0, 0, 0), BlockPos::new(20, 15, 20), 1);
+        let region = world.region;
+        relight(&mut world, region);
+
+        // Above the water, nothing changed: daylight still falls free.
+        assert_eq!(world.at(BlockPos::new(5, 20, 5)).sun(), MAX_LEVEL);
+        assert_eq!(world.at(BlockPos::new(5, 16, 5)).sun(), MAX_LEVEL);
+        // And in it, one level a block from the surface down.
+        for (y, expected) in [(15, 14), (14, 13), (10, 9), (5, 4), (1, 0), (0, 0)] {
+            assert_eq!(
+                world.at(BlockPos::new(5, y, 5)).sun(),
+                expected,
+                "the sun at y = {y} under a surface at y = 15"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fluid_with_no_falloff_lights_exactly_as_air_does() {
+        // The counter-example, and the compatibility promise: `light_falloff`
+        // defaults to zero, and zero has to be bit-for-bit what every world had
+        // before the field existed — the determinism goldens say so.
+        let mut world = open_box(20);
+        world.flood_with(BlockPos::new(0, 0, 0), BlockPos::new(20, 15, 20), 0);
+        let region = world.region;
+        relight(&mut world, region);
+
+        for y in 0..=20 {
+            assert_eq!(
+                world.at(BlockPos::new(5, y, 5)).sun(),
+                MAX_LEVEL,
+                "a fluid that asked for nothing dimmed the column at y = {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_that_fills_with_a_dimming_fluid_goes_dark_block_by_block() {
+        // The incremental half: a sea does not arrive already there, it is
+        // poured, and `edited` is what the tick calls for each block that
+        // started or stopped holding a fluid that changes the light.
+        let mut world = open_box(20);
+        let region = world.region;
+        relight(&mut world, region);
+        assert_eq!(world.at(BlockPos::new(5, 0, 5)).sun(), MAX_LEVEL);
+
+        world.flood_with(BlockPos::new(0, 0, 0), BlockPos::new(20, 15, 20), 1);
+        // Top down, which is the order a pour reaches the tick in — and the
+        // order that would hide a bug if `edited` only ever brightened.
+        for y in (0..=15).rev() {
+            for z in 0..=20 {
+                for x in 0..=20 {
+                    edited(&mut world, BlockPos::new(x, y, z));
+                }
+            }
+        }
+
+        assert_eq!(
+            world.at(BlockPos::new(5, 15, 5)).sun(),
+            14,
+            "the surface of the new sea"
+        );
+        assert_eq!(
+            world.at(BlockPos::new(5, 0, 5)).sun(),
+            0,
+            "the floor of a fifteen-block sea should be dark"
+        );
     }
 
     #[test]
@@ -1353,7 +1501,12 @@ mod tests {
 
                     let explained = (0..FACE_COUNT).any(|face| {
                         crosses(&world, pos, face).is_some_and(|next| {
-                            arriving(channel, world.at(next).channel(channel), opposite(face))
+                            arriving(
+                                channel,
+                                world.at(next).channel(channel),
+                                opposite(face),
+                                0,
+                            )
                                 >= here
                         })
                     });

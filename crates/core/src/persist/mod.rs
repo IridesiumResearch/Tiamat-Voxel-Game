@@ -800,6 +800,11 @@ impl WorldDb {
         pos: ChunkPos,
         layer: &FluidLayer,
     ) -> Result<(), WorldError> {
+        // **The summary goes with it**, exactly as saving a chunk's blocks
+        // drops it: a summary carries the sea (World ask 28), so a pond that
+        // moved or drained makes the horizon's copy of it wrong, and a stale
+        // derived row is wrong with nothing downstream able to tell.
+        self.forget_summaries(domain, pos)?;
         if layer.is_empty() {
             self.conn.execute(
                 "DELETE FROM chunk_fluid WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
@@ -871,7 +876,14 @@ impl WorldDb {
             let mut remove = transaction.prepare_cached(
                 "DELETE FROM chunk_fluid WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
             )?;
+            // In the same transaction as the layers, for the reason the batch
+            // exists: a commit that wrote the ponds and not the summary
+            // removals would leave a horizon showing a sea that has drained.
+            let mut forget = transaction.prepare_cached(
+                "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
+            )?;
             for (pos, blob) in &encoded {
+                forget.execute(params![domain, pos.x, pos.y, pos.z])?;
                 match blob {
                     Some(blob) => {
                         write.execute(params![domain, pos.x, pos.y, pos.z, blob])?;

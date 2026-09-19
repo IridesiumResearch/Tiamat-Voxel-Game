@@ -309,6 +309,7 @@ fn fluid_named(name: &str) -> tiamot_core::fluid::Registered {
         color: [255, 255, 255],
         material: MaterialId(4),
         opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+        light_falloff: 0,
     }
 }
 

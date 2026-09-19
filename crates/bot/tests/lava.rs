@@ -161,6 +161,111 @@ fn a_pool_of_glowing_fluid_lights_the_room_it_stands_in() {
     );
 }
 
+/// The same room, empty, with the lava poured DURING play instead of generated.
+fn write_pouring_world(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("lava");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"lava\"\nname = \"Lava\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local rock = game.register_block{ id = "rock" }
+game.register_block{ id = "molten", light_emit = { r = 15, g = 8, b = 2 } }
+game.register_fluid{ id = "lava", material = "lava:molten", opacity = 1.0 }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(16), rock)
+    local x0, z0 = pos.x * 16, pos.z * 16
+    for x = x0, x0 + 15 do
+        for z = z0, z0 + 15 do
+            for y = 1, 4 do
+                buf:set_world(x, y, z, 0)
+            end
+        end
+    end
+end)
+
+-- Poured AFTER somebody joins, and ten seconds after that, so the room has
+-- certainly been served and seen dark first. The only thing that can light it
+-- from then on is the fluid step's own relight.
+local due = nil
+game.register_on_player_join(function()
+    due = 200
+end)
+game.register_on_tick(function()
+    if due == nil then return end
+    due = due - 1
+    if due > 0 then return end
+    due = nil
+    for x = 0, 15 do
+        for z = 0, 15 do
+            game.set_fluid({ x = x, y = 1, z = z }, { fluid = "lava:lava", volume = 27 })
+        end
+    end
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
+#[test]
+fn lava_poured_during_play_lights_the_room_without_the_chunk_being_served_again() {
+    // **The half the test above cannot reach.** Lava that is GENERATED is lit
+    // when its chunk is served; lava that arrives later is lit only by the
+    // tick's own relight pass — and that pass used to run BEFORE the fluid
+    // step, so every position the fluid step queued was pushed onto a vector
+    // that was dropped at the end of the tick. A lake that flowed took its
+    // light with it the next time somebody reloaded the chunk, and no sooner.
+    let server = start("poured", write_pouring_world("poured-mods"));
+    let lit = block_on(async {
+        let mut bot = Bot::connect(
+            server.local_addr(),
+            Identity::generate().expect("identity"),
+            server.cert_fingerprint(),
+        )
+        .await
+        .expect("connect");
+        bot.join("Miner").await.expect("join");
+        loop {
+            let batch = bot
+                .collect_chunks(64, Duration::from_secs(2))
+                .await
+                .expect("collect");
+            if batch.is_empty() {
+                break;
+            }
+        }
+        // Dark to begin with: the room is roofed and nothing has been poured.
+        bot.sleep_ticks(20).await;
+        let before = bot
+            .light_at(BlockPos::new(8, 2, 8))
+            .map_or(0, |light| light.red());
+        assert_eq!(before, 0, "the room was lit before anything was poured");
+
+        // Past the pour, and past the fluid tick that carries it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut lit = 0;
+        while tokio::time::Instant::now() < deadline && lit == 0 {
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+            lit = bot
+                .light_at(BlockPos::new(8, 2, 8))
+                .map_or(0, |light| light.red());
+        }
+        bot.disconnect().await;
+        lit
+    });
+    assert!(server.stop());
+    assert!(
+        lit >= 8,
+        "lava poured into a served room left it at {lit}: the fluid step's relight never ran"
+    );
+}
+
 #[test]
 fn a_pool_of_ordinary_fluid_lights_nothing() {
     // **The counter-example, and the reason it is here.** Without it the test

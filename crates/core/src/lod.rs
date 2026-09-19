@@ -305,6 +305,23 @@ impl Default for Rings {
     }
 }
 
+/// What an otherwise-empty block of fluid reads as, for a summary.
+///
+/// The material a full block of that fluid is DRAWN as, which is the block id
+/// the mesher and the atlas already use for it — see [`Summary::of_wet`].
+///
+/// Air for a block that is dry or barely wet: a cell or two of water in a block
+/// is spray at the bottom of a fall, not a sea, and half a block is the same
+/// threshold the summary uses for terrain.
+fn wet_cell(fluid: crate::fluid::Fluid, fluids: &crate::fluid::Fluids) -> MaterialId {
+    if fluid.is_empty() || fluid.volume() * 2 < crate::fluid::MAX_VOLUME {
+        return MaterialId::AIR;
+    }
+    fluids
+        .get(fluid.fluid())
+        .map_or(MaterialId::AIR, |registered| registered.material)
+}
+
 /// One chunk's shape at one level.
 ///
 /// Cells are in `x + y * n + z * n * n` order, the same order the chunk's own
@@ -321,15 +338,60 @@ impl Summary {
     /// A block's cell is the material most of its 27 sub-nodes are, air
     /// included — see the module docs on why a mostly-empty block reads as
     /// empty.
+    ///
+    /// Dry: the same as [`Self::of_wet`] with an empty layer. Kept because most
+    /// of the world has no fluid in it and most callers have none to hand.
     #[must_use]
     pub fn of(chunk: &Chunk) -> Self {
+        Self::of_wet(
+            chunk,
+            &crate::fluid::FluidLayer::empty(),
+            &crate::fluid::Fluids::new(),
+        )
+    }
+
+    /// The same, with the fluid that stands in the chunk drawn into it.
+    ///
+    /// # Why the fluid is a material and not a field of its own
+    ///
+    /// World ask 28: the seas were placed and a chunk outside the detail radius
+    /// is drawn from its summary, which held materials only — so from a hill a
+    /// sea was its floor, a hole in the world the shape of the pool, until the
+    /// player walked close enough for the real chunk to arrive.
+    ///
+    /// A block that holds fluid and no terrain becomes the material that fluid
+    /// is DRAWN as, which is the same block id the mesher and the atlas already
+    /// use for it (`fluid::Registered::material`). So the horizon draws a sea
+    /// exactly as it draws anything else: opaque, greedily merged, lit by the
+    /// face-direction shade. At a distance where one cell is a block or eight,
+    /// that is what a sea looks like, and nothing anywhere else has to learn
+    /// about fluid — not the wire, not the client, not the mesher.
+    ///
+    /// **Terrain wins.** A block with any solid cells keeps its own material:
+    /// the fluid is only ever painted into what would otherwise be air, so a
+    /// cliff standing in the sea is still a cliff.
+    ///
+    /// A half-full block counts as fluid. The alternative is a shoreline that
+    /// flickers between sea and nothing as the tide finds its level, and half a
+    /// block of water a mile away is water.
+    #[must_use]
+    pub fn of_wet(
+        chunk: &Chunk,
+        fluid: &crate::fluid::FluidLayer,
+        fluids: &crate::fluid::Fluids,
+    ) -> Self {
         let n = CHUNK_BLOCKS;
         let mut cells = Vec::with_capacity((n * n * n) as usize);
         for z in 0..n {
             for y in 0..n {
                 for x in 0..n {
                     let local = LocalBlock::new(x, y, z);
-                    cells.push(dominant_subnode(&chunk.get_block_local(local)));
+                    let material = dominant_subnode(&chunk.get_block_local(local));
+                    cells.push(if material.is_air() {
+                        wet_cell(fluid.get(local), fluids)
+                    } else {
+                        material
+                    });
                 }
             }
         }
@@ -381,7 +443,25 @@ impl Summary {
     /// together.
     #[must_use]
     pub fn chain(chunk: &Chunk) -> Vec<Self> {
-        let mut out = vec![Self::of(chunk)];
+        Self::chain_wet(
+            chunk,
+            &crate::fluid::FluidLayer::empty(),
+            &crate::fluid::Fluids::new(),
+        )
+    }
+
+    /// The same chain, with the fluid standing in the chunk drawn into it.
+    ///
+    /// World ask 28. See [`Self::of_wet`]: only the finest level reads the
+    /// layer, and every coarser one is built from it as it always was, so a sea
+    /// merges upward exactly as terrain does.
+    #[must_use]
+    pub fn chain_wet(
+        chunk: &Chunk,
+        fluid: &crate::fluid::FluidLayer,
+        fluids: &crate::fluid::Fluids,
+    ) -> Vec<Self> {
+        let mut out = vec![Self::of_wet(chunk, fluid, fluids)];
         while let Some(next) = out.last().and_then(Self::coarser) {
             out.push(next);
         }
@@ -976,6 +1056,117 @@ mod tests {
                 summary.level()
             );
         }
+    }
+
+    /// A registry holding one fluid, drawn as `material`.
+    fn one_fluid(material: MaterialId) -> crate::fluid::Fluids {
+        let mut fluids = crate::fluid::Fluids::new();
+        fluids
+            .register(crate::fluid::Registered {
+                name: "test:water".to_owned(),
+                waterlogs_at: 14,
+                tick_rate: 1,
+                evaporates: 0,
+                color: [0, 0, 255],
+                material,
+                opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                light_falloff: 0,
+            })
+            .expect("register");
+        fluids
+    }
+
+    #[test]
+    fn a_summary_draws_the_sea_standing_in_a_chunk() {
+        // World ask 28: the seas are placed, and a chunk outside the detail
+        // radius is drawn from its summary — which held materials only, so from
+        // a hill a sea was its floor, a hole in the world the shape of the pool.
+        let mut chunk = Chunk::air(home());
+        // A floor at y = 0 and nothing else.
+        for z in 0..CHUNK_BLOCKS {
+            for x in 0..CHUNK_BLOCKS {
+                chunk
+                    .set_block(
+                        crate::BlockPos::new(x as i32, 0, z as i32),
+                        crate::block::BlockValue::Uniform(STONE),
+                    )
+                    .expect("floor");
+            }
+        }
+        let fluids = one_fluid(DIRT);
+        let water = crate::fluid::FluidId(1);
+        let mut layer = crate::fluid::FluidLayer::empty();
+        for z in 0..CHUNK_BLOCKS {
+            for y in 1..4 {
+                for x in 0..CHUNK_BLOCKS {
+                    layer.set(
+                        LocalBlock::new(x, y, z),
+                        crate::fluid::Fluid::new(water, crate::fluid::MAX_VOLUME),
+                    );
+                }
+            }
+        }
+
+        let dry = Summary::of(&chunk);
+        let wet = Summary::of_wet(&chunk, &layer, &fluids);
+        let at = |summary: &Summary, x: u32, y: u32, z: u32| {
+            let n = CHUNK_BLOCKS as usize;
+            summary.cells()[(z as usize * n + y as usize) * n + x as usize]
+        };
+
+        assert_eq!(at(&dry, 8, 2, 8), MaterialId::AIR, "the fixture is not dry");
+        assert_eq!(
+            at(&wet, 8, 2, 8),
+            DIRT,
+            "a block of water reads as the block that water is drawn as"
+        );
+        assert_eq!(
+            at(&wet, 8, 0, 8),
+            STONE,
+            "terrain wins: a floor under the sea is still the floor"
+        );
+        assert_eq!(
+            at(&wet, 8, 5, 8),
+            MaterialId::AIR,
+            "the air above the surface was filled in"
+        );
+    }
+
+    #[test]
+    fn a_barely_wet_block_is_not_a_sea() {
+        // Spray at the bottom of a fall, not water: half a block is the same
+        // threshold the summary uses for terrain, and anything less is nothing.
+        let chunk = Chunk::air(home());
+        let fluids = one_fluid(DIRT);
+        let mut layer = crate::fluid::FluidLayer::empty();
+        layer.set(
+            LocalBlock::new(1, 1, 1),
+            crate::fluid::Fluid::new(crate::fluid::FluidId(1), 3),
+        );
+        layer.set(
+            LocalBlock::new(2, 1, 1),
+            crate::fluid::Fluid::new(crate::fluid::FluidId(1), 14),
+        );
+        let wet = Summary::of_wet(&chunk, &layer, &fluids);
+        let n = CHUNK_BLOCKS as usize;
+        let at = |x: usize, y: usize, z: usize| wet.cells()[(z * n + y) * n + x];
+        assert_eq!(at(1, 1, 1), MaterialId::AIR, "three cells is spray");
+        assert_eq!(at(2, 1, 1), DIRT, "over half a block is water");
+    }
+
+    #[test]
+    fn a_dry_world_summarises_exactly_as_it_always_did() {
+        // The compatibility promise: `of` is `of_wet` with nothing in it, and a
+        // world with no fluid registered cannot tell the difference.
+        let chunk = Chunk::new(home(), STONE);
+        assert_eq!(
+            Summary::chain(&chunk),
+            Summary::chain_wet(
+                &chunk,
+                &crate::fluid::FluidLayer::empty(),
+                &crate::fluid::Fluids::new()
+            )
+        );
     }
 
     #[test]

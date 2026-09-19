@@ -200,12 +200,23 @@ function ChunkBuffer:fill_layers(depth, code, layers) end
 ---cover — grass, ferns, anything that grows UP from the ground.
 ---
 ---For every cell column, wherever an empty cell sits on an occupied one, that
----cell and up to `cells - 1` empty cells above it become `material`. **Inside
----one block, always**: the run stops at the block's top, so a tuft is never
----two stacked blocks that highlight and dig apart, and where the surface is
----a block's top cell the run is that one cell. It never overwrites a cell
----that holds something, and cover this call writes is not ground for it — a
----run never stands on another run.
+---cell and up to `cells - 1` empty cells above it become `material`. It never
+---overwrites a cell that holds something — the run stops at the first thing it
+---meets — and cover this call writes is not ground for it, so a run never
+---stands on another run.
+---
+---**Up to three cells, the run stays in the block it started in.** That is
+---what keeps a tuft from being two stacked blocks that highlight and dig
+---apart, and where the surface is a block's top cell the run is that one cell.
+---Every grass in the world wants two, and two behaves exactly as it always did.
+---
+---**Over three cells, it carries into the block above** — the two-block
+---flowers an allium or a peony wants, up to nine cells. It stops where it
+---meets anything, in the block above as in its own. It is cut at the chunk's
+---ceiling: the block over the top block belongs to a chunk that does not exist
+---yet, which is the same reason a surface exactly on the chunk floor gets no
+---cover. One block row in sixteen, and only for a run tall enough to reach out
+---of it.
 ---
 ---**Why a field cannot do this.** A density has no idea which block a sample
 ---is in, and a run two cells tall in a block whose surface sits at an
@@ -221,11 +232,12 @@ function ChunkBuffer:fill_layers(depth, code, layers) end
 ---Call it AFTER the fills that make the ground — it reads what they wrote.
 ---
 ---```lua
----buf:fill_cover(grass, { cells = 2, take = tufts })   -- two cells, where tufts > 0
+---buf:fill_cover(grass, { cells = 2, take = tufts })   -- two cells, in its block
 ---buf:fill_cover(moss)                                 -- one cell, everywhere
+---buf:fill_cover(allium, { cells = 6, take = rare })   -- two blocks tall
 ---```
 ---@param material integer
----@param options table? `{ cells = 1 | 2 | 3, take = Tiamot.Density }`
+---@param options table? `{ cells = 1..9, take = Tiamot.Density }`
 function ChunkBuffer:fill_cover(material, options) end
 
 ---Fills every block below `level` with a fluid, around the terrain.
@@ -265,10 +277,24 @@ function ChunkBuffer:fill_fluid_below(level, fluid) end
 ---`fill_fluid_below` is one level for the world, which is a sea. Fluid is
 ---conserved and flows, so water laid at a SLOPE does not stay put — it runs to
 ---the lowest point of its valley as soon as the chunk loads. Here `level` is a
----density whose value is a world height; it is read once per column (at the
----column's centre, on the chunk's lowest layer, so give it a field that does
----not read `y`) and taken down to a whole block, and the column's fluid fills
----every block below that, around the terrain, as a sea does.
+---density whose value is a world height; it is read once per column and taken
+---down to a whole block, and the column's fluid fills every block below that,
+---around the terrain, as a sea does.
+---
+---# Both fields are read on the world plane `y = 0.5`
+---
+---Not on the chunk's own floor — **on `y = 0.5`, for every chunk in the
+---world**, at the column's centre. That is what makes a column's level a fact
+---about the COLUMN: read them per chunk layer and two layers of one column
+---answer a block apart, and the lower one stops short of the upper one's
+---water, leaving a sheet of it hanging over an air gap exactly on the seam.
+---
+---So **give `level` and `within` fields that do not read `y` at all.** A field
+---that reads height a little — a province cut carrying a depth band, a noise
+---stretched in y — is evaluated thirty thousand blocks from where its water
+---goes. If it reads `y` enough that `within` answers differently at the two
+---heights, the call is now an error saying so; a `level` that does it is not
+---detectable and is simply wrong.
 ---
 ---Where a neighbouring column's top is higher, this column gets a **lip**: the
 ---blocks from its own top up to the neighbour's are made `lip` wherever the
@@ -294,7 +320,8 @@ function ChunkBuffer:fill_fluid_below(level, fluid) end
 ---```
 ---
 ---Run it after the terrain, and after anything stamped into the channel: the
----fluid takes the room the blocks leave. Returns how many blocks became lips.
+---fluid takes the room the blocks leave. Returns how many blocks became lips,
+---and raises an error if `within` reads height (see above).
 ---@param spec { level: Tiamot.Density, within: Tiamot.Density?, fluid: string, lip: integer? }
 ---@return integer lips
 function ChunkBuffer:fill_fluid_terraced(spec) end
@@ -423,7 +450,7 @@ function Stream:next_bool() end
 ---@field light_emit Tiamot.LightEmit? Light this block gives off. Omit for anything that is not a lamp.
 ---@field transparent boolean? Whether this block can be seen through: glass. **A flag, not an alpha value** — what it looks like is its texture's own alpha, and a second opacity number beside it would be two sources of truth for one appearance. Three things change (Sub-Node Contract §8.1): a face draws where exactly one side of it is transparent, so a wall behind a window is not a hole and two panes together do not double up; the block is drawn in a blended pass after the opaque world; and light passes through it, so a glass roof does not make a dark room. **Collision does NOT change — glass is solid** and you cannot walk through a window. Only a whole block of one transparent material passes light; a chiselled or mixed block holding glass falls back to the ordinary cell rule.
 ---@field cutout boolean? Whether this block is see-through in PLACES rather than everywhere: leaves, a fern, a grate. **Not a variant of `transparent` — the opposite culling rule**, and a block declaring both is refused rather than given whichever the engine tests first. Glass hides the face between two panes so a window does not double up; foliage KEEPS the faces between two leaf blocks, because culled, a canopy is a hollow shell whose alpha holes look straight through the world at the sky. Drawn alpha-tested with the opaque world rather than blended, so it writes depth, occludes itself correctly at every angle, and needs none of the sorting §8.1 gave up on. Light passes as it does through glass; dappled shade is not expressible. Collision does NOT change — leaves are solid. The cost is that every interior face of a mass of foliage is drawn (Sub-Node Contract §8.2), which is what makes it look like foliage rather than a painted box.
----@field passable boolean? Whether a body walks through it: grass, ferns, vines. **Collision only.** The cell is still there for everything else — it meshes, it is lit, it holds fluid out, and a ray still STOPS at it, which is what lets a player aim at a tuft and break it. Without this every plant is a lip: collision is at sub-node resolution, so a two-cell fern is two thirds of a yard to climb, and foliage has to be built around that rather than around what it should look like (Sub-Node Contract §2).
+---@field passable boolean? Whether a body walks through it: grass, ferns, vines. **Collision only.** The cell is still there for everything else — it meshes, it is lit, and a ray still STOPS at it, which is what lets a player aim at a tuft and break it. **It does not hold fluid out:** a block holding nothing but passable cells takes a whole block of water, so a plant under water is saturated rather than standing in a bubble of air, and a body swimming through it is as submerged as the water beside it. Without this every plant is a lip: collision is at sub-node resolution, so a two-cell fern is two thirds of a yard to climb, and foliage has to be built around that rather than around what it should look like (Sub-Node Contract §2).
 ---@field sway boolean? Whether the top of it moves in a fake wind: grass, leaves, a banner. **Presentation only** — the world does not know it is moving, so collision, lighting and the server's idea of where anything is are all untouched. The mesher marks the TOP EDGE of each face and the shader bends only those, so a plant bends from base to tip rather than sliding, and its base stays planted. The motion is smooth noise over world position and time, so a field leans in gusts rather than each plant buzzing on its own (Sub-Node Contract §8.3).
 ---@field billboard boolean|"cross"? Whether its cells are drawn as SPRITES rather than as geometry: grass, ferns, flowers. `true` is one card that turns to face the camera; `"cross"` is two FIXED cards on the diagonals of the run's column — the X Minecraft and Minetest draw, which reads as a plant and holds still as the player walks round it. **This is what a sprite card is here** — the engine has no diagonal geometry, and a cell drawn as a cube shows a NINTH of its texture per face (a texture repeats once per block), so grass built from cells reads as little floating boxes. A run of cells in a column is ONE sprite as tall as the run: one cell is a third of a yard, three is a yard. It turns about the vertical axis only, so it never lies over when you look down. The cells stay where they are for collision, light, fluid and the dig ray — only the drawing changes (Sub-Node Contract §8.4). A billboard may not also declare `transparent` or `cutout` — those are rules about a cell's cube faces and a sprite has none; the pair is refused.
 ---@field tint table? How this block's colour varies across the world: `{ strength = 0.15, scale = 32, low = {0.9, 1.0, 0.85}, high = {1.0, 0.95, 1.0} }`. **This is what stops ground reading as a repeating texture.** The client multiplies the texture by a colour sampled from one smooth field of world position — the same field for every material, so neighbouring materials vary together rather than each drifting on its own. `strength` (0..1) moves the TONE and is the whole of what most mods want: brightness variation alone breaks up the repeat. `low` and `high` are optional RGB multipliers at the two ends of the same field, for a hue shift — grass greener in one place than another — and default to no shift at all. `scale` is how many blocks one period spans, tens rather than ones: a period near a block makes noise rather than ground. Presentation only — nothing in the simulation reads it, and it is not in any determinism hash.
@@ -1872,6 +1899,30 @@ function game.steer_entity(id, target, gait) end
 ---@return number time
 function game.time_of_day() end
 
+---Winds the day. Returns whether the clock moved.
+---
+---**A bed that ends the night is what this is for.** `0.0` is midnight, `0.25`
+---dawn, `0.5` noon, `0.75` dusk. Wrapped, not clamped, so
+---`game.set_time_of_day(game.time_of_day() + 0.3)` crosses midnight instead of
+---stopping at it.
+---
+---Everybody is told at once rather than at the next scheduled update, because a
+---skipped night is exactly the case where waiting a second is visible: a player
+---who has just got out of bed would otherwise watch the sun hang at midnight.
+---
+---`false` in a world whose mods registered no sky — there is no day to set,
+---which is not an error. It is the same clock for everybody: a mod that wants
+---one player's sky to differ wants `game.set_sky_modifier`.
+---
+---```lua
+---if everyone_in_bed() then
+---    game.set_time_of_day(0.25)   -- dawn
+---end
+---```
+---@param time number 0..1, midnight to midnight.
+---@return boolean moved
+function game.set_time_of_day(time) end
+
 ---Stops a looping sound by the id you gave it. Returns how many were told.
 ---
 ---Stopping one that is not running is not an error, so tidying up on shutdown
@@ -2347,6 +2398,7 @@ function game.find_path(from, to, options) end
 ---@field waterlogs_at? integer How full of terrain a block must be before this fluid treats it as floor, in cells of 27. Default 14 — over half. Below it the block is more air than anything and the fluid runs through; at or above it the block holds the fluid up and a mod can swap it for a waterlogged one from `register_on_fluid_flow`. Set it to 1 for the blocky rule where a single chiselled cell makes a block waterproof.
 ---@field evaporates? integer One in how many fluid ticks a block open to the air loses a cell. Default 0, which never evaporates. **This destroys matter**, which is why the engine defaults it off and leaves the decision to you — a wide shallow pool goes before a deep narrow one, because more of it is exposed.
 ---@field opacity? number How much of what is behind it a surface of this fluid hides, 0.0..=1.0. Default 0.72, which is what every fluid was drawn at before the field existed: you can make out a riverbed through it, and a deep pool still reads as deep. `1.0` is lava — a surface, not a window. `0.0` is invisible, which is legitimate and is not the same as "unsaid".
+---@field light_falloff? integer Levels of light a block of this fluid takes out of what reaches it. Default 0, which is "like air" and is what every fluid was: a block of fluid is air in the block store (Sub-Node Contract §4), so sunlight fell through a hundred blocks of sea at full strength. **1 is a level a block**, which also ends daylight's free fall straight down — an open shaft of air is lit to its floor and a shaft of water is dark fifteen blocks down. 3 is dark five blocks down, which is a murky sea. It costs nothing in a world that leaves it at zero: the lighting pass checks one bool and never looks at the fluid layer.
 
 ---Registers a fluid.
 ---
@@ -2397,6 +2449,7 @@ Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ----- Lava: opaque, and a light source because its block is one.
 ---game.register_block{ id = "molten", texture = "lava.png", light_emit = { r = 15, g = 8, b = 2 } }
 ---game.register_fluid{ id = "lava", material = "molten", opacity = 1.0, tick_rate = 4 }
+---game.register_fluid{ id = "brine", material = "water", light_falloff = 1 }  -- a dark deep sea
 ---```
 ---@param spec Tiamot.FluidSpec
 function game.register_fluid(spec) end

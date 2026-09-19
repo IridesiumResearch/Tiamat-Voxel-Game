@@ -388,6 +388,50 @@ impl BlockView<'_> {
         }
     }
 
+    /// How many of the block's 27 cells stand in a fluid's way.
+    ///
+    /// [`Self::filled_cells`] with the passable materials — grass, ferns,
+    /// anything a body walks through — left out. **Sub-Node Contract §4's
+    /// input, refined.** A tuft of grass holds one to three cells, so a block
+    /// of it under water used to take one to three cells less water than the
+    /// empty block beside it, and the plant stood in a pocket of air. World ask
+    /// 29: "grass, when under water, should get saturated so it doesn't have an
+    /// air bubble around it."
+    ///
+    /// A fluid and a solid cannot share a cell in the store, so what happens
+    /// instead is that the block holds twenty-seven of water AND the plant, and
+    /// the mesher fills every free cell with fluid anyway — so nothing has to
+    /// change about how it is drawn.
+    ///
+    /// `passable` is asked once per distinct material rather than once per
+    /// cell, for the common shapes: a uniform or partial block is one call.
+    #[must_use]
+    pub fn blocking_cells(&self, passable: impl Fn(MaterialId) -> bool) -> u32 {
+        match self {
+            Self::Uniform(material) => {
+                if material.is_air() || passable(*material) {
+                    0
+                } else {
+                    SUBNODES_PER_BLOCK as u32
+                }
+            }
+            Self::Partial {
+                material,
+                occupancy,
+            } => {
+                if material.is_air() || passable(*material) {
+                    0
+                } else {
+                    occupancy.count_ones()
+                }
+            }
+            Self::Mixed(cells) => cells
+                .iter()
+                .filter(|material| !material.is_air() && !passable(**material))
+                .count() as u32,
+        }
+    }
+
     /// The material at a sub-node index.
     ///
     /// # Panics

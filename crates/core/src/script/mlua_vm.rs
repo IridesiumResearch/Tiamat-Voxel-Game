@@ -877,8 +877,10 @@ impl BufferHandle {
         );
 
         // Ground cover: a run of cells stood on every surface the buffer holds,
-        // inside one block. Its own call because a field cannot say "the block
-        // the surface is in" — see `ChunkBuffer::fill_cover`.
+        // on the ground. Its own call because a field cannot say "the block
+        // the surface is in" — see `ChunkBuffer::fill_cover`, which is also
+        // where the "up to three cells stays in its block, more than three
+        // carries into the one above" rule is written down.
         methods.add_method_mut(
             "fill_cover",
             |_, this, (material, options): (u16, Option<Table>)| {
@@ -888,9 +890,10 @@ impl BufferHandle {
                     .transpose()?
                     .flatten()
                     .unwrap_or(1);
-                if !(1..=3).contains(&cells) {
+                if !(1..=crate::detgen::buffer::MAX_COVER_CELLS).contains(&cells) {
                     return Err(mlua::Error::external(format!(
-                        "fill_cover: `cells` is 1 to 3, not {cells}"
+                        "fill_cover: `cells` is 1 to {}, not {cells}",
+                        crate::detgen::buffer::MAX_COVER_CELLS
                     )));
                 }
                 let take = options
@@ -3257,6 +3260,7 @@ impl ScriptVm for MluaVm {
                     ],
                     tick_rate: entry.get("tick_rate").ok()?,
                     opacity: entry.get("opacity").ok()?,
+                    light_falloff: entry.get("light_falloff").ok()?,
                 })
             })
             .collect();
@@ -3985,6 +3989,34 @@ impl MluaVm {
     /// A mod wanting a noise on jumping does not have to find the jump code —
     /// there is none it could reach — and the engine does not have to know
     /// anybody wanted one.
+    /// `game.set_time_of_day(t)` — Life mod's ask 2, and the other half of
+    /// `game.time_of_day`.
+    ///
+    /// Its own method because `install_cues` is at the line limit, and this is
+    /// the natural seam: everything else there is about sound, and a clock is
+    /// only on that trait because deciding what should be playing is the one
+    /// reason a mod needed the time on the server.
+    fn install_clock(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.sounds);
+        let set_time = self
+            .lua
+            .create_function(move |_, fraction: f32| {
+                if !fraction.is_finite() {
+                    return Err(mlua::Error::external(
+                        "set_time_of_day: the time is 0..1, midnight to midnight, and not a NaN",
+                    ));
+                }
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.set_time_of_day(fraction)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_time_of_day", set_time)
+            .map_err(|err| self.vm_error(&err))
+    }
+
     fn install_cues(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
         let owner = mod_id.to_owned();
         let bind = self
@@ -4036,6 +4068,7 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("time_of_day", time_of_day)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_clock(game)?;
 
         let owner = mod_id.to_owned();
         let slot = std::sync::Arc::clone(&self.sounds);
@@ -8315,6 +8348,21 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         )));
     }
 
+    // **How dark this fluid gets with depth** — World ask 25. Zero, the
+    // default, is "like air" and is what every fluid was: sunlight fell through
+    // a hundred blocks of sea at full strength, because a block of fluid is air
+    // in the block store.
+    let light_falloff: u8 = spec.get("light_falloff").unwrap_or(0);
+    if u32::from(light_falloff) > u32::from(crate::light::MAX_LEVEL) {
+        return Err(mlua::Error::external(format!(
+            "register_fluid(\"{qualified}\"): light_falloff must be 0..={}, got \
+             {light_falloff}. It is how many levels of light a block of this fluid takes out \
+             of what reaches it; 0 is like air and {} is pitch dark one block down.",
+            crate::light::MAX_LEVEL,
+            crate::light::MAX_LEVEL
+        )));
+    }
+
     let registry: Table = lua.named_registry_value("tiamot.fluids")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
@@ -8329,6 +8377,7 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     entry.set("tick_rate", tick_rate)?;
     entry.set("evaporates", evaporates)?;
     entry.set("opacity", opacity)?;
+    entry.set("light_falloff", light_falloff)?;
     entry.set("color_r", color[0])?;
     entry.set("color_g", color[1])?;
     entry.set("color_b", color[2])?;
@@ -8680,7 +8729,7 @@ const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "defa
 /// a misspelled field is a mod that thinks it configured something.
 const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator"];
 
-const FLUID_FIELDS: [&str; 7] = [
+const FLUID_FIELDS: [&str; 8] = [
     "id",
     "material",
     "waterlogs_at",
@@ -8688,6 +8737,7 @@ const FLUID_FIELDS: [&str; 7] = [
     "evaporates",
     "opacity",
     "color",
+    "light_falloff",
 ];
 
 /// Fields `register_block` accepts. Anything else is an error naming the field.

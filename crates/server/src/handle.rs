@@ -2148,6 +2148,9 @@ impl ServerHandle {
                     world_options: chosen_options.clone(),
                     limits: VmLimits::default(),
                     fluid_ids: fluid_ids.clone(),
+                    // World ask 28: a worker encodes the summaries for the
+                    // chunk it generated, and a summary carries the sea.
+                    fluids: fluids.clone(),
                     maps: world.all_maps().unwrap_or_else(|err| {
                         error!("could not read this world's maps for the workers: {err}");
                         Vec::new()
@@ -2587,6 +2590,11 @@ impl ServerHandle {
                             .filter(|(_, spec)| spec.kind == tiamot_core::domain::Kind::Sparse)
                             .map(|(id, _)| id.clone()),
                     );
+                    // And what each fluid is DRAWN as, so a summary can carry
+                    // the sea instead of a hole the shape of one — World ask
+                    // 28. Told once, beside the domains, for the same reason:
+                    // both are facts the freeze has just made final.
+                    world.set_fluids(fluids.clone());
                     let mut domain_access: Option<std::sync::Arc<crate::domains::Shared>> = None;
 
                     // Light is derived and lives only in memory — see
@@ -2600,24 +2608,35 @@ impl ServerHandle {
                     // borrow what the tick is holding. The lock is never
                     // contended — both sides are this thread — and is never
                     // held across a callback, which is what would deadlock.
-                    // **Which fluids are light sources, worked out once.**
+                    // **Which fluids change the light where they are, worked
+                    // out once.**
                     //
-                    // A fluid glows with whatever the block it is drawn as
-                    // emits (see `light::Glowing`), and the tick needs that
-                    // answer per change without holding the lighting lock
-                    // inside the fluid lock — the one ordering that could
-                    // deadlock, since every lighting pass takes the fluid lock
-                    // the other way round. A set computed here, while both
-                    // registries are in hand and neither is behind a lock,
-                    // costs nothing to consult and cannot invert anything.
+                    // Two ways a fluid can: it GLOWS, because a fluid glows
+                    // with whatever the block it is drawn as emits (see
+                    // `light::Glowing`), or it DIMS, because `light_falloff`
+                    // takes levels out of what passes through it (World ask
+                    // 25). Either way, a block that starts or stops holding one
+                    // has to be relit, and nothing else in the tick would
+                    // notice — a block of fluid is air in the block store.
                     //
-                    // Empty in every world whose mods registered no glowing
-                    // fluid, which is every world that has no lava in it: the
+                    // The tick needs that answer per change without holding the
+                    // lighting lock inside the fluid lock — the one ordering
+                    // that could deadlock, since every lighting pass takes the
+                    // fluid lock the other way round. A set computed here,
+                    // while both registries are in hand and neither is behind a
+                    // lock, costs nothing to consult and cannot invert
+                    // anything.
+                    //
+                    // Empty in every world whose mods registered neither, which
+                    // is every world with no lava and no dark sea in it: the
                     // relight below is skipped entirely rather than cheaply.
-                    let glowing_fluids: std::collections::BTreeSet<tiamot_core::fluid::FluidId> =
+                    let lighting_fluids: std::collections::BTreeSet<tiamot_core::fluid::FluidId> =
                         fluids
                             .iter_registered()
-                            .filter(|(_, registered)| !emissions.of(registered.material).is_dark())
+                            .filter(|(_, registered)| {
+                                !emissions.of(registered.material).is_dark()
+                                    || registered.light_falloff > 0
+                            })
                             .map(|(id, _)| id)
                             .collect();
                     let lighting = std::sync::Arc::new(std::sync::RwLock::new(
@@ -2629,11 +2648,13 @@ impl ServerHandle {
                     // inside a tick and cannot borrow what the tick is holding.
                     // Never contended — both sides are this thread — and never
                     // held across a callback, which is what would deadlock.
-                    let fluidics = std::sync::Arc::new(std::sync::RwLock::new(
-                        {
-                            crate::fluid::Ponds::new(fluids, absorbency)
-                        },
-                    ));
+                    let fluidics = std::sync::Arc::new(std::sync::RwLock::new({
+                        let mut ponds = crate::fluid::Ponds::new(fluids, absorbency);
+                        // World ask 29: a plant does not displace the water
+                        // round it, so a tuft is not a bubble of air in a pond.
+                        ponds.set_passable(passable_runtime.clone());
+                        ponds
+                    }));
                     // And the entities, behind the same kind of lock for the
                     // same reason: `game.spawn_entity` runs on this thread
                     // inside a tick.
@@ -4323,38 +4344,6 @@ impl ServerHandle {
                         control.note_generated_off_tick(served.from_workers);
 
                         phases.mark("serving");
-                        // Light, once, after every edit this tick has landed.
-                        // Order matters: relighting between edits would do the
-                        // work twice for two edits in the same room, and the
-                        // second answer is the only one anybody sees.
-                        if !relight.is_empty() {
-                            let mut lit = lighting.write().expect("lighting lock");
-                            // The fluid of that space, under the lighting lock
-                            // and never the other way round — see the serve
-                            // path. Lava lights what it stands in.
-                            let ponds = fluidics.read().expect("fluid lock");
-                            let dry = crate::light::Dry;
-                            let glow: &dyn crate::light::Glowing = ponds
-                                .get(tiamot_core::domain::OVERWORLD)
-                                .map_or(&dry as &dyn crate::light::Glowing, |fluid| {
-                                    fluid as &dyn crate::light::Glowing
-                                });
-                            // Every edit this tick happened in some space; each
-                            // relights its own.
-                            let mut touched = std::collections::BTreeSet::new();
-                            let light = lit.of(tiamot_core::domain::OVERWORLD);
-                            for pos in relight.drain(..) {
-                                touched.extend(light.edited_with_fluid(
-                                    tiamot_core::domain::OVERWORLD,
-                                    &world,
-                                    pos,
-                                    glow,
-                                ));
-                            }
-                            drop(ponds);
-                            broadcast_light(&shared, tiamot_core::domain::OVERWORLD, light, &touched);
-                        }
-
                         // Chunks that arrived this tick, whatever brought
                         // them in — a chunk request, a player walking, a mod
                         // reading. Asking the world what arrived rather than
@@ -4878,30 +4867,32 @@ impl ServerHandle {
                                 tick / crate::fluid::TICKS_PER_FLUID_TICK,
                                 world.seed(),
                             );
-                            // **Lava that moves takes its light with it.**
+                            // **Lava that moves takes its light with it, and
+                            // a sea that drains lets the light back in.**
                             //
-                            // A glowing fluid is a light source that the block
-                            // store knows nothing about (`light::Glowing`), so
-                            // nothing else in the tick would ever notice it had
-                            // gone. Queued onto the same list an edited block
-                            // uses, which is how it inherits that path's
-                            // budget, its batching and its broadcast — a flow
-                            // of lava relights exactly as if somebody had
-                            // placed and broken a lamp along it.
+                            // A fluid that glows or dims changes the light
+                            // where it is, and the block store knows nothing
+                            // about it (`light::Glowing`), so nothing else in
+                            // the tick would ever notice it had gone. Queued
+                            // onto the same list an edited block uses, which is
+                            // how it inherits that path's budget, its batching
+                            // and its broadcast — a flow of lava relights
+                            // exactly as if somebody had placed and broken a
+                            // lamp along it.
                             //
                             // Only where a block STARTED or STOPPED holding
                             // one: a block that merely got deeper glows the
-                            // same, because emission does not scale with how
-                            // much is there (`Lit::fluid_emission`). And only
-                            // in a world that registered a glowing fluid at
-                            // all, where the set is empty and this is one
-                            // comparison per change.
-                            if !glowing_fluids.is_empty() {
+                            // same and dims the same, because neither scales
+                            // with how much is there (`Lit::fluid_emission`,
+                            // `Lit::fluid_falloff`). And only in a world that
+                            // registered such a fluid at all, where the set is
+                            // empty and this is one comparison per change.
+                            if !lighting_fluids.is_empty() {
                                 for change in &changes {
                                     let was = !change.was.is_empty()
-                                        && glowing_fluids.contains(&change.was.fluid());
+                                        && lighting_fluids.contains(&change.was.fluid());
                                     let now = !change.now.is_empty()
-                                        && glowing_fluids.contains(&change.now.fluid());
+                                        && lighting_fluids.contains(&change.now.fluid());
                                     if was != now {
                                         relight.push(change.pos);
                                     }
@@ -5084,6 +5075,49 @@ impl ServerHandle {
                                 }
                             }
                             }
+                        }
+
+                        // Light, once, after every edit this tick has landed —
+                        // **including the ones the fluid step made**, which is
+                        // why this is here and not where the terrain edits
+                        // stop. A fluid that glows or dims changes the light
+                        // where it is and nothing in the block store records
+                        // it, so a pool of lava that FLOWED used to take its
+                        // light with it only when its chunk was next served.
+                        // The list was drained before the fluid ran, so those
+                        // positions were pushed onto a vector that was then
+                        // dropped at the end of the tick.
+                        //
+                        // Order still matters for the original reason:
+                        // relighting between edits would do the work twice for
+                        // two edits in the same room, and the second answer is
+                        // the only one anybody sees.
+                        if !relight.is_empty() {
+                            let mut lit = lighting.write().expect("lighting lock");
+                            // The fluid of that space, under the lighting lock
+                            // and never the other way round — see the serve
+                            // path. Lava lights what it stands in.
+                            let ponds = fluidics.read().expect("fluid lock");
+                            let dry = crate::light::Dry;
+                            let glow: &dyn crate::light::Glowing = ponds
+                                .get(tiamot_core::domain::OVERWORLD)
+                                .map_or(&dry as &dyn crate::light::Glowing, |fluid| {
+                                    fluid as &dyn crate::light::Glowing
+                                });
+                            // Every edit this tick happened in some space; each
+                            // relights its own.
+                            let mut touched = std::collections::BTreeSet::new();
+                            let light = lit.of(tiamot_core::domain::OVERWORLD);
+                            for pos in relight.drain(..) {
+                                touched.extend(light.edited_with_fluid(
+                                    tiamot_core::domain::OVERWORLD,
+                                    &world,
+                                    pos,
+                                    glow,
+                                ));
+                            }
+                            drop(ponds);
+                            broadcast_light(&shared, tiamot_core::domain::OVERWORLD, light, &touched);
                         }
 
                         phases.mark("fluid");
@@ -5872,6 +5906,25 @@ impl tiamot_core::sound::Access for Earshot {
 
     fn time_of_day(&self) -> f32 {
         self.shared.day_fraction()
+    }
+
+    fn set_time_of_day(&self, fraction: f32) -> bool {
+        if !self.shared.set_day_fraction(fraction) {
+            return false;
+        }
+        // **Told at once rather than left to the next broadcast.** The clock
+        // goes out every `TIME_BROADCAST_TICKS` — a second — because a float
+        // nobody can distinguish frame to frame is not worth twenty messages a
+        // second. A skipped night is exactly the case where that second is
+        // visible: a player who has just got out of bed would watch the sun
+        // hang at midnight until the next scheduled update.
+        self.tell_all(
+            &tiamot_core::proto::ServerMessage::TimeOfDay {
+                time: self.shared.day_fraction(),
+            },
+            None,
+        );
+        true
     }
 
     fn stop_loop(&self, request: &tiamot_core::sound::StopRequest) -> u32 {

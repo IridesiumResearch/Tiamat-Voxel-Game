@@ -23,6 +23,7 @@ use bot::Bot;
 use tiamot_core::identity::{Allowlist, Identity};
 use tiamot_core::interest::ViewDistance;
 use tiamot_core::proto::ServerMessage;
+use tiamot_core::{ChunkPos, MaterialId};
 use tiamot_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
@@ -133,6 +134,100 @@ fn every_chunk_of_a_sea_arrives_after_its_own_water() {
             assert!(
                 checked >= 9,
                 "only {checked} chunks of sea were sent to check"
+            );
+            bot.disconnect().await;
+        });
+    assert!(server.stop());
+}
+
+#[test]
+fn the_sea_is_drawn_at_the_horizon_and_not_as_a_hole_the_shape_of_it() {
+    // **World ask 28.** A chunk outside the detail radius is drawn from its
+    // summary, and a summary held materials only — so from a hill a sea was its
+    // FLOOR, a hole in the world the shape of the pool, until the player walked
+    // close enough for the full chunk and its fluid layer to arrive.
+    //
+    // A summary now paints a block holding fluid and no terrain as the material
+    // that fluid is drawn as, which is the same block the mesher and the atlas
+    // already use for it. So nothing on the wire or in the client had to learn
+    // anything: the horizon meshes the sea exactly as it meshes a hillside.
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("horizon-world"),
+        identity_path: None,
+        max_players: 2,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(write_sea("horizon-mods")),
+        enabled_mods: None,
+        seed: Some(11),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start");
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let mut bot = Bot::connect(
+                server.local_addr(),
+                Identity::generate().expect("identity"),
+                server.cert_fingerprint(),
+            )
+            .await
+            .expect("connect");
+            bot.join("Lookout").await.expect("join");
+
+            let water = loop {
+                if let Some(id) = bot.material_table().and_then(|table| {
+                    table
+                        .into_iter()
+                        .find(|def| def.name == "sea:water")
+                        .map(|def| def.id)
+                }) {
+                    break id;
+                }
+                bot.recv().await.expect("recv");
+            };
+
+            // The surface is y = 8, so chunk row y = 0 holds the top of the sea
+            // and is the row a horizon shows. Gather what arrives as summaries.
+            let mut wet_summaries = 0;
+            let mut summaries = 0;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            let mut full: Vec<ChunkPos> = Vec::new();
+            while tokio::time::Instant::now() < deadline && wet_summaries == 0 {
+                match tokio::time::timeout(Duration::from_millis(200), bot.recv()).await {
+                    Ok(Ok(ServerMessage::ChunkData { pos, .. })) => full.push(pos),
+                    Ok(Ok(ServerMessage::ChunkSummary { pos, blob })) => {
+                        if pos.y != 0 {
+                            continue;
+                        }
+                        summaries += 1;
+                        let summary = tiamot_core::lod::codec::decode(&blob)
+                            .expect("the server sent a horizon that would not decode");
+                        if summary.cells().contains(&MaterialId(water)) {
+                            wet_summaries += 1;
+                        }
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) => break,
+                    Err(_) => {}
+                }
+            }
+
+            assert!(
+                summaries > 0,
+                "no horizon arrived at all, so nothing was tested"
+            );
+            assert!(
+                wet_summaries > 0,
+                "{summaries} summaries of a world that is sea from edge to edge, and not one of \
+                 them had any water in it: the horizon is a hole the shape of the pool"
             );
             bot.disconnect().await;
         });

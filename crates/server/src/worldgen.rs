@@ -84,6 +84,15 @@ pub struct WorkerSpec {
     pub limits: VmLimits,
     /// Fluid ids as the world assigned them, so an ocean is the same liquid.
     pub fluid_ids: Vec<(String, tiamot_core::fluid::FluidId)>,
+    /// The fluids as the world registered them, for the summary chain.
+    ///
+    /// **A worker encodes its chunk's summaries**, and a summary carries the
+    /// sea (World ask 28) — which means turning a fluid id into the block it is
+    /// drawn as. A worker's own VM could be asked, but the answer has to be the
+    /// world's rather than the worker's, for exactly the reason `blocks` is
+    /// here: a worker that numbered anything differently would encode a horizon
+    /// the world does not agree with.
+    pub fluids: tiamot_core::fluid::Fluids,
     /// Every map the world holds, as the pre-pass left them.
     pub maps: Vec<(String, String, tiamot_core::detgen::Map)>,
     /// The materials the tick's VM registered, in order, with their ids.
@@ -389,7 +398,7 @@ fn worker(
             }
             known_faulted.clone_from(&shared);
         }
-        let answer = generate(&mut host, &job, &mut known_faulted);
+        let answer = generate(&mut host, &job, &spec.fluids, &mut known_faulted);
         if done.send(answer).is_err() {
             // The tick has dropped the pool.
             return;
@@ -432,7 +441,12 @@ fn load(spec: &WorkerSpec) -> Result<ModHost<MluaVm>, String> {
 /// A panic inside generation — a bug, since a mod's errors are caught by the
 /// VM — answers with air rather than never answering: a job that vanished is a
 /// request parked for ever and a player's in-flight slot never freed.
-fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<String>) -> Done {
+fn generate(
+    host: &mut ModHost<MluaVm>,
+    job: &Job,
+    fluids: &tiamot_core::fluid::Fluids,
+    known_faulted: &mut BTreeSet<String>,
+) -> Done {
     let before: BTreeSet<String> = host.disabled().into_iter().collect();
     // Per job rather than at spawn: the pool starts before the world has said
     // which seed it keeps, and the job is what knows. A table write per mod.
@@ -472,7 +486,7 @@ fn generate(host: &mut ModHost<MluaVm>, job: &Job, known_faulted: &mut BTreeSet<
             )
         }
     };
-    let summaries = crate::world::World::encode_chain(&chunk);
+    let summaries = crate::world::World::encode_chain(&chunk, &fluid, fluids);
     let after: BTreeSet<String> = host.disabled().into_iter().collect();
     let faults: Vec<String> = after.difference(&before).cloned().collect();
     known_faulted.extend(faults.iter().cloned());
@@ -542,6 +556,7 @@ mod tests {
             enabled: None,
             limits: VmLimits::default(),
             fluid_ids: Vec::new(),
+            fluids: tiamot_core::fluid::Fluids::new(),
             maps: Vec::new(),
             blocks: host.vm().registered_blocks(),
         };
@@ -610,7 +625,7 @@ mod tests {
                 .expect("tint");
             assert_eq!(tint, done.tint, "tint at {:?} differs", done.job.pos);
             assert_eq!(
-                crate::world::World::encode_chain(&chunk),
+                crate::world::World::encode_chain(&chunk, &fluid, &spec.fluids),
                 done.summaries,
                 "summary chain at {:?} differs",
                 done.job.pos
