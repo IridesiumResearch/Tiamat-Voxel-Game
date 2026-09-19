@@ -29,62 +29,10 @@ a guess about where the plants are from where the water is blocked.
 
 **Smallest change.** A block flag, `washes_away = true`: when the solver
 moves fluid INTO a block whose terrain is that block's, it clears the
-block's cells first (as a dig would; dropping nothing until ask 11 lands).
-The mod would declare it on every `passable` plant and drop the sweep.
-Separately: the flow hook should be able to read, as ask 17 asks of the
-dig and place hooks; or the stub should say it cannot.
-
-## 36. Walls of water: what the world's data says, and where the rest may be (2026-09-18)
-
-For the engine's own hunt ("chunk walls in large bodies of water ... cannot
-find it"). The mod's side, measured headless: every fluid block within 40 of
-a landing, 30 under to 10 over the water's surface, checked for a SIDEWAYS
-face open to air (no terrain, no fluid) — in the columns either side of every
-chunk seam, and as a control the mid-chunk columns — and for water over open
-air on y seams and mid-chunk heights.
-
-**The open sea is seamless in the data.** Deep Ocean, Coral-Fringed
-Shallows, Kelp Forest, Pack Ice: about 363,000 water blocks, **zero** open
-faces anywhere and zero water over air.
-
-**The coasts were not — the mod's fault, fixed (mod, this date).** Every
-coast had a dry slope under the sea's level on the land side of the
-shoreline (the coast's terrain rises from the sea floor to the land there,
-and the sea's `within` stopped at the line), and every river valley near a
-sea was cut dry to thirty blocks under it. The sea stood against both: up to
-31 blocks of water face, 144 faces on seams and 84 inside chunks in one
-81x81 patch. After the fix, zero, at both coasts measured. Lakes show only
-the one- and two-block edges of ordinary shorelines.
-
-**So what is left is the client's**, and one place fits "chunk walls in
-large water, not reproducible between two loaded chunks": `ABSENT_POLICY =
-Absent::Air` (client/src/world.rs). A water column whose neighbour chunk
-has not arrived — the streaming frontier, absent AND not summarised — has
-its side faces drawn against air, the whole depth of the water in that
-chunk: a chunk-wide sheet, flush with the seam, standing until the neighbour
-lands. In rock that wall is invisible; in water you look straight at it,
-and a sea is where the frontier is in plain view (vertically too: the view
-distance ends inside deep water). `Neighbours::summarised` already hides
-faces at the LOD boundary; the frontier inside water has no such cover.
-`ChunkFluid::solid` counts an unsent block as a wall for the SKIRT, but the
-FACE culling goes by the grid's shell, which is `Absent::Air`.
-
-**The code that fills the water**, all through `fill_fluid_terraced`:
-
-- the seas: `seas.lua`, `M.fill` — `level` is `M.fluid_level()` (the level
-  map, quantised to the pool's step; no y), `within` is `M.d()` (the sea
-  distance map plus two fine noises) plus `WATER_INLAND`; no lip. Called for
-  every chunk inside the body from `generate.lua` (`sea_into`), after the
-  terrain and structures;
-- a biome's pools and rivers: its `fluid` fill (level, within, lip) from
-  `generate.lua`, `waters_into`, after the sea;
-- the caves' pools and rivers: `biomes/caves.lua`, `M.into`, in chunks of
-  solid rock, after the sea.
-
-Every `level` and `within` reads no y (engine-asks 35), so stacked chunk
-layers ask the same question of a column and cannot disagree at a y seam:
-the measured water-over-air at y seams was zero in the open sea, and the few
-at the coast went with the dry slopes.
+block's cells first, as a dig would. The mod would declare it on every
+`passable` plant and drop the sweep. Separately: the flow hook should be
+able to read, as the dig, place and punch hooks now can (7579e22); or the
+stub should say it cannot.
 
 ## 35. A terraced fluid fill reads its fields at y = 0.5, and the docs say the chunk's floor (2026-09-18)
 
@@ -149,20 +97,6 @@ is why this ask is really "either more of one or more of the other": more
 buffers with spilling, or the cap raised, or both. Any of the three buys
 the same thing, which is that a biome can carry the detail its brief asks
 for without another one losing some.
-
-## 33. A chunk tint cannot brighten (2026-09-16)
-
-**Seen.** The designer's rule is one grass, one dirt, one lichen, and a
-biome that wants them another colour gets it from its chunk tint. The
-Savanna's grass should be gold and the Taiga's rust; the one grass is a
-mid green, and the tint multiplies it with every channel clamped to 1
-(`tint_bytes`), so the best a tint can do is darken green toward olive.
-
-**Why the mod cannot.** A brighter base texture would brighten every biome
-that does not tint, and the untinted world is most of it.
-
-**Ask.** Let a chunk tint's channels run above 1 — 0 to 2 in the byte, say,
-with 1.0 at 128 — so a tint can lift a channel as well as cut one.
 
 ## 32. A cover fill is one block tall (2026-09-16)
 
@@ -274,82 +208,4 @@ block rather than passing it untouched, so a thick canopy is dim beneath
 and a thin one dappled. The mod cannot work round either: an opaque
 material inside every clump would be visible through the leaves' holes,
 and would still be undone by (2).
-
-## 17. The world cannot be read inside a dig or place hook (2026-09-11)
-
-**Seen.** `game.get_block` returns nil from inside `register_on_dig_complete`
-for the very block being dug, with the player standing on it. The block
-reader answers through the sight lease (`mlua_vm.rs`, `block_reader`),
-which is held only while the tick runs the mods' own callbacks; the dig
-hook is asked from the dig path, where the lease is `None` and every
-reading is `Unavailable`.
-
-**Why it matters.** A hook that decides by what the block HOLDS — blooms
-on a bush, a lock on a door, a nest with eggs — cannot look, and the
-event carries one material of a block that may hold three. The mod
-decides on the event's material and reads the block a tick later, which
-means cancelling a dig it may then find had nothing to pick.
-
-**Ask.** Hold the sight lease across the cancellable hooks, or hand the
-dig hook the block's cells. Reads are the only thing wanted; a write from
-a veto hook is already refused, and can stay refused.
-
-## 16. A right-click on a block (2026-09-11)
-
-**Wanted.** Picking roses: right-click a bush and it gives a rose or two
-and loses its blooms for a while. Right-click is the natural verb for
-"use what is in front of you" and the designer asked for it by name.
-
-**Why the mod cannot do it.** Right-click is the place control, and a
-placement exists only when the player carries a placeable material:
-with an empty hand the client sends nothing, and `register_on_place`
-never fires. `register_on_punch` is entities; `register_on_action` has
-no target. The mod picks on a DIG for now — a completed dig on a bush
-with blooms is cancelled with `""` and handled — which is the same idiom
-`tiamot_default_life` forages berries with, but it is not the verb asked
-for, and a pick that takes a dig's countdown is slow.
-
-**Ask.** `game.register_on_use(callback)`: fired when the place control
-lands on a block and no placement is possible (empty hand, or an item in
-it), with `{ player, x, y, z (the cell), material, held }`, before
-anything else; the same return ladder as the other hooks, `""` meaning
-handled. The client already knows the cell under the crosshair — it is
-what it would step across for a placement — so it is one message with
-the target and nothing to place.
-
-## 13. A billboard that is also cutout is drawn as cubes (2026-09-11)
-
-**Seen.** Grass declared `cutout = true, billboard = true` was drawn as
-cutout CUBES — cell faces showing ninths of the blade tile — with the
-sprite lost inside them. In `mesher.rs` (`emit` for one axis) the opaque
-set is `solid & !panes & !leaves & !sprites`, as the comment beside it
-says ("taken out of every set here"), but `leaves` is the cutout column
-as it came and its faces are emitted from that, sprites included.
-
-**Fixed in the mod** by not declaring `cutout` on a billboard: the sprite
-pass alpha-tests with `fragment_cutout` on its own, nothing in core reads
-the flag, and the client reads it only to build the foliage set.
-
-**Ask.** Either `let leaves = cutout & !sprites` (one line, and the
-comment already promises it), or refuse the pair at registration the way
-`transparent` and `cutout` are refused together — a billboard has no cube
-faces for a culling rule to apply to.
-
-## 11. An item dropped at a position (2026-09-11)
-
-**Wanted.** Water reaching a leaves block breaks it (`rules.lua`, on
-`register_on_fluid_flow`), and the designer wants what it was to DROP. A
-dig drops through the engine's own rule and a placement can be refused
-with the player keeping the material, but a mod that removes a block in a
-hook has no way to put its units into the world as a pickup.
-
-**Ask.** `game.drop(position, { material = "mod:block", units = 27 })`: the
-same pickup a dig makes, spawned at a position, owned by nobody.
-
-## 7. Summaries of partial blocks read as crosses (2026-09-10) — noted
-
-**Seen.** Beyond the view distance the horizon is drawn from LOD summaries,
-and a woodland's trunks — whole blocks minus their corner columns — come
-out as "+" shapes floating at canopy height, with small leaf clumps as
-lone crosses. Not a mod matter; recorded so it is not chased as one.
 
