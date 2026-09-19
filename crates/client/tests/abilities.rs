@@ -177,12 +177,20 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
         sprint: true,
         ..Input::default()
     };
+    // **Stand through two full pacing windows first.** The server spawns at a
+    // fixed block, which on this flat world is one block in the air, so its
+    // body drops a block over the first five ticks while the client's — with
+    // no chunk under it yet, and an absent chunk reads as solid — stands
+    // still. That is a real disagreement of 2.4 cells, and the windowed
+    // divergence holds it for a second after it happens. Read the window it
+    // lands in and every run reads 2.400, honest or not.
+    run_frames(&mut app, Input::default(), 2.5, |_| false);
     // Settle: the first reconcile after starting to move is a transient.
     run_frames(&mut app, forward, 1.5, |_| false);
 
     let start = app.camera().position.to_world();
     let server_start = app.server_travelled();
-    let mut worst = 0.0f32; // logged, not asserted: see below
+    let mut worst = 0.0f32;
     let mut corrected = 0.0f32;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -203,19 +211,19 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
         predicted > 1.0,
         "held forward and barely moved: {predicted:.2}"
     );
-    // **The correction, not the end position and not the divergence.** Both
-    // were tried and neither can fail: reconciliation pulls the client back to
-    // the server, so the two end within a few hundredths of a block whether
-    // the client applied the speed or not (8.66 against 8.69 with the tuning
-    // deliberately left at the default). `worst_divergence_cells` read 2.400
-    // in every run, honest, sabotaged, and with no mod slowing anybody at all,
-    // so it says nothing here. The correction is what a player sees as
-    // rubber-banding: 0.000 honest, 0.322 cells with the client ignoring the
-    // grant — measured by breaking it.
+    // **Not the end position**: reconciliation pulls the client back to the
+    // server, so the two end within a few hundredths of a block whether the
+    // client applied the speed or not. The correction and the per-tick
+    // divergence are what a player sees as rubber-banding, and both were
+    // checked by deliberately leaving the client's tuning at the default.
     assert!(
         corrected < 0.05,
         "the client was corrected by up to {corrected:.3} cells: it is not predicting the \
          speed the server applies"
+    );
+    assert!(
+        worst < 0.05,
+        "the client disagreed with the server by up to {worst:.3} cells a tick"
     );
 
     app.shutdown();

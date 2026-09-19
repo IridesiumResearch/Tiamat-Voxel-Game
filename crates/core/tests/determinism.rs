@@ -128,7 +128,16 @@ fn golden_fingerprints_match() {
 /// difference is the intended spacing and nothing else — the hash does not
 /// cover the new `Body::jump_cooldown` field, and the worldgen, light and fluid
 /// goldens pass unchanged, which is what says the change stayed inside `phys`.
-const PHYSICS_GOLDEN: u64 = 17_724_608_142_780_610_054;
+///
+/// Regenerated a fifth time, case 3 again, when a sprint got its own ground
+/// acceleration (`Tuning::sprint_acceleration`). Until then a sprint on flat
+/// ground settled at the WALK speed, because a top speed is only a cap and the
+/// walk's acceleration never reached the sprint's; found 2026-09-19 by a test
+/// that could not tell a refused sprint from an honoured one. The script this
+/// hash covers sprints on three ticks in eight, so those trajectories
+/// legitimately move. Pinned rather than assumed: with `sprint_acceleration`
+/// set equal to `ground_acceleration` the PREVIOUS constant passes exactly.
+const PHYSICS_GOLDEN: u64 = 11_098_149_173_410_595_960;
 
 /// Runs the fixed physics scenario and hashes every tick of it.
 ///
@@ -212,8 +221,8 @@ fn an_input_log_simulates_to_its_golden_hash() {
     // million — changes this hash. Perturbing `walk_speed` does NOT, and that
     // is not a gap: it is a CAP, and the speed a body settles at comes from
     // acceleration and friction, so the cap never binds. `tuning`'s own
-    // `friction_and_acceleration_settle_at_the_walk_speed` is what keeps the
-    // two agreeing.
+    // `the_acceleration_and_the_friction_still_settle_at_the_walk_speed` (and
+    // its sprint twin) is what keeps the two agreeing.
     assert_eq!(
         physics_fingerprint(),
         PHYSICS_GOLDEN,

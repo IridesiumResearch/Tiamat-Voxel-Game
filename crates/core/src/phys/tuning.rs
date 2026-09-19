@@ -122,7 +122,25 @@ pub struct Tuning {
     pub air_drag: f32,
 
     /// Horizontal acceleration applied on the ground, cells/tick².
+    ///
+    /// The walk's and the sneak's. Settles at [`walk_speed`](Self::walk_speed)
+    /// against [`ground_friction`](Self::ground_friction); a sneak reaches its
+    /// lower cap on the way there and is held at it.
     pub ground_acceleration: f32,
+
+    /// Horizontal acceleration applied on the ground while sprinting,
+    /// cells/tick².
+    ///
+    /// **A sprint needs its own, because a top speed is only a cap.** A body
+    /// settles at `a × f / (1 − f)`, and with the walk's acceleration that is
+    /// the walk speed whatever the gait — so until 2026-09-19 a sprint on flat
+    /// ground went exactly as fast as a walk, and only a jump (where the air's
+    /// drag lets a body run up to the cap) showed any difference. Found by a
+    /// test that tried to tell a refused sprint from an honoured one by
+    /// distance and could not. Derived from
+    /// [`sprint_speed`](Self::sprint_speed) the way the walk's is derived from
+    /// the walk speed.
+    pub sprint_acceleration: f32,
 
     /// Horizontal acceleration applied in the air, cells/tick².
     ///
@@ -233,6 +251,8 @@ impl Tuning {
         // which is what keeps the top speed where it was — and is also what
         // gives the start its ramp rather than a step.
         ground_acceleration: 0.276_428_58,
+        // The same derivation from the sprint speed: 0.84 × 0.3 / 0.7.
+        sprint_acceleration: 0.36,
         air_acceleration: 0.06,
         step_height: 1.0,
         buoyancy: 1.25,
@@ -311,6 +331,22 @@ mod tests {
             tuning.ground_acceleration,
             tuning.ground_friction,
             tuning.walk_speed
+        );
+    }
+
+    #[test]
+    fn the_sprint_acceleration_settles_at_the_sprint_speed() {
+        // The same pair for the sprint. Without it a sprint on the ground
+        // settled at the WALK speed, and its top speed was a cap nothing
+        // reached.
+        let tuning = Tuning::DEFAULT;
+        let settled =
+            tuning.sprint_acceleration * tuning.ground_friction / (1.0 - tuning.ground_friction);
+        assert!(
+            (settled - tuning.sprint_speed).abs() < 0.005,
+            "sprint acceleration {} settles at {settled}, not the sprint speed {}",
+            tuning.sprint_acceleration,
+            tuning.sprint_speed
         );
     }
 

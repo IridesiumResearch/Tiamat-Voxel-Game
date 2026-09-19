@@ -1519,10 +1519,15 @@ fn a_refused_sprint_walks_rather_than_stopping() {
         (refused - walked).abs() < 1e-4,
         "{refused} against {walked}"
     );
-    // Asked of the filter directly rather than by comparing distances: on flat
-    // ground a sprint settles at the walk speed (the ground acceleration was
-    // derived from `walk_speed`, and sprint only raises the cap), so distance
-    // alone cannot tell a refused sprint from an honoured one.
+    // And an honoured sprint really is faster on flat ground. It was not until
+    // 2026-09-19: the sprint's top speed was a cap the walk's acceleration
+    // never reached, and this test's first version could not tell a refused
+    // sprint from an honoured one. 5.6 against 4.3 yd/s once settled.
+    let sprinted = distance_walked(Abilities::DEFAULT, Gait::Sprint, 60);
+    assert!(
+        sprinted > walked * 1.2,
+        "sprinted {sprinted} cells against a walk's {walked}"
+    );
     let sprint = Intent {
         walk: [0.0, 1.0],
         jump: false,

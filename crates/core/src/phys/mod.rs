@@ -421,6 +421,7 @@ impl Abilities {
             sprint_speed: base.sprint_speed * self.speed,
             sneak_speed: base.sneak_speed * self.speed,
             ground_acceleration: base.ground_acceleration * self.speed,
+            sprint_acceleration: base.sprint_acceleration * self.speed,
             air_acceleration: base.air_acceleration * self.speed,
             ..*base
         }
@@ -644,8 +645,16 @@ pub fn step_shaped(
     }
 
     // --- horizontal steering -----------------------------------------------
-    let mut acceleration = if body.on_ground {
+    // The gait's own ground acceleration, so each gait SETTLES at its own top
+    // speed rather than merely being capped by it — see
+    // `Tuning::sprint_acceleration`.
+    let ground_acceleration = if intent.gait == Gait::Sprint {
+        tuning.sprint_acceleration
+    } else {
         tuning.ground_acceleration
+    };
+    let mut acceleration = if body.on_ground {
+        ground_acceleration
     } else {
         tuning.air_acceleration
     };
@@ -671,7 +680,7 @@ pub fn step_shaped(
         // `a × f / (1 − f)`, which is how `ground_acceleration` was derived from
         // `walk_speed` in the first place, so scaling `a` lands exactly on the
         // scaled cap rather than near it.
-        acceleration = tuning.ground_acceleration * tuning.fly_speed_scale;
+        acceleration = ground_acceleration * tuning.fly_speed_scale;
         friction = tuning.ground_friction;
         top_speed *= tuning.fly_speed_scale;
     }
