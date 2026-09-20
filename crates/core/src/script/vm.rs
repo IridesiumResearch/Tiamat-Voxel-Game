@@ -327,6 +327,15 @@ pub struct BlockRules {
     /// with the opaque world rather than blended. See
     /// `docs/subnode-contract.md` §8.2.
     pub cutout: bool,
+    /// Whether fluid running into it sweeps it away: a plant in a flood.
+    ///
+    /// World ask 37. The solver clears the block's cells as a dig would when a
+    /// flow enters it, and only where every occupied cell is such a material,
+    /// so a fern growing on a wall cannot take the wall with it. Nothing is
+    /// dropped: what a washed plant leaves behind is a mod's business, and
+    /// `register_on_fluid_flow` is where it would decide.
+    pub washes_away: bool,
+
     /// Whether a body walks through it: grass, ferns, vines.
     ///
     /// Collision only. The cell is still occupied for meshing, lighting, fluid

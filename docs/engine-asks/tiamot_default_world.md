@@ -9,28 +9,6 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-## 37. Water that runs through a plant does not break it (2026-09-18) — the flow hook's reads LANDED (engine a3db9fa)
-
-**Seen, in play.** Water let loose over a meadow (a brook's spill, in the
-Flower Forest) ran through the grass cards and stood in the same blocks as
-the tufts. The designer: "Grass should probably get broken by water."
-
-**What the mod does now, and why it is a workaround** (rules.lua). A tuft is
-a few cells of its block, under the fluid's `waterlogs_at`, so the solver
-lets water in and `register_on_fluid_flow` never reports the plant. The
-reports it does send are the water's edge pressing sideways on ground
-(measured, a flood over a meadow: 1,208 reports, all sideways, none from a
-plant's block). So the mod notes each report's place and, on the next tick,
-sweeps a 7 x 7 round it for a plant with water in it and clears it. It works
-(20 wet plants of 102 gone, the dry 82 kept, 1.4 ms of mod time a tick while
-the water ran), but it is a guess about where the plants are from where the
-water is blocked.
-
-**Smallest change.** A block flag, `washes_away = true`: when the solver
-moves fluid INTO a block whose terrain is that block's, it clears the
-block's cells first, as a dig would. The mod would declare it on every
-`passable` plant and drop the sweep.
-
 ## 24. Shade under a canopy (2026-09-14) — the chunk-arriving half LANDED (engine deba305); foliage still passes light as glass
 
 **Seen.** The rainforest's brief has its canopy block 85-90% of direct

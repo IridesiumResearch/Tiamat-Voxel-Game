@@ -2067,6 +2067,23 @@ impl ServerHandle {
             })
             .collect();
 
+        // And the materials a flow sweeps away, in the same id space as
+        // `passable_runtime` above and for the same reason: it is compared
+        // against what a chunk in memory holds (World ask 37).
+        let washes_away_runtime: Vec<u16> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+            .iter()
+            .filter(|rule| rule.washes_away)
+            .filter_map(|rule| {
+                registry
+                    .iter()
+                    .find(|(_, name)| *name == rule.block)
+                    .map(|(id, _)| id.0)
+            })
+            .collect();
+
         // The domains the mods registered. Read here, with everything else the
         // freeze made final, and handed to the simulation thread that owns the
         // registry they go into.
@@ -2683,6 +2700,7 @@ impl ServerHandle {
                         // World ask 29: a plant does not displace the water
                         // round it, so a tuft is not a bubble of air in a pond.
                         ponds.set_passable(passable_runtime.clone());
+                        ponds.set_washes_away(washes_away_runtime.clone());
                         ponds
                     }));
                     // And the entities, behind the same kind of lock for the
@@ -5046,6 +5064,11 @@ impl ServerHandle {
                                     })
                                     .collect();
                             let blocked = fluid.take_blocked();
+                            // World ask 37: the plants a flow ran into. The
+                            // solver reports the position and this clears it,
+                            // for the same reason the saturation above is
+                            // applied here — clearing is a terrain edit.
+                            let washed = fluid.take_washed();
                             drop(ponds);
 
                             for (pos, becomes) in soaked {
@@ -5074,6 +5097,39 @@ impl ServerHandle {
                                     }
                                     Err(err) => {
                                         warn!("a soaked block could not be written: {err}");
+                                    }
+                                }
+                            }
+                            // **What the water swept away** (World ask 37).
+                            // A tuft is `passable`, so a flood runs straight
+                            // through it and stands in the same block: the mod
+                            // saw nothing, because a flow into a block nothing
+                            // blocks is not a blocked flow. Cleared as a dig
+                            // clears it, and nothing is dropped — what a washed
+                            // plant leaves behind is a mod's business.
+                            for pos in washed {
+                                let edit = tiamot_core::proto::Edit::Block {
+                                    pos,
+                                    material: tiamot_core::MaterialId::AIR.0,
+                                };
+                                match world.apply(&domain, &edit, &mut source) {
+                                    Ok(_) => {
+                                        relight.push(pos);
+                                        // The block holds more now, so the pond
+                                        // has to look at it again — the same
+                                        // reason a soaked block is touched.
+                                        fluidics
+                                            .write()
+                                            .expect("fluid lock")
+                                            .of(&domain)
+                                            .touch(pos);
+                                        shared.broadcast_in(
+                                            &domain,
+                                            ServerMessage::BlockDelta { edit, actor: None },
+                                        );
+                                    }
+                                    Err(err) => {
+                                        warn!("a washed block could not be cleared: {err}");
                                     }
                                 }
                             }

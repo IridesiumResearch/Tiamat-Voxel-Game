@@ -104,6 +104,24 @@ pub trait Neighbourhood {
         0
     }
 
+    /// Whether fluid entering this block sweeps its terrain away: a plant.
+    ///
+    /// **A fact about the block, like [`Self::absorbency`]**, and this module
+    /// knows nothing about what it is made of. The world mod's grass, ferns
+    /// and flowers are `passable`, so a flood runs THROUGH them and leaves
+    /// them standing in the water — the mod could not see it happen, because
+    /// a flow into a block nothing blocked is not a blocked flow (World ask
+    /// 37). The clearing is applied by whoever holds the registry, from the
+    /// positions this produces ([`Solver::take_washed`]), exactly as the
+    /// absorbed material swap is.
+    ///
+    /// Answered for a block whose occupied cells are ALL such a material, so
+    /// clearing it cannot take a wall's cells with the fern growing on it.
+    fn washes_away(&self, pos: BlockPos) -> bool {
+        let _ = pos;
+        false
+    }
+
     /// What a block holds now.
     fn fluid(&self, pos: BlockPos) -> Fluid;
 
@@ -388,6 +406,13 @@ pub struct Solver {
     /// there next time the pond is examined. Carrying them would let a mod that
     /// is slow to handle them grow an unbounded queue inside the tick.
     blocked: Vec<Blocked>,
+    /// Blocks whose terrain a flow swept away this tick — World ask 37.
+    ///
+    /// Positions rather than edits, for the reason `Sinks::absorbed` is: this
+    /// module cannot name a material, and clearing a block is the caller's to
+    /// do. Bounded by construction, because a position only lands here when a
+    /// transfer happens and transfers are capped per tick.
+    washed: Vec<BlockPos>,
     /// Where volume went when it left the world, since this was last drained.
     ///
     /// Accumulated rather than returned per tick because the caller that
@@ -459,6 +484,14 @@ impl Solver {
     /// Takes the flows that could not happen since this was last called.
     pub fn take_blocked(&mut self) -> Vec<Blocked> {
         std::mem::take(&mut self.blocked)
+    }
+
+    /// Takes the blocks a flow has swept the terrain out of — World ask 37.
+    ///
+    /// The caller clears each one as a dig would. Deduplicated: two flows into
+    /// one plant are one clearing.
+    pub fn take_washed(&mut self) -> Vec<BlockPos> {
+        std::mem::take(&mut self.washed)
     }
 
     /// Takes what has been destroyed since this was last called.
@@ -550,8 +583,11 @@ impl Solver {
                 pos,
                 seed,
                 fluid_tick,
-                &mut changes,
-                &mut self.sinks,
+                &mut Record {
+                    flows: &mut changes,
+                    sinks: &mut self.sinks,
+                    washed: &mut self.washed,
+                },
             );
             // Everything that changed wakes its own neighbourhood, including
             // the block above: milk drained from under a column is what lets
@@ -691,10 +727,16 @@ fn transfer(
     into: BlockPos,
     fluid: FluidId,
     cells: u32,
-    out: &mut Vec<Flow>,
+    record: &mut Record<'_>,
 ) {
     if cells == 0 {
         return;
+    }
+    // **Every way fluid enters a block runs through here**, which is why the
+    // question is asked here and not at the four call sites — World ask 37,
+    // and a fifth way added later would otherwise wash nothing.
+    if world.washes_away(into) && !record.washed.contains(&into) {
+        record.washed.push(into);
     }
     let was_from = world.fluid(from);
     let was_into = world.fluid(into);
@@ -702,12 +744,12 @@ fn transfer(
     let now_into = Fluid::new(fluid, was_into.volume() + cells);
     world.set_fluid(from, now_from);
     world.set_fluid(into, now_into);
-    out.push(Flow {
+    record.flows.push(Flow {
         pos: from,
         was: was_from,
         now: now_from,
     });
-    out.push(Flow {
+    record.flows.push(Flow {
         pos: into,
         was: was_into,
         now: now_into,
@@ -815,14 +857,28 @@ fn record_blocked(
 }
 
 /// Applies the whole rule to one block, appending what changed.
+/// Everything one settled block has to report.
+///
+/// **One borrow rather than three.** A flow, a sink and a washed plant are all
+/// "what this tick did", they are all written by the same few functions, and
+/// carrying them separately put `settle_one` over clippy's argument limit —
+/// which was the honest signal that they belong together.
+struct Record<'a> {
+    /// Fluid that moved, both ends of every transfer.
+    flows: &'a mut Vec<Flow>,
+    /// Fluid that was destroyed, and by what.
+    sinks: &'a mut Sinks,
+    /// Blocks whose terrain a flow swept away — World ask 37.
+    washed: &'a mut Vec<BlockPos>,
+}
+
 fn settle_one(
     world: &mut impl Neighbourhood,
     tunings: &Tunings,
     pos: BlockPos,
     seed: u64,
     fluid_tick: u64,
-    out: &mut Vec<Flow>,
-    sinks: &mut Sinks,
+    record: &mut Record<'_>,
 ) {
     let here = world.fluid(pos);
     if here.is_empty() {
@@ -838,15 +894,15 @@ fn settle_one(
     });
     if here.volume() > room {
         let excess = here.volume() - room;
-        let spilled = spill(world, tunings, pos, fluid, excess, out);
+        let spilled = spill(world, tunings, pos, fluid, excess, record);
         if spilled < excess {
             let lost = excess - spilled;
             let now = world.fluid(pos);
             let was = now;
             let now = now.with_volume(now.volume().saturating_sub(lost));
             world.set_fluid(pos, now);
-            out.push(Flow { pos, was, now });
-            sinks.displaced += lost;
+            record.flows.push(Flow { pos, was, now });
+            record.sinks.displaced += lost;
         }
         if world.fluid(pos).is_empty() {
             return;
@@ -858,7 +914,7 @@ fn settle_one(
     let mine = world.fluid(pos).volume();
     let falling = accepts(world, tunings, below, fluid).min(mine);
     if falling > 0 {
-        transfer(world, pos, below, fluid, falling, out);
+        transfer(world, pos, below, fluid, falling, record);
         if world.fluid(pos).is_empty() {
             return;
         }
@@ -890,7 +946,7 @@ fn settle_one(
         let half = (mine - theirs) / 2;
         let moved = half.min(accepts(world, tunings, at, fluid));
         if moved > 0 {
-            transfer(world, pos, at, fluid, moved, out);
+            transfer(world, pos, at, fluid, moved, record);
         }
     }
 
@@ -910,13 +966,13 @@ fn settle_one(
             if accepts(world, tunings, under, fluid) == 0 {
                 continue;
             }
-            transfer(world, pos, at, fluid, mine, out);
+            transfer(world, pos, at, fluid, mine, record);
             return;
         }
     }
 
     // Rule 4 — the sinks.
-    absorb(world, pos, fluid, out, sinks);
+    absorb(world, pos, fluid, record);
     if world.fluid(pos).is_empty() {
         return;
     }
@@ -930,8 +986,8 @@ fn settle_one(
         let was = world.fluid(pos);
         let now = was.with_volume(was.volume() - 1);
         world.set_fluid(pos, now);
-        out.push(Flow { pos, was, now });
-        sinks.evaporated += 1;
+        record.flows.push(Flow { pos, was, now });
+        record.sinks.evaporated += 1;
     }
 }
 
@@ -943,7 +999,7 @@ fn spill(
     pos: BlockPos,
     fluid: FluidId,
     cells: u32,
-    out: &mut Vec<Flow>,
+    record: &mut Record<'_>,
 ) -> u32 {
     let mut left = cells;
     let turn = rotation(pos);
@@ -958,7 +1014,7 @@ fn spill(
         }
         let moved = accepts(world, tunings, at, fluid).min(left);
         if moved > 0 {
-            transfer(world, pos, at, fluid, moved, out);
+            transfer(world, pos, at, fluid, moved, record);
             left -= moved;
         }
     }
@@ -970,13 +1026,7 @@ fn spill(
 /// One absorption per neighbour per tick, and a neighbour takes at most what is
 /// there: a single cell over ground that would drink three is one cell absorbed,
 /// not a debt.
-fn absorb(
-    world: &mut impl Neighbourhood,
-    pos: BlockPos,
-    fluid: FluidId,
-    out: &mut Vec<Flow>,
-    sinks: &mut Sinks,
-) {
+fn absorb(world: &mut impl Neighbourhood, pos: BlockPos, fluid: FluidId, record: &mut Record<'_>) {
     let turn = rotation(pos);
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     let sideways: Vec<BlockPos> = (0..LATERAL.len())
@@ -1000,8 +1050,8 @@ fn absorb(
         let was = world.fluid(pos);
         let now = was.with_volume(mine - cells);
         world.set_fluid(pos, now);
-        out.push(Flow { pos, was, now });
-        sinks.absorbed.push(Absorbed {
+        record.flows.push(Flow { pos, was, now });
+        record.sinks.absorbed.push(Absorbed {
             pos: at,
             fluid,
             cells,
@@ -1037,6 +1087,8 @@ mod tests {
         /// block of air, and §4.5's "brims" is about capacity rather than 27.
         partial: BTreeMap<(i32, i32, i32), u32>,
         fluid: BTreeMap<(i32, i32, i32), Fluid>,
+        /// Blocks a flow sweeps the terrain out of: a plant (World ask 37).
+        washes: BTreeSet<(i32, i32, i32)>,
         loaded: Option<BTreeSet<(i32, i32, i32)>>,
     }
 
@@ -1094,6 +1146,16 @@ mod tests {
             self.partial.insert((x, y, z), cells);
         }
 
+        /// A plant: a tuft water sweeps away.
+        ///
+        /// **No occupancy**, which is what the real thing reports: the world
+        /// mod's plants are `passable`, so the server counts their cells as
+        /// blocking nothing and a flood runs straight through them (World ask
+        /// 37). That is exactly why the mod could not see it happen.
+        pub(super) fn plant(&mut self, x: i32, y: i32, z: i32) {
+            self.washes.insert((x, y, z));
+        }
+
         pub(super) fn make_absorbent(&mut self, x: i32, y: i32, z: i32, rate: u32) {
             self.absorbent.insert((x, y, z), rate);
         }
@@ -1119,6 +1181,12 @@ mod tests {
         }
     }
 
+    impl Scene {
+        fn washes_at(&self, pos: BlockPos) -> bool {
+            self.washes.contains(&(pos.x, pos.y, pos.z))
+        }
+    }
+
     impl Neighbourhood for Scene {
         fn occupancy(&self, pos: BlockPos) -> Option<u32> {
             if let Some(loaded) = &self.loaded
@@ -1135,6 +1203,10 @@ mod tests {
                     .copied()
                     .unwrap_or(0),
             )
+        }
+
+        fn washes_away(&self, pos: BlockPos) -> bool {
+            self.washes_at(pos)
         }
 
         fn absorbency(&self, pos: BlockPos, fluid: FluidId) -> u32 {
@@ -1462,6 +1534,46 @@ mod tests {
         assert_eq!(
             sinks.displaced, MAX_VOLUME,
             "displaced milk was destroyed without being counted, so conservation cannot be checked"
+        );
+    }
+
+    #[test]
+    fn a_flow_into_a_plant_sweeps_it_away_once() {
+        // World ask 37. A tuft is `passable`, so a flood runs through it and
+        // stands in the same block — the mod's own report of a meadow flooded
+        // was 1,208 blocked flows, none of them from a plant's block, because
+        // a flow into a block nothing blocks is not blocked.
+        let mut scene = Scene::floored(-4..=4, -4..=4);
+        scene.plant(0, 1, 0);
+        scene.plant(1, 1, 0);
+        scene.pour(BlockPos::new(0, 2, 0), MAX_VOLUME);
+        let mut solver = Solver::new();
+        let tunings = Tunings::uniform(Tuning::DEFAULT);
+        solver.touch(BlockPos::new(0, 2, 0));
+        for tick in 0..12 {
+            solver.tick(&mut scene, &tunings, 64, 7, tick);
+        }
+        let washed = solver.take_washed();
+        assert!(
+            washed.contains(&BlockPos::new(0, 1, 0)),
+            "the water fell through the plant and left it standing: {washed:?}"
+        );
+        assert_eq!(
+            washed
+                .iter()
+                .filter(|pos| **pos == BlockPos::new(0, 1, 0))
+                .count(),
+            1,
+            "one plant, one clearing: {washed:?}"
+        );
+        // Taken, so the caller is told once and the next tick starts empty.
+        assert!(solver.take_washed().is_empty());
+
+        // And a block nobody called a plant is never reported, however much
+        // water runs through it.
+        assert!(
+            !washed.contains(&BlockPos::new(0, 2, 0)),
+            "an ordinary block was washed: {washed:?}"
         );
     }
 

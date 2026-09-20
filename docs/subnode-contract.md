@@ -393,6 +393,26 @@ silently discarding it:
   porosity is.
 - **Evaporation.** A block with air above it may lose volume on a random tick.
 
+**A third rule that destroys TERRAIN rather than fluid, and is therefore not a
+sink**: a material may declare `washes_away`, and a flow entering its block
+clears that block's cells as a dig would. *(Added 2026-09-20, World ask 37.)*
+No fluid is lost, so the conservation invariant below is untouched.
+
+- **Every occupied cell, or none of it.** A block whose occupied cells are all
+  such a material is cleared whole; a block that mixes one with anything else
+  is left alone, so a fern growing on a wall cannot take the wall with it.
+- **The solver reports the position and clears nothing**, exactly as it does
+  for absorption: naming a material needs the registry, which is the tick
+  thread's. The clearing is an ordinary `Edit::Block` to air, so it relights,
+  broadcasts and persists like any other edit.
+- **Nothing is dropped.** What a washed plant leaves behind is a mod's
+  business; the engine registers no plants and has no opinion about seeds.
+- Only a flow INTO the block washes it. A plant that stops fluid outright is
+  never reached by one, which is why this is declared by the same materials
+  that declare `passable` — a flood runs through a tuft rather than into it,
+  and that is precisely the case a mod cannot see (`on_fluid_flow` reports
+  flows that were BLOCKED).
+
 Both randomness sources are engine-provided seeded streams
 (`world_seed + chunk_coords + stream_name`, charter rule 4). A process RNG here
 fails the cross-platform hash gate — or worse, does not, and two servers drift.

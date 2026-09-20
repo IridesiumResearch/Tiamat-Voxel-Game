@@ -144,6 +144,11 @@ pub struct Ponds {
     /// See [`Fluidics::set_passable`]. Held here so a domain made on first use
     /// gets them, exactly as it gets the absorbency.
     passable: std::sync::Arc<Vec<u16>>,
+    /// The materials a flow sweeps away, sorted, in the id space chunks hold.
+    ///
+    /// World ask 37. Held here for the same reason `passable` is: a domain made
+    /// on first use has to be told what every other one knows.
+    washes_away: std::sync::Arc<Vec<u16>>,
     domains: std::collections::BTreeMap<String, Fluidics>,
 }
 
@@ -155,6 +160,7 @@ impl Ponds {
             fluids,
             absorbency,
             passable: std::sync::Arc::new(Vec::new()),
+            washes_away: std::sync::Arc::new(Vec::new()),
             domains: std::collections::BTreeMap::new(),
         }
     }
@@ -173,12 +179,23 @@ impl Ponds {
         }
     }
 
+    /// Records which materials a flow sweeps away: plants (World ask 37).
+    pub fn set_washes_away(&mut self, washes_away: Vec<u16>) {
+        let mut washes_away = washes_away;
+        washes_away.sort_unstable();
+        self.washes_away = std::sync::Arc::new(washes_away);
+        for fluidics in self.domains.values_mut() {
+            fluidics.set_washes_away(std::sync::Arc::clone(&self.washes_away));
+        }
+    }
+
     /// One domain's fluid, created on first use.
     pub fn of(&mut self, domain: &str) -> &mut Fluidics {
         self.domains.entry(domain.to_owned()).or_insert_with(|| {
             let mut fluidics = Fluidics::new(self.fluids.clone());
             fluidics.set_absorbency(self.absorbency.clone());
             fluidics.set_passable(std::sync::Arc::clone(&self.passable));
+            fluidics.set_washes_away(std::sync::Arc::clone(&self.washes_away));
             fluidics
         })
     }
@@ -362,6 +379,8 @@ pub struct Fluidics {
     absorbency: Absorbency,
     /// The materials a fluid flows through rather than round.
     passable: std::sync::Arc<Vec<u16>>,
+    /// Materials a flow sweeps away — World ask 37, runtime ids, sorted.
+    washes_away: std::sync::Arc<Vec<u16>>,
     solver: Solver,
     /// Writes a MOD made, waiting to go out with the next tick's changes.
     ///
@@ -390,6 +409,7 @@ impl Fluidics {
             fluids,
             absorbency: Absorbency::default(),
             passable: std::sync::Arc::new(Vec::new()),
+            washes_away: std::sync::Arc::new(Vec::new()),
             solver: Solver::new(),
             written: Vec::new(),
         }
@@ -470,6 +490,23 @@ impl Fluidics {
     /// a hash for that many is not close.
     pub fn set_passable(&mut self, passable: std::sync::Arc<Vec<u16>>) {
         self.passable = passable;
+    }
+
+    /// The materials a flow sweeps away: a plant in a flood (World ask 37).
+    ///
+    /// **Runtime ids, sorted**, like `passable` beside it and for the same
+    /// reason: it is compared against what a chunk in memory holds.
+    pub fn set_washes_away(&mut self, washes_away: std::sync::Arc<Vec<u16>>) {
+        self.washes_away = washes_away;
+    }
+
+    /// Takes the blocks a flow has swept the terrain out of.
+    ///
+    /// Positions only: clearing one is a terrain edit, and the world belongs to
+    /// the tick thread rather than to this lock — the same division
+    /// [`Fluidics::take_sinks`] describes.
+    pub fn take_washed(&mut self) -> Vec<tiamot_core::BlockPos> {
+        self.solver.take_washed()
     }
 
     /// What one material does to fluid touching it.
@@ -649,6 +686,7 @@ impl Fluidics {
             layers,
             absorbency,
             passable: &self.passable,
+            washes_away: &self.washes_away,
         };
         for block in filled {
             if !tiamot_core::fluid::in_a_body(&view, tunings, block) {
@@ -734,6 +772,7 @@ impl Fluidics {
             layers: &mut self.layers,
             absorbency: &self.absorbency,
             passable: &self.passable,
+            washes_away: &self.washes_away,
         };
         changes.extend(solver.tick(&mut view, &self.tunings, VISITS_PER_TICK, seed, fluid_tick));
         self.solver = solver;
@@ -813,6 +852,7 @@ struct Wet<'a> {
     layers: &'a mut HashMap<ChunkPos, FluidLayer>,
     absorbency: &'a Absorbency,
     passable: &'a [u16],
+    washes_away: &'a [u16],
 }
 
 impl Neighbourhood for Wet<'_> {
@@ -852,6 +892,33 @@ impl Neighbourhood for Wet<'_> {
         self.absorbency
             .block(&chunk.get_block_local(pos.local()))
             .map_or(0, |absorbs| absorbs.rate_for(fluid))
+    }
+
+    /// World ask 37: whether a flow into this block sweeps its terrain away.
+    ///
+    /// **Every occupied cell, or none of it.** A block half fern and half wall
+    /// is a wall with a fern on it, and clearing it would take the wall — so a
+    /// mixed block is left alone and the mod's plant, which is a `Partial` of
+    /// its own material, is not. An empty block has nothing to wash.
+    fn washes_away(&self, pos: BlockPos) -> bool {
+        if self.washes_away.is_empty() {
+            return false;
+        }
+        let Some(chunk) = self.terrain.resident(pos.chunk()) else {
+            return false;
+        };
+        let block = chunk.get_block_local(pos.local());
+        let mut any = false;
+        for cell in block.cells() {
+            if cell.is_air() {
+                continue;
+            }
+            if self.washes_away.binary_search(&cell.0).is_err() {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 
     fn fluid(&self, pos: BlockPos) -> Fluid {
