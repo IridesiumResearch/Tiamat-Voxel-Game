@@ -5432,6 +5432,122 @@ fn a_half_covered_sky_has_cloud_and_sky_in_it_rather_than_one_flat_fill() {
     );
 }
 
+#[test]
+fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
+    // **Weather ask W10's own acceptance**: "standing under a clear square
+    // with a forced storm three squares east, the east horizon shows a grey
+    // deck and the sky overhead does not." `set_clouds` took ONE cover for the
+    // whole sky a player sees, so a front could not be watched coming — the
+    // deck was overcast everywhere or nowhere.
+    //
+    // **Asserted by MIRRORING rather than by naming a side of the screen.**
+    // Which way round the halves land depends on the handedness of the view
+    // matrix, and a test that hard-codes "east is the right of the frame"
+    // passes for a frame that is simply wrong in a consistent way. So the
+    // storm is put over one half of the world and then the other, and the
+    // greying has to follow it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // Clear everywhere the grid does not reach, so anything the frame shows is
+    // the grid's doing.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(tiamot_core::atmosphere::Clouds {
+            cover: 0.0,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+        }),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+
+    // Sixteen cells of 256 blocks centred on the camera: two kilometres either
+    // way, which is past anything the march reaches.
+    const SIZE: usize = 16;
+    const CELL: f32 = 256.0;
+    let camera = skyward();
+    let (cx, _, cz) = camera.position.to_world();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a camera standing in a fixed test scene, tens of blocks from the origin"
+    )]
+    let origin = [
+        cx as f32 - CELL * (SIZE as f32) / 2.0,
+        cz as f32 - CELL * (SIZE as f32) / 2.0,
+    ];
+    let storm_over = |rising_x: bool| {
+        let mut cover = vec![0_u8; SIZE * SIZE];
+        let mut darkness = vec![0_u8; SIZE * SIZE];
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                if (x >= SIZE / 2) == rising_x {
+                    cover[z * SIZE + x] = 255;
+                    darkness[z * SIZE + x] = 255;
+                }
+            }
+        }
+        #[expect(clippy::cast_possible_truncation, reason = "SIZE is 16")]
+        std::sync::Arc::new(tiamot_core::atmosphere::CloudMap {
+            origin,
+            cell: CELL,
+            size: SIZE as u8,
+            cover,
+            darkness,
+        })
+    };
+    // Blue over red: open sky is blue, cloud is grey. The same measure the
+    // half-covered test uses, and for the same reason — a colour would be a
+    // hostage to the lighting mode and the driver's filtering.
+    let halves = |frame: &client::texture::Image| {
+        let side = |x0, x1| {
+            let tile = average(frame, x0, 0, x1, HEIGHT / 2);
+            tile[2] - tile[0]
+        };
+        (side(0, WIDTH / 3), side(WIDTH * 2 / 3, WIDTH))
+    };
+
+    // The same sky with no map at all: the reference each half is judged
+    // against. **Not the other half** — a clear sky is not symmetric, because
+    // the sun is on one side of it: here the clear halves read 0.31 and 0.24,
+    // and a test that compared them would fail on the sun.
+    renderer.set_cloud_map(None);
+    let (clear_left, clear_right) =
+        halves(&target.capture(&mut renderer, &camera).expect("capture"));
+
+    renderer.set_cloud_map(Some(storm_over(true)));
+    let (left_a, right_a) = halves(&target.capture(&mut renderer, &camera).expect("capture"));
+    renderer.set_cloud_map(Some(storm_over(false)));
+    let (left_b, right_b) = halves(&target.capture(&mut renderer, &camera).expect("capture"));
+    println!(
+        "blue-over-red: clear {clear_left:.4}/{clear_right:.4}, storm over +x \
+         {left_a:.4}/{right_a:.4}, over -x {left_b:.4}/{right_b:.4}"
+    );
+
+    // The half the storm is over greys; the half it is not over stays as
+    // clear as it was. Both halves of that, both ways round — which is what
+    // says the grid is read per ray rather than per frame.
+    assert!(
+        clear_left - left_a > 0.05,
+        "a storm over +x should grey that side: {clear_left:.4} clear, {left_a:.4} stormy"
+    );
+    assert!(
+        (right_a - clear_right).abs() < 0.02,
+        "a storm over +x greyed the other side too: {clear_right:.4} clear, {right_a:.4} with it"
+    );
+    assert!(
+        clear_right - right_b > 0.05,
+        "a storm over -x should grey that side: {clear_right:.4} clear, {right_b:.4} stormy"
+    );
+    assert!(
+        (left_b - clear_left).abs() < 0.02,
+        "a storm over -x greyed the other side too: {clear_left:.4} clear, {left_b:.4} with it"
+    );
+}
+
 /// The deck Weather tuned after the first look: coarser, calmer, cheaper.
 ///
 /// Their numbers in `docs/engine-asks/tiamot_weather.md` are measured against

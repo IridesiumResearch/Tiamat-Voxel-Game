@@ -208,6 +208,8 @@ struct Seen {
     abilities: Option<tiamot_core::phys::Abilities>,
     /// Skins a mod's models arrived wearing, as `(model id, one pixel)`.
     skins: Vec<(String, [u8; 4])>,
+    /// The cover map, as `(origin, cell, size, first cover, last cover)`.
+    cloud_map: Option<([f32; 2], f32, u8, u8, u8)>,
 }
 
 impl Seen {
@@ -244,6 +246,19 @@ impl Seen {
             Event::ModelTexture { id, image } => {
                 let pixel = image.pixel(0, 0).unwrap_or([0, 0, 0, 0]);
                 self.skins.push((id, pixel));
+            }
+            // The coarse cover map — weather ask W10. Recorded as its corner
+            // and its first cell, which is enough to say it arrived whole.
+            Event::CloudMap(map) => {
+                self.cloud_map = map.map(|map| {
+                    (
+                        map.origin,
+                        map.cell,
+                        map.size,
+                        map.cover.first().copied().unwrap_or(0),
+                        map.cover.last().copied().unwrap_or(0),
+                    )
+                });
             }
             Event::CloudLayer(layer) => self.cloud_layer = Some(layer),
             Event::Clouds(clouds) => self.clouds = clouds,
@@ -1140,7 +1155,22 @@ game.register_clouds{ base = 420, thickness = 96, cell = 8, detail = 2,
                       towers = 0.25, drift = { x = 1.5, z = 0.4 } }
 
 game.register_on_player_join(function(event)
-    game.set_clouds(event.player, { cover = 0.55, darkness = 0.0, ease_ticks = 600 })
+    -- A coarse cover map beside the single value (weather ask W10): a storm
+    -- filling the far half of a four-kilometre grid, and fair weather in the
+    -- near half. The single `cover` still answers outside the grid.
+    local cover, darkness = {}, {}
+    for z = 0, 3 do
+        for x = 0, 3 do
+            local stormy = z >= 2
+            cover[z * 4 + x + 1] = stormy and 1.0 or 0.1
+            darkness[z * 4 + x + 1] = stormy and 0.8 or 0.0
+        end
+    end
+    game.set_clouds(event.player, {
+        cover = 0.55, darkness = 0.0, ease_ticks = 600,
+        map = { origin = { x = -512, z = -512 }, cell = 256, size = 4,
+                cover = cover, darkness = darkness },
+    })
 end)
 "#,
     )
@@ -1205,6 +1235,15 @@ fn a_mods_cloud_deck_and_a_players_cover_both_reach_a_client() {
     let clouds = seen.clouds.expect("told a cover");
     assert!((clouds.cover - 0.55).abs() < 0.01);
     assert_eq!(clouds.ease_ticks, 600);
+
+    // **And the map beside it** — weather ask W10. A grid of bytes, because
+    // cover and darkness are shares of one: 0.1 is 26 of 255 and 1.0 is 255.
+    let (origin, cell, size, first, last) = seen.cloud_map.expect("told a map");
+    assert!((origin[0] + 512.0).abs() < 0.01 && (origin[1] + 512.0).abs() < 0.01);
+    assert!((cell - 256.0).abs() < 0.01);
+    assert_eq!(size, 4);
+    assert_eq!(first, 26, "the fair corner did not survive the wire");
+    assert_eq!(last, 255, "the stormy corner did not survive the wire");
 }
 
 /// A mod directory whose one mod registers a model.

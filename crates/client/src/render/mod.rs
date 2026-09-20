@@ -1637,6 +1637,18 @@ impl Renderer {
         self.clouds.set(deck);
     }
 
+    /// Lays a coarse cover map over the world, or takes it away — ask W10.
+    ///
+    /// Beside the deck rather than in it: a grid is half a kilobyte and
+    /// changes when the weather does, while the deck is handed over every
+    /// frame.
+    pub fn set_cloud_map(
+        &mut self,
+        map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>,
+    ) {
+        self.clouds.set_map(map);
+    }
+
     /// Advances the deck's own clock.
     ///
     /// Seconds rather than ticks: drift and evolution are presentation and run

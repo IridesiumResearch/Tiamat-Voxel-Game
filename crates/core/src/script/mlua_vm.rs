@@ -1608,6 +1608,77 @@ fn cloud_layer_of(spec: &Table) -> mlua::Result<crate::atmosphere::CloudLayer> {
 }
 
 /// Reads `game.set_clouds`' table into one player's cloud state.
+/// `map = { origin, cell, size, cover, darkness }` on a `set_clouds` spec.
+///
+/// Weather ask W10: a storm over the next valley. **Refused rather than
+/// clamped when the shape is wrong** — a grid whose cell count does not match
+/// its size is a mod that has miscounted, and the error names the numbers so
+/// it can be found. The values themselves are shares of one and are clamped,
+/// like every other number a mod hands the engine.
+fn cloud_map_of(spec: &Table) -> mlua::Result<Option<crate::atmosphere::CloudMap>> {
+    let Some(map) = spec.get::<Option<Table>>("map")? else {
+        return Ok(None);
+    };
+    for pair in map.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        if let Value::String(name) = key
+            && !CLOUD_MAP_FIELDS.contains(&name.to_string_lossy().as_ref())
+        {
+            return Err(mlua::Error::external(format!(
+                "set_clouds: unknown field `{}` in `map`. The fields are {CLOUD_MAP_FIELDS:?}.",
+                name.to_string_lossy()
+            )));
+        }
+    }
+    let origin: Table = map.get("origin")?;
+    let size: u8 = map.get("size")?;
+    if size == 0 || size > crate::atmosphere::MAX_MAP_SIZE {
+        return Err(mlua::Error::external(format!(
+            "set_clouds: `map.size` is 1..={}, got {size}",
+            crate::atmosphere::MAX_MAP_SIZE
+        )));
+    }
+    let cell: f32 = map.get("cell")?;
+    if !cell.is_finite() || cell <= 0.0 {
+        return Err(mlua::Error::external(format!(
+            "set_clouds: `map.cell` is how many blocks a cell covers, got {cell}"
+        )));
+    }
+    let wanted = usize::from(size) * usize::from(size);
+    let share = |field: &str| -> mlua::Result<Vec<u8>> {
+        let values: Vec<f32> = map.get(field)?;
+        if values.len() != wanted {
+            return Err(mlua::Error::external(format!(
+                "set_clouds: `map.{field}` holds {} values for a {size} x {size} grid, which \
+                 wants {wanted}",
+                values.len()
+            )));
+        }
+        Ok(values
+            .into_iter()
+            .map(|value| {
+                // A share of one, as a byte: a 255th is finer than a sky can
+                // show, and no NaN survives the trip to a shader.
+                let share = if value.is_finite() {
+                    value.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (share * 255.0 + 0.5) as u8
+            })
+            .collect())
+    };
+    Ok(crate::atmosphere::sanitise_cloud_map(
+        crate::atmosphere::CloudMap {
+            origin: [origin.get("x")?, origin.get("z")?],
+            cell,
+            size,
+            cover: share("cover")?,
+            darkness: share("darkness")?,
+        },
+    ))
+}
+
 fn cloud_state_of(spec: &Table) -> mlua::Result<crate::atmosphere::Clouds> {
     Ok(crate::atmosphere::sanitise_cloud_state(
         crate::atmosphere::Clouds {
@@ -6682,10 +6753,17 @@ impl MluaVm {
             .create_function(move |_, (uuid, spec): (String, Option<Table>)| {
                 let player =
                     crate::identity::PlayerUuid::from_bytes(player_of(&uuid, "set_clouds")?);
+                let map = spec.as_ref().map(cloud_map_of).transpose()?.flatten();
                 let clouds = spec.map(|spec| cloud_state_of(&spec)).transpose()?;
                 let told = slot.lock().ok().and_then(|slot| {
-                    slot.as_ref()
-                        .map(|access| access.set_clouds(player, clouds))
+                    slot.as_ref().map(|access| {
+                        // **Both, every call.** The map is replaced whole like
+                        // the state beside it, so a call that names none
+                        // clears the last one rather than leaving a storm
+                        // parked over a valley for ever.
+                        access.set_cloud_map(player, map);
+                        access.set_clouds(player, clouds)
+                    })
                 });
                 Ok(told.unwrap_or(false))
             })
@@ -8887,6 +8965,9 @@ const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "defa
 /// every other registration applies, and for the reason `register_fluid` gives:
 /// a misspelled field is a mod that thinks it configured something.
 const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator"];
+
+/// Fields the `map` of a `game.set_clouds` spec accepts — weather ask W10.
+const CLOUD_MAP_FIELDS: [&str; 5] = ["origin", "cell", "size", "cover", "darkness"];
 
 /// Fields `game.set_player_abilities` accepts.
 ///

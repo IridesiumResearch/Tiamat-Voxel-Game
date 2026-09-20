@@ -343,6 +343,8 @@ pub struct Shared {
     pub precipitation: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, PrecipitationSlot>>,
     /// Each player's cloud state, and whether they have been told it.
     pub clouds: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, CloudSlot>>,
+    /// Each player's cover map, and whether they have been told it — ask W10.
+    pub cloud_maps: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, CloudMapSlot>>,
 
     /// Every distributable file the loaded mods supply, by hash.
     ///
@@ -424,6 +426,20 @@ pub struct PrecipitationSlot {
 pub struct CloudSlot {
     /// The state, or none.
     pub clouds: Option<tiamot_core::atmosphere::Clouds>,
+    /// Whether the player has been told this version.
+    pub sent: bool,
+}
+
+/// One player's cover map as a mod last set it, and whether it was sent.
+///
+/// Its own slot beside [`CloudSlot`] rather than a field in it, because a grid
+/// is half a kilobyte and the state beside it is sixteen bytes: a mod moving
+/// the cover a little every tick would otherwise put the whole grid on the
+/// wire each time. Weather ask W10.
+#[derive(Debug, Clone, Default)]
+pub struct CloudMapSlot {
+    /// The grid, or none.
+    pub map: Option<tiamot_core::atmosphere::CloudMap>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -2368,6 +2384,39 @@ impl Shared {
         if let Ok(mut all) = self.clouds.lock() {
             all.remove(uuid);
         }
+        if let Ok(mut all) = self.cloud_maps.lock() {
+            all.remove(uuid);
+        }
+    }
+
+    /// Replaces one player's cover map; unchanged and already sent is a no-op.
+    ///
+    /// Weather ask W10. The comparison is the whole grid, which is 512 bytes
+    /// against a wire message of the same — a mod that recomputes the same
+    /// weather every tick costs a memcmp rather than a send.
+    pub fn set_cloud_map(&self, uuid: &PlayerUuid, map: Option<tiamot_core::atmosphere::CloudMap>) {
+        let Ok(mut all) = self.cloud_maps.lock() else {
+            return;
+        };
+        let slot = all.entry(*uuid).or_default();
+        if slot.map == map && slot.sent {
+            return;
+        }
+        slot.map = map;
+        slot.sent = false;
+    }
+
+    /// Takes the cover map one player has not been told yet.
+    pub fn unsent_cloud_map(&self, uuid: &PlayerUuid) -> Option<ServerMessage> {
+        let mut all = self.cloud_maps.lock().ok()?;
+        let slot = all.get_mut(uuid)?;
+        if slot.sent {
+            return None;
+        }
+        slot.sent = true;
+        Some(ServerMessage::CloudMap {
+            map: slot.map.clone(),
+        })
     }
 
     /// Replaces one player's precipitation; unchanged and already sent is a no-op.
@@ -2824,6 +2873,12 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                         frame::write(&mut send, &message).await?;
                     }
                     if let Some(message) = shared.unsent_precipitation(&uuid) {
+                        frame::write(&mut send, &message).await?;
+                    }
+                    // **The map before the state**, so a client that adopts
+                    // both in one frame never draws one tick of the new cover
+                    // laid over the old grid.
+                    if let Some(message) = shared.unsent_cloud_map(&uuid) {
                         frame::write(&mut send, &message).await?;
                     }
                     if let Some(message) = shared.unsent_clouds(&uuid) {
@@ -3692,6 +3747,7 @@ mod tests {
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             clouds: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            cloud_maps: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             precipitation: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),

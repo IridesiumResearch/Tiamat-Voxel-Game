@@ -84,4 +84,16 @@ impl tiamot_core::atmosphere::Access for Shared {
         self.endpoint.set_clouds(&player, clouds);
         true
     }
+
+    fn set_cloud_map(
+        &self,
+        player: PlayerUuid,
+        map: Option<tiamot_core::atmosphere::CloudMap>,
+    ) -> bool {
+        if !self.endpoint.is_online(&player) {
+            return false;
+        }
+        self.endpoint.set_cloud_map(&player, map);
+        true
+    }
 }

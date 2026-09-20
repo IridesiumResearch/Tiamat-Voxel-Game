@@ -111,7 +111,7 @@ impl Quality {
 /// them or none: a deck with no weather is a clear sky, weather with no deck
 /// is nothing to draw, a player who turned clouds off gets neither however
 /// much a mod registered, and the seed decides which sky it is.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Deck {
     /// The deck a mod registered.
     pub layer: Option<CloudLayer>,
@@ -139,7 +139,23 @@ struct Uniforms {
     weather: [f32; 4],
     motion: [f32; 4],
     quality: [f32; 4],
+    /// The cover map's corner x and z, its cell size in blocks, and how many
+    /// cells a side — zero for "no map, use `weather` everywhere". Ask W10.
+    map: [f32; 4],
+    /// Cover and darkness per cell, `[cover, darkness]` packed two cells to a
+    /// `vec4`, row-major by z.
+    ///
+    /// **A `vec4` array rather than a flat one**: WGSL's uniform address space
+    /// gives an array element a stride of at least sixteen bytes, so
+    /// `array<f32, N>` is not expressible there and a flat Rust array would
+    /// silently disagree with the shader's idea of it.
+    cells: [[f32; 4]; MAP_VEC4S],
 }
+
+/// How many `vec4`s the packed cover map takes: two cells each.
+const MAP_VEC4S: usize = (tiamot_core::atmosphere::MAX_MAP_SIZE as usize
+    * tiamot_core::atmosphere::MAX_MAP_SIZE as usize)
+    .div_ceil(2);
 
 /// What the pass needs to know about the frame.
 #[derive(Debug, Clone, Copy)]
@@ -179,6 +195,12 @@ pub struct Pass {
     /// ceiling, and a pass that keeps its own state costs it one line instead
     /// of four. It is also where the state belongs.
     deck: Deck,
+    /// The coarse cover map, if a mod sent one — weather ask W10.
+    ///
+    /// **Beside the deck rather than in it.** `Deck` is `Copy` and is handed
+    /// over every frame; a grid is half a kilobyte, and it changes when the
+    /// weather does rather than when the frame does.
+    map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>,
     /// Seconds since the client started, for drift and evolution.
     seconds: f32,
 }
@@ -226,13 +248,19 @@ impl Pass {
             bind,
             draws: false,
             deck: Deck::default(),
+            map: None,
             seconds: 0.0,
         }
     }
 
     /// Sets the deck, the weather over it, and the player's own quality.
-    pub const fn set(&mut self, deck: Deck) {
+    pub fn set(&mut self, deck: Deck) {
         self.deck = deck;
+    }
+
+    /// Lays a coarse cover map over the world, or takes it away — ask W10.
+    pub fn set_map(&mut self, map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>) {
+        self.map = map;
     }
 
     /// Advances the deck's own clock.
@@ -300,6 +328,22 @@ impl Pass {
             reason = "the seed only has to pick a field, not be read back"
         )]
         let seed = (self.deck.seed & 0xFFFF) as f32;
+        // **The map, unpacked into the uniform.** Bytes on the wire, shares
+        // of one here, and zero cells when a mod sent none — which is what
+        // tells the shader to use the single cover for the whole sky.
+        let mut cells = [[0.0_f32; 4]; MAP_VEC4S];
+        let descriptor = self.map.as_ref().map_or([0.0; 4], |map| {
+            for (index, (cover, darkness)) in map.cover.iter().zip(map.darkness.iter()).enumerate()
+            {
+                let Some(slot) = cells.get_mut(index / 2) else {
+                    break;
+                };
+                let half = (index % 2) * 2;
+                slot[half] = f32::from(*cover) / 255.0;
+                slot[half + 1] = f32::from(*darkness) / 255.0;
+            }
+            [map.origin[0], map.origin[1], map.cell, f32::from(map.size)]
+        });
         let uniforms = Uniforms {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
             view_projection: frame.view_projection.to_cols_array_2d(),
@@ -317,6 +361,8 @@ impl Pass {
             shade: [layer.shade[0], layer.shade[1], layer.shade[2], small],
             weather: [state.cover, state.darkness, layer.frequency, layer.towers],
             motion: [layer.drift[0], layer.drift[1], layer.evolve, seed],
+            map: descriptor,
+            cells,
             quality: [
                 quality.reach(),
                 quality.detail_reach(),

@@ -501,6 +501,14 @@ hangs a dark haze under the deck as well as greying it: that, rather than
 precipitation spawns around the player's own camera and cannot draw a curtain
 of rain over the next valley.
 
+**A storm over the next valley is `map` on `set_clouds`** — a coarse grid of
+cover and darkness laid over the world rather than over the player, sampled
+where each ray of the deck passes, with the plain `cover` still answering
+outside the grid. Up to 16 cells a side; at the 256-block squares a weather mod
+tends to evaluate that is four kilometres, which is further than the deck is
+drawn. Values are shares of one and travel as bytes. Without it, a front cannot
+be watched coming: the sky a player sees is overcast everywhere or nowhere.
+
 The player owns the quality: a cloud setting in their own graphics options
 scales the deck's resolution and draw distance, down to off. The server is
 never told, and a mod must not assume its clouds are being drawn at all.

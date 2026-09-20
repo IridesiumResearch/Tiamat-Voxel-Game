@@ -74,6 +74,14 @@ game.register_on_player_join(function(event)
     if spawned then return end
     spawned = true
     game.spawn_entity{ model = "zoo:cow", pos = { x = 0.5, y = 1.0, z = 4.5 } }
+    -- And a coarse cover map, for the seam between the wire and the sky
+    -- (weather ask W10): a storm filling the far half of a 2 x 2 grid.
+    game.set_clouds(event.player, {
+        cover = 0.2,
+        map = { origin = { x = -256, z = -256 }, cell = 256, size = 2,
+                cover = { 0.0, 0.0, 1.0, 1.0 },
+                darkness = { 0.0, 0.0, 0.9, 0.9 } },
+    })
 end)
 "#,
     )
@@ -165,6 +173,30 @@ fn an_entity_wearing_a_mods_model_is_placed_in_the_world() {
     // And the engine's own rig is untouched by the routing: the player is
     // still theirs, and a mod's entity is not counted among them.
     assert!(app.model_figures() >= 1, "the cow left the frame again");
+
+    app.shutdown();
+    assert!(server.stop());
+}
+
+#[test]
+fn a_coarse_cover_map_reaches_the_sky_the_client_draws() {
+    // **The seam, and it went missing twice while this was written.** The
+    // wire test proves a mod's grid reaches the client, and the screenshot
+    // test proves a grid handed to the renderer greys half the sky; neither
+    // notices when the app stops carrying one to the other. Weather ask W10.
+    let Some(gpu) = gpu() else { return };
+    let server = embedded("weather");
+    let mut app = client("weather", &server, gpu);
+
+    assert!(
+        run_frames(&mut app, 30.0, |app| app.joined()
+            && app.cloud_map().is_some()),
+        "the cover map never reached the app; warnings: {:?}",
+        app.warnings()
+    );
+    let map = app.cloud_map().expect("a map").clone();
+    assert_eq!(map.size, 2);
+    assert_eq!(map.cover, vec![0, 0, 255, 255], "the grid arrived changed");
 
     app.shutdown();
     assert!(server.stop());

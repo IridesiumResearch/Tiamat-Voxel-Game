@@ -445,6 +445,82 @@ pub fn sanitise_cloud_state(mut clouds: Clouds) -> Clouds {
     clouds
 }
 
+/// The widest a cover map may be, in cells a side.
+///
+/// Sixteen at the 256-block cells the weather mod evaluates is four
+/// kilometres a side, which is past any view distance the engine serves — so a
+/// wider one would be describing weather nobody can see. It also fixes the
+/// room the client's cloud uniform needs at 2 KiB, which is why it is a
+/// constant rather than a preference.
+pub const MAX_MAP_SIZE: u8 = 16;
+
+/// Cover and darkness over a patch of the world, rather than over one player.
+///
+/// **A storm over the next valley** — weather ask W10. [`Clouds`] is one
+/// number for the whole sky a player sees, so a front could not be watched
+/// coming: the deck was overcast everywhere or nowhere. This is a coarse grid
+/// laid over the world, sampled where each ray of the cloud march passes, with
+/// the [`Clouds`] values still answering everywhere the grid does not reach.
+///
+/// **Bytes, not floats.** Cover and darkness are shares of one, a 255th of
+/// which is far finer than a sky can show, and a 16x16 grid of pairs is 512
+/// bytes on the wire against 2 KiB of `f32`. It also means no float can arrive
+/// as a NaN and reach a shader.
+///
+/// Its own message and its own type rather than a field on [`Clouds`], because
+/// `Clouds` is `Copy` and travels through eight places by value; a grid inside
+/// it would make every one of those copies kilobytes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CloudMap {
+    /// The world x and z of the grid's corner, in blocks.
+    pub origin: [f32; 2],
+    /// How many blocks a cell covers.
+    pub cell: f32,
+    /// How many cells a side. At most [`MAX_MAP_SIZE`].
+    pub size: u8,
+    /// Cover per cell, row-major by z, `size * size` of them. 0 is clear.
+    pub cover: Vec<u8>,
+    /// Darkness per cell, the same order. 0 is fair-weather white.
+    pub darkness: Vec<u8>,
+}
+
+impl CloudMap {
+    /// Whether the grid is square, in range, and the size it says it is.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let cells = usize::from(self.size) * usize::from(self.size);
+        self.size > 0
+            && self.size <= MAX_MAP_SIZE
+            && self.origin.iter().all(|value| value.is_finite())
+            && self.cell.is_finite()
+            && self.cell > 0.0
+            && self.cover.len() == cells
+            && self.darkness.len() == cells
+    }
+}
+
+/// Brings a grid a mod got wrong into one that can be drawn, or drops it.
+///
+/// **Dropped rather than clamped when the SHAPE is wrong**, unlike every
+/// number beside it: a grid whose cell count does not match its size is not a
+/// grid with a bad number in it, it is a mod that has miscounted, and guessing
+/// which cells it meant would draw weather nobody asked for.
+#[must_use]
+pub fn sanitise_cloud_map(mut map: CloudMap) -> Option<CloudMap> {
+    map.size = map.size.min(MAX_MAP_SIZE);
+    if !map.cell.is_finite() || map.cell <= 0.0 {
+        return None;
+    }
+    if !map.origin.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let cells = usize::from(map.size) * usize::from(map.size);
+    if map.size == 0 || map.cover.len() != cells || map.darkness.len() != cells {
+        return None;
+    }
+    Some(map)
+}
+
 /// Where `game.set_sky_modifier` and `game.flash` reach.
 ///
 /// The same seam shape as [`crate::hud::Access`], and for the same reason:
@@ -467,6 +543,19 @@ pub trait Access: Send + Sync {
     ///
     /// Returns whether the player was there to tell.
     fn set_clouds(&self, player: PlayerUuid, clouds: Option<Clouds>) -> bool;
+
+    /// Replaces the cover map one player's sky is drawn from — ask W10.
+    ///
+    /// Its own call rather than a field on [`Clouds`], for the reason
+    /// [`CloudMap`] gives: a grid inside a `Copy` type would be copied by
+    /// value everywhere that type goes. Set together with the state by
+    /// `game.set_clouds`, so a call that names no map clears one.
+    ///
+    /// Defaulted, because a VM with no server behind it has no players.
+    fn set_cloud_map(&self, player: PlayerUuid, map: Option<CloudMap>) -> bool {
+        let _ = (player, map);
+        false
+    }
 }
 
 #[cfg(test)]
@@ -526,6 +615,41 @@ mod tests {
         let fine = fair_weather();
         assert!(fine.is_valid());
         assert_eq!(sanitise_clouds(fine), fine);
+    }
+
+    #[test]
+    fn a_cover_map_whose_shape_is_wrong_is_dropped_rather_than_guessed_at() {
+        // Weather ask W10. Every number a mod hands the engine is clamped; a
+        // grid is the exception, because a cell count that disagrees with the
+        // size is not a bad number, it is a miscount — and guessing which
+        // cells were meant would draw weather nobody asked for.
+        let grid = |size: u8, cells: usize| CloudMap {
+            origin: [0.0, 0.0],
+            cell: 256.0,
+            size,
+            cover: vec![0; cells],
+            darkness: vec![0; cells],
+        };
+        assert!(sanitise_cloud_map(grid(4, 16)).is_some(), "a square grid");
+        assert!(sanitise_cloud_map(grid(4, 15)).is_none(), "one cell short");
+        assert!(sanitise_cloud_map(grid(0, 0)).is_none(), "no grid at all");
+
+        // A cell size that is not a length, and an origin that is not a place.
+        let mut nonsense = grid(2, 4);
+        nonsense.cell = 0.0;
+        assert!(sanitise_cloud_map(nonsense).is_none());
+        let mut adrift = grid(2, 4);
+        adrift.origin = [f32::NAN, 0.0];
+        assert!(sanitise_cloud_map(adrift).is_none());
+
+        // Wider than the engine will draw: cut to the cap, which then makes
+        // the cell count wrong, so it is refused rather than silently cropped.
+        let wide = grid(MAX_MAP_SIZE + 1, usize::from(MAX_MAP_SIZE + 1).pow(2));
+        assert!(sanitise_cloud_map(wide).is_none());
+
+        // And the shape the wire checks is the same one.
+        assert!(grid(4, 16).is_valid());
+        assert!(!grid(4, 15).is_valid());
     }
 
     #[test]

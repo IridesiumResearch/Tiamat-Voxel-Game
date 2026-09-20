@@ -2302,6 +2302,35 @@ function game.register_clouds(spec) end
 ---`base` overrides the registered floor for this player alone, for a world
 ---whose ground height varies enough that one number will not do.
 ---
+---**A storm over the next valley: `map`.** `cover` and `darkness` are one sky
+---for this player, so a front cannot be watched coming. A `map` lays a coarse
+---grid over the WORLD instead, sampled wherever each ray of the deck passes,
+---and the plain `cover` and `darkness` still answer everywhere the grid does
+---not reach. Sent when it changes, like everything else here, and compared
+---before it is sent — so recomputing the same weather every tick costs
+---nothing on the wire.
+---
+---```lua
+----- Sixteen cells of 256 blocks: four kilometres, centred on the player's own
+----- square. Row-major by z, so cover[z * size + x + 1].
+---game.set_clouds(uuid, {
+---    cover = 0.2, darkness = 0.0,
+---    map = {
+---        origin = { x = square_x - 8 * 256, z = square_z - 8 * 256 },
+---        cell = 256, size = 16,
+---        cover = cover, darkness = darkness,
+---    },
+---})
+---```
+---
+---Values are shares of one and travel as bytes, which is a 255th — finer than
+---a sky can show. A grid whose `cover` or `darkness` holds the wrong number of
+---values for its `size` is an error naming both counts, rather than a sky that
+---is quietly wrong. The engine draws the nearest cell rather than blending
+---between them: a cell is hundreds of blocks and the cloud in it has its own
+---edges, so keep the cells at the resolution of your own weather and let the
+---clouds do the rest.
+---
 ---Returns whether that player was there to tell.
 ---
 ---@param uuid string The player's UUID.
@@ -2315,6 +2344,15 @@ function game.set_clouds(uuid, spec) end
 ---@field darkness number? 0 is fair-weather white, 1 is storm grey. Default 0.
 ---@field base number? Overrides the registered floor for this player.
 ---@field ease_ticks integer? How long the client takes to get there. Default 0, at most 2400.
+---@field map Tiamot.CloudMapSpec? A coarse grid of weather over the world, for a storm that can be seen coming. Omit it for one sky everywhere; a call that omits it clears the last one.
+
+---A coarse grid of cloud cover over the world — one cell is hundreds of blocks.
+---@class Tiamot.CloudMapSpec
+---@field origin { x: number, z: number } The world x and z of the grid's corner, in blocks.
+---@field cell number How many blocks a cell covers.
+---@field size integer How many cells a side, 1 to 16. Sixteen 256-block cells is four kilometres, which is past any view distance the engine serves.
+---@field cover number[] `size * size` shares of one, row-major by z: `cover[z * size + x + 1]`.
+---@field darkness number[] The same, for how grey the storm is.
 
 ---There is no `game.register_theme`, and there cannot be.
 ---

@@ -1011,6 +1011,12 @@ pub struct App {
     cloud_layer: Option<tiamot_core::atmosphere::CloudLayer>,
     /// How much cloud this player is under, as the weather last said.
     clouds: Option<tiamot_core::atmosphere::Clouds>,
+    /// The coarse cover map a mod sent, if any — weather ask W10.
+    ///
+    /// Behind an `Arc` so the once-a-frame handover to the renderer copies a
+    /// pointer rather than half a kilobyte of grid.
+    cloud_map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>,
+
     /// What each mod wants this player's HUD to show, by mod id.
     ///
     /// Held here rather than inside the VM because it arrives on the network
@@ -1448,6 +1454,7 @@ impl App {
             theme: crate::theme::Theme::none(),
             cloud_layer: None,
             clouds: None,
+            cloud_map: None,
             hud_vm: start_hud_vm(),
             fps: 0.0,
             last_dt: 0.0,
@@ -3860,12 +3867,23 @@ impl App {
             crate::net::Event::Precipitation(rain) => self.weather.rain.set(*rain),
             crate::net::Event::CloudLayer(layer) => self.cloud_layer = *layer,
             crate::net::Event::Clouds(clouds) => self.clouds = *clouds,
+            crate::net::Event::CloudMap(map) => self.cloud_map.clone_from(map),
             // Unreachable by construction: the caller matched these five.
             // An arm rather than an `unreachable!`, because a sixth weather
             // event added to the caller and forgotten here should do nothing
             // rather than kill the client's network pump.
             _ => {}
         }
+    }
+
+    /// The coarse cover map this player's sky is drawn from, if any.
+    ///
+    /// Exposed for the test that the map reaches the renderer at all: the
+    /// wire test and the drawing test each cover one end, and the seam
+    /// between them is where a feature goes quietly missing.
+    #[must_use]
+    pub fn cloud_map(&self) -> Option<&tiamot_core::atmosphere::CloudMap> {
+        self.cloud_map.as_deref()
     }
 
     /// The cloud deck this world registered, and what this player is under.
@@ -4638,6 +4656,7 @@ impl App {
             | Event::Flash(_)
             | Event::Precipitation(_)
             | Event::CloudLayer(_)
+            | Event::CloudMap(_)
             | Event::Clouds(_) => self.adopt_weather(&event),
 
             Event::SoundBindings { bindings } => self.adopt_bindings(bindings),
@@ -4997,6 +5016,9 @@ impl App {
         // The deck drifts and evolves on frame time for the same reason the
         // clock above does: it is presentation, and charter rule 4 exempts it.
         self.renderer.advance_clouds(dt);
+        // The coarse cover map, handed over beside the deck — weather ask
+        // W10. An `Arc`, so this is a pointer a frame rather than a grid.
+        self.renderer.set_cloud_map(self.cloud_map.clone());
         self.renderer.set_clouds(crate::render::clouds::Deck {
             layer: self.cloud_layer,
             clouds: self.clouds,

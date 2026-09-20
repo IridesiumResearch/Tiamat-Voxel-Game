@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 69;
+pub const PROTOCOL_VERSION: u32 = 70;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 69;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v70 (weather W10): appended `ServerMessage::CloudMap`, a coarse grid of
+// cover and darkness over the world, so a storm can be watched coming from the
+// clear valley beside it. Its own message rather than a field on `Clouds`,
+// which is a `Copy` type carried by value in eight places.
 // v69 (Life 0 step 2): `ModelDef` carries `texture`, an image pushed beside
 // the model and drawn on it. Without one a model is matte white, which is what
 // every model was.
@@ -2222,6 +2226,19 @@ pub enum ServerMessage {
         /// What the player may now do.
         abilities: AbilitiesDef,
     },
+    /// The cover map one player's sky is drawn from — weather ask W10.
+    ///
+    /// **Appended at the end** (protocol v70). Latest state beside
+    /// [`ServerMessage::Clouds`], and sent with it: a storm over the next
+    /// valley is a grid laid over the world, and the state's own numbers
+    /// answer everywhere the grid does not reach.
+    ///
+    /// Bytes rather than floats, because cover and darkness are shares of one
+    /// — see [`crate::atmosphere::CloudMap`].
+    CloudMap {
+        /// The grid, or `None` for one sky everywhere.
+        map: Option<crate::atmosphere::CloudMap>,
+    },
 }
 
 /// [`phys::Abilities`](crate::phys::Abilities) as it travels.
@@ -2787,6 +2804,12 @@ fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
         ServerMessage::Clouds { clouds } => clouds
             .as_ref()
             .is_none_or(crate::atmosphere::Clouds::is_valid),
+        // **A grid reaches a shader**, so its shape is checked before its
+        // numbers are trusted: a cell count that disagrees with the size would
+        // index past the end of it.
+        ServerMessage::CloudMap { map } => map
+            .as_ref()
+            .is_none_or(crate::atmosphere::CloudMap::is_valid),
         _ => true,
     };
     if valid {
@@ -3299,6 +3322,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         | ServerMessage::Flash { .. }
         | ServerMessage::Precipitation { .. }
         | ServerMessage::CloudLayer { .. }
+        | ServerMessage::CloudMap { .. }
         | ServerMessage::Clouds { .. } => check_atmosphere(message)?,
         // A domain id is a string a server chose, and it reaches a loading
         // screen the client draws. Capped like every other id on the wire

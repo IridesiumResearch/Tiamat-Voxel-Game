@@ -75,9 +75,52 @@ struct Clouds {
     // Classic, and the only sign was that two of the three pictures were
     // identical.
     quality: vec4<f32>,
+    // The cover map's corner x and z, its cell in blocks, and how many cells a
+    // side — zero for "no map", which is every world until a mod sends one.
+    // Weather ask W10.
+    map: vec4<f32>,
+    // Cover and darkness per cell, two cells to a vec4, row-major by z.
+    //
+    // **A vec4 array, and that is not a preference**: WGSL gives a uniform
+    // array element a stride of at least sixteen bytes, so `array<f32, 512>`
+    // is not expressible here at all. The Rust side packs to match, and the
+    // warning on `view` above applies double — a disagreement about this
+    // layout empties the sky rather than failing to compile.
+    cells: array<vec4<f32>, 128>,
 }
 
 @group(0) @binding(0) var<uniform> clouds: Clouds;
+
+// The weather over one place: cover and darkness, from the map where there is
+// one and from the single state everywhere else. Weather ask W10.
+//
+// **Nearest cell, not bilinear.** A cell is hundreds of blocks and the field
+// it feeds is heaps of cloud with their own edges, so an interpolated boundary
+// buys nothing a player could see and costs three more fetches on every step
+// of every ray. The mod's grid is the resolution of its own weather.
+fn weather_at(cell_xz: vec2<f32>) -> vec2<f32> {
+    let plain = vec2<f32>(clouds.weather.x, clouds.weather.y);
+    let size = i32(clouds.map.w);
+    if (size <= 0) {
+        return plain;
+    }
+    let cell = max(clouds.map.z, 1.0);
+    let local = (cell_xz - vec2<f32>(clouds.map.x, clouds.map.y)) / cell;
+    let x = i32(floor(local.x));
+    let z = i32(floor(local.y));
+    // Outside the grid the single state answers, which is what lets a mod
+    // describe the weather it knows about and leave the rest of the world
+    // alone.
+    if (x < 0 || z < 0 || x >= size || z >= size) {
+        return plain;
+    }
+    let index = z * size + x;
+    let packed = clouds.cells[index / 2];
+    if ((index & 1) == 0) {
+        return packed.xy;
+    }
+    return packed.zw;
+}
 
 struct Varyings {
     @builtin(position) clip: vec4<f32>,
@@ -178,6 +221,11 @@ struct Column {
     // 0 at a heap's rim, 1 at its crown. The lighting reads it: thin cloud
     // passes light and thick cloud does not.
     density: f32,
+    // How grey the weather is over THIS column — ask W10. Carried rather than
+    // read in the fragment for the reason the density is: the march has it in
+    // hand where it hits, and a storm three squares east must not colour the
+    // fair cloud overhead.
+    darkness: f32,
 };
 
 fn empty_column() -> Column {
@@ -185,6 +233,7 @@ fn empty_column() -> Column {
     column.lower = vec2<f32>(0.0, -1.0);
     column.upper = vec2<f32>(0.0, -1.0);
     column.density = 0.0;
+    column.darkness = 0.0;
     return column;
 }
 
@@ -212,7 +261,12 @@ fn empty_column() -> Column {
 fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
-    let cover = clouds.weather.x;
+    // **The weather over THIS column**, not over the player — ask W10. Every
+    // caller of this reaches it through the same sample, so the march, the
+    // sun's shadow and the fog inside the deck cannot disagree about where the
+    // storm is.
+    let weather = weather_at(cell_xz);
+    let cover = weather.x;
     let frequency = clouds.weather.z;
     let towers = clouds.weather.w;
     let seed = clouds.motion.w;
@@ -312,6 +366,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     column.lower = vec2<f32>(base, max(top, base + clouds.colour.w));
     column.upper = vec2<f32>(0.0, -1.0);
     column.density = crown;
+    column.darkness = weather.y;
     return column;
 }
 
@@ -391,6 +446,9 @@ struct Hit {
     face_y: f32,
     /// The grid this ray marched on.
     cell: f32,
+    /// How grey the weather over the hit is — ask W10, and carried for the
+    /// same reason the density below is.
+    darkness: f32,
     /// How deep into a heap the hit was: 0 at the rim, 1 at the crown.
     ///
     /// **Carried out rather than looked up again.** The march has the column
@@ -445,6 +503,7 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     out.cell = clouds.colour.w;
     out.normal = vec3<f32>(0.0, 1.0, 0.0);
     out.density = 0.0;
+    out.darkness = clouds.weather.y;
 
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
@@ -551,6 +610,7 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
             out.position = origin + direction * found.x;
             out.face_y = found.y;
             out.density = column.density;
+            out.darkness = column.darkness;
             // A horizontal face if the ray met the column's top or bottom
             // inside this cell, and otherwise the wall it came in through. A
             // ray travelling downwards that meets a horizontal face met the
@@ -754,7 +814,11 @@ fn fragment_main(in: Varyings) -> Painted {
     // Storm grey, and a dark haze under the deck — which is what makes a storm
     // read from outside it. Rain seen at a distance is a curtain kilometres
     // away, and precipitation spawns around the player's own camera.
-    let darkness = clouds.weather.y;
+    // **The weather where the hit is**, not where the player is — ask W10. A
+    // storm over the next valley greys the cloud over the valley and leaves
+    // the fair sky overhead alone, which is the whole of what a front looks
+    // like from outside it.
+    let darkness = found.darkness;
     lit = mix(lit, lit * vec3<f32>(0.30, 0.31, 0.38), darkness);
 
     // Aerial perspective: distant cloud loses contrast into the horizon. Free,

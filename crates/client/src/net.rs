@@ -255,6 +255,12 @@ pub enum Event {
     /// the weather changes, eased client-side.
     Clouds(Option<tiamot_core::atmosphere::Clouds>),
 
+    /// The coarse cover map one player's sky is drawn from — ask W10.
+    ///
+    /// Behind an `Arc` because it is half a kilobyte and is handed from the
+    /// network task to the app and on to the renderer every frame.
+    CloudMap(Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>),
+
     /// How this server's mods want the engine's own screens to look, or
     /// `None` for the client's own — see [`crate::theme`].
     Theme(Option<tiamot_core::proto::ThemeDef>),
@@ -1709,6 +1715,10 @@ async fn session(
 
             ServerMessage::CloudLayer { layer } => {
                 let _ = events.send(Event::CloudLayer(layer));
+            }
+
+            ServerMessage::CloudMap { map } => {
+                let _ = events.send(Event::CloudMap(map.map(std::sync::Arc::new)));
             }
 
             ServerMessage::Clouds { clouds } => {
