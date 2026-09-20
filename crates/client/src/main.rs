@@ -981,6 +981,10 @@ impl Client {
         // egui is built without `default_fonts`, so it has no glyphs until this
         // runs. Skipping it renders an empty HUD and reports nothing.
         client::app::install_fonts(&egui);
+        // A secondary line is drawn a size down (UI ask 12). Once, here: a
+        // theme changes faces and never sizes, so this survives whatever a
+        // server's mod asks for.
+        client::theme::size_secondary_text(&egui);
         let egui_state = egui_winit::State::new(
             egui.clone(),
             egui.viewport_id(),
@@ -2238,7 +2242,7 @@ fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dr
                     let mut owner: Option<String> = None;
                     for def in &settings {
                         if owner.as_deref() != Some(def.mod_id.as_str()) {
-                            ui.weak(&def.mod_id);
+                            client::theme::secondary(ui, &def.mod_id);
                             owner = Some(def.mod_id.clone());
                         }
                         let current = app.mod_setting(def);
@@ -2278,7 +2282,7 @@ fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dr
                             }
                         }
                         if !def.description.is_empty() {
-                            ui.indent(&def.id, |ui| ui.weak(&def.description));
+                            ui.indent(&def.id, |ui| client::theme::secondary(ui, &def.description));
                         }
                     }
                     ui.separator();

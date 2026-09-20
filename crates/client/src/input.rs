@@ -575,10 +575,18 @@ const ENGINE_ACTIONS: &[(&str, &str, Option<Input>)] = &[
         "Third person (laptop)",
         Some(Input::Key(KeyCode::KeyV)),
     ),
+    // **The debug keys ship on function keys and nowhere else** (Life ask
+    // 10b). These four held B, Y, H and G — letters a game wants, and the Life
+    // mod had to move its wardrobe off G to avoid one. None of them is a
+    // cheat: two shift the render origin for the floating-point check without
+    // moving the body, one lays out blocks in singleplayer, one draws lines.
+    // So they keep their function keys, lose their letter twins, and a player
+    // who had bound one keeps their choice — a default is only what nobody
+    // chose (see `Bindings`).
     (
         "engine:chunk_borders",
         "Show chunk borders",
-        Some(Input::Key(KeyCode::KeyB)),
+        Some(Input::Key(KeyCode::F4)),
     ),
     (
         "engine:time_back",
@@ -615,15 +623,13 @@ const ENGINE_ACTIONS: &[(&str, &str, Option<Input>)] = &[
         "Debug: teleport to the far edge",
         Some(Input::Key(KeyCode::F8)),
     ),
-    // **Moved off `T` when chat arrived.** `T` is what a player reaches for to
-    // say something, and a debug laptop fallback is not what should own it.
-    // Changing a DEFAULT is safe by design: the bindings file records only what
-    // a player chose, so anybody who had rebound this keeps their key and
-    // everybody else gets the better one (see `Bindings`).
+    // **Moved off `T` when chat arrived, and off `Y` with the rest of the
+    // debug set.** Unbound rather than deleted: the action is still there to
+    // bind, and a player who had already bound it keeps their key.
     (
         "engine:teleport_far_alt",
         "Debug: teleport to the far edge (laptop)",
-        Some(Input::Key(KeyCode::KeyY)),
+        None,
     ),
     (
         "engine:teleport_home",
@@ -633,12 +639,12 @@ const ENGINE_ACTIONS: &[(&str, &str, Option<Input>)] = &[
     (
         "engine:teleport_home_alt",
         "Debug: teleport home (laptop)",
-        Some(Input::Key(KeyCode::KeyH)),
+        None,
     ),
     (
         "engine:material_row",
         "Debug: lay out one of every block",
-        Some(Input::Key(KeyCode::KeyG)),
+        Some(Input::Key(KeyCode::F9)),
     ),
 ];
 
@@ -669,6 +675,35 @@ mod default_binding_tests {
             Input::Key(KeyCode::ShiftRight),
             "sprint is back on the key nobody found"
         );
+    }
+
+    #[test]
+    fn the_debug_actions_ship_on_function_keys_and_no_letters() {
+        // Life ask 10b: a mod's own controls want the letters. Every action
+        // whose name says "Debug", plus the chunk-border lines, either ships
+        // on a function key or ships unbound.
+        for (id, label, default) in ENGINE_ACTIONS {
+            if !label.starts_with("Debug") && *id != "engine:chunk_borders" {
+                continue;
+            }
+            let Some(Input::Key(key)) = default else {
+                continue;
+            };
+            assert!(
+                matches!(
+                    key,
+                    KeyCode::F1
+                        | KeyCode::F2
+                        | KeyCode::F3
+                        | KeyCode::F4
+                        | KeyCode::F7
+                        | KeyCode::F8
+                        | KeyCode::F9
+                        | KeyCode::F10
+                ),
+                "{id} ships on {key:?}, a key a mod may want"
+            );
+        }
     }
 
     #[test]

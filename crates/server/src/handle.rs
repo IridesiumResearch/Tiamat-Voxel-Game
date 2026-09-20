@@ -3243,7 +3243,7 @@ impl ServerHandle {
                                 let before = player.body;
                                 player.body =
                                     tiamot_core::phys::step(&voxels, player.body, intent, &tuning);
-                                crate::transport::measure_fall(player, &before);
+                                crate::transport::measure_fall(player, &before, intent.fly);
                                 // How wet, measured where the body ENDED UP.
                                 // The step measures it where the body started,
                                 // because a force has to be computed from the

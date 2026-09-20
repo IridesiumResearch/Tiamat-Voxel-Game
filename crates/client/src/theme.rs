@@ -292,6 +292,45 @@ impl Theme {
     }
 }
 
+/// How much smaller a secondary line is drawn than body text.
+///
+/// **A size down, not egui's own `Small`**, which is about two thirds of body
+/// and reads as a footnote. This is the difference between a control and the
+/// sentence explaining it — UI ask 12, where the start screen's secondary
+/// lines were drawn at full body size, so a page read as one undifferentiated
+/// block.
+pub const SECONDARY_SCALE: f32 = 0.85;
+
+/// Sizes `TextStyle::Small` against the body face, once, for the whole client.
+///
+/// Called at startup on the live context. A theme changes faces and never
+/// sizes ([`Theme::apply`]), so this holds whatever a mod does, and the
+/// player's own interface scale multiplies it afterwards as it does
+/// everything else.
+pub fn size_secondary_text(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        let body = style
+            .text_styles
+            .get(&egui::TextStyle::Body)
+            .map_or(12.5, |font| font.size);
+        if let Some(small) = style.text_styles.get_mut(&egui::TextStyle::Small) {
+            small.size = body * SECONDARY_SCALE;
+        }
+    });
+}
+
+/// Draws one secondary line: a size down, in the weak colour.
+///
+/// The sentence under a control, a mod's description under its name, an id
+/// under a world's title. UI ask 12 — see [`SECONDARY_SCALE`].
+pub fn secondary(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.label(
+        egui::RichText::new(text.into())
+            .text_style(egui::TextStyle::Small)
+            .weak(),
+    )
+}
+
 /// A theme read off the local disk, for the screen that has no server.
 ///
 /// # Why this exists at all
@@ -756,6 +795,31 @@ mod tests {
         assert_eq!(
             family(&egui::TextStyle::Body),
             family(&egui::TextStyle::Small)
+        );
+    }
+
+    #[test]
+    fn a_secondary_line_is_a_size_down_and_a_theme_does_not_undo_it() {
+        // UI ask 12. egui's own `Small` is about two thirds of body, which
+        // reads as a footnote; this is one step down. And it has to survive a
+        // theme, which rewrites every text style's FACE — the size is what a
+        // theme must never touch, or a mod could make the settings screen
+        // unreadable.
+        let ctx = egui::Context::default();
+        size_secondary_text(&ctx);
+        let sized =
+            |ctx: &egui::Context, kind: &egui::TextStyle| ctx.global_style().text_styles[kind].size;
+        let body = sized(&ctx, &egui::TextStyle::Body);
+        let small = sized(&ctx, &egui::TextStyle::Small);
+        assert!(
+            (small - body * SECONDARY_SCALE).abs() < 0.01,
+            "a secondary line is {small} against a body of {body}"
+        );
+
+        Theme::from_def(&def()).apply(&ctx, &crate::fonts::Fonts::new());
+        assert!(
+            (sized(&ctx, &egui::TextStyle::Small) - small).abs() < 0.01,
+            "a theme resized the secondary text"
         );
     }
 

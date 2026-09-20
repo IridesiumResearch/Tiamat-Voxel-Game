@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 67;
+pub const PROTOCOL_VERSION: u32 = 68;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 67;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v68 (Life 10a): `AbilitiesDef` carries `wind_sky`, whether this player may
+// scrub their own clock. The sky keys light a player's night for free, and a
+// client that may not use them has to be told.
 // v67 (World 27): `MaterialDef` carries `friction`, a floor's share of the
 // ordinary grip. The client predicts its own slide on ice, so it must know.
 // v66 (Life 1 and 9): appended `ServerMessage::Abilities`, what a mod lets one
@@ -2227,6 +2230,8 @@ pub struct AbilitiesDef {
     pub speed: f32,
     /// Whether the sprint key does anything.
     pub sprint: bool,
+    /// Whether this player may wind their own sky with the engine's keys.
+    pub wind_sky: bool,
 }
 
 impl From<crate::phys::Abilities> for AbilitiesDef {
@@ -2235,6 +2240,7 @@ impl From<crate::phys::Abilities> for AbilitiesDef {
             fly: abilities.fly,
             speed: abilities.speed,
             sprint: abilities.sprint,
+            wind_sky: abilities.wind_sky,
         }
     }
 }
@@ -2249,6 +2255,7 @@ impl From<AbilitiesDef> for crate::phys::Abilities {
             fly: def.fly,
             speed: def.speed,
             sprint: def.sprint,
+            wind_sky: def.wind_sky,
         }
         .sanitised()
     }
@@ -4725,6 +4732,7 @@ mod tests {
                 fly: false,
                 speed: f32::NAN,
                 sprint: true,
+                wind_sky: true,
             },
         };
         assert!(validate_server_message(&poison).is_err());
@@ -4737,9 +4745,10 @@ mod tests {
             fly: true,
             speed: 1.0e9,
             sprint: false,
+            wind_sky: false,
         };
         let adopted = crate::phys::Abilities::from(wild);
-        assert!(adopted.fly && !adopted.sprint);
+        assert!(adopted.fly && !adopted.sprint && !adopted.wind_sky);
         assert_eq!(
             adopted.speed.to_bits(),
             crate::phys::Abilities::MAX_SPEED.to_bits()

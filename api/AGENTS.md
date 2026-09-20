@@ -1270,8 +1270,10 @@ not build ice by pushing bodies from a tick hook — that is the rubber-banding
 version.
 
 **A player's movement is yours to limit, and flight yours to grant.**
-`game.set_player_abilities(uuid, { fly, speed, sprint })` — a Creative world
-where everybody flies, cold that slows, hunger that stops a sprint. Replaced
+`game.set_player_abilities(uuid, { fly, speed, sprint, wind_sky })` — a Creative
+world where everybody flies, cold that slows, hunger that stops a sprint, and
+`wind_sky = false` for a world that means its nights (the engine's sky keys
+scrub the client's own clock, which lights a player's night for free). Replaced
 whole each call (a field left out is the default again), `fly` is OR-ed with the
 operator list, and the client predicts with the same numbers so nobody
 rubber-bands. Do not try this with `game.set_entity` on a player's body: the

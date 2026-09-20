@@ -376,6 +376,20 @@ pub struct Abilities {
     /// `false` walks instead, rather than refusing to move: an empty hunger bar
     /// should stop somebody running, not stop them.
     pub sprint: bool,
+    /// Whether this player may wind their own sky.
+    ///
+    /// **A cheat in a world that means its nights** (Life ask 10a). The engine
+    /// binds three keys that scrub the client's clock; nothing on the server
+    /// moves, but the client draws stored sunlight scaled by the sky's
+    /// intensity, so winding to noon lights a player's night — seeing in the
+    /// dark for free. Taking the default keys away does not help, because
+    /// anybody can bind them again, so the refusal has to be the client's and
+    /// the decision the server's.
+    ///
+    /// `true` by default, like `sprint`: the keys have always worked, and a
+    /// world that wants them gone says so. Returning the sky to the server's
+    /// hour is never refused — that is the opposite of a cheat.
+    pub wind_sky: bool,
 }
 
 impl Abilities {
@@ -384,6 +398,7 @@ impl Abilities {
         fly: false,
         speed: 1.0,
         sprint: true,
+        wind_sky: true,
     };
 
     /// The most a mod may multiply a speed by.

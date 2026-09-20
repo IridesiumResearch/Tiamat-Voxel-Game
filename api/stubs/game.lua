@@ -2017,6 +2017,12 @@ function game.is_operator(player) end
 ---  16 is clamped. Negative or NaN is an error.
 ---- `sprint` (default `true`) — `false` makes the sprint key walk, rather than
 ---  stopping anybody.
+---- `wind_sky` (default `true`) — `false` refuses this player the engine's
+---  sky keys. They scrub the CLIENT's clock only, but the client draws stored
+---  sunlight scaled by the sky, so winding to noon lights a player's night.
+---  Turn it off in a world that means its nights; unbinding the keys does not
+---  work, because anybody can bind them again. Returning the sky to the
+---  server's hour is never refused.
 ---
 ---The client is told and predicts with the same numbers, so a slowed player
 ---does not rubber-band. An unknown field is an error, so a typo is not a
@@ -2033,7 +2039,7 @@ function game.is_operator(player) end
 ---})
 ---```
 ---@param player string The player's UUID, in hex.
----@param abilities { fly: boolean?, speed: number?, sprint: boolean? }|nil
+---@param abilities { fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean? }|nil
 ---@return boolean told
 function game.set_player_abilities(player, abilities) end
 

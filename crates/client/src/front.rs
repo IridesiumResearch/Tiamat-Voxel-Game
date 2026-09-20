@@ -489,10 +489,14 @@ impl Front {
             .filter(|entry| entry.is_local())
         {
             ui.label(format!("Mods for “{}”", entry.name));
-            ui.weak("Each world keeps its own selection. Changing these changes that world.");
+            crate::theme::secondary(
+                ui,
+                "Each world keeps its own selection. Changing these changes that world.",
+            );
         } else {
             ui.label("Mods for a new world");
-            ui.weak(
+            crate::theme::secondary(
+                ui,
                 "Pick a world on the Play tab to see and change its own selection. A server's \
                  mods are the server's to choose.",
             );
@@ -513,10 +517,12 @@ impl Front {
             for listing in &mut self.catalogue.mods {
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut listing.enabled, &listing.name).changed();
-                    ui.weak(&listing.id);
+                    crate::theme::secondary(ui, &listing.id);
                 });
                 if !listing.description.is_empty() {
-                    ui.indent(&listing.id, |ui| ui.weak(&listing.description));
+                    ui.indent(&listing.id, |ui| {
+                        crate::theme::secondary(ui, &listing.description)
+                    });
                 }
             }
         }
@@ -544,8 +550,8 @@ impl Front {
         ui.horizontal(|ui| {
             ui.label("On your network");
             match &self.network {
-                Some(_) => ui.weak("listening"),
-                None => ui.weak("not listening — another program has the port"),
+                Some(_) => crate::theme::secondary(ui, "listening"),
+                None => crate::theme::secondary(ui, "not listening — another program has the port"),
             };
         });
         let worlds = self
@@ -554,7 +560,10 @@ impl Front {
             .map(Discovery::worlds)
             .unwrap_or_default();
         if worlds.is_empty() {
-            ui.weak("Nothing found yet. A world has to be opened to the LAN to appear here.");
+            crate::theme::secondary(
+                ui,
+                "Nothing found yet. A world has to be opened to the LAN to appear here.",
+            );
         }
         for world in worlds {
             ui.horizontal(|ui| {
@@ -585,7 +594,7 @@ impl Front {
                     // different version" is an answer, and a world missing
                     // from the list is a mystery.
                     ui.add_enabled(false, egui::Button::new(label));
-                    ui.weak("different version");
+                    crate::theme::secondary(ui, "different version");
                 }
             });
         }
@@ -781,8 +790,14 @@ impl Front {
                 .checkbox(&mut config.debug_overlay, "Debug readouts")
                 .changed();
             ui.add_space(8.0);
-            ui.weak("Keys and volume are on the in-game screen — press Escape in a world.");
-            ui.weak("A mod's controls only exist once a server has told the client about them.");
+            crate::theme::secondary(
+                ui,
+                "Keys and volume are on the in-game screen — press Escape in a world.",
+            );
+            crate::theme::secondary(
+                ui,
+                "A mod's controls only exist once a server has told the client about them.",
+            );
         }
         self.settings_dirty |= changed;
     }

@@ -4020,10 +4020,25 @@ impl MluaVm {
                                  {speed}. 1 is unchanged and 0 is rooted."
                             )));
                         }
+                        // **`Option<bool>`, and that is the whole of it.**
+                        // mlua reads a MISSING field as `false` for a plain
+                        // `bool` — nil is falsy in Lua — so `.get("sprint")`
+                        // answered `false` for a mod that never mentioned
+                        // sprinting, and `unwrap_or(default)` never ran.
+                        // A mod that only slowed somebody took their sprint
+                        // away with it. `None` is the only way to tell "said
+                        // false" from "said nothing".
+                        let flag = |field: &str, default: bool| -> bool {
+                            spec.get::<Option<bool>>(field)
+                                .ok()
+                                .flatten()
+                                .unwrap_or(default)
+                        };
                         Some(crate::phys::Abilities {
-                            fly: spec.get("fly").unwrap_or(default.fly),
+                            fly: flag("fly", default.fly),
                             speed,
-                            sprint: spec.get("sprint").unwrap_or(default.sprint),
+                            sprint: flag("sprint", default.sprint),
+                            wind_sky: flag("wind_sky", default.wind_sky),
                         })
                     }
                 };
@@ -8821,7 +8836,7 @@ const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator
 /// Checked so a typo is an error rather than a silent default, for the reason
 /// `register_fluid` gives: a misspelled field is a mod that thinks it
 /// configured something.
-const ABILITY_FIELDS: [&str; 3] = ["fly", "speed", "sprint"];
+const ABILITY_FIELDS: [&str; 4] = ["fly", "speed", "sprint", "wind_sky"];
 
 const FLUID_FIELDS: [&str; 8] = [
     "id",
@@ -13479,11 +13494,21 @@ mod entity_tests {
         transfers: std::sync::Mutex<Vec<(crate::ent::EntityId, String)>>,
         /// Hotbar selections asked for, likewise.
         selected: std::sync::Mutex<Vec<([u8; 32], u16)>>,
+        /// Abilities granted, likewise: the last word wins, as on the server.
+        granted: std::sync::Mutex<Vec<([u8; 32], Option<crate::phys::Abilities>)>>,
     }
 
     impl crate::ent::Access for Menagerie {
         fn select_slot(&self, uuid: [u8; 32], slot: u16) -> bool {
             self.selected.lock().expect("selected").push((uuid, slot));
+            true
+        }
+
+        fn set_abilities(&self, uuid: [u8; 32], abilities: Option<crate::phys::Abilities>) -> bool {
+            self.granted
+                .lock()
+                .expect("granted")
+                .push((uuid, abilities));
             true
         }
 
@@ -13571,6 +13596,44 @@ mod entity_tests {
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn crate::ent::Access>
         );
         (vm, store)
+    }
+
+    #[test]
+    fn an_ability_a_mod_did_not_mention_takes_the_engines_default() {
+        // **A missing Lua field is nil, and nil is falsy**, so reading one as a
+        // plain `bool` answers `false` for a mod that never mentioned it —
+        // which made `game.set_player_abilities{ speed = 0.25 }` take the
+        // player's sprint away as well, silently, and left `wind_sky` off.
+        // Found by a client test printing what actually arrived.
+        let (mut vm, store) = vm_with_entities();
+        let uuid = "ab".repeat(32);
+        load(
+            &mut vm,
+            "core",
+            &format!(
+                r#"game.set_player_abilities("{uuid}", {{ speed = 0.25 }})
+                   game.set_player_abilities("{uuid}", {{ sprint = false }})
+                   game.set_player_abilities("{uuid}", nil)"#
+            ),
+        )
+        .expect("load");
+
+        let granted = store.granted.lock().expect("granted");
+        let first = granted[0].1.expect("a grant");
+        assert!(
+            first.sprint && first.wind_sky,
+            "a mod that said only `speed` changed something else: {first:?}"
+        );
+        assert!(!first.fly, "flight is off until a mod says otherwise");
+        assert_eq!(first.speed.to_bits(), 0.25_f32.to_bits());
+
+        // And a field a mod DOES say false is still false — the fix must not
+        // turn every flag on.
+        let second = granted[1].1.expect("a grant");
+        assert!(!second.sprint, "`sprint = false` was ignored: {second:?}");
+        assert_eq!(second.speed.to_bits(), 1.0_f32.to_bits(), "replaced whole");
+
+        assert!(granted[2].1.is_none(), "nil should clear the grant");
     }
 
     #[test]

@@ -54,6 +54,11 @@ fn gpu() -> Option<Gpu> {
 
 /// Flat ground, and a mod that slows everybody the moment they join.
 fn write_mod(name: &str) -> PathBuf {
+    write_mod_granting(name, &format!("speed = {SPEED}, sprint = false"))
+}
+
+/// The same, granting whatever the caller names.
+fn write_mod_granting(name: &str, grant: &str) -> PathBuf {
     let root = scratch(name);
     let dir = root.join("slow");
     std::fs::create_dir_all(&dir).expect("mod dir");
@@ -71,7 +76,7 @@ game.register_on_generate(function(buf, pos)
     buf:fill_below_heightmap(game.flat_heightmap(0), ground)
 end)
 game.register_on_player_join(function(event)
-    game.set_player_abilities(event.player, {{ speed = {SPEED}, sprint = false }})
+    game.set_player_abilities(event.player, {{ {grant} }})
 end)
 "#
         ),
@@ -81,6 +86,15 @@ end)
 }
 
 fn embedded(name: &str) -> ServerHandle {
+    embedded_granting(name, None)
+}
+
+/// The same, with a mod that grants exactly what is named.
+fn embedded_granting(name: &str, grant: Option<&str>) -> ServerHandle {
+    let mods = grant.map_or_else(
+        || write_mod(&format!("{name}-mods")),
+        |grant| write_mod_granting(&format!("{name}-mods"), grant),
+    );
     ServerHandle::start(&Settings {
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: scratch(&format!("{name}-world")),
@@ -89,7 +103,7 @@ fn embedded(name: &str) -> ServerHandle {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
-        mods_path: Some(write_mod(&format!("{name}-mods"))),
+        mods_path: Some(mods),
         enabled_mods: None,
         seed: Some(7),
         rcon: None,
@@ -225,6 +239,46 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
         worst < 0.05,
         "the client disagreed with the server by up to {worst:.3} cells a tick"
     );
+
+    app.shutdown();
+    assert!(server.stop());
+}
+
+#[test]
+fn a_player_refused_the_sky_keys_cannot_wind_their_own_clock() {
+    // Life ask 10a. Nothing on the server moves when a client scrubs its
+    // clock, but the client draws stored sunlight scaled by the sky's
+    // intensity — so winding to noon lights a player's night, which is seeing
+    // in the dark for free in a world that meant its nights. Unbinding the
+    // keys is not a fix: anybody can bind them again.
+    let Some(gpu) = gpu() else { return };
+    let server = embedded_granting("sky", Some("wind_sky = false"));
+    let mut app = client("sky", &server, gpu);
+
+    assert!(
+        run_frames(&mut app, Input::default(), 30.0, |app| app.joined()
+            && app.predicting()),
+        "expected to join; warnings: {:?}",
+        app.warnings()
+    );
+    assert!(
+        run_frames(&mut app, Input::default(), 5.0, |app| !app
+            .abilities()
+            .wind_sky),
+        "the client never heard the refusal: {:?}",
+        app.abilities()
+    );
+    println!("PROBE abilities {:?}", app.abilities());
+
+    let before = app.sky_time();
+    app.nudge_time(0.3);
+    app.nudge_time(-0.1);
+    assert!(
+        (app.sky_time() - before).abs() < 1e-6,
+        "the clock moved from {before} to {} on a client that may not wind it",
+        app.sky_time()
+    );
+    assert!(!app.time_is_local(), "the clock was taken off the server");
 
     app.shutdown();
     assert!(server.stop());

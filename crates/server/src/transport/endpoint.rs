@@ -604,9 +604,22 @@ impl PlayerSim {
 /// descent counts, so a jump up a cliff and a step off it are the same fall.
 /// A body that never left the ground never fell either, so walking down a
 /// staircase raises nothing.
-pub fn measure_fall(player: &mut PlayerSim, before: &tiamot_core::phys::Body) {
+///
+/// **A flying body accrues nothing, and `flying` is how it is told** (Life ask
+/// 11). Flight is a descent under control: an operator who flies twenty blocks
+/// down and touches the grass used to land with `fell = 20`, the same number
+/// as somebody who stepped off a cliff, and a mod that hurts a hard landing
+/// hurt them for arriving. A fall starts where flight stops, so the store is
+/// cleared while flying rather than merely not added to — otherwise a body
+/// that fell ten blocks, switched flight on and drifted down would land with
+/// the ten still owing.
+pub fn measure_fall(player: &mut PlayerSim, before: &tiamot_core::phys::Body, flying: bool) {
     // Cleared first, so the value is one tick wide whatever happens below.
     player.fell = 0.0;
+    if flying {
+        player.falling = 0.0;
+        return;
+    }
     let dropped = before.position[1] - player.body.position[1];
     if !player.body.on_ground {
         if dropped > 0.0 {
@@ -3512,11 +3525,46 @@ mod fall_tests {
 
     /// One tick of falling, from `from` to `to` cells, landing or not.
     fn tick(player: &mut PlayerSim, from: f32, to: f32, landed: bool) {
+        flying_tick(player, from, to, landed, false);
+    }
+
+    /// The same, saying whether the body was flying that tick.
+    fn flying_tick(player: &mut PlayerSim, from: f32, to: f32, landed: bool, flying: bool) {
         let mut before = player.body;
         before.position[1] = from;
         player.body.position[1] = to;
         player.body.on_ground = landed;
-        measure_fall(player, &before);
+        measure_fall(player, &before, flying);
+    }
+
+    #[test]
+    fn a_flight_down_to_the_ground_is_not_a_fall() {
+        // Life ask 11. Flight is a descent under control: an operator who flew
+        // twenty blocks down and touched the grass landed with `fell = 20`,
+        // the same number as somebody who stepped off a cliff, and a mod that
+        // hurts a hard landing hurt them for arriving.
+        let mut player = sim();
+        player.body.on_ground = false;
+        for from in [160.0, 130.0, 100.0] {
+            flying_tick(&mut player, from, from - 30.0, false, true);
+        }
+        flying_tick(&mut player, 70.0, 70.0, true, true);
+        assert_eq!(player.fell, 0.0, "a controlled descent was a fall");
+
+        // And a fall STARTS where flight stops, rather than carrying what the
+        // flight covered: the store is cleared while flying, not merely left
+        // alone. Ten blocks of real fall, then flight, then a drop of two.
+        let mut mixed = sim();
+        mixed.body.on_ground = false;
+        tick(&mut mixed, 100.0, 70.0, false);
+        flying_tick(&mut mixed, 70.0, 60.0, false, true);
+        tick(&mut mixed, 60.0, 54.0, false);
+        tick(&mut mixed, 54.0, 54.0, true);
+        assert!(
+            (mixed.fell - 2.0).abs() < 1e-5,
+            "landed owing {} blocks; a fall starts where flight stops",
+            mixed.fell
+        );
     }
 
     #[test]

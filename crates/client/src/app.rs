@@ -4152,7 +4152,17 @@ impl App {
     /// charter rule 11 puts key bindings in the engine and named actions in
     /// mods, and named actions are inert until Task 13. This is a key the
     /// engine owns, for a thing only a developer needs.
+    /// **Refused when the server has said this player may not** (Life ask
+    /// 10a). Nothing on the server moves when the clock is scrubbed, but the
+    /// client draws stored sunlight scaled by the sky's intensity, so winding
+    /// to noon lights a player's night: seeing in the dark for free, in a
+    /// world that meant its nights. Refused HERE rather than at the key,
+    /// because the key can be rebound and a mod's own action could call this
+    /// later; returning to the server's hour is never refused.
     pub fn nudge_time(&mut self, delta: f32) {
+        if !self.abilities.wind_sky {
+            return;
+        }
         self.time_override = true;
         let time = (self.sky.time() + delta).rem_euclid(1.0);
         self.sky.set_time(time);
@@ -5624,6 +5634,12 @@ impl App {
     fn adopt_abilities(&mut self, abilities: tiamot_core::phys::Abilities) {
         self.abilities = abilities;
         self.may_fly = abilities.fly;
+        if !abilities.wind_sky {
+            // A clock already scrubbed goes back to the server's hour, or a
+            // player who wound to noon before the grant arrived would keep the
+            // daylight they are no longer allowed.
+            self.time_override = false;
+        }
         if !abilities.fly {
             // A grant taken away while somebody is in the air: stop flying
             // now, rather than sending a bit the server refuses and falling
