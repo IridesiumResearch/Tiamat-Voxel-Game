@@ -3197,6 +3197,12 @@ impl ScriptVm for MluaVm {
                         cutout: flag(entry.as_ref(), "cutout"),
                         passable: flag(entry.as_ref(), "passable"),
                         washes_away: flag(entry.as_ref(), "washes_away"),
+                        light_falloff: entry
+                            .as_ref()
+                            .and_then(|entry| {
+                                entry.get::<Option<u8>>("light_falloff").ok().flatten()
+                            })
+                            .unwrap_or(0),
                         sway: flag(entry.as_ref(), "sway"),
                         billboard: billboard_of(entry.as_ref()).0,
                         billboard_cross: billboard_of(entry.as_ref()).1,
@@ -8039,6 +8045,52 @@ fn register_item(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
     Ok(next)
 }
 
+/// `light_emit = { r = 0..15, g = ..., b = ... }` on a block spec.
+///
+/// Validated rather than clamped silently, because a mod asking for 30 has
+/// misunderstood the range and should be told at registration — when the error
+/// names the mod and the block — rather than shipping a lamp that is quietly
+/// dimmer than its author intended.
+fn copy_light_emit(lua: &Lua, id: &str, spec: &Table, entry: &Table) -> mlua::Result<()> {
+    let Some(emit) = spec.get::<Option<Table>>("light_emit")? else {
+        return Ok(());
+    };
+    for key in ["r", "g", "b"] {
+        let Some(level) = emit.get::<Option<i64>>(key)? else {
+            continue;
+        };
+        if !(0..=i64::from(crate::light::MAX_LEVEL)).contains(&level) {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): light_emit.{key} must be 0..={}, got {level}",
+                crate::light::MAX_LEVEL
+            )));
+        }
+    }
+    let stored = lua.create_table()?;
+    for key in ["r", "g", "b"] {
+        stored.set(key, emit.get::<Option<u8>>(key)?.unwrap_or(0))?;
+    }
+    entry.set("light_emit", stored)
+}
+
+/// `light_falloff` on a block spec: levels lost per block (World ask 24).
+///
+/// Validated rather than clamped, like the fluid field of the same name: a mod
+/// asking for 30 has misread the range, and 0..=15 is the whole of it.
+fn light_falloff_of(id: &str, spec: &Table) -> mlua::Result<Option<u8>> {
+    let levels: Option<u8> = spec.get("light_falloff")?;
+    if let Some(levels) = levels
+        && u32::from(levels) > u32::from(crate::light::MAX_LEVEL)
+    {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): light_falloff is levels lost per block, 0..={}, got \
+             {levels}",
+            crate::light::MAX_LEVEL
+        )));
+    }
+    Ok(levels)
+}
+
 /// `friction` on a block spec: a share of the ordinary grip, 0 to 1 (World 27).
 ///
 /// Refused rather than clamped outside that: above 1 a body would lose more
@@ -8117,10 +8169,14 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
             )));
         }
         let friction = friction_of(&id, spec)?;
+        let light_falloff = light_falloff_of(&id, spec)?;
         let drops: Option<Table> = spec.get("drops")?;
         let entry = lua.create_table()?;
         if let Some(friction) = friction {
             entry.set("friction", friction)?;
+        }
+        if let Some(levels) = light_falloff {
+            entry.set("light_falloff", levels)?;
         }
 
         step_sound_of(owner, spec, &entry)?;
@@ -8132,29 +8188,7 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
             entry.set("dominance", dominance)?;
         }
 
-        // `light_emit = { r = 0..15, g = ..., b = ... }`. Validated here rather
-        // than clamped silently, because a mod asking for 30 has misunderstood
-        // the range and should be told at registration — when the error names
-        // the mod and the block — rather than shipping a lamp that is quietly
-        // dimmer than its author intended.
-        if let Some(emit) = spec.get::<Option<Table>>("light_emit")? {
-            for key in ["r", "g", "b"] {
-                let Some(level) = emit.get::<Option<i64>>(key)? else {
-                    continue;
-                };
-                if !(0..=i64::from(crate::light::MAX_LEVEL)).contains(&level) {
-                    return Err(mlua::Error::external(format!(
-                        "register_block(\"{id}\"): light_emit.{key} must be 0..={}, got {level}",
-                        crate::light::MAX_LEVEL
-                    )));
-                }
-            }
-            let stored = lua.create_table()?;
-            for key in ["r", "g", "b"] {
-                stored.set(key, emit.get::<Option<u8>>(key)?.unwrap_or(0))?;
-            }
-            entry.set("light_emit", stored)?;
-        }
+        copy_light_emit(lua, &id, spec, &entry)?;
         // **Recorded whether or not the mod set it**, like the rules above: an
         // absent flag and a `false` one must not be distinguishable downstream.
         copy_block_flags(spec, &entry)?;
@@ -8858,7 +8892,7 @@ const FLUID_FIELDS: [&str; 8] = [
 /// accepted them would be an API promising behaviour nothing implements.
 const ITEM_FIELDS: [&str; 4] = ["id", "name", "texture", "description"];
 
-const BLOCK_FIELDS: [&str; 19] = [
+const BLOCK_FIELDS: [&str; 20] = [
     "id",
     "name",
     "drops",
@@ -8878,6 +8912,7 @@ const BLOCK_FIELDS: [&str; 19] = [
     "billboard",
     "friction",
     "washes_away",
+    "light_falloff",
 ];
 
 /// Keys the `textures` sub-table accepts.

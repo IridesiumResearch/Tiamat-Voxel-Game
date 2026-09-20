@@ -222,3 +222,57 @@ mod tests {
         assert!(table.block(&BlockView::Mixed(&plain)).is_dark());
     }
 }
+
+/// How many levels of light each material takes out of what passes through it.
+///
+/// **A canopy that shades** — World ask 24, Sub-Node Contract §8.2. Foliage is
+/// permeable, so light passes through leaves rather than stopping at them, and
+/// passing it untouched made a rainforest floor as bright as a meadow: 85% of
+/// it had a whole leaf block overhead and still read `sun = 15`.
+///
+/// The same number a fluid has declared since ask 25, keyed by material and
+/// read on the same hook. Zero is what every block did before this existed, and
+/// [`Self::any`] is how a world with no dimming material pays a single bool for
+/// the question.
+#[derive(Debug, Clone, Default)]
+pub struct Dimming {
+    by_id: Vec<u8>,
+}
+
+impl Dimming {
+    /// Builds a table from `(material, levels)` pairs.
+    ///
+    /// Ids need not be contiguous or sorted; anything unnamed dims nothing,
+    /// which is almost everything. A material named twice keeps the larger.
+    #[must_use]
+    pub fn new(levels: impl IntoIterator<Item = (MaterialId, u8)>) -> Self {
+        let mut by_id: Vec<u8> = Vec::new();
+        for (id, levels) in levels {
+            let index = id.get() as usize;
+            if by_id.len() <= index {
+                by_id.resize(index + 1, 0);
+            }
+            by_id[index] = by_id[index].max(levels);
+        }
+        Self { by_id }
+    }
+
+    /// How much this material dims light, in levels per block.
+    #[must_use]
+    pub fn of(&self, material: MaterialId) -> u8 {
+        self.by_id
+            .get(material.get() as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether any material dims at all.
+    ///
+    /// The gate, for the reason [`SeeThrough::any`] is one: the lighting hot
+    /// path asks this before it looks a block up, so a world with no canopy in
+    /// it pays nothing for the question.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.by_id.iter().any(|&levels| levels > 0)
+    }
+}

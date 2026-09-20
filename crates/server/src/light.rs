@@ -92,6 +92,8 @@ pub struct Lights {
     /// Which materials light passes through, shared by every domain: a world's
     /// mod set is one set, whatever domains it grows.
     see_through: tiamot_core::light::SeeThrough,
+    /// How much each material dims what passes through it: a canopy.
+    dimming: tiamot_core::light::Dimming,
     domains: std::collections::BTreeMap<String, Lighting>,
 }
 
@@ -101,19 +103,25 @@ impl Lights {
     pub fn new(
         emissions: tiamot_core::light::Emissions,
         see_through: tiamot_core::light::SeeThrough,
+        dimming: tiamot_core::light::Dimming,
     ) -> Self {
         Self {
             emissions,
             see_through,
+            dimming,
             domains: std::collections::BTreeMap::new(),
         }
     }
 
     /// One domain's light, created on first use.
     pub fn of(&mut self, domain: &str) -> &mut Lighting {
-        self.domains
-            .entry(domain.to_owned())
-            .or_insert_with(|| Lighting::new(self.emissions.clone(), self.see_through.clone()))
+        self.domains.entry(domain.to_owned()).or_insert_with(|| {
+            Lighting::new(
+                self.emissions.clone(),
+                self.see_through.clone(),
+                self.dimming.clone(),
+            )
+        })
     }
 
     /// One domain's light, if anything has lit it.
@@ -157,17 +165,29 @@ pub struct Lighting {
     emissions: Emissions,
     /// Which materials light passes straight through: glass. Contract §8.1.
     see_through: tiamot_core::light::SeeThrough,
+    /// How much each material dims what it passes: foliage. Contract §8.2.
+    ///
+    /// **Beside `see_through` rather than inside it.** Leaves are permeable and
+    /// they dim; a material that stopped light would be neither, and folding
+    /// the two would make a uniform chunk of leaves read as dark solid and be
+    /// short-circuited to black without a relight.
+    dimming: tiamot_core::light::Dimming,
 }
 
 impl Lighting {
     /// A store for a world whose mods emit these levels.
     #[must_use]
-    pub fn new(emissions: Emissions, see_through: tiamot_core::light::SeeThrough) -> Self {
+    pub fn new(
+        emissions: Emissions,
+        see_through: tiamot_core::light::SeeThrough,
+        dimming: tiamot_core::light::Dimming,
+    ) -> Self {
         Self {
             layers: HashMap::new(),
             dark_shortcuts: 0,
             emissions,
             see_through,
+            dimming,
         }
     }
 
@@ -677,6 +697,29 @@ impl Lit<'_> {
         self.fluid.falloff(held.fluid())
     }
 
+    /// How much the terrain in this block dims what passes through it.
+    ///
+    /// Contract §8.2, World ask 24. **Gated on any material dimming at all**,
+    /// like `fluid_falloff` above it: a world with no canopy pays one bool per
+    /// call and never reaches for a chunk.
+    ///
+    /// `Uniform` only, exactly as `faces` reads `see_through`: a block that is
+    /// partly leaves is a block whose cells the ordinary rule already answers,
+    /// and inventing a per-cell dimming would be a second lighting resolution
+    /// (contract §8.1 records the same limit for glass).
+    fn block_falloff(&self, pos: BlockPos) -> u8 {
+        if !self.lighting.dimming.any() {
+            return 0;
+        }
+        let Some(chunk) = self.blocks(pos.chunk()) else {
+            return 0;
+        };
+        match chunk.get_block_local(pos.local()) {
+            tiamot_core::block::BlockView::Uniform(material) => self.lighting.dimming.of(material),
+            _ => 0,
+        }
+    }
+
     /// The light at a block, from the centre layer where it lives there.
     fn level(&self, pos: BlockPos) -> Light {
         if pos.chunk() == self.centre {
@@ -742,8 +785,12 @@ impl Neighbourhood for Lit<'_> {
         self.level(pos)
     }
 
+    /// **The most either says, not the sum.** A block of leaves standing in
+    /// water dims by whichever takes more — "levels lost per block of it" is a
+    /// property of the block, and adding two of them would make a flooded
+    /// canopy darker than either the water or the canopy ever asked for.
     fn falloff(&self, pos: BlockPos) -> u8 {
-        self.fluid_falloff(pos)
+        self.fluid_falloff(pos).max(self.block_falloff(pos))
     }
 
     fn set_light(&mut self, pos: BlockPos, level: Light) {
@@ -776,6 +823,28 @@ impl Neighbourhood for Lit<'_> {
 /// different mod set numbers its materials differently, and a table of this
 /// session's runtime ids would name every window one number out (charter rule
 /// 8).
+/// Builds a dimming table from what the mods registered.
+///
+/// World ask 24, Sub-Node Contract §8.2: a canopy that shades. Keyed by WORLD
+/// id for the reason the two tables beside it are — a world that has seen a
+/// different mod set numbers its materials differently.
+///
+/// Only the materials that dim, so [`tiamot_core::light::Dimming::any`] is
+/// false for every world until a mod asks, and the lighting hot path skips the
+/// question with one bool.
+#[must_use]
+pub fn dimming_from_rules(
+    rules: &[tiamot_core::script::BlockRules],
+    id_of: impl Fn(&str) -> Option<MaterialId>,
+) -> tiamot_core::light::Dimming {
+    tiamot_core::light::Dimming::new(
+        rules
+            .iter()
+            .filter(|rule| rule.light_falloff > 0)
+            .filter_map(|rule| Some((id_of(&rule.block)?, rule.light_falloff))),
+    )
+}
+
 #[must_use]
 pub fn see_through_from_rules(
     rules: &[tiamot_core::script::BlockRules],
@@ -846,9 +915,18 @@ mod tests {
 
     /// The same, for a world that has some glass in it.
     fn lighting_with(see_through: tiamot_core::light::SeeThrough) -> Lighting {
+        dimming_lighting(see_through, tiamot_core::light::Dimming::default())
+    }
+
+    /// The same, for a world whose mods dim light: a canopy (ask 24).
+    fn dimming_lighting(
+        see_through: tiamot_core::light::SeeThrough,
+        dimming: tiamot_core::light::Dimming,
+    ) -> Lighting {
         Lighting::new(
             Emissions::new([(LAMP, Light::new(0, MAX_LEVEL, 0, 0))]),
             see_through,
+            dimming,
         )
     }
 
@@ -933,6 +1011,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_canopy_shades_the_floor_under_it_without_roofing_it() {
+        // **Contract §8.2, World ask 24.** Leaves are permeable, so a canopy
+        // is not a roof and a forest floor is not a cellar. But passing light
+        // untouched made a rainforest floor as bright as a meadow: the world
+        // mod measured 85% of its floor under a whole leaf block, and most of
+        // those columns still read `sun = 15`.
+        //
+        // Measured three ways in one test, because the claim is the
+        // DIFFERENCE: the same trees, and the only change is whether the
+        // material dims.
+        const LEAF: tiamot_core::MaterialId = tiamot_core::MaterialId(9);
+
+        let forest = || {
+            let mut world = world();
+            let pos = ChunkPos::new(0, 0, 0);
+            resident(&mut world, pos);
+            {
+                let chunk = world
+                    .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+                    .expect("chunk");
+                // Ground at y = 0, and a canopy three blocks thick at y = 9.
+                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                    if local.y == 0 {
+                        chunk.set_block_local(local, BlockValue::Uniform(STONE));
+                    } else if (9..12).contains(&local.y) {
+                        chunk.set_block_local(local, BlockValue::Uniform(LEAF));
+                    }
+                }
+            }
+            (world, pos)
+        };
+
+        let floor = BlockPos::new(8, 1, 8);
+        let see_through = || tiamot_core::light::SeeThrough::new([LEAF]);
+
+        // Leaves that pass light untouched: the floor is a meadow. This is
+        // what the mod reported, and it is the control.
+        let (world, pos) = forest();
+        let mut light = lighting_with(see_through());
+        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        assert_eq!(
+            light.at(floor).sun(),
+            MAX_LEVEL,
+            "the control is wrong: undimmed leaves should pass full daylight"
+        );
+
+        // The same canopy, dimming two levels a block: shade, not darkness.
+        let (world, pos) = forest();
+        let mut light =
+            dimming_lighting(see_through(), tiamot_core::light::Dimming::new([(LEAF, 2)]));
+        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        let shaded = light.at(floor).sun();
+        assert!(
+            shaded > 0 && shaded < MAX_LEVEL,
+            "a canopy should shade its floor, not roof it: {shaded}"
+        );
+
+        // And a thicker canopy is darker than a thinner one, which is what
+        // makes a rainforest read differently from a copse.
+        let (world, pos) = forest();
+        let mut heavy =
+            dimming_lighting(see_through(), tiamot_core::light::Dimming::new([(LEAF, 5)]));
+        heavy.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        assert!(
+            heavy.at(floor).sun() < shaded,
+            "five levels a block lit the floor at {} against two levels' {shaded}",
+            heavy.at(floor).sun()
+        );
+
+        // A canopy is still not a roof: the block INSIDE the leaves is lit,
+        // and a uniform chunk of them is never short-circuited to black.
+        assert!(
+            light.at(BlockPos::new(8, 10, 8)).sun() > 0,
+            "the canopy itself went dark"
+        );
     }
 
     #[test]
@@ -1365,5 +1522,74 @@ mod tests {
             total += t.elapsed();
         }
         println!("chunk_loaded (air, open sky): mean {:?}", total / N);
+    }
+
+    /// What a canopy costs a relight — World ask 24.
+    ///
+    /// The dimming lookup is one `get_block_local` per flood visit, gated on
+    /// any material dimming at all, so a world with no foliage pays a bool.
+    /// This measures the world that does pay, against the same chunk with the
+    /// table empty. Run it the same way as the harness above.
+    #[test]
+    #[ignore = "measures rather than asserts; run by hand"]
+    fn measure_canopy_relight() {
+        const LEAF: tiamot_core::MaterialId = tiamot_core::MaterialId(9);
+
+        let scene = || {
+            let mut world = world();
+            for x in -1..=1 {
+                for z in -1..=1 {
+                    for y in -1..=0 {
+                        resident(&mut world, ChunkPos::new(x, y, z));
+                    }
+                }
+            }
+            {
+                let chunk = world
+                    .chunk(
+                        tiamot_core::domain::OVERWORLD,
+                        ChunkPos::new(0, 0, 0),
+                        &mut Empty,
+                    )
+                    .expect("chunk");
+                // A canopy four blocks thick across the whole chunk: more
+                // foliage than any real forest puts over one column.
+                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                    if (10..14).contains(&local.y) {
+                        chunk.set_block_local(local, BlockValue::Uniform(LEAF));
+                    }
+                }
+            }
+            world
+        };
+
+        let measure = |name: &str, mut light: Lighting| {
+            let world = scene();
+            let centre = ChunkPos::new(0, 0, 0);
+            for _ in 0..20 {
+                light.forget(centre);
+                light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, centre);
+            }
+            let mut total = std::time::Duration::ZERO;
+            const N: u32 = 200;
+            for _ in 0..N {
+                light.forget(centre);
+                let t = std::time::Instant::now();
+                light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, centre);
+                total += t.elapsed();
+            }
+            println!("chunk_loaded ({name}): mean {:?}", total / N);
+        };
+
+        let see_through = tiamot_core::light::SeeThrough::new([LEAF]);
+        measure(
+            "canopy, dimming nothing",
+            dimming_lighting(see_through.clone(), tiamot_core::light::Dimming::default()),
+        );
+        measure(
+            "canopy, dimming 2 levels a block",
+            dimming_lighting(see_through, tiamot_core::light::Dimming::new([(LEAF, 2)])),
+        );
     }
 }

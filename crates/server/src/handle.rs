@@ -1988,6 +1988,27 @@ impl ServerHandle {
             },
         );
 
+        // And how much each material dims what passes through it, from the
+        // same rules and keyed the same way. Contract §8.2: a canopy is
+        // permeable and shades, which is not the same as a roof.
+        let dimming = crate::light::dimming_from_rules(
+            &host
+                .as_ref()
+                .map(|loaded| loaded.vm().registered_block_rules())
+                .unwrap_or_default(),
+            |block| {
+                let runtime = registry
+                    .iter()
+                    .find(|(_, name)| *name == block)
+                    .map(|(id, _)| id)?;
+                world
+                    .materials()
+                    .to_world(runtime)
+                    .ok()
+                    .map(tiamot_core::MaterialId)
+            },
+        );
+
         // And the materials a body walks through, from the same rules and keyed
         // the same way. Contract §2: collision only — the cell still meshes, is
         // still lit, and still stops the dig ray.
@@ -2687,7 +2708,7 @@ impl ServerHandle {
                             .map(|(id, _)| id)
                             .collect();
                     let lighting = std::sync::Arc::new(std::sync::RwLock::new(
-                        crate::light::Lights::new(emissions, see_through),
+                        crate::light::Lights::new(emissions, see_through, dimming),
                     ));
 
                     // Behind a lock for the same reason lighting is, and not

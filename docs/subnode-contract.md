@@ -229,6 +229,12 @@ not a suggestion — Task 02b measured the uncached test at **≈50% overhead** 
 chiselled chunk against a treat-Partial-as-solid baseline, failing that gate.
 The remedy is six bits per block, recomputed only when the block changes.
 
+**A material may dim the light it passes** (added 2026-09-20, World ask 24):
+`light_falloff` on `register_block`, levels lost per block, default 0, read on
+the same hook a fluid's is (§4's amendment for ask 25). It does not touch this
+cache either: the block is still permeable or not, and the dimming is a
+separate lookup. See §8.2 for what it is for — a canopy that shades.
+
 **Transparent materials are the one exception, and they do not touch this
 cache** — see §8.1. A `Uniform(transparent)` block is permeable on all six faces,
 decided by a material lookup where the cached answer is read rather than where it
@@ -929,11 +935,28 @@ several times the quads of the same volume of stone. That is what makes it look
 like foliage rather than like a painted box, and a mod that wants the cheap
 version leaves the flag off.
 
-**Lighting (§3) is §8.1's rule, unchanged**: a block whose content is
-`Uniform(cutout)` is permeable, so light passes through leaves. Dappled shade —
-foliage that passes SOME light — is not expressible: permeability is a yes or
-no, and inventing a third state for one material would put a number in the
-lighting hot path that every other block would pay to read. Recorded as a limit.
+**Lighting (§3) is §8.1's rule, and a block may now DIM what passes** *(amended
+2026-09-20, World ask 24)*. A block whose content is `Uniform(cutout)` is
+permeable, so light passes through leaves rather than stopping at them — a
+canopy is not a roof. But passing light untouched made a rainforest floor as
+bright as a meadow: measured by the world mod, 85% of the floor had a whole
+leaf block over it and most of those columns still read `sun = 15`.
+
+`light_falloff` on `register_block` is levels lost per block of that material,
+default 0, and **0 is bit-for-bit what every block did before it existed** —
+the light golden says so. It is the same number, on the same hook
+(`Neighbourhood::falloff`), that a fluid has declared since World ask 25, and
+for the same reason: the permeability cache stays a yes or no, and the dimming
+is a material lookup beside it that a world with no dimming material pays one
+bool to skip.
+
+The limit this replaces said a number in the lighting hot path would be paid
+for by every block. That is true and it is already paid: fluid put it there.
+
+Daylight's free fall ends at the first dimming block of a column, exactly as it
+does under water (§4, ask 25) — so a canopy dims by its own falloff and every
+block below it costs the ordinary level, which is what makes the floor of a
+thick forest dark and the edge of a thin one dappled.
 
 **Collision (§2) is unchanged.** Leaves are solid, like glass. Whether a player
 can walk through foliage is a mod's opinion about its own blocks, and the engine

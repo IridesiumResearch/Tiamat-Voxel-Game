@@ -1262,6 +1262,13 @@ rather than clamped, everybody told at once. That is the bed that ends the
 night. One clock for the world; a sky that differs for one player is
 `game.set_sky_modifier`.
 
+**A canopy shades, if you ask it to: `light_falloff` on `register_block`.**
+Leaves are `cutout` and a cutout block passes light the way glass does, so a
+forest floor under a whole canopy was as bright as a meadow. `light_falloff = 2`
+is two levels lost per block of leaves; three blocks of that put a floor at
+about 6 of 15. It is the same number `register_fluid` takes, and 0 — the
+default — is exactly what blocks always did.
+
 **Water breaks plants, if you say so: `washes_away` on `register_block`.** A
 flood runs straight through a `passable` tuft and stands in the same block, and
 your mod cannot see it happen — `on_fluid_flow` reports the flows that were

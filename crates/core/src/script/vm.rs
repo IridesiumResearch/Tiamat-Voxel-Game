@@ -327,6 +327,15 @@ pub struct BlockRules {
     /// with the opaque world rather than blended. See
     /// `docs/subnode-contract.md` §8.2.
     pub cutout: bool,
+    /// Levels of light this material takes out of what passes through it.
+    ///
+    /// World ask 24, Sub-Node Contract §8.2: a canopy is permeable — light
+    /// passes through leaves rather than stopping at them — and passing it
+    /// untouched made a forest floor as bright as a meadow. Zero for almost
+    /// everything, and zero is bit-for-bit what every block did before this
+    /// existed. The same number a fluid declares, on the same hook.
+    pub light_falloff: u8,
+
     /// Whether fluid running into it sweeps it away: a plant in a flood.
     ///
     /// World ask 37. The solver clears the block's cells as a dig would when a
