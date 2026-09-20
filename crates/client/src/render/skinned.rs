@@ -91,6 +91,16 @@ pub struct Skinned {
     palette_capacity: usize,
     palette_layout: wgpu::BindGroupLayout,
     palette_bind: wgpu::BindGroup,
+    /// The skin this model wears, and the layout it is bound with.
+    ///
+    /// **White until a mod's image arrives, and white for ever if it names
+    /// none** — Life ask 0, step 2. A 1x1 white pixel rather than a branch in
+    /// the shader: an untextured model then samples 1.0 and comes out exactly
+    /// the colour it always did, so the engine's own rig is unchanged to the
+    /// bit and every screenshot hash holds.
+    texture_layout: wgpu::BindGroupLayout,
+    texture_bind: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
     shader: wgpu::ShaderModule,
 }
 
@@ -138,6 +148,17 @@ impl Skinned {
         });
         let palette_layout = palette_layout(gpu);
         let palette_bind = palette_bind(gpu, &palette_layout, &palette);
+        let texture_layout = texture_layout(gpu);
+        let sampler = model_sampler(gpu);
+        let texture_bind = texture_bind(
+            gpu,
+            &texture_layout,
+            &upload_skin(
+                gpu,
+                &crate::texture::Image::solid(1, 1, [255, 255, 255, 255]),
+            ),
+            &sampler,
+        );
 
         let shader = gpu
             .device
@@ -158,8 +179,28 @@ impl Skinned {
             palette_capacity,
             palette_layout,
             palette_bind,
+            texture_layout,
+            texture_bind,
+            sampler,
             shader,
         }
+    }
+
+    /// Dresses this model in an image a mod pushed — Life ask 0, step 2.
+    ///
+    /// Rebuilt rather than written into, for the reason `grow` rebuilds the
+    /// palette bind: the view is part of the bind group, so a new image is a
+    /// new group. A model whose skin never arrives keeps the white one it was
+    /// built with.
+    pub fn set_texture(&mut self, gpu: &Gpu, image: &crate::texture::Image) {
+        let view = upload_skin(gpu, image);
+        self.texture_bind = texture_bind(gpu, &self.texture_layout, &view, &self.sampler);
+    }
+
+    /// The bind group layout the pipelines need for the skin.
+    #[must_use]
+    pub const fn texture_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.texture_layout
     }
 
     /// The bind group layout the pipelines need for the palette.
@@ -341,6 +382,7 @@ impl Skinned {
             return;
         }
         pass.set_bind_group(2, &self.palette_bind, &[]);
+        pass.set_bind_group(3, &self.texture_bind, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_vertex_buffer(1, self.instances.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -409,6 +451,111 @@ fn vertex_layout() -> [wgpu::VertexBufferLayout<'static>; 2] {
     ]
 }
 
+/// The layout a model's skin is bound with: an image and a sampler.
+fn texture_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
+    gpu.device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skinned-texture-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+}
+
+fn texture_bind(
+    gpu: &Gpu,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("skinned-texture"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// **Clamped and linear, unlike the block atlas.** That one repeats and
+/// magnifies with `Nearest` because it is padded 16-pixel tiles of pixel art;
+/// a character's skin is one image over a whole body, and a UV that wanders a
+/// hair past the edge should take the edge rather than wrap to the far side of
+/// the face.
+fn model_sampler(gpu: &Gpu) -> wgpu::Sampler {
+    gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("skinned-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    })
+}
+
+/// Uploads one decoded image as a model's skin, level zero only.
+///
+/// No mips: a skin is drawn at roughly one texel a pixel at the distances a
+/// mob is looked at, and the block atlas's mip chain exists because a chunk
+/// face is seen from across a valley.
+fn upload_skin(gpu: &Gpu, image: &crate::texture::Image) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: image.width.max(1),
+        height: image.height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("skinned-skin"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(size.width * 4),
+            rows_per_image: Some(size.height),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 fn palette_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
     gpu.device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -457,7 +604,12 @@ pub fn colour_pipeline(
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("skinned-layout"),
-            bind_group_layouts: &[Some(globals), None, Some(skinned.layout())],
+            bind_group_layouts: &[
+                Some(globals),
+                None,
+                Some(skinned.layout()),
+                Some(skinned.texture_layout()),
+            ],
             immediate_size: 0,
         });
 

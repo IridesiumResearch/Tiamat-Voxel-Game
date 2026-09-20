@@ -3939,6 +3939,78 @@ fn an_entity_is_drawn_where_the_server_put_it() {
 }
 
 #[test]
+fn a_mods_model_wears_the_skin_it_was_pushed() {
+    // **Life ask 0, step 2.** A mod's model was drawn with the fixed albedo
+    // every figure has — "matte white, because the rig is untextured" — and a
+    // cow came out a white cow whatever its author painted. The UVs were
+    // already in the vertex buffer with nothing to sample.
+    //
+    // Asserted by DIFFERENCE, like every other test here: the same model, the
+    // same figure, the same camera, and the only change is the image bound to
+    // it. Reading a hue would make this a hostage to the lighting and the
+    // driver's filtering.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let mut camera = Camera {
+        position: Position::from_world(40.0, 10.0, 24.0),
+        ..Camera::default()
+    };
+    camera.look(std::f32::consts::FRAC_PI_2, -0.25);
+
+    // A mod's model, uploaded exactly as a pushed one is, and one figure
+    // wearing it right in front of the camera.
+    renderer.add_model("zoo:cow", tiamot_core::model::humanoid(), 1.0);
+    let ahead = camera.forward();
+    let mut posed = std::collections::BTreeMap::new();
+    posed.insert(
+        "zoo:cow".to_owned(),
+        vec![client::render::skinned::Figure {
+            offset: [ahead.x * 2.0, ahead.y * 2.0 - 1.0, ahead.z * 2.0],
+            yaw: 0.0,
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+        }],
+    );
+    renderer.set_model_figures(posed);
+
+    let pale = target.capture(&mut renderer, &camera).expect("capture");
+    let before = average(&pale, WIDTH / 4, HEIGHT / 4, WIDTH * 3 / 4, HEIGHT * 3 / 4);
+
+    // The same cow, painted. A flat colour rather than art: what is under test
+    // is that the sample reaches the fragment, not how it is filtered.
+    renderer.set_model_texture(
+        "zoo:cow",
+        &client::texture::Image::solid(8, 8, [200, 40, 30, 255]),
+    );
+    let painted = target.capture(&mut renderer, &camera).expect("capture");
+    let after = average(
+        &painted,
+        WIDTH / 4,
+        HEIGHT / 4,
+        WIDTH * 3 / 4,
+        HEIGHT * 3 / 4,
+    );
+
+    let difference = (0..3)
+        .map(|channel| (after[channel] - before[channel]).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        difference > 0.01,
+        "the model reads {before:?} white and {after:?} painted — the skin \
+         never reached the fragment"
+    );
+    // Red, and the test says so: the skin is mostly red, so the frame must
+    // have LOST green and blue rather than merely changed.
+    assert!(
+        after[1] < before[1] && after[2] < before[2],
+        "a red skin should darken the green and blue of the frame: {before:?} to {after:?}"
+    );
+}
+
+#[test]
 fn a_hundred_entities_all_reach_the_instance_buffer() {
     // The figure instance array and the joint palette are both grown in powers
     // of two. A crowd is where an off-by-one in that arithmetic shows up, and

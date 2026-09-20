@@ -278,6 +278,8 @@ struct ModModels {
     passes: std::collections::BTreeMap<String, skinned::Skinned>,
     /// Where each of those models' entities are, camera-relative.
     by_model: std::collections::BTreeMap<String, Vec<skinned::Figure>>,
+    /// Skins whose model has not arrived yet, by model id.
+    skins: std::collections::BTreeMap<String, crate::texture::Image>,
 }
 
 /// The default sky, as the shader wants it.
@@ -1315,9 +1317,38 @@ impl Renderer {
                 }
             }
         }
-        self.figures
-            .passes
-            .insert(id.to_owned(), skinned::Skinned::new(&self.gpu, model));
+        let mut pass = skinned::Skinned::new(&self.gpu, model);
+        // A skin that arrived first, put on now.
+        if let Some(image) = self.figures.skins.remove(id) {
+            pass.set_texture(&self.gpu, &image);
+        }
+        self.figures.passes.insert(id.to_owned(), pass);
+    }
+
+    /// Dresses a mod's model in an image it pushed — Life ask 0, step 2.
+    ///
+    /// **Remembered when the model has not arrived yet.** The geometry and the
+    /// skin are two hashes fetched independently, and the cache answers at once
+    /// for bytes it already holds, so the skin routinely lands first on a
+    /// second visit to a server. Forgetting it there would leave a cow white
+    /// until somebody reconnected in the other order.
+    pub fn set_model_texture(&mut self, id: &str, image: &crate::texture::Image) {
+        if let Some(pass) = self.figures.passes.get_mut(id) {
+            pass.set_texture(&self.gpu, image);
+        } else {
+            self.figures.skins.insert(id.to_owned(), image.clone());
+        }
+    }
+
+    /// How many figures of a mod's models were placed this frame.
+    ///
+    /// **Exposed because nothing placed any for three tasks.** The models were
+    /// fetched, parsed, scaled and uploaded, and `set_model_figures` had no
+    /// caller — so a mod's cow was on the GPU and never in the world, which
+    /// looks exactly like a model that failed to arrive.
+    #[must_use]
+    pub fn model_figures(&self) -> usize {
+        self.figures.by_model.values().map(Vec::len).sum()
     }
 
     /// Whether a model of this id has arrived and been uploaded.
@@ -1333,6 +1364,7 @@ impl Renderer {
     pub fn clear_models(&mut self) {
         self.figures.passes.clear();
         self.figures.by_model.clear();
+        self.figures.skins.clear();
     }
 
     /// Where each mod model's entities are this frame, camera-relative.

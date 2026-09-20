@@ -1509,6 +1509,23 @@ impl App {
         &mut self.renderer
     }
 
+    /// Whether a mod's model of this id has arrived and been uploaded.
+    #[must_use]
+    pub fn has_model(&self, id: &str) -> bool {
+        self.renderer.has_model(id)
+    }
+
+    /// How many figures wearing a mod's model were placed this frame.
+    ///
+    /// **Exposed because nothing placed any until 2026-09-20.** A model was
+    /// fetched, parsed and uploaded, and every entity wearing one was skipped
+    /// where the engine's own rig was placed — which from the window is
+    /// indistinguishable from a model that never arrived.
+    #[must_use]
+    pub fn model_figures(&self) -> usize {
+        self.renderer.model_figures()
+    }
+
     /// How many chunks have a mesh on the GPU.
     ///
     /// A shared borrow, unlike [`App::renderer`], so a frame-loop condition can
@@ -3815,6 +3832,13 @@ impl App {
             crate::net::Event::Model { id, scale, model } => {
                 self.renderer.add_model(&id, *model, scale);
             }
+            crate::net::Event::ModelTexture { id, image } => {
+                // **Whichever order the two arrive in.** A skin may land
+                // before its geometry — the cache answers instantly for bytes
+                // it already holds — so this is remembered rather than
+                // dropped, and applied when the model turns up.
+                self.renderer.set_model_texture(&id, &image);
+            }
             // Unreachable by construction: the caller matched these three. An
             // arm rather than an `unreachable!`, because a fourth asset added
             // to the caller and forgotten here should do nothing rather than
@@ -4513,7 +4537,10 @@ impl App {
             } => self.connected_to(&address, &fingerprint, first_use),
 
             Event::Materials { table, images } => self.adopt_atlas(&table, &images),
-            Event::Picture { .. } | Event::Font { .. } | Event::Model { .. } => {
+            Event::Picture { .. }
+            | Event::Font { .. }
+            | Event::Model { .. }
+            | Event::ModelTexture { .. } => {
                 self.adopt_asset(event);
             }
 
@@ -5806,14 +5833,22 @@ impl App {
         let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
 
         let mut placed = Vec::with_capacity(self.entities.len());
+        // **A mod's models, each in its own list.** `game.register_model`
+        // uploaded them and nothing ever drew one: every entity that was not
+        // the engine's rig was skipped here, so a mod's cow was fetched,
+        // parsed, scaled, put on the GPU and never placed. The renderer has
+        // held the other half of this since the day models landed.
+        let mut by_model: std::collections::BTreeMap<String, Vec<crate::render::skinned::Figure>> =
+            std::collections::BTreeMap::new();
         for (id, entity) in self.entities.iter() {
-            // **The engine's rig, or nothing.** A model is a canonical string
-            // id and the only one the client has is its own; a server naming
-            // another is naming something it has not pushed yet, and drawing a
-            // humanoid for it would put a person where a mod meant a crate.
-            // An entity with no model at all is a marker and is meant to be
-            // invisible.
-            if entity.model.as_deref() != Some(tiamot_core::ent::HUMANOID_MODEL) {
+            // **A model the client actually has.** A server naming one it has
+            // not pushed is naming nothing, and drawing a humanoid for it would
+            // put a person where a mod meant a crate. An entity with no model
+            // at all is a marker and is meant to be invisible.
+            let model = entity.model.as_deref();
+            let own = model == Some(tiamot_core::ent::HUMANOID_MODEL);
+            let mods = model.filter(|id| self.renderer.has_model(id));
+            if !own && mods.is_none() {
                 continue;
             }
             let Some(pose) = entity.pose(now) else {
@@ -5827,7 +5862,7 @@ impl App {
                 f64::from(corner.y) + f64::from(pose.local[1]) / cells,
                 f64::from(corner.z) + f64::from(pose.local[2]) / cells,
             ];
-            placed.push(crate::render::skinned::Figure {
+            let figure = crate::render::skinned::Figure {
                 offset: self.camera.position.offset_to(feet),
                 yaw: pose.yaw,
                 anim: pose.anim,
@@ -5840,8 +5875,14 @@ impl App {
                 // What the entity stream says it is holding, so the arm is out
                 // for something that is actually drawn — see `place_props`.
                 carrying: [entity.hands[0].is_some(), entity.hands[1].is_some()],
-            });
+            };
+            if let Some(model) = mods.filter(|_| !own) {
+                by_model.entry(model.to_owned()).or_default().push(figure);
+            } else {
+                placed.push(figure);
+            }
         }
+        self.renderer.set_model_figures(by_model);
         self.renderer.set_entities(placed);
     }
 

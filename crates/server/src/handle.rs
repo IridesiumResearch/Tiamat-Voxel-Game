@@ -1828,11 +1828,30 @@ impl ServerHandle {
                          draw nothing for entities that name it"
                     );
                 }
+                // The skin, hashed the same way (Life ask 0, step 2). A model
+                // whose texture is missing is drawn matte white, which is what
+                // every model was — so this is a warning rather than the
+                // error above, where a missing `.glb` means nothing is drawn
+                // at all.
+                let texture = model.texture.as_deref().and_then(|path| {
+                    let hash = content_index.hash_of(&model.mod_id, path);
+                    if hash.is_none() {
+                        warn!(
+                            mod_id = %model.mod_id,
+                            path = %path,
+                            model = %model.id,
+                            "model declares a texture that is not in the mod directory; it will \
+                             be drawn matte white"
+                        );
+                    }
+                    hash
+                });
                 tiamot_core::proto::ModelDef {
                     id: model.id,
                     mod_id: model.mod_id,
                     file,
                     scale: model.scale,
+                    texture,
                 }
             })
             .collect();

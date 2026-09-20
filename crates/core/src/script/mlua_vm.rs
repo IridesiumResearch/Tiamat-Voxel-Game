@@ -3413,6 +3413,7 @@ impl ScriptVm for MluaVm {
                     mod_id: entry.get("mod_id").ok()?,
                     file: entry.get("file").ok()?,
                     scale: entry.get("scale").ok().unwrap_or(1.0),
+                    texture: entry.get("texture").ok().flatten(),
                 })
             })
             .collect()
@@ -4600,6 +4601,22 @@ impl MluaVm {
                     1.0
                 };
 
+                // **A path, checked here, hashed by the server** — the same
+                // way a block's texture travels, and deliberately not the way
+                // a picture does: a picture hands its hash back to the mod
+                // because a HUD script names one by hash, and nothing names a
+                // model's skin but the model. Life ask 0, step 2.
+                let texture = spec.get::<Option<String>>("texture")?;
+                if let Some(path) = texture.as_deref() {
+                    validate_mod_path("register_model", path).map_err(mlua::Error::external)?;
+                    if !crate::content::is_distributable(std::path::Path::new(path)) {
+                        return Err(mlua::Error::external(format!(
+                            "register_model: `texture` is an image file beside your mod, got \
+                             `{path}`. The client decodes PNG."
+                        )));
+                    }
+                }
+
                 let models: Table = lua.named_registry_value("tiamot.models")?;
                 // **Last registration of an id wins**, the rule a sound and a
                 // picture follow: a mod reloading its own model should replace
@@ -4608,6 +4625,10 @@ impl MluaVm {
                     if existing.get::<String>("id").ok().as_deref() == Some(id.as_str()) {
                         existing.set("file", file)?;
                         existing.set("scale", scale)?;
+                        // Replaced, not merged: a re-registration that stops
+                        // naming a texture means the model has none, the same
+                        // rule the file and the scale follow above.
+                        existing.set("texture", texture)?;
                         return Ok(());
                     }
                 }
@@ -4622,6 +4643,7 @@ impl MluaVm {
                 entry.set("mod_id", owner.clone())?;
                 entry.set("file", file)?;
                 entry.set("scale", scale)?;
+                entry.set("texture", texture)?;
                 models.push(entry)?;
                 Ok(())
             })
@@ -8832,7 +8854,7 @@ const GRADE_MIN_GAMMA: f32 = 0.1;
 const SKY_FIELDS: [&str; 3] = ["day_length_ticks", "keyframes", "start_time"];
 
 /// Fields `register_model` accepts.
-const MODEL_FIELDS: [&str; 3] = ["id", "file", "scale"];
+const MODEL_FIELDS: [&str; 4] = ["id", "file", "scale", "texture"];
 
 /// Fields `register_clouds` accepts.
 ///

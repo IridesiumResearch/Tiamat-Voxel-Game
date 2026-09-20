@@ -1262,6 +1262,11 @@ rather than clamped, everybody told at once. That is the bed that ends the
 night. One clock for the world; a sky that differs for one player is
 `game.set_sky_modifier`.
 
+**Your model can wear a skin: `texture` on `register_model`.** A `.glb` with
+no texture is drawn matte white, which is what every model was, and the reader
+refuses a `.glb` that embeds its image — ship the PNG beside it and name it.
+The model's own UVs are used as they are.
+
 **A canopy shades, if you ask it to: `light_falloff` on `register_block`.**
 Leaves are `cutout` and a cutout block passes light the way glass does, so a
 forest floor under a whole canopy was as bright as a meadow. `light_falloff = 2`

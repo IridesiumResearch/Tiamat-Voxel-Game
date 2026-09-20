@@ -206,6 +206,8 @@ struct Seen {
     summaries: Vec<tiamot_core::ChunkPos>,
     /// What the server said this player may do.
     abilities: Option<tiamot_core::phys::Abilities>,
+    /// Skins a mod's models arrived wearing, as `(model id, one pixel)`.
+    skins: Vec<(String, [u8; 4])>,
 }
 
 impl Seen {
@@ -237,6 +239,12 @@ impl Seen {
             // arrives is the engine's own defaults — recorded so the arm is
             // not a silent `{}` that would hide the message going missing.
             Event::Abilities { abilities } => self.abilities = Some(abilities),
+            // A model's skin: decoded by the same path, on a worker, with the
+            // same caps as every other image (charter rule 14).
+            Event::ModelTexture { id, image } => {
+                let pixel = image.pixel(0, 0).unwrap_or([0, 0, 0, 0]);
+                self.skins.push((id, pixel));
+            }
             Event::CloudLayer(layer) => self.cloud_layer = Some(layer),
             Event::Clouds(clouds) => self.clouds = clouds,
             // A mod's font. Same reasoning as the picture above.
@@ -1215,10 +1223,25 @@ fn modelled_mods(name: &str) -> PathBuf {
     let glb = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fuzz/corpus/gltf_ingest/humanoid.glb");
     std::fs::copy(&glb, dir.join("models/cow.glb")).expect("copy the glb");
+    // And a skin beside it (Life ask 0, step 2). Written here rather than
+    // copied so the test owns its colours: a model with no texture is drawn
+    // matte white, and the whole claim is that this one is not.
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 8, 8);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer
+            .write_image_data(&[200, 40, 30, 255].repeat(8 * 8))
+            .expect("png data");
+    }
+    std::fs::write(dir.join("models/cow.png"), &png).expect("write the skin");
     std::fs::write(
         dir.join("init.lua"),
         r#"
-game.register_model{ id = "cow", file = "models/cow.glb", scale = 3.0 }
+game.register_model{ id = "cow", file = "models/cow.glb", scale = 3.0,
+                     texture = "models/cow.png" }
 "#,
     )
     .expect("init");
@@ -1278,4 +1301,20 @@ fn a_mods_model_reaches_a_client_and_parses() {
     // clips is legal and draws rigid, so this asserts the CLIPS survived
     // rather than that every model must have them.
     assert!(clips > 0, "the clips did not survive the reader");
+
+    // **And the skin beside it** (Life ask 0, step 2). A second hash, fetched
+    // and decoded like any other image; a model with none is drawn matte
+    // white, which is what every model was.
+    assert!(
+        pump(&mut connection, &mut seen, |seen| !seen.skins.is_empty()),
+        "no skin arrived for the model; warnings: {:?}",
+        seen.warnings
+    );
+    let (skinned, pixel) = seen.skins[0].clone();
+    assert_eq!(skinned, "zoo:cow", "the skin named the wrong model");
+    assert_eq!(
+        pixel,
+        [200, 40, 30, 255],
+        "the skin decoded to something other than what the mod shipped"
+    );
 }

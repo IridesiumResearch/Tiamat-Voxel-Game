@@ -218,6 +218,19 @@ pub enum Event {
         values: tiamot_core::hud::Values,
     },
 
+    /// The image a model wears, decoded — Life ask 0, step 2.
+    ///
+    /// Its own event rather than a field on [`Event::Model`], because the two
+    /// are separate hashes that complete when they complete: a mod's geometry
+    /// and its skin arrive in whichever order the cache and the wire produce
+    /// them, and a model with no texture yet is drawn matte white meanwhile.
+    ModelTexture {
+        /// Which model it belongs to.
+        id: String,
+        /// The decoded image.
+        image: crate::texture::Image,
+    },
+
     /// A model a mod pushed, parsed and ready to upload.
     ///
     /// One event per model rather than one for the table, for the reason a
@@ -1359,6 +1372,11 @@ async fn session(
                         for model in awaited_models.iter().filter(|m| m.file == Some(hash)) {
                             offer_model(model, &cache, &events);
                         }
+                        // And a model's skin, `filter` for the same reason —
+                        // two models wearing one image share its hash.
+                        for model in awaited_models.iter().filter(|m| m.texture == Some(hash)) {
+                            offer_model_texture(model, &cache, &events);
+                        }
                     }
                     Ok(false) => {}
                     Err(reason) => {
@@ -1668,11 +1686,16 @@ async fn session(
                 // on input a server chose, which is why `model::ingest` caps
                 // every count before it allocates and parses under
                 // `catch_unwind`.
-                let wanted: Vec<tiamot_core::proto::ContentHash> =
-                    models.iter().filter_map(|model| model.file).collect();
+                // The `.glb` and the skin beside it, both by hash.
+                let wanted: Vec<tiamot_core::proto::ContentHash> = models
+                    .iter()
+                    .flat_map(|model| [model.file, model.texture])
+                    .flatten()
+                    .collect();
                 let missing = cache.missing(&wanted);
                 for model in &models {
                     offer_model(model, &cache, &events);
+                    offer_model_texture(model, &cache, &events);
                 }
                 awaited_models = models;
                 if !missing.is_empty()
@@ -2028,6 +2051,42 @@ fn offer_picture(
             return;
         }
         let _ = events.send(Event::Picture { hash, image });
+    });
+}
+
+/// Decodes the image a model wears, once its bytes are in the cache.
+///
+/// **Dropped with a warning rather than replaced with the magenta checker.**
+/// A missing block texture is a hole in the world and should shout; a model
+/// with no skin is matte white, which is the documented state of every model
+/// that never named one — so a cow whose skin will not decode looks like a cow
+/// nobody painted rather than like a bug in the world.
+fn offer_model_texture(
+    model: &tiamot_core::proto::ModelDef,
+    cache: &ContentCache,
+    events: &mpsc::UnboundedSender<Event>,
+) {
+    let Some(hash) = model.texture else {
+        return;
+    };
+    let Some(bytes) = cache.get(&hash) else {
+        return;
+    };
+    let id = model.id.clone();
+    let mod_id = model.mod_id.clone();
+    let events = events.clone();
+    // A worker, like every other decode of a server's bytes: charter rule 14
+    // wants the panic isolated and the network pump left alone.
+    tokio::task::spawn_blocking(move || {
+        let (image, failure) = decode_or_missing(&bytes);
+        if let Some(err) = failure {
+            let _ = events.send(Event::Warning(format!(
+                "`{mod_id}`'s model `{id}` has a texture that would not decode; it will be drawn \
+                 matte white: {err}"
+            )));
+            return;
+        }
+        let _ = events.send(Event::ModelTexture { id, image });
     });
 }
 

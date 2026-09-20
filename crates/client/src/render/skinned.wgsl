@@ -73,6 +73,14 @@ struct Cascade {
 // every mode allocate a shadow map to draw a mob.
 @group(2) @binding(0) var<storage, read> palette: array<mat4x4<f32>>;
 
+// The skin this model wears — Life ask 0, step 2. **Group 3, and every model
+// has one**: a model whose mod named no image is bound to a single white
+// pixel, so this samples 1.0 and the colour below is exactly what an
+// untextured figure always was. A branch here would cost every fragment of
+// every mob a comparison to save one texture fetch of one texel.
+@group(3) @binding(0) var skin_texture: texture_2d<f32>;
+@group(3) @binding(1) var skin_sampler: sampler;
+
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -91,6 +99,9 @@ struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) distance: f32,
+    // The model's own UV, carried since Life ask 0 step 2. The attribute has
+    // been uploaded since models landed and nothing read it.
+    @location(2) uv: vec2<f32>,
 };
 
 // The vertex, moved by its joints.
@@ -156,6 +167,7 @@ fn vertex_main(input: VertexIn) -> VertexOut {
     let c = cos(yaw);
     out.normal = normalize(vec3<f32>(n.x * c + n.z * s, n.y, -n.x * s + n.z * c));
     out.distance = length(world);
+    out.uv = input.uv;
     return out;
 }
 
@@ -168,7 +180,8 @@ fn vertex_shadow(input: VertexIn) -> @builtin(position) vec4<f32> {
     return cascade.view_projection * vec4<f32>(world, 1.0);
 }
 
-// Matte white, lit by the sun and the ambient, then fogged.
+// The model's skin, lit by the sun and the ambient, then fogged. White where
+// no skin was pushed, which is what every figure was until Life ask 0.
 //
 // The half-lambert wrap is not stylistic: a body lit by a straight dot product
 // goes flat black on the shaded side, and a figure with a black half reads as a
@@ -182,8 +195,11 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
 
     let sun = globals.sun_colour.rgb * globals.sun_intensity * wrapped;
     let sky = globals.sky_colour.rgb * globals.ambient;
-    // White, because the rig is untextured and skins are a later phase.
-    let albedo = vec3<f32>(0.92, 0.92, 0.94);
+    // The model's own skin, times the matte white the rig was drawn in
+    // before it had one — a model with no texture is bound to a white pixel,
+    // so this is bit-for-bit the old colour for every figure that has none.
+    let skin = textureSample(skin_texture, skin_sampler, input.uv).rgb;
+    let albedo = skin * vec3<f32>(0.92, 0.92, 0.94);
     let lit = albedo * (sun + sky);
 
     let far = globals.sky_colour.w;

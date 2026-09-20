@@ -226,6 +226,14 @@ pub struct ModelFile {
     /// should be; asking an author to re-export their art to fit the engine's
     /// unit is asking them to keep two copies of it.
     pub scale: f32,
+    /// An image beside the model, drawn on it — `"models/cow.png"`.
+    ///
+    /// Life ask 0, step 2. `None` is matte white, which is what every model
+    /// was: the rig is drawn with a fixed albedo, and a model's own UVs had
+    /// nothing to sample. A path here, a content hash on the wire, and the
+    /// same PNG decoder with the same caps every other image goes through
+    /// (charter rule 14).
+    pub texture: Option<String>,
 }
 
 /// The most models one server may push.

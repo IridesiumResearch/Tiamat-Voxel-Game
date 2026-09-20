@@ -2223,6 +2223,7 @@ function game.register_model(spec) end
 ---@field id string Required. Unqualified means your own mod's namespace.
 ---@field file string Required. A self-contained `.glb` inside your mod directory.
 ---@field scale number? Multiplies the model's size. Default 1, from 0.01 to 64.
+---@field texture string? A PNG beside the model, drawn on it using the model's own UVs — `"models/cow.png"`. Without one a model is matte white, which is what every model was. Pushed to clients by hash like a block's texture, decoded through the same caps (charter rule 14), and a skin that will not decode leaves the model white with a warning rather than painting it magenta. Your `.glb` must NOT embed the image: the reader refuses embedded images, and this is the separate file it refuses them in favour of.
 
 ---Declares this world's cloud deck. Registration window only.
 ---

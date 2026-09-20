@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 68;
+pub const PROTOCOL_VERSION: u32 = 69;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 68;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v69 (Life 0 step 2): `ModelDef` carries `texture`, an image pushed beside
+// the model and drawn on it. Without one a model is matte white, which is what
+// every model was.
 // v68 (Life 10a): `AbilitiesDef` carries `wind_sky`, whether this player may
 // scrub their own clock. The sky keys light a player's night for free, and a
 // client that may not use them has to be told.
@@ -617,6 +620,11 @@ pub struct ModelDef {
     pub file: Option<ContentHash>,
     /// Multiplies the model's own size. See [`crate::model::ModelFile::scale`].
     pub scale: f32,
+    /// The image drawn on it, if the mod named one.
+    ///
+    /// A hash like every other pushed asset, fetched and decoded by the same
+    /// path with the same caps. `None` is matte white.
+    pub texture: Option<ContentHash>,
 }
 
 /// A sound a mod registered, as the client needs to see it.
