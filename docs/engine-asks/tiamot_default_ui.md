@@ -10,22 +10,6 @@ What the inventory has needed from the engine, found by building it. Each entry
 says what was seen, why the mod cannot fix it, and the smallest engine change
 that would. Newest first. Items are removed when they land.
 
-## 12. Descriptions a size down (2026-09-18, split from 9)
-
-**Seen, in the window.** The start screen's secondary lines ("Nothing found
-yet. A world has to be opened to the LAN to appear here.", "Each world keeps
-its own selection…", a mod's description) are drawn at full body size, the
-same as the controls they describe, so a page reads as one undifferentiated
-block. They are the `ui.weak(...)` calls: ten in `front.rs`, two in
-`main.rs`.
-
-Asked as the second half of 9. `86dcbb9` landed the first half, `text_font`,
-and these lines are in Spectral now, but still at body size.
-
-**Smallest change.** Draw them in `TextStyle::Small`, with `Small` set to about
-85% of `Body` rather than egui's much smaller default. A client change whatever
-the theme; a mod cannot reach these lines.
-
 ## Watched, not asked: Life's status tray and narrow windows (2026-09-18)
 
 Life draws a status tray in the bottom-right corner: a 150-pixel weather
