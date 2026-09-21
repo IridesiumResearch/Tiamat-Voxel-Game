@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Iridesium
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Builds the four targets a tester can download and puts them on a DRAFT
+# release — see `docs/distribution.md` §8.
+#
+# **Draft, and nothing here signs anything.** The manifest that says what is
+# authentic is signed on the maintainer's machine with a key that never enters
+# CI: a private key in a repository secret is a private key that every workflow
+# change can reach.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Update channel to stamp into the build"
+        required: false
+        default: test
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      # One target failing must not cancel the others: three usable archives
+      # and a known gap beats no archives at all when a release is being cut.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Intel Macs, cross-compiled from the Apple Silicon runner: Apple's
+          # SDK carries both architectures, so this needs no second runner.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag and the workspace version must agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml ${declared}" >&2
+            echo "A release whose binaries report a different version from the" >&2
+            echo "tag they were cut from is one nobody can reason about." >&2
+            exit 1
+          fi
+
+      - name: Install the pinned toolchain for this target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      # The client links an audio backend, and on Linux that is ALSA. See the
+      # README's system dependencies.
+      - name: ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          channel="${{ inputs.channel || 'test' }}"
+          scripts/package.sh --target ${{ matrix.target }} --channel "$channel"
+
+      # Kept whatever happens, so a dispatch run with no tag still produces
+      # something to download and try.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiamot-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+      - name: Attach to the draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Created on the first target to finish and reused by the rest;
+          # `--draft` because §8 publishes by hand, after the manifest is
+          # signed off the runner.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --title "Tiamot $GITHUB_REF_NAME" \
+              --notes "Unsigned test build. See docs/distribution.md for what to do with it."
+          gh release upload "$GITHUB_REF_NAME" dist/tiamot-*.tar.gz dist/tiamot-*.zip --clobber

@@ -62,6 +62,7 @@
 pub mod atmosphere;
 pub mod bitpack;
 pub mod block;
+pub mod build;
 pub mod chunk;
 pub mod content;
 pub mod coords;
