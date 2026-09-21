@@ -3660,6 +3660,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relman"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "serde_json",
+ "tiamot-core",
+]
+
+[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

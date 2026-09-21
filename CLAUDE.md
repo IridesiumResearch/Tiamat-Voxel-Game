@@ -26,6 +26,9 @@ X," the answer is that a future mod needs X, and the engine's job is to make X e
    - `crates/server` — thin binary over core. Headless. No GUI deps, no X11.
    - `crates/client` — core + wgpu/winit/kira/egui.
    - `crates/bot`    — scripted headless client for tests/benchmarks/load.
+   - `crates/relman` — release manager: hashes a built release into a signed
+     manifest. Offline by construction; no network, no GUI. See
+     `docs/distribution.md`.
 
 4. **Determinism — the Deterministic Float Subset.** Fixed timestep. Same seed ⇒ bit-identical
    worlds on Linux/Windows/macOS. The mechanism is NOT fixed-point arithmetic; it is a

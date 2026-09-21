@@ -90,6 +90,7 @@ pub mod picture;
 pub mod place;
 pub mod plan;
 pub mod proto;
+pub mod release;
 #[cfg(feature = "script")]
 pub mod script;
 pub mod session;
