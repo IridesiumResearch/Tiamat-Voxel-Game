@@ -147,6 +147,8 @@ fn v1_to_v2(v1: EntityV1) -> crate::ent::Entity {
         submerged: 0.0,
         fell: 0.0,
         drive: crate::phys::Intent::default(),
+        // A world saved before mobs had a pace: the ordinary one.
+        speed: 1.0,
         collider: v1.collider,
         model: v1.model,
         item: None,

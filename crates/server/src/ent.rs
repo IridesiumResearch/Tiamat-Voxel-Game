@@ -611,7 +611,16 @@ impl Population {
             let voxels = phys::Voxels::with_fluid(&terrain, fluid, origin)
                 .passing(passable)
                 .gripping(friction);
-            let stepped = phys::step_shaped(&voxels, body, drive, &phys::Tuning::DEFAULT, collider);
+            // **The mob's own pace** (Life ask 14), through the same
+            // `Abilities::tuning` a slowed player goes through: one
+            // implementation of "slower" rather than two, and a speed of
+            // exactly 1 returns the base tuning untouched.
+            let tuning = phys::Abilities {
+                speed: entity.speed,
+                ..phys::Abilities::DEFAULT
+            }
+            .tuning(&phys::Tuning::DEFAULT);
+            let stepped = phys::step_shaped(&voxels, body, drive, &tuning, collider);
 
             // Charter rule 7: keep the local part inside one chunk so it never
             // becomes a world-space f32 that loses precision far from the
@@ -1363,6 +1372,67 @@ mod tests {
             (elsewhere - landed).abs() > 1.0,
             "both mobs ended up at the same height, so this cannot tell a \
              domain-scoped step from an overworld-scoped one"
+        );
+    }
+
+    #[test]
+    fn a_mob_with_a_slower_pace_covers_less_ground() {
+        // **Life ask 14.** A mob's drive has gaits and nothing else, and
+        // `Intent::walk` is normalised — so a shorter drive is not a slower
+        // one, and cows walked at a player's 4.3 yards a second, twice what a
+        // grazing animal should. The mod's workaround was a duty cycle:
+        // push on every other tick and coast on the rest.
+        let mut world = world();
+        floor(&mut world, ChunkPos::new(0, 0, 0));
+        let fluid = crate::fluid::Fluidics::default();
+
+        let walking = tiamot_core::phys::Intent {
+            walk: [0.0, 1.0],
+            jump: false,
+            gait: tiamot_core::phys::Gait::Walk,
+            fly: false,
+        };
+        let mut population = Population::new();
+        let quick = population.spawn(Entity {
+            drive: walking,
+            ..mob(ChunkPos::new(0, 0, 0), [4.0, 3.0, 2.0])
+        });
+        let slow = population.spawn(Entity {
+            drive: walking,
+            speed: 0.5,
+            ..mob(ChunkPos::new(0, 0, 0), [8.0, 3.0, 2.0])
+        });
+
+        for _ in 0..60 {
+            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+        }
+
+        let walked = |id| population.get(id).expect("still there").transform.local[2] - 2.0;
+        let (quick, slow) = (walked(quick), walked(slow));
+        assert!(quick > 1.0, "the fixture never walked: {quick} cells");
+        // Half the speed and half the acceleration, so the whole curve halves
+        // — `Abilities::tuning` scales both, which is why this is a ratio and
+        // not merely "less".
+        assert!(
+            (slow / quick - 0.5).abs() < 0.05,
+            "half a pace walked {slow} cells against {quick}"
+        );
+
+        // And a mob that says nothing walks exactly as it always did: the
+        // multiplier of one returns the base tuning untouched.
+        let mut plain = Population::new();
+        let ordinary = plain.spawn(Entity {
+            drive: walking,
+            ..mob(ChunkPos::new(0, 0, 0), [4.0, 3.0, 2.0])
+        });
+        for _ in 0..60 {
+            plain.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+        }
+        let untouched = plain.get(ordinary).expect("still there").transform.local[2] - 2.0;
+        assert_eq!(
+            untouched.to_bits(),
+            quick.to_bits(),
+            "a mob with no pace of its own moved differently from before"
         );
     }
 

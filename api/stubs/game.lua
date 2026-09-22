@@ -3585,7 +3585,7 @@ function game.rng_stream(pos, name) end
 ---    collider = { width = 0.6, height = 0.6 },
 ---}
 ---```
----@param spec { pos: { x: number, y: number, z: number }, model?: string, item?: table, health?: integer, nametag?: string, collider?: { width: number, height: number } }
+---@param spec { pos: { x: number, y: number, z: number }, model?: string, item?: table, health?: integer, speed?: number, nametag?: string, collider?: { width: number, height: number } }
 ---@return integer|nil id
 function game.spawn_entity(spec) end
 
@@ -3687,12 +3687,18 @@ function game.entity(id) end
 ---```lua
 ---game.set_entity(id, {
 ---    drive = { walk = { x = 1, z = 0 }, gait = "walk" },
+---    -- And how fast, as a multiple of the ordinary pace: a grazing animal is
+---    -- not a sprinting player. 1 is unchanged, 0 is rooted, 16 is the cap.
+---    -- The drive's direction is normalised, so a shorter one is NOT a slower
+---    -- one — this is the number that makes a cow amble. It is kept with the
+---    -- entity, so it survives a save, and may be set at `spawn_entity` too.
+---    speed = 0.5,
 ---    yaw = 1.57,
 ---    anim = 1,  -- WALK
 ---})
 ---```
 ---@param id integer
----@param spec { pos?: { x: number, y: number, z: number }, velocity?: { x: number, y: number, z: number }, yaw?: number, pitch?: number, health?: integer, anim?: integer, drive?: { walk?: { x: number, z: number }, jump?: boolean, gait?: "walk"|"sprint"|"sneak" } }
+---@param spec { pos?: { x: number, y: number, z: number }, velocity?: { x: number, y: number, z: number }, yaw?: number, pitch?: number, health?: integer, speed?: number, anim?: integer, drive?: { walk?: { x: number, z: number }, jump?: boolean, gait?: "walk"|"sprint"|"sneak" } }
 ---@return boolean changed
 function game.set_entity(id, spec) end
 

@@ -1301,6 +1301,11 @@ the feet, it slides mobs as well as players, and the client predicts it, so do
 not build ice by pushing bodies from a tick hook — that is the rubber-banding
 version.
 
+**A mob's pace is `speed` on the entity** — `spawn_entity{ speed = 0.5 }` or
+`set_entity`. A drive's direction is normalised, so a shorter one is not a
+slower one; this is the multiplier that makes a cow amble rather than march at
+a player's walk. The same number, and the same code, that slows a player.
+
 **A player's movement is yours to limit, and flight yours to grant.**
 `game.set_player_abilities(uuid, { fly, speed, sprint, wind_sky })` — a Creative
 world where everybody flies, cold that slows, hunger that stops a sprint, and

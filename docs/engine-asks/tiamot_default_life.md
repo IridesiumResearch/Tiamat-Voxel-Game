@@ -37,21 +37,3 @@ picture, so a heart is one particle), or `game.show_over(entity, { picture,
 count, seconds, player })`, a row of icons billboarded over an entity that
 follows it. The first is general; the second is what health bars, "!"
 over a startled animal and quest markers all are.
-
-## 14. A mob's own speed (2026-09-22)
-
-**Seen.** Cows and pigs walked at a player's walk, 4.3 yards a second, and
-fled at a player's sprint, 5.6: two to four times what an animal should. A mob's `drive` has gaits and nothing
-else, `Intent::walk` is normalised, so a shorter drive is not a slower one,
-and `set_player_abilities`' `speed` is for players.
-
-**What the mod does now.** A kind names `walk_speed` and `run_speed` in
-blocks a second (the cow and pig: 1.1 and 2.8), drives nothing, and sets
-its horizontal velocity to the speed times a gain it nudges each tick by
-what the body did. Through `phys::step` on flat ground it settles on
-exactly the speed asked, steadily (the gain lands on 1/0.7, the ground
-friction). It works; it is a controller standing in for a number, and it
-bypasses the gaits a mob was meant to use.
-
-**Smallest change.** `speed` on `drive` (or on the entity), the multiplier
-`Abilities::speed` already is for players, through `Abilities::tuning`.

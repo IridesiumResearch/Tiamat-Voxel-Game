@@ -6105,6 +6105,19 @@ impl MluaVm {
                 if let Some(points) = spec.get::<Option<u32>>("health")? {
                     entity.health = Some(crate::ent::Health::full(points));
                 }
+                // How fast it walks, as a multiple of the ordinary pace: a
+                // grazing animal is not a sprinting player (Life ask 14).
+                if let Some(speed) = spec.get::<Option<f32>>("speed")? {
+                    if !speed.is_finite()
+                        || !(0.0..=crate::phys::Abilities::MAX_SPEED).contains(&speed)
+                    {
+                        return Err(mlua::Error::external(format!(
+                            "spawn_entity: `speed` is a multiplier from 0 to {}, got {speed}",
+                            crate::phys::Abilities::MAX_SPEED
+                        )));
+                    }
+                    entity.speed = speed;
+                }
                 if let Some(name) = spec.get::<Option<String>>("nametag")? {
                     entity.nametag = Some(crate::ent::Nametag::Text(name));
                 }
@@ -8357,6 +8370,19 @@ fn read_patch(spec: &Table) -> mlua::Result<crate::ent::Patch> {
     patch.yaw = spec.get("yaw")?;
     patch.pitch = spec.get("pitch")?;
     patch.health = spec.get("health")?;
+    // A multiplier on the pace, refused rather than clamped outside its range
+    // for the reason every other number a mod hands the engine is: a mod that
+    // asked for -1 has misunderstood, and a mob walking backwards for ever is
+    // harder to find than an error at the call.
+    if let Some(speed) = spec.get::<Option<f32>>("speed")? {
+        if !speed.is_finite() || !(0.0..=crate::phys::Abilities::MAX_SPEED).contains(&speed) {
+            return Err(mlua::Error::external(format!(
+                "set_entity: `speed` is a multiplier from 0 to {}, got {speed}",
+                crate::phys::Abilities::MAX_SPEED
+            )));
+        }
+        patch.speed = Some(speed);
+    }
     if let Some(tag) = spec.get::<Option<u8>>("anim")? {
         patch.anim = Some(crate::ent::AnimTag(tag));
     }

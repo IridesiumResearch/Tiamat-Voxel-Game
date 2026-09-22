@@ -153,6 +153,23 @@ pub struct Entity {
     /// a week later should be asked again rather than resume a stride.
     #[serde(skip)]
     pub drive: crate::phys::Intent,
+    /// How fast this body moves, as a multiple of the ordinary pace.
+    ///
+    /// **Life ask 14.** A mob's drive has gaits and nothing else, and
+    /// `Intent::walk` is normalised, so a shorter drive is not a slower one —
+    /// cows and pigs walked at a player's 4.3 yards a second, twice what a
+    /// grazing animal should. The mod's workaround was a duty cycle: push on
+    /// every other tick and coast on the rest.
+    ///
+    /// The same multiplier `Abilities::speed` is for players, through the same
+    /// `Abilities::tuning`, so there is one implementation of "slower" in the
+    /// engine rather than two. `1.0` is the ordinary pace and takes no
+    /// arithmetic at all.
+    ///
+    /// Persisted, because a cow is slow whether or not anybody is asking it to
+    /// walk this tick.
+    #[serde(default = "one")]
+    pub speed: f32,
     /// The box it occupies, or `None` for something that does not collide.
     pub collider: Option<Collider>,
     /// What to draw, as a canonical string id, or `None` for invisible.
@@ -226,6 +243,12 @@ pub struct Entity {
     pub script: Option<Vec<u8>>,
 }
 
+/// The ordinary pace, for a mob whose kind said nothing and for a saved one
+/// written before `speed` existed.
+const fn one() -> f32 {
+    1.0
+}
+
 impl Entity {
     /// A bare entity at a transform, with nothing else set.
     #[must_use]
@@ -237,6 +260,7 @@ impl Entity {
             submerged: 0.0,
             fell: 0.0,
             drive: crate::phys::Intent::default(),
+            speed: one(),
             collider: None,
             model: None,
             item: None,

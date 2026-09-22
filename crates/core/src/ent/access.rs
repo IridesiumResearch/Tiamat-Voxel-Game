@@ -44,6 +44,8 @@ pub struct Patch {
     pub pitch: Option<f32>,
     /// What it is trying to do, which the next tick's physics reads.
     pub drive: Option<crate::phys::Intent>,
+    /// How fast it moves, as a multiple of the ordinary pace — Life ask 14.
+    pub speed: Option<f32>,
     /// Which clip a client should play.
     pub anim: Option<AnimTag>,
     /// Current hit points. Ignored by an entity that has no health at all.
@@ -83,6 +85,15 @@ impl Patch {
         }
         if let Some(drive) = self.drive.filter(|d| d.walk.iter().all(|v| v.is_finite())) {
             entity.drive = drive;
+            changed = true;
+        }
+        // Sanitised here as well as at the call, because a patch can be built
+        // in Rust too and a NaN pace would make a body's position NaN.
+        if let Some(speed) = self
+            .speed
+            .filter(|speed| speed.is_finite() && *speed >= 0.0)
+        {
+            entity.speed = speed.min(crate::phys::Abilities::MAX_SPEED);
             changed = true;
         }
         if let Some(anim) = self.anim {
