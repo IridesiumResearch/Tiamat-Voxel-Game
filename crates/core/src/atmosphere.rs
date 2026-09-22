@@ -719,6 +719,7 @@ mod tests {
                 area: [16.0, 3.0, 16.0],
                 gravity: 0.0,
                 collide: true,
+                texture: None,
             },
             rate: f32::INFINITY,
             above: -4.0,

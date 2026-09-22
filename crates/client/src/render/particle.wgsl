@@ -94,3 +94,36 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(colour, alpha);
 }
+
+// A picture a mod registered, drawn on the particle instead of the disc —
+// Life ask 15. **Group 1, and only the textured pipeline declares it**, so a
+// world of plain rain never binds anything: the hot path is thousands of
+// particles a frame and a bind group each would cost more than the pixels.
+@group(1) @binding(0) var picture: texture_2d<f32>;
+@group(1) @binding(1) var picture_sampler: sampler;
+
+@fragment
+fn fragment_textured(input: VertexOut) -> @location(0) vec4<f32> {
+    // The quad's own -1..1 corner, as a texture coordinate. `v` is flipped
+    // because an image's first row is its top and the quad's +y is up, which
+    // is the same correction `sprite_vertex` makes in `world.wgsl`.
+    let uv = vec2<f32>(input.local.x * 0.5 + 0.5, 0.5 - input.local.y * 0.5);
+    let texel = textureSample(picture, picture_sampler, uv);
+
+    // **The picture's own alpha decides the shape**, not the disc falloff: a
+    // heart is a heart because of where its pixels are transparent, and a
+    // round fade over it would eat its corners.
+    let alpha = input.colour.a * texel.a;
+    if (alpha <= 0.002) {
+        discard;
+    }
+    // Tinted by the burst's colour, so one white picture serves a row of red
+    // hearts and a row of grey ones, and the light the particle was spawned
+    // under still applies.
+    var colour = texel.rgb * input.colour.rgb;
+    if (view.sky.w > 0.0) {
+        let haze = pow(clamp(input.reach, 0.0, 1.0), view.up.w);
+        colour = mix(colour, view.sky.rgb, haze);
+    }
+    return vec4<f32>(colour, alpha);
+}

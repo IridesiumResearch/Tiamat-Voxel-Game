@@ -719,6 +719,16 @@ from a tick or a hook, near players (the call returns how many were told), and
 never from a generator. Mist is large, faint, slow and `collide = false`; a drip
 is small with gravity and `collide = true`.
 
+**A picture on each particle: `texture`.** Give the burst the hash
+`game.register_picture` answered and every particle in it draws that picture
+instead of the round dot. The picture's own transparency is the shape — a heart
+is a heart because of where its pixels are clear — and `colour` still tints it,
+so one white picture serves red hearts and grey ones without a second file. It
+costs one texture bind per picture per frame, and particles are grouped by
+picture before they are drawn, so a scene mixing plain dots and three pictures
+is four draws rather than one per particle. A hash whose bytes are still in
+flight draws the plain dot until they land: never nothing.
+
 ---
 
 ## Interfaces: what a mod can and cannot do to the look

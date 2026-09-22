@@ -504,6 +504,7 @@ fn particles_are_drawn_in_every_mode_and_hidden_behind_the_ground() {
                             ],
                             size: 1.2,
                             colour: [1.0, 0.0, 0.0, 1.0],
+                            texture: None,
                         });
                     }
                 }
@@ -538,6 +539,132 @@ fn particles_are_drawn_in_every_mode_and_hidden_behind_the_ground() {
             "in {mode:?} particles under the floor showed through it ({buried:.3})"
         );
     }
+}
+
+#[test]
+fn a_particle_with_a_picture_on_it_draws_the_picture_the_right_way_up() {
+    // `emit_particles{ texture = ... }` — Life ask 15. "13 particles a heart,
+    // 65 a blow, for what is one picture."
+    //
+    // The hard part of proving this is that a textured particle and a plain
+    // one are both a coloured patch in the middle of the frame, so a test that
+    // only asked "is it red?" would pass for a pipeline that ignored the
+    // picture entirely. What is asserted instead is ASYMMETRY: each picture is
+    // opaque over one half and transparent over the other, so the half of the
+    // quad the picture says to draw comes out red and the other half shows the
+    // floor behind it. That fails for a disc, for an ignored alpha, and — with
+    // the second picture — for a flipped `v`, which is the bug every textured
+    // quad has once.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let camera = viewpoint();
+    let forward = camera.forward();
+
+    // Solid white, opaque over `keep` and clear elsewhere. White because the
+    // shader tints by the burst's colour, so the picture decides the SHAPE and
+    // the burst decides the colour — the one-picture-many-colours claim.
+    let half = |keep: fn(u32, u32) -> bool| {
+        let (width, height) = (16u32, 16u32);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgba.extend_from_slice(&[255, 255, 255, if keep(x, y) { 255 } else { 0 }]);
+            }
+        }
+        Image {
+            width,
+            height,
+            rgba,
+        }
+    };
+    let left_half = half(|x, _| x < 8);
+    // The image's FIRST rows, which are its top. `fragment_textured` flips `v`
+    // so that a picture's top lands at the quad's top; without the flip this
+    // one would draw along the bottom of the frame and the assertion below
+    // would read the halves the other way round.
+    let top_half = half(|_, y| y < 8);
+
+    // One quad squarely in front, big enough to cover all four boxes below and
+    // small enough to stay inside the frame: 5 blocks across at 4 blocks away.
+    let redness = |picture: Option<(&Image, [u8; 32])>, unknown: bool| {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        let hash = match picture {
+            Some((image, hash)) => {
+                renderer.set_particle_picture(hash, image);
+                Some(hash)
+            }
+            None if unknown => Some([0xAB; 32]),
+            None => None,
+        };
+        renderer.set_particles(&[client::render::particle::Sprite {
+            centre: [forward.x * 4.0, forward.y * 4.0, forward.z * 4.0],
+            size: 5.0,
+            colour: [1.0, 0.0, 0.0, 1.0],
+            texture: hash,
+        }]);
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let frame = target.capture(&mut renderer, &camera).expect("capture");
+        let box_of = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            let patch = average(
+                &frame,
+                (WIDTH as f32 * x0) as u32,
+                (HEIGHT as f32 * y0) as u32,
+                (WIDTH as f32 * x1) as u32,
+                (HEIGHT as f32 * y1) as u32,
+            );
+            patch[0] - patch[1]
+        };
+        [
+            box_of(0.30, 0.42, 0.45, 0.58),
+            box_of(0.55, 0.42, 0.70, 0.58),
+            box_of(0.42, 0.28, 0.58, 0.43),
+            box_of(0.42, 0.57, 0.58, 0.72),
+        ]
+    };
+
+    // The control: no picture at all. The disc is round and centred, so every
+    // one of the four boxes is red — which is what makes each "the other half
+    // is clear" assertion below a claim about the picture and not about where
+    // the boxes happen to sit.
+    let [dl, dr, dt, db] = redness(None, false);
+    for (side, seen) in [("left", dl), ("right", dr), ("top", dt), ("bottom", db)] {
+        assert!(
+            seen > 0.5,
+            "the plain disc did not reach the {side} box ({seen:.3}), so this test's boxes \
+             prove nothing about a picture"
+        );
+    }
+
+    // A hash the server never sent a picture for falls back to that same disc
+    // rather than drawing nothing: a particle whose art is still in flight is
+    // a particle, not a hole.
+    let [ul, ur, ..] = redness(None, true);
+    assert!(
+        ul > 0.5 && ur > 0.5,
+        "a particle naming a picture that has not arrived drew nothing ({ul:.3}, {ur:.3})"
+    );
+
+    let [ll, lr, ..] = redness(Some((&left_half, [1; 32])), false);
+    assert!(
+        ll > 0.5,
+        "the opaque half of the picture did not draw ({ll:.3})"
+    );
+    assert!(
+        lr < 0.05,
+        "the picture's transparent half was drawn anyway ({lr:.3}), so the shape is the \
+         quad's and not the picture's"
+    );
+
+    let [.., tt, tb] = redness(Some((&top_half, [2; 32])), false);
+    assert!(
+        tt > 0.5,
+        "a picture opaque along its top row drew nothing at the top of the quad ({tt:.3})"
+    );
+    assert!(
+        tb < 0.05,
+        "a picture opaque along its TOP drew at the BOTTOM of the quad ({tb:.3}): `v` is \
+         upside down"
+    );
 }
 
 #[test]
@@ -5039,12 +5166,23 @@ fn a_frame_with_particles_and_a_selection_in_it_draws_at_all() {
     let mut renderer = prepare(gpu, &scene(), RenderMode::Textured);
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
 
-    // Particles in front of the camera, as the mist a biome makes.
+    // Particles in front of the camera, as the mist a biome makes — and mixed
+    // in with them, one carrying a mod's picture and one naming a picture that
+    // never arrived. **That mixture is the same hazard one step along**: the
+    // textured pipeline has a second bind group and a second layout, so a
+    // frame that switches between the two pipelines mid-pass and then hands
+    // the pass to the overlays is the shape of the crash above.
+    renderer.set_particle_picture([9; 32], &Image::solid(8, 8, [255, 255, 255, 255]));
     let sprites: Vec<client::render::particle::Sprite> = (-2..=2)
         .map(|dx| client::render::particle::Sprite {
             centre: [dx as f32 * 0.4, -1.0, 6.0],
             size: 1.2,
             colour: [0.8, 0.85, 1.0, 0.6],
+            texture: match dx {
+                -1 => Some([9; 32]),
+                1 => Some([0x5E; 32]),
+                _ => None,
+            },
         })
         .collect();
     renderer.set_particles(&sprites);

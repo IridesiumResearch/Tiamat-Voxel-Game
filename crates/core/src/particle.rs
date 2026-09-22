@@ -77,6 +77,18 @@ pub struct Burst {
     /// Whether one dies when it reaches a solid cell. A drip stops at the
     /// floor; mist drifts through a hedge.
     pub collide: bool,
+    /// A registered picture drawn on each, or `None` for a plain disc.
+    ///
+    /// **Life ask 15.** Without it a particle is a flat square of one colour,
+    /// so the mod drew a row of hearts over a struck cow pixel by pixel — 13
+    /// particles a heart, 65 a blow, for what is one picture.
+    ///
+    /// A content hash rather than a name, because that is what
+    /// `register_picture` hands a mod back and what the client already fetches
+    /// and caches by. A hash the client has never heard of draws the plain
+    /// disc, which is also what a picture that has not arrived yet does.
+    #[serde(default)]
+    pub texture: Option<crate::proto::ContentHash>,
 }
 
 impl Burst {
@@ -186,6 +198,7 @@ mod tests {
             area: [0.5; 3],
             gravity: 20.0,
             collide: true,
+            texture: None,
         }
     }
 
@@ -207,6 +220,7 @@ mod tests {
                 area: [f32::NAN, 99.0, -1.0],
                 gravity: f32::INFINITY,
                 collide: false,
+                texture: None,
             },
             domain: "overworld".to_owned(),
             radius: f32::NAN,

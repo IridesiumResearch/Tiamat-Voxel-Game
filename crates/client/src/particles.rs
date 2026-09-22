@@ -50,6 +50,11 @@ pub struct Particle {
     pub size: f32,
     /// Whether it dies on reaching a solid cell.
     pub collide: bool,
+    /// The registered picture drawn on it, or `None` for a plain disc.
+    ///
+    /// Carried from the burst — Life ask 15. A hash the client has never
+    /// heard of, or one whose bytes have not arrived yet, draws the disc.
+    pub texture: Option<tiamot_core::proto::ContentHash>,
 }
 
 impl Particle {
@@ -141,6 +146,7 @@ impl System {
                 colour,
                 size: burst.size,
                 collide: burst.collide,
+                texture: burst.texture,
             });
         }
     }
@@ -294,6 +300,7 @@ mod tests {
             area: [0.5, 0.0, 0.5],
             gravity: 10.0,
             collide: false,
+            texture: None,
         }
     }
 
@@ -433,6 +440,7 @@ mod tests {
                 area: [16.0, 3.0, 16.0],
                 gravity: 0.0,
                 collide: true,
+                texture: None,
             },
             rate: 900.0,
             above: 18.0,

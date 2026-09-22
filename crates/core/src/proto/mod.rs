@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 70;
+pub const PROTOCOL_VERSION: u32 = 71;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 70;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v71 (Life 15): `particle::Burst` carries `texture`, a registered picture
+// drawn on each particle instead of a flat disc. Without it a mod drew a row
+// of hearts over a struck cow one particle per PIXEL — 65 a blow.
 // v70 (weather W10): appended `ServerMessage::CloudMap`, a coarse grid of
 // cover and darkness over the world, so a storm can be watched coming from the
 // clear valley beside it. Its own message rather than a field on `Clouds`,
@@ -3480,6 +3483,7 @@ mod particle_tests {
             area: [0.0; 3],
             gravity: 9.0,
             collide: true,
+            texture: None,
         }
     }
 

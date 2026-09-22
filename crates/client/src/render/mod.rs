@@ -1614,6 +1614,20 @@ impl Renderer {
         );
     }
 
+    /// Gives the particle pass a picture a burst may name — Life ask 15.
+    ///
+    /// **Handed over when it arrives, not when it is drawn.** A picture is
+    /// fetched by hash after the join and a burst may name one before its
+    /// bytes land; until then the particles are the plain discs they always
+    /// were, and they start wearing it the moment it is here.
+    pub fn set_particle_picture(
+        &mut self,
+        hash: tiamot_core::proto::ContentHash,
+        image: &crate::texture::Image,
+    ) {
+        self.particles.set_picture(&self.gpu, hash, image);
+    }
+
     /// Sets the particles to draw this frame, already camera-relative.
     ///
     /// **Every frame, like the blobs.** A particle is where it is now.

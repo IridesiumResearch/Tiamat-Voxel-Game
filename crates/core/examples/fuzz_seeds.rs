@@ -476,6 +476,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 area: [tiamot_core::particle::MAX_AREA, 0.0, 1.0],
                 gravity: -9.5,
                 collide: false,
+                texture: None,
             }],
         },
         ServerMessage::BlockDelta {

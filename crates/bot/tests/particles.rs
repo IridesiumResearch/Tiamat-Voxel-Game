@@ -22,13 +22,19 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// A mod that sprays three bursts a second, told apart by colour: one beside
-/// the player (red), one far out of radius (green), and one at the player's
-/// own coordinates in another domain (blue).
+/// The bytes the sprayer's picture is made of, so a test can work out the hash
+/// the server will send without reading the file back.
+const PICTURE: &[u8] = b"\x89PNG\r\n\x1a\nbytes standing in for a heart";
+
+/// A mod that sprays four bursts a second, told apart by colour: one beside
+/// the player (red), one far out of radius (green), one at the player's own
+/// coordinates in another domain (blue), and one carrying a picture (grey — a colour with no full channel in
+/// it, so the three checks below still mean what they say).
 fn write_sprayer(name: &str) -> PathBuf {
     let root = scratch(name);
     let dir = root.join("sprayer");
-    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::create_dir_all(dir.join("textures")).expect("mod dir");
+    std::fs::write(dir.join("textures/heart.png"), PICTURE).expect("picture");
     std::fs::write(
         dir.join("mod.toml"),
         "id = \"sprayer\"\nname = \"Sprayer\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
@@ -37,6 +43,7 @@ fn write_sprayer(name: &str) -> PathBuf {
     std::fs::write(
         dir.join("init.lua"),
         "local ground = game.register_block{ id = \"ground\" }\n\
+         local heart = game.register_picture{ id = \"heart\", file = \"textures/heart.png\" }\n\
          game.register_domain{ id = \"elsewhere\" }\n\
          game.register_on_generate(function(buf, pos)\n\
          \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
@@ -51,6 +58,8 @@ fn write_sprayer(name: &str) -> PathBuf {
          \x20       colour = { r = 0, g = 1, b = 0 } }\n\
          \x20   game.emit_particles{ pos = { x = 2, y = 2, z = 2, domain = \"sprayer:elsewhere\" },\n\
          \x20       colour = { r = 0, g = 0, b = 1 } }\n\
+         \x20   game.emit_particles{ pos = { x = 2, y = 2, z = 2 }, count = 1,\n\
+         \x20       colour = { r = 0.5, g = 0.5, b = 0.5 }, texture = heart }\n\
          end)\n",
     )
     .expect("script");
@@ -97,7 +106,7 @@ fn a_spray_reaches_the_player_beside_it_and_nobody_out_of_reach_or_elsewhere() {
                 && bot
                     .particles_received()
                     .iter()
-                    .filter(|b| b.colour[0] == 255)
+                    .filter(|b| b.colour == [255, 0, 0, 255])
                     .count()
                     < 3
             {
@@ -131,6 +140,25 @@ fn a_spray_reaches_the_player_beside_it_and_nobody_out_of_reach_or_elsewhere() {
             assert!(
                 !bursts.iter().any(|b| b.colour[2] == 255),
                 "a spray in another domain was sent to a player in the overworld"
+            );
+
+            // Life ask 15: a burst may name a picture, and the hash that
+            // reaches the client is the one `register_picture` answered — the
+            // same hash the content index serves the bytes under, or the
+            // client would look up art nobody has.
+            assert_eq!(
+                first.texture, None,
+                "a burst that named no picture carried one anyway"
+            );
+            let pictured: Vec<_> = bursts.iter().filter(|b| b.texture.is_some()).collect();
+            assert!(
+                !pictured.is_empty(),
+                "the burst carrying a picture never arrived: {bursts:?}"
+            );
+            assert_eq!(
+                pictured[0].texture,
+                Some(tiamot_core::content::hash_bytes(PICTURE)),
+                "the picture's hash did not survive the wire"
             );
             bot.disconnect().await;
         });

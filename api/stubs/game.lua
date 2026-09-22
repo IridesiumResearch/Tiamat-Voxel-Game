@@ -2408,6 +2408,7 @@ function game.play_sound(spec) end
 ---@field collide boolean? Whether one vanishes on reaching a solid cell — a drip stops at the floor. Default true. Passable blocks do not stop them.
 ---@field radius number? How far away a player may be and still be sent it. Default 32, at most 128.
 ---@field player? string A player's UUID in hex. Sends the burst to that one player and nobody else, provided they are in the domain and within `radius` — it narrows, never widens. How a mod honours its own "particles off" setting, and how rain is emitted per player rather than per patch of ground.
+---@field texture string? A picture to draw on each particle instead of the round dot: the 64 hex characters `game.register_picture` answers. The picture's own transparency is the particle's shape, and `colour` tints it — so one white heart serves red hearts and grey ones. A hash whose bytes have not reached the client yet draws the plain dot until they do.
 
 ---Scatters a burst of short-lived sprites — sea spray, a drip, mist.
 ---
@@ -2426,6 +2427,11 @@ function game.play_sound(spec) end
 ---game.emit_particles{ pos = at, count = 6, size = 2.5, lifetime = 8,
 ---    colour = { r = 0.8, g = 0.85, b = 0.8, a = 0.15 }, area = { x = 8, y = 1, z = 8 },
 ---    spread = 0.2, collide = false }
+---
+------ A picture on each one: thirteen dots make a heart, or one picture does.
+---local heart = game.register_picture{ id = "heart", file = "textures/heart.png" }
+---game.emit_particles{ pos = above, count = 3, size = 0.5, texture = heart,
+---    colour = { r = 1, g = 0.3, b = 0.4 }, velocity = { y = 1.5 }, lifetime = 1.5 }
 ---```
 ---
 ---Returns how many players were told — not a promise anybody SAW it. Bursts are

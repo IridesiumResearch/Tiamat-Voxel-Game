@@ -9715,6 +9715,13 @@ fn burst_of(spec: &Table, what: &str) -> mlua::Result<crate::particle::Burst> {
         area: triple("area", [0.0; 3])?,
         gravity: spec.get::<Option<f32>>("gravity")?.unwrap_or(0.0),
         collide: spec.get::<Option<bool>>("collide")?.unwrap_or(true),
+        // A registered picture, by the hash `register_picture` handed back
+        // (Life ask 15). The same helper every other by-hash field uses, so a
+        // mod passes the string it was given and nothing else.
+        texture: match spec.get::<Option<mlua::Value>>("texture")? {
+            None | Some(mlua::Value::Nil) => None,
+            Some(_) => Some(content_hash(spec, "texture")?),
+        },
     })
 }
 
@@ -11134,7 +11141,9 @@ mod tests {
              \x20   count = 100000, colour = { r = 0.5, b = 2 }, size = 0.3,\n\
              \x20   velocity = { y = 12 }, spread = 2, gravity = 20, lifetime = 0/0,\n\
              }\n\
-             game.emit_particles{ pos = { x = 0, y = 0, z = 0 } }",
+             game.emit_particles{ pos = { x = 0, y = 0, z = 0 } }\n\
+             game.emit_particles{ pos = { x = 0, y = 0, z = 0 },\n\
+             \x20   texture = string.rep('ab', 32) }",
         )
         .expect("load");
         let env = host.environment("coast").expect("env");
@@ -11145,7 +11154,7 @@ mod tests {
         );
 
         let asked = spray.asked.lock().expect("lock").clone();
-        assert_eq!(asked.len(), 2);
+        assert_eq!(asked.len(), 3);
         let spout = &asked[0];
         assert_eq!(spout.domain, "coast:caves");
         assert!(
@@ -11179,6 +11188,19 @@ mod tests {
         assert_eq!(plain.domain, crate::domain::OVERWORLD);
         assert_eq!(plain.burst.count, 8);
         assert!((plain.radius - 32.0).abs() < f32::EPSILON);
+        assert_eq!(
+            plain.burst.texture, None,
+            "a burst that named no picture got one"
+        );
+
+        // Life ask 15: a picture on the particle, named by the hash
+        // `register_picture` answers. The default above and this together are
+        // what make `texture` a field rather than a constant.
+        assert_eq!(
+            asked[2].burst.texture,
+            Some([0xAB; 32]),
+            "the hash a mod named did not reach the seam"
+        );
 
         let mut fresh = vm();
         let refused = load(
@@ -11190,6 +11212,19 @@ mod tests {
             refused.is_err(),
             "a velocity that is not a table was accepted"
         );
+        // A hash that is not one is a mistake, not something to ignore: a
+        // silently dropped texture is a mod author staring at plain dots.
+        for bad in ["'heart.png'", "42", "string.rep('zz', 32)"] {
+            let mut fresh = vm();
+            let refused = load(
+                &mut fresh,
+                "coast",
+                &format!(
+                    "game.emit_particles{{ pos = {{ x = 0, y = 0, z = 0 }}, texture = {bad} }}"
+                ),
+            );
+            assert!(refused.is_err(), "`texture = {bad}` was accepted");
+        }
     }
 
     #[test]

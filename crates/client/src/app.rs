@@ -3834,7 +3834,14 @@ impl App {
     /// glyph atlas, and this is the network pump.
     fn adopt_asset(&mut self, event: crate::net::Event) {
         match event {
-            crate::net::Event::Picture { hash, image } => self.pictures.insert(hash, image),
+            crate::net::Event::Picture { hash, image } => {
+                // **Two copies, deliberately.** The HUD draws a picture
+                // through egui and a particle draws it through the world
+                // pass, which are different kinds of texture on different
+                // devices' terms — Life ask 15.
+                self.renderer.set_particle_picture(hash, &image);
+                self.pictures.insert(hash, image);
+            }
             crate::net::Event::Font { id, bytes } => self.adopt_font(&id, bytes),
             crate::net::Event::Model { id, scale, model } => {
                 self.renderer.add_model(&id, *model, scale);
@@ -5458,6 +5465,9 @@ impl App {
                     particle.colour[2],
                     particle.opacity(),
                 ],
+                // Life ask 15: the picture this burst named, if any. The pass
+                // groups by it, so one picture is one draw.
+                texture: particle.texture,
             })
             .collect();
         self.renderer.set_particles(&sprites);
