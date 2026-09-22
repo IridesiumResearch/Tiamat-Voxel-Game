@@ -139,7 +139,7 @@ echo "==> third-party notices"
     echo
     echo "Source for any MPL-2.0 crate is available from its own repository, and"
     echo "the corresponding source for Tiamat itself is at"
-    echo "https://github.com/IridesiumResearch/Tiamot-Voxel-Game"
+    echo "https://github.com/IridesiumResearch/Tiamat-Voxel-Game"
     [ -n "$commit" ] && echo "at commit ${commit}."
     echo
     echo "The client embeds the Go Mono font; see"
@@ -184,7 +184,7 @@ What is in here
 Your worlds, settings and identity key are kept outside this folder, so
 deleting it loses nothing but the program.
 
-Source: https://github.com/IridesiumResearch/Tiamot-Voxel-Game
+Source: https://github.com/IridesiumResearch/Tiamat-Voxel-Game
 Licence: GPL-3.0-only (LICENSE), with a mod exception (LICENSE.EXCEPTION).
 EOF
 

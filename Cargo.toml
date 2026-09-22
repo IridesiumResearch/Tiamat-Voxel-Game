@@ -31,7 +31,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-only"
-repository = "https://github.com/IridesiumResearch/Tiamot-Voxel-Game"
+repository = "https://github.com/IridesiumResearch/Tiamat-Voxel-Game"
 authors = ["Iridesium"]
 # This is an engine distributed as a whole, not a set of crates.io libraries.
 # Saying so keeps an accidental `cargo publish` from happening and lets
