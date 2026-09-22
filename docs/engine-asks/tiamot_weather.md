@@ -12,6 +12,45 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
+## W14. A fluid that does not wash plants away (2026-09-22)
+
+**Seen, reading e4ac3a8 (`washes_away`, World ask 37).** A block that
+declares `washes_away` is cleared by ANY fluid running into it. Weather's
+puddles are a fluid: `tiamot_weather:rainwater`, a few cells left on open
+ground in rain, which spreads and evaporates. Beside the Spindle, every
+passable plant (grass, ferns, flowers: `tdw.washes_away` in its
+`blocks.lua`) is the obvious thing to declare it on, and the moment it
+does, a shower strips the meadows it falls on.
+
+**Not happening yet**, which is why this is filed now rather than as a
+bug. The Spindle still washes plants from its own `on_fluid_flow` rule, and
+that rule skips the fluids other mods have told it are harmless
+(`add_harmless_fluid`, which Weather calls for rainwater). The engine flag
+has no such exception, so moving to it loses one.
+
+**Why the mod cannot.** `washes_away` is the plant's declaration and names
+no fluid; Weather registers the fluid and cannot reach another mod's
+blocks. Weather could stop leaving puddles near plants, but a puddle's
+whole point is that it spreads a little, and it cannot know which blocks
+some other mod has made washable.
+
+**Smallest change**, either of:
+
+- **On the fluid:** `register_fluid{ ..., washes = false }` (default true),
+  a fluid too gentle to sweep a plant. Rain on grass, a trickle of milk. The
+  fluid's author knows this and no plant's author has to list every
+  fluid in the world.
+- **On the block**, mirroring W7's `absorbs.fluid`: `washes_away = { fluid =
+  "core:water" }`, or a list, for the fluids that sweep it. Weaker for this
+  case: every plant mod has to know about rainwater.
+
+The first is the one asked for.
+
+**Acceptance.** Two tufts that declare `washes_away`; water run into one
+clears it, rainwater (declared `washes = false`) run into the other leaves
+it standing, and the rainwater stands in its block as water stands in a
+tuft today.
+
 ## W13. Cloud genera: cumulus, stratocumulus, altocumulus, cumulonimbus (2026-09-19, revised)
 
 **Revised the same day, before any of it was built.** The first version
