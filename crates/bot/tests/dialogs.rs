@@ -16,10 +16,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::{Click, DialogEvent};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::{Click, DialogEvent};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["shop:ground", "shop:counter"];
 
@@ -27,12 +27,12 @@ const MATERIALS: [&str; 2] = ["shop:ground", "shop:counter"];
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// Where the mod marks the world, one height per kind of event.
-const PRESSED: tiamot_core::BlockPos = tiamot_core::BlockPos::new(0, 4, 0);
-const CLICKED: tiamot_core::BlockPos = tiamot_core::BlockPos::new(0, 6, 0);
-const CLOSED: tiamot_core::BlockPos = tiamot_core::BlockPos::new(0, 8, 0);
+const PRESSED: tiamat_core::BlockPos = tiamat_core::BlockPos::new(0, 4, 0);
+const CLICKED: tiamat_core::BlockPos = tiamat_core::BlockPos::new(0, 6, 0);
+const CLOSED: tiamat_core::BlockPos = tiamat_core::BlockPos::new(0, 8, 0);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-dialogs-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-dialogs-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -240,7 +240,7 @@ fn a_mods_picture_reaches_a_client_by_hash_and_a_dialog_names_it_in_hex() {
     let server = start("pictures", mods);
     block_on(async {
         let mut bot = join(&server, "Reader").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
 
@@ -248,7 +248,7 @@ fn a_mods_picture_reaches_a_client_by_hash_and_a_dialog_names_it_in_hex() {
         assert_eq!(pictures.len(), 1, "the picture table is {pictures:?}");
         assert_eq!(pictures[0].id, "framed:frame");
         assert_eq!(pictures[0].mod_id, "framed");
-        let hash = tiamot_core::content::hash_bytes(&png);
+        let hash = tiamat_core::content::hash_bytes(&png);
         assert_eq!(
             pictures[0].file,
             Some(hash),
@@ -279,7 +279,7 @@ fn a_mods_font_reaches_a_client_by_hash_and_a_style_names_it() {
     let server = start("fonts", write_lettering("fonts"));
     block_on(async {
         let mut bot = join(&server, "Reader").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
 
@@ -317,7 +317,7 @@ fn a_server_mod_shows_a_dialog_to_a_client_that_pushed_no_code() {
     let server = start("shows", write_shop("shows"));
     block_on(async {
         let mut bot = join(&server, "Shopper").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
         let dialogs = bot.dialogs();
@@ -325,7 +325,7 @@ fn a_server_mod_shows_a_dialog_to_a_client_that_pushed_no_code() {
         // Namespaced with the owning mod's id, so two mods may both use "till".
         assert_eq!(form, "shop:till");
         assert!(
-            tiamot_core::ui::check(tree, tiamot_core::ui::Limits::default()).is_ok(),
+            tiamat_core::ui::check(tree, tiamat_core::ui::Limits::default()).is_ok(),
             "the server sent a tree that fails its own checker"
         );
 
@@ -336,11 +336,11 @@ fn a_server_mod_shows_a_dialog_to_a_client_that_pushed_no_code() {
             .nodes
             .iter()
             .map(|node| match &node.widget {
-                tiamot_core::ui::Widget::Container { .. } => "container",
-                tiamot_core::ui::Widget::Label { .. } => "label",
-                tiamot_core::ui::Widget::Button { .. } => "button",
-                tiamot_core::ui::Widget::ItemGrid { .. } => "grid",
-                tiamot_core::ui::Widget::ItemSlot { .. } => "slot",
+                tiamat_core::ui::Widget::Container { .. } => "container",
+                tiamat_core::ui::Widget::Label { .. } => "label",
+                tiamat_core::ui::Widget::Button { .. } => "button",
+                tiamat_core::ui::Widget::ItemGrid { .. } => "grid",
+                tiamat_core::ui::Widget::ItemSlot { .. } => "slot",
                 _ => "other",
             })
             .collect();
@@ -366,7 +366,7 @@ fn a_button_press_reaches_the_mod_that_opened_the_dialog() {
     let server = start("press", write_shop("press"));
     block_on(async {
         let mut bot = join(&server, "Presser").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
 
@@ -406,7 +406,7 @@ fn a_forged_event_for_a_dialog_nobody_opened_changes_nothing() {
     let server = start("forged", write_shop("forged"));
     block_on(async {
         let mut bot = join(&server, "Forger").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
         let counter = bot
@@ -485,7 +485,7 @@ fn the_slot_a_mod_is_told_about_is_the_slot_a_mod_asked_for() {
     let server = start("slot-index", write_shop("slot-index"));
     block_on(async {
         let mut bot = join(&server, "Counter").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
         let counter = bot
@@ -506,7 +506,7 @@ fn the_slot_a_mod_is_told_about_is_the_slot_a_mod_asked_for() {
             .nodes
             .iter()
             .filter_map(|node| match &node.widget {
-                tiamot_core::ui::Widget::ItemSlot { index, .. } => Some(*index),
+                tiamat_core::ui::Widget::ItemSlot { index, .. } => Some(*index),
                 _ => None,
             })
             .collect();
@@ -530,11 +530,11 @@ fn the_slot_a_mod_is_told_about_is_the_slot_a_mod_asked_for() {
         .await
         .expect("send");
 
-        bot.expect_block(tiamot_core::BlockPos::new(3, 12, 0), counter, PATIENCE)
+        bot.expect_block(tiamat_core::BlockPos::new(3, 12, 0), counter, PATIENCE)
             .await
             .expect("the mod was told about a different slot than the one clicked");
         assert!(
-            !bot.saw_block(tiamot_core::BlockPos::new(2, 12, 0), counter),
+            !bot.saw_block(tiamat_core::BlockPos::new(2, 12, 0), counter),
             "the mod heard the raw wire index rather than its own numbering"
         );
 
@@ -555,14 +555,14 @@ fn splitting_a_stack_in_a_dialog_respects_the_twenty_seven_unit_arithmetic() {
     let server = start("split", write_shop("split"));
     block_on(async {
         let mut bot = join(&server, "Splitter").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
 
         // Dig a block of ground so there is something in slot 0. `y = -1` is
         // the surface: `fill_below_heightmap(0)` fills everything BELOW zero,
         // so the topmost solid block is the one under the player's feet.
-        bot.dig_block(tiamot_core::BlockPos::new(0, -1, 0))
+        bot.dig_block(tiamat_core::BlockPos::new(0, -1, 0))
             .await
             .expect("dig");
 
@@ -659,10 +659,10 @@ fn a_forged_slot_move_cannot_invent_items() {
     let server = start("forgeslot", write_shop("forgeslot"));
     block_on(async {
         let mut bot = join(&server, "Cheat").await;
-        bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ShowDialog { .. }))
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
             .await
             .expect("no dialog arrived");
-        bot.dig_block(tiamot_core::BlockPos::new(0, -1, 0))
+        bot.dig_block(tiamat_core::BlockPos::new(0, -1, 0))
             .await
             .expect("dig");
         let before = bot

@@ -18,10 +18,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::BlockPos;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::BlockPos;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -30,7 +30,7 @@ const WAS_PUNCHED: BlockPos = BlockPos::new(1, 10, 1);
 const KNEW_THE_OWNER: BlockPos = BlockPos::new(3, 10, 1);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-punching").join(name);
+    let dir = std::env::temp_dir().join("tiamat-punching").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -163,7 +163,7 @@ fn a_punch_at_an_entity_that_does_not_exist_reaches_nobody() {
         }
         assert!(
             !alice.saw_subnode(
-                tiamot_core::SubNodePos::new(
+                tiamat_core::SubNodePos::new(
                     WAS_PUNCHED.x * 3 + 1,
                     WAS_PUNCHED.y * 3 + 1,
                     WAS_PUNCHED.z * 3 + 1

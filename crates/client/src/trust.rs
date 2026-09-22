@@ -142,7 +142,7 @@ impl TrustStore {
     /// [`TrustError::Io`] if the file cannot be written.
     pub fn save(&self) -> Result<(), TrustError> {
         let mut text = String::from(
-            "# Tiamot known servers. One line per address:\n\
+            "# Tiamat known servers. One line per address:\n\
              #   <address> <BLAKE3 of the server certificate, hex>\n\
              #\n\
              # A server whose fingerprint stops matching is refused. If you know why it\n\
@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("tiamot-trust-tests");
+        let dir = std::env::temp_dir().join("tiamat-trust-tests");
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join(format!("{name}-known-hosts"));
         let _ = std::fs::remove_file(&path);

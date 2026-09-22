@@ -10,12 +10,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tiamot_core::identity::Allowlist;
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::Allowlist;
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-pause-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-pause-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -110,11 +110,11 @@ fn a_paused_world_does_not_tick_and_does_not_catch_up_afterwards() {
     // notices, and the bound moves with the constant rather than being a
     // number somebody chose.
     assert!(
-        after - held <= u64::from(tiamot_core::tick::MAX_CATCH_UP_TICKS),
+        after - held <= u64::from(tiamat_core::tick::MAX_CATCH_UP_TICKS),
         "resuming fired {} ticks at once, over the {} the accumulator caps at, so the pause \
          was banked AND the cap is gone",
         after - held,
-        tiamot_core::tick::MAX_CATCH_UP_TICKS
+        tiamat_core::tick::MAX_CATCH_UP_TICKS
     );
 
     assert!(server.stop());

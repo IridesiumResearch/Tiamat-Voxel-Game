@@ -9,22 +9,22 @@
 //! rotation, and the admin escape hatch.
 //!
 //! Every test drives a real loopback server. The unit tests in
-//! `tiamot_core::identity` prove the crypto; these prove the *protocol* carries
+//! `tiamat_core::identity` prove the crypto; these prove the *protocol* carries
 //! it, which is a different claim and the one a player actually depends on.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::keyset::commit_to;
-use tiamot_core::identity::{Allowlist, Identity, RecoveryPhrase};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::DisconnectReason;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::keyset::commit_to;
+use tiamat_core::identity::{Allowlist, Identity, RecoveryPhrase};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::DisconnectReason;
+use tiamat_server::{ServerHandle, Settings};
 
 fn world_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("tiamot-identity-suite")
+        .join("tiamat-identity-suite")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -335,7 +335,7 @@ fn a_rotation_matching_the_commitment_succeeds_and_retires_the_old_key() {
     let uuid = alice.uuid_as_root();
     block_on(async {
         let mut identities = server.shared().identities.lock().await;
-        identities.insert(tiamot_core::identity::KeySet::new(
+        identities.insert(tiamat_core::identity::KeySet::new(
             alice.public_key(),
             Some(commitment),
             0,
@@ -403,7 +403,7 @@ fn a_rotation_to_the_wrong_key_is_refused_even_when_correctly_signed() {
 
     block_on(async {
         let mut identities = server.shared().identities.lock().await;
-        identities.insert(tiamot_core::identity::KeySet::new(
+        identities.insert(tiamat_core::identity::KeySet::new(
             alice.public_key(),
             Some(commit_to(&designated.public_key())),
             0,

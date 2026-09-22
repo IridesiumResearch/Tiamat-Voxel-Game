@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-use tiamot_core::script::ScriptVm;
+use tiamat_core::script::ScriptVm;
 
 fn main() {
     let mut vm =
-        tiamot_core::script::MluaVm::new(tiamot_core::script::VmLimits::default()).expect("vm");
+        tiamat_core::script::MluaVm::new(tiamat_core::script::VmLimits::default()).expect("vm");
     let dir = std::path::Path::new("game/core_blocks");
     let src = std::fs::read_to_string(dir.join("init.lua")).expect("read");
     vm.load_mod("core_blocks", &src, dir).expect("load");

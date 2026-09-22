@@ -51,7 +51,7 @@
 
 use std::collections::BTreeMap;
 
-use tiamot_core::proto::ChunkFog;
+use tiamat_core::proto::ChunkFog;
 
 use crate::camera::Camera;
 
@@ -252,7 +252,7 @@ pub struct PlaceFog {
     cells: Vec<[f32; 4]>,
     /// The chunk the grid was last centred on, and whether it has to be
     /// rebuilt anyway because a fog changed.
-    centre: Option<tiamot_core::ChunkPos>,
+    centre: Option<tiamat_core::ChunkPos>,
     dirty: bool,
     /// Off under water, where the water's own murk is the whole view and a
     /// forest's mist behind it is not something anybody down there sees.
@@ -333,7 +333,7 @@ impl PlaceFog {
     }
 
     /// Fills the grid around `centre`.
-    fn rebuild(&mut self, centre: tiamot_core::ChunkPos) {
+    fn rebuild(&mut self, centre: tiamat_core::ChunkPos) {
         let reference = reference_height(centre);
         let half = (GRID / 2) as i32;
         for z in 0..GRID {
@@ -352,7 +352,7 @@ impl PlaceFog {
         let Some(centre) = self.centre else {
             return Uniforms::NONE;
         };
-        let side = tiamot_core::CHUNK_BLOCKS as f32;
+        let side = tiamat_core::CHUNK_BLOCKS as f32;
         let half = (GRID / 2) as i32;
         let local = camera.position.local;
         let at = camera.position.chunk;
@@ -373,8 +373,8 @@ impl PlaceFog {
 
 /// The height the grid's tops are measured from: the base of the chunk it is
 /// centred on, which keeps every top a small number.
-const fn reference_height(centre: tiamot_core::ChunkPos) -> i32 {
-    centre.y * tiamot_core::CHUNK_BLOCKS as i32
+const fn reference_height(centre: tiamat_core::ChunkPos) -> i32 {
+    centre.y * tiamat_core::CHUNK_BLOCKS as i32
 }
 
 /// The grid, filtered at a point `within` blocks of its `-x-z` corner.
@@ -383,7 +383,7 @@ const fn reference_height(centre: tiamot_core::ChunkPos) -> i32 {
 /// `place_fog_at` does in the shaders.
 #[must_use]
 pub fn sample(cells: &[[f32; 4]], within: [f32; 2]) -> Sample {
-    let side = tiamot_core::CHUNK_BLOCKS as f32;
+    let side = tiamat_core::CHUNK_BLOCKS as f32;
     let last = (GRID - 1) as f32;
     let p = [
         (within[0] / side - 0.5).clamp(0.0, last),
@@ -473,7 +473,7 @@ mod tests {
         // where an unpremultiplied blend would have dragged it half way to the
         // zeros a clear cell holds, a dark rim round every foggy place.
         let cells = grid_with(&[((10, 10), fog([60, 200, 90], 20, Some(40)))]);
-        let side = tiamot_core::CHUNK_BLOCKS as f32;
+        let side = tiamat_core::CHUNK_BLOCKS as f32;
         let centre = |x: f32| (x + 0.5) * side;
         let inside = sample(&cells, [centre(10.0), centre(10.0)]);
         let between = sample(&cells, [centre(10.5), centre(10.0)]);

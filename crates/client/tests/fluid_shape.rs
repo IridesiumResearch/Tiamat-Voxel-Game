@@ -28,9 +28,9 @@ use client::mesher::{self, Absent, FluidVertex, Mesh, Neighbours};
 use client::render::{Gpu, Offscreen, Renderer};
 use client::texture::{Atlas, Image};
 use std::collections::HashMap;
-use tiamot_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
+use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
-const DAY: client::shade::Uniform = client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: client::shade::Uniform = client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
 const STONE: MaterialId = MaterialId(2);
@@ -45,8 +45,8 @@ fn gpu() -> Option<Gpu> {
         Ok(gpu) => Some(gpu),
         Err(err) => {
             assert!(
-                std::env::var("TIAMOT_REQUIRE_GPU").is_err(),
-                "TIAMOT_REQUIRE_GPU is set and no adapter was available: {err}"
+                std::env::var("TIAMAT_REQUIRE_GPU").is_err(),
+                "TIAMAT_REQUIRE_GPU is set and no adapter was available: {err}"
             );
             println!("SKIPPING: no graphics adapter on this machine ({err})");
             None
@@ -147,13 +147,13 @@ fn quads(mesh: &Mesh) -> impl Iterator<Item = &[FluidVertex]> {
 
 /// Which block a cell coordinate falls in.
 fn block_of(cell: u32) -> i32 {
-    (cell / tiamot_core::SUBNODES_PER_AXIS) as i32
+    (cell / tiamat_core::SUBNODES_PER_AXIS) as i32
 }
 
 /// Where a vertex really sits, in blocks.
 fn height_of(vertex: &FluidVertex) -> f32 {
     let (_, y, _) = vertex.position();
-    y as f32 / tiamot_core::SUBNODES_PER_AXIS as f32 - f32::from(vertex.drop()) / 48.0
+    y as f32 / tiamat_core::SUBNODES_PER_AXIS as f32 - f32::from(vertex.drop()) / 48.0
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn a_pond_draws_no_faces_inside_itself() {
         // not on a block boundary means a face INSIDE a block, which only
         // terrain can produce and which separates no two blocks at all.
         let (x, y, z) = quad[0].position();
-        let (by, span) = (block_of(y), tiamot_core::SUBNODES_PER_AXIS);
+        let (by, span) = (block_of(y), tiamat_core::SUBNODES_PER_AXIS);
         let along = if axis == 0 { x } else { z };
         if along % span != 0 {
             continue;
@@ -246,7 +246,7 @@ fn one_body_of_milk_crossing_a_chunk_seam_draws_nothing_there() {
     let on_seam = quads(&mesh)
         .filter(|quad| {
             let (axis, positive) = quad[0].face();
-            axis == 0 && positive && quad[0].position().0 == tiamot_core::CHUNK_SUBNODES
+            axis == 0 && positive && quad[0].position().0 == tiamat_core::CHUNK_SUBNODES
         })
         .count();
     assert_eq!(
@@ -341,7 +341,7 @@ fn the_surface_reaches_the_depth_the_milk_actually_has() {
             // the gate working. The fractional part is what matters here and
             // either gives it.
             let cells = (*height - POOL as f32) * 3.0;
-            let fraction = cells - tiamot_core::detgen::floor_to_i32(cells) as f32;
+            let fraction = cells - tiamat_core::detgen::floor_to_i32(cells) as f32;
             fraction > 1.0 / 48.0 && fraction < 1.0 - 1.0 / 48.0
         })
         .count();
@@ -410,7 +410,7 @@ fn dump_the_splat() {
         };
         camera.look(0.0, pitch);
         let frame = target.capture(&mut renderer, &camera).expect("capture");
-        let path = std::env::temp_dir().join(format!("tiamot-splat-{label}.png"));
+        let path = std::env::temp_dir().join(format!("tiamat-splat-{label}.png"));
         let mut bytes = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut bytes, frame.width, frame.height);
@@ -455,7 +455,7 @@ fn a_shoreline_stands_no_wall_of_milk_under_its_own_surface() {
     // The bound is two, so the ring reappearing at a third of a block still
     // fails by a factor of eight.
     let mesh = splat();
-    let per_axis = tiamot_core::SUBNODES_PER_AXIS;
+    let per_axis = tiamat_core::SUBNODES_PER_AXIS;
     let fine = 48 / per_axis;
 
     let tallest = mesh
@@ -498,7 +498,7 @@ fn the_shore_never_lies_in_the_same_plane_as_the_floor() {
     // property of two surfaces being in one plane, and a frame that happened to
     // resolve it one way on this driver would say nothing about another.
     let mesh = splat();
-    let per_axis = tiamot_core::SUBNODES_PER_AXIS;
+    let per_axis = tiamat_core::SUBNODES_PER_AXIS;
     let fine = 48 / per_axis;
 
     // Absolute height of every fluid TOP vertex, in fine units. `drop` is how
@@ -542,16 +542,16 @@ fn the_shore_never_lies_in_the_same_plane_as_the_floor() {
 #[test]
 fn an_ocean_in_the_store_draws_no_walls_between_its_chunks() {
     use client::world::{ABSENT_POLICY, ChunkStore};
-    use tiamot_core::fluid::{Fluid, FluidId, FluidLayer};
+    use tiamat_core::fluid::{Fluid, FluidId, FluidLayer};
 
     let water = FluidId(1);
     let mut store = ChunkStore::new();
-    store.set_fluid_table(&[tiamot_core::proto::FluidDef {
+    store.set_fluid_table(&[tiamat_core::proto::FluidDef {
         id: 1,
         name: "sea:water".to_owned(),
         material: MILK.get(),
         color: [40, 90, 200],
-        opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+        opacity: tiamat_core::script::FluidRules::DEFAULT_OPACITY,
     }]);
     // A sea whose surface is at y = 10: full blocks below it, in the chunk
     // that holds the surface and all the chunk under it.
@@ -566,10 +566,10 @@ fn an_ocean_in_the_store_draws_no_walls_between_its_chunks() {
                 let pos = ChunkPos::new(cx, cy, cz);
                 store.insert(Chunk::new(pos, MaterialId::AIR));
                 let mut layer = FluidLayer::default();
-                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
-                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                    let local = tiamat_core::coords::LocalBlock::from_index(index);
                     if cy < 0 || local.y < 10 {
-                        layer.set(local, Fluid::new(water, tiamot_core::fluid::MAX_VOLUME));
+                        layer.set(local, Fluid::new(water, tiamat_core::fluid::MAX_VOLUME));
                     }
                 }
                 store.set_fluid(pos, layer);
@@ -587,7 +587,7 @@ fn an_ocean_in_the_store_draws_no_walls_between_its_chunks() {
             &store.fluid_for(centre),
             &mesher::NoGlass,
         );
-        let edge = tiamot_core::CHUNK_SUBNODES;
+        let edge = tiamat_core::CHUNK_SUBNODES;
         let mut walls = Vec::new();
         for quad in quads(&mesh) {
             let (axis, positive) = quad[0].face();

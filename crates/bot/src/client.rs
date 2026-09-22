@@ -14,15 +14,15 @@ use std::sync::Arc;
 
 use quinn::{ClientConfig, Endpoint};
 use rustls_pki_types::CertificateDer;
-use tiamot_core::identity::{Identity, challenge_payload};
-use tiamot_core::proto::{
+use tiamat_core::identity::{Identity, challenge_payload};
+use tiamat_core::proto::{
     ClientMessage, DisconnectReason, PROTOCOL_VERSION, ServerMessage, WireSignature,
 };
-use tiamot_server::transport::frame;
-pub use tiamot_server::transport::{Impairment, Link};
+use tiamat_server::transport::frame;
+pub use tiamat_server::transport::{Impairment, Link};
 
 /// The ALPN the server requires. Must match `transport::endpoint`.
-const ALPN: &[u8] = b"tiamot/1";
+const ALPN: &[u8] = b"tiamat/1";
 
 /// Something went wrong driving a connection.
 #[derive(Debug, thiserror::Error)]
@@ -91,7 +91,7 @@ pub enum BotError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerPosition {
     /// Which chunk.
-    pub chunk: tiamot_core::ChunkPos,
+    pub chunk: tiamat_core::ChunkPos,
     /// Cell offset within it, `0..48` on each axis.
     pub local: [f32; 3],
 }
@@ -102,8 +102,8 @@ pub struct PlayerPosition {
 /// charter rule 7 keeps out of `f32` — and this is presentation for a bot's
 /// navigation rather than simulation, so the wider type costs nothing.
 fn world_blocks(position: &PlayerPosition) -> [f64; 3] {
-    let span = f64::from(tiamot_core::CHUNK_SUBNODES);
-    let per_block = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+    let span = f64::from(tiamat_core::CHUNK_SUBNODES);
+    let per_block = f64::from(tiamat_core::SUBNODES_PER_AXIS);
     [
         (f64::from(position.chunk.x) * span + f64::from(position.local[0])) / per_block,
         (f64::from(position.chunk.y) * span + f64::from(position.local[1])) / per_block,
@@ -114,13 +114,13 @@ fn world_blocks(position: &PlayerPosition) -> [f64; 3] {
 impl PlayerPosition {
     /// The position in whole blocks, for asserting about where a bot ended up.
     #[must_use]
-    pub fn block(&self) -> tiamot_core::BlockPos {
-        let corner = tiamot_core::BlockPos::from_chunk_corner(self.chunk);
-        let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
-        tiamot_core::BlockPos::new(
-            corner.x + tiamot_core::detgen::floor_to_i32(self.local[0] / cells),
-            corner.y + tiamot_core::detgen::floor_to_i32(self.local[1] / cells),
-            corner.z + tiamot_core::detgen::floor_to_i32(self.local[2] / cells),
+    pub fn block(&self) -> tiamat_core::BlockPos {
+        let corner = tiamat_core::BlockPos::from_chunk_corner(self.chunk);
+        let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
+        tiamat_core::BlockPos::new(
+            corner.x + tiamat_core::detgen::floor_to_i32(self.local[0] / cells),
+            corner.y + tiamat_core::detgen::floor_to_i32(self.local[1] / cells),
+            corner.z + tiamat_core::detgen::floor_to_i32(self.local[2] / cells),
         )
     }
 }
@@ -225,7 +225,7 @@ impl Bot {
         endpoint.set_default_client_config(client_config(verifier));
 
         let connection = endpoint
-            .connect(addr, "tiamot-server")
+            .connect(addr, "tiamat-server")
             .map_err(|err| BotError::Connect {
                 addr,
                 reason: err.to_string(),
@@ -242,7 +242,7 @@ impl Bot {
         let cert_fingerprint = connection
             .peer_identity()
             .and_then(|any| any.downcast::<Vec<CertificateDer<'static>>>().ok())
-            .and_then(|chain| chain.first().map(tiamot_server::cert::fingerprint_of))
+            .and_then(|chain| chain.first().map(tiamat_server::cert::fingerprint_of))
             .unwrap_or(expected_fingerprint);
 
         let (send, mut recv) = connection
@@ -519,7 +519,7 @@ impl Bot {
     /// what a caller should be looking for; see [`Bot::refusal`].
     pub async fn send_retired_block_delta(
         &mut self,
-        edit: tiamot_core::proto::Edit,
+        edit: tiamat_core::proto::Edit,
     ) -> Result<(), BotError> {
         self.send(&ClientMessage::BlockDelta { edit }).await
     }
@@ -536,7 +536,7 @@ impl Bot {
     pub async fn next_block_delta(
         &mut self,
         timeout: std::time::Duration,
-    ) -> Result<Option<tiamot_core::proto::Edit>, BotError> {
+    ) -> Result<Option<tiamat_core::proto::Edit>, BotError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -564,7 +564,7 @@ impl Bot {
         &mut self,
         count: usize,
         timeout: std::time::Duration,
-    ) -> Result<Vec<tiamot_core::ChunkPos>, BotError> {
+    ) -> Result<Vec<tiamat_core::ChunkPos>, BotError> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut chunks = Vec::new();
         while chunks.len() < count {
@@ -591,7 +591,7 @@ impl Bot {
     /// that can read the colour through the real endpoint is how that stays
     /// caught.
     #[must_use]
-    pub fn chunk_tints_received(&self) -> Vec<(tiamot_core::ChunkPos, [u8; 3])> {
+    pub fn chunk_tints_received(&self) -> Vec<(tiamat_core::ChunkPos, [u8; 3])> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -609,7 +609,7 @@ impl Bot {
     #[must_use]
     pub fn chunk_fogs_received(
         &self,
-    ) -> Vec<(tiamot_core::ChunkPos, Option<tiamot_core::proto::ChunkFog>)> {
+    ) -> Vec<(tiamat_core::ChunkPos, Option<tiamat_core::proto::ChunkFog>)> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -621,7 +621,7 @@ impl Bot {
 
     /// Every sky modifier received so far, in arrival order.
     #[must_use]
-    pub fn sky_modifiers_received(&self) -> Vec<Option<tiamot_core::atmosphere::SkyModifier>> {
+    pub fn sky_modifiers_received(&self) -> Vec<Option<tiamat_core::atmosphere::SkyModifier>> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -633,7 +633,7 @@ impl Bot {
 
     /// Every precipitation received so far, in arrival order.
     #[must_use]
-    pub fn precipitation_received(&self) -> Vec<Option<tiamot_core::atmosphere::Precipitation>> {
+    pub fn precipitation_received(&self) -> Vec<Option<tiamat_core::atmosphere::Precipitation>> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -645,7 +645,7 @@ impl Bot {
 
     /// Every flash received so far, in arrival order.
     #[must_use]
-    pub fn flashes_received(&self) -> Vec<tiamot_core::atmosphere::Flash> {
+    pub fn flashes_received(&self) -> Vec<tiamat_core::atmosphere::Flash> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -657,7 +657,7 @@ impl Bot {
 
     /// Every particle burst received so far, in arrival order.
     #[must_use]
-    pub fn particles_received(&self) -> Vec<tiamot_core::particle::Burst> {
+    pub fn particles_received(&self) -> Vec<tiamat_core::particle::Burst> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -670,7 +670,7 @@ impl Bot {
 
     /// Every badge received so far, in arrival order.
     #[must_use]
-    pub fn badges_received(&self) -> Vec<tiamot_core::particle::Badge> {
+    pub fn badges_received(&self) -> Vec<tiamat_core::particle::Badge> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -686,10 +686,10 @@ impl Bot {
     #[must_use]
     pub fn chunk_report(&self, view: i32) -> String {
         use std::collections::BTreeMap;
-        let mut held: BTreeMap<tiamot_core::ChunkPos, Option<u8>> = BTreeMap::new();
+        let mut held: BTreeMap<tiamat_core::ChunkPos, Option<u8>> = BTreeMap::new();
         let (mut chunks, mut summaries, mut unloads) = (0usize, 0usize, 0usize);
-        let mut centre: Option<tiamot_core::ChunkPos> = None;
-        let mut wet: std::collections::BTreeSet<tiamot_core::ChunkPos> =
+        let mut centre: Option<tiamat_core::ChunkPos> = None;
+        let mut wet: std::collections::BTreeSet<tiamat_core::ChunkPos> =
             std::collections::BTreeSet::new();
         for message in self.received() {
             match message {
@@ -702,7 +702,7 @@ impl Bot {
                 }
                 ServerMessage::ChunkSummary { pos, blob } => {
                     summaries += 1;
-                    let level = tiamot_core::lod::codec::decode(&blob)
+                    let level = tiamat_core::lod::codec::decode(&blob)
                         .map(|summary| summary.level())
                         .unwrap_or(0);
                     held.insert(pos, Some(level));
@@ -739,8 +739,8 @@ impl Bot {
         // one-material solid chunk with air directly over it is a surface
         // flattened to a chunk face, which is a generator's bound gone wrong
         // and not a thing terrain does.
-        let materials = tiamot_core::persist::idmap::MaterialMap::passthrough();
-        let mut kind: BTreeMap<tiamot_core::ChunkPos, u8> = BTreeMap::new(); // 0 air, 1 solid uniform, 2 mixed
+        let materials = tiamat_core::persist::idmap::MaterialMap::passthrough();
+        let mut kind: BTreeMap<tiamat_core::ChunkPos, u8> = BTreeMap::new(); // 0 air, 1 solid uniform, 2 mixed
         let (mut air, mut solid, mut mixed, mut undecodable) = (0usize, 0usize, 0usize, 0usize);
         for (pos, level) in &held {
             if level.is_some()
@@ -755,7 +755,7 @@ impl Bot {
                 continue;
             };
             let k = match chunk.is_uniform() {
-                Some(m) if m == tiamot_core::MaterialId::AIR => 0,
+                Some(m) if m == tiamat_core::MaterialId::AIR => 0,
                 Some(_) => 1,
                 None => {
                     if chunk.blocks().all(|(_, b)| b.is_empty()) {
@@ -780,7 +780,7 @@ impl Bot {
         // hole in the ground shows.
         let mut under_surface: BTreeMap<u16, usize> = BTreeMap::new();
         for (pos, k) in &kind {
-            let over = tiamot_core::ChunkPos::new(pos.x, pos.y + 1, pos.z);
+            let over = tiamat_core::ChunkPos::new(pos.x, pos.y + 1, pos.z);
             if kind.get(&over) == Some(&0) {
                 match k {
                     1 if wet.contains(&over) => seabeds += 1,
@@ -789,7 +789,7 @@ impl Bot {
                     _ => {}
                 }
             }
-            let sky = tiamot_core::ChunkPos::new(pos.x, pos.y + 2, pos.z);
+            let sky = tiamat_core::ChunkPos::new(pos.x, pos.y + 2, pos.z);
             if *k == 1
                 && kind.get(&over) == Some(&2)
                 && kind.get(&sky) == Some(&0)
@@ -834,7 +834,7 @@ impl Bot {
 
     /// Every chunk received so far, in arrival order.
     #[must_use]
-    pub fn chunks_received(&self) -> Vec<tiamot_core::ChunkPos> {
+    pub fn chunks_received(&self) -> Vec<tiamat_core::ChunkPos> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -856,9 +856,9 @@ impl Bot {
     /// decode.
     pub fn decode_chunk(
         &self,
-        pos: tiamot_core::ChunkPos,
-        materials: &tiamot_core::persist::idmap::MaterialMap,
-    ) -> Result<tiamot_core::Chunk, BotError> {
+        pos: tiamat_core::ChunkPos,
+        materials: &tiamat_core::persist::idmap::MaterialMap,
+    ) -> Result<tiamat_core::Chunk, BotError> {
         let history = self.received();
         let blob = history
             .iter()
@@ -872,7 +872,7 @@ impl Bot {
                 got: format!("no chunk at {pos:?}"),
             })?;
 
-        tiamot_core::persist::codec::decode_chunk(pos, blob, materials, &[]).map_err(|err| {
+        tiamat_core::persist::codec::decode_chunk(pos, blob, materials, &[]).map_err(|err| {
             BotError::Unexpected {
                 expected: "a decodable chunk blob",
                 got: err.to_string(),
@@ -887,7 +887,7 @@ impl Bot {
     /// [`BotError::Frame`] if the write fails.
     pub async fn request_content(
         &mut self,
-        hashes: Vec<tiamot_core::proto::ContentHash>,
+        hashes: Vec<tiamat_core::proto::ContentHash>,
     ) -> Result<(), BotError> {
         self.send(&ClientMessage::ContentRequest { hashes }).await
     }
@@ -906,9 +906,9 @@ impl Bot {
         &mut self,
         wanted: usize,
         timeout: std::time::Duration,
-    ) -> Result<Vec<(tiamot_core::proto::ContentHash, Vec<u8>)>, BotError> {
+    ) -> Result<Vec<(tiamat_core::proto::ContentHash, Vec<u8>)>, BotError> {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut partial: std::collections::BTreeMap<tiamot_core::proto::ContentHash, Vec<u8>> =
+        let mut partial: std::collections::BTreeMap<tiamat_core::proto::ContentHash, Vec<u8>> =
             std::collections::BTreeMap::new();
         let mut complete = Vec::new();
 
@@ -951,7 +951,7 @@ impl Bot {
                 // The hash is the whole point. A server that sent different
                 // bytes than were asked for is caught here rather than by the
                 // decoder it was aimed at.
-                if tiamot_core::content::hash_bytes(&bytes) != hash {
+                if tiamat_core::content::hash_bytes(&bytes) != hash {
                     return Err(BotError::Unexpected {
                         expected: "content matching the hash it was requested by",
                         got: "bytes that hash to something else".to_owned(),
@@ -969,7 +969,7 @@ impl Bot {
     /// is what turns a decoded chunk's numbers into names a client can choose
     /// textures by.
     #[must_use]
-    pub fn material_table(&self) -> Option<Vec<tiamot_core::proto::MaterialDef>> {
+    pub fn material_table(&self) -> Option<Vec<tiamat_core::proto::MaterialDef>> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -980,7 +980,7 @@ impl Bot {
 
     /// The options this server's mods offer, as sent on join.
     #[must_use]
-    pub fn mod_settings(&self) -> Option<Vec<tiamot_core::proto::SettingDef>> {
+    pub fn mod_settings(&self) -> Option<Vec<tiamat_core::proto::SettingDef>> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -995,7 +995,7 @@ impl Bot {
     ///
     /// [`BotError::Frame`] if the write fails.
     pub async fn set_setting(&mut self, id: &str, value: u32) -> Result<(), BotError> {
-        self.send(&tiamot_core::proto::ClientMessage::SetSetting {
+        self.send(&tiamat_core::proto::ClientMessage::SetSetting {
             id: id.to_owned(),
             value,
         })
@@ -1004,7 +1004,7 @@ impl Bot {
 
     /// The mod manifest the server sent, if it has arrived.
     #[must_use]
-    pub fn manifest(&self) -> Option<Vec<tiamot_core::proto::ModEntry>> {
+    pub fn manifest(&self) -> Option<Vec<tiamat_core::proto::ModEntry>> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -1027,7 +1027,7 @@ impl Bot {
     ) -> Result<(), BotError> {
         let uuid = self.identity.uuid_as_root();
         let payload =
-            tiamot_core::identity::keyset::add_key_payload(&uuid, new_key, next_key_hash.as_ref());
+            tiamat_core::identity::keyset::add_key_payload(&uuid, new_key, next_key_hash.as_ref());
         self.send(&ClientMessage::AddKey {
             new_public_key: *new_key.as_bytes(),
             next_key_hash,
@@ -1048,10 +1048,10 @@ impl Bot {
     pub async fn add_key_signed_by(
         &mut self,
         signer: &Identity,
-        target_uuid: &tiamot_core::PlayerUuid,
+        target_uuid: &tiamat_core::PlayerUuid,
         new_key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), BotError> {
-        let payload = tiamot_core::identity::keyset::add_key_payload(target_uuid, new_key, None);
+        let payload = tiamat_core::identity::keyset::add_key_payload(target_uuid, new_key, None);
         self.send(&ClientMessage::AddKey {
             new_public_key: *new_key.as_bytes(),
             next_key_hash: None,
@@ -1072,7 +1072,7 @@ impl Bot {
         new_next_key_hash: Option<[u8; 32]>,
     ) -> Result<(), BotError> {
         let uuid = self.identity.uuid_as_root();
-        let payload = tiamot_core::identity::keyset::rotate_key_payload(
+        let payload = tiamat_core::identity::keyset::rotate_key_payload(
             &uuid,
             new_key,
             new_next_key_hash.as_ref(),
@@ -1125,7 +1125,7 @@ impl Bot {
     /// none — which is a world nobody can dig in, and correct rather than
     /// broken (charter rule 1).
     #[must_use]
-    pub fn tools(&self) -> Vec<tiamot_core::proto::ToolDef> {
+    pub fn tools(&self) -> Vec<tiamat_core::proto::ToolDef> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -1172,15 +1172,15 @@ impl Bot {
     ///
     /// [`BotError::Unexpected`] if no whole-block tool is registered, or if the
     /// block never breaks.
-    pub async fn dig_block(&mut self, pos: tiamot_core::BlockPos) -> Result<(), BotError> {
-        self.hold_brush(tiamot_core::dig::Brush::Block.name())
+    pub async fn dig_block(&mut self, pos: tiamat_core::BlockPos) -> Result<(), BotError> {
+        self.hold_brush(tiamat_core::dig::Brush::Block.name())
             .await?;
         // **Finished means every sub-node has gone, not one `Edit::Block`.**
         // A block comes apart a cell at a time now, so digging never emits a
         // whole-block edit at all — this used to wait for one and timed out on
         // a block that had visibly finished breaking.
         self.dig_until_gone(
-            tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1),
+            tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1),
             |bot| bot.block_is_empty(pos),
         )
         .await
@@ -1192,8 +1192,8 @@ impl Bot {
     /// Counts the distinct `SubNode` edits it has seen, and still honours a
     /// whole-block edit — a mod's `set_block` can still send one.
     #[must_use]
-    pub fn block_is_empty(&self, pos: tiamot_core::BlockPos) -> bool {
-        self.cells_broken(pos) >= tiamot_core::block::SUBNODES_PER_BLOCK
+    pub fn block_is_empty(&self, pos: tiamat_core::BlockPos) -> bool {
+        self.cells_broken(pos) >= tiamat_core::block::SUBNODES_PER_BLOCK
     }
 
     /// How many of a block's cells this bot has been told are gone.
@@ -1203,28 +1203,28 @@ impl Bot {
     /// finished: nothing at all having broken says the target was never solid,
     /// and a partial count says the dig is merely slow.
     #[must_use]
-    pub fn cells_broken(&self, pos: tiamot_core::BlockPos) -> usize {
+    pub fn cells_broken(&self, pos: tiamat_core::BlockPos) -> usize {
         let mut gone = std::collections::BTreeSet::new();
         for message in self.received() {
             let ServerMessage::BlockDelta { edit, .. } = message else {
                 continue;
             };
             match edit {
-                tiamot_core::proto::Edit::Block {
+                tiamat_core::proto::Edit::Block {
                     pos: got,
                     material: got_material,
                 } if got == pos => {
-                    if got_material == tiamot_core::MaterialId::AIR.0 {
-                        return tiamot_core::block::SUBNODES_PER_BLOCK;
+                    if got_material == tiamat_core::MaterialId::AIR.0 {
+                        return tiamat_core::block::SUBNODES_PER_BLOCK;
                     }
                     // Filled back in. Anything counted before it is stale.
                     gone.clear();
                 }
-                tiamot_core::proto::Edit::SubNode {
+                tiamat_core::proto::Edit::SubNode {
                     pos: got,
                     material: got_material,
                 } if got.block() == pos => {
-                    if got_material == tiamot_core::MaterialId::AIR.0 {
+                    if got_material == tiamat_core::MaterialId::AIR.0 {
                         gone.insert((got.x, got.y, got.z));
                     } else {
                         gone.remove(&(got.x, got.y, got.z));
@@ -1254,7 +1254,7 @@ impl Bot {
     /// Aims at a cell until `done`, re-sending the dig each round.
     async fn dig_until_gone(
         &mut self,
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         done: impl Fn(&Self) -> bool,
     ) -> Result<(), BotError> {
         /// Long enough for the slowest tool the reference mods register, with
@@ -1307,7 +1307,7 @@ impl Bot {
                     got: format!(
                         "{target:?} was still there after {PATIENCE:?}; {broken} of {} cells \
                          had broken: {diagnosis}",
-                        tiamot_core::block::SUBNODES_PER_BLOCK
+                        tiamat_core::block::SUBNODES_PER_BLOCK
                     ),
                 });
             }
@@ -1452,7 +1452,7 @@ impl Bot {
     /// # Errors
     ///
     /// [`BotError::Frame`] if the write fails.
-    pub async fn start_dig(&mut self, target: tiamot_core::SubNodePos) -> Result<(), BotError> {
+    pub async fn start_dig(&mut self, target: tiamat_core::SubNodePos) -> Result<(), BotError> {
         self.send(&ClientMessage::StartDig { target }).await
     }
 
@@ -1485,17 +1485,17 @@ impl Bot {
     /// # Errors
     ///
     /// [`BotError::Frame`] if the write fails.
-    pub async fn dig_subnode(&mut self, pos: tiamot_core::SubNodePos) -> Result<(), BotError> {
-        self.hold_brush(tiamot_core::dig::Brush::SubNode.name())
+    pub async fn dig_subnode(&mut self, pos: tiamat_core::SubNodePos) -> Result<(), BotError> {
+        self.hold_brush(tiamat_core::dig::Brush::SubNode.name())
             .await?;
         self.dig_until_gone(pos, move |bot| {
             bot.received().iter().any(|message| {
                 matches!(
                     message,
                     ServerMessage::BlockDelta {
-                        edit: tiamot_core::proto::Edit::SubNode { pos: at, material },
+                        edit: tiamat_core::proto::Edit::SubNode { pos: at, material },
                         ..
-                    } if *at == pos && *material == tiamot_core::MaterialId::AIR.0
+                    } if *at == pos && *material == tiamat_core::MaterialId::AIR.0
                 )
             })
         })
@@ -1521,13 +1521,13 @@ impl Bot {
     /// cell never fills. Read [`Bot::notices`] for the server's reason.
     pub async fn place_subnode(
         &mut self,
-        pos: tiamot_core::SubNodePos,
+        pos: tiamat_core::SubNodePos,
         material: u16,
     ) -> Result<(), BotError> {
         /// Long enough to cover a tick and the broadcast back.
         const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
-        self.hold_brush(tiamot_core::dig::Brush::SubNode.name())
+        self.hold_brush(tiamat_core::dig::Brush::SubNode.name())
             .await?;
         self.place_from_inventory(pos, material).await?;
 
@@ -1558,7 +1558,7 @@ impl Bot {
     /// wire format — and so a payload that will not decode fails the test that
     /// cares rather than being silently treated as darkness.
     #[must_use]
-    pub fn light_at(&self, pos: tiamot_core::BlockPos) -> Option<tiamot_core::light::Light> {
+    pub fn light_at(&self, pos: tiamat_core::BlockPos) -> Option<tiamat_core::light::Light> {
         let chunk = pos.chunk();
         // The LAST one wins: light is re-sent whenever it changes, and an
         // earlier payload describes a world that has moved on.
@@ -1567,7 +1567,7 @@ impl Bot {
             .rev()
             .find_map(|message| match message {
                 ServerMessage::ChunkLight { pos: at, light } if *at == chunk => {
-                    tiamot_core::light::codec::decode(light).ok()
+                    tiamat_core::light::codec::decode(light).ok()
                 }
                 _ => None,
             })
@@ -1585,8 +1585,8 @@ impl Bot {
     /// go on the unreliable channel and spawns do not, so an unmatched delta is
     /// a stale packet about something already despawned, not a discovery.
     #[must_use]
-    pub fn entities(&self) -> std::collections::BTreeMap<u64, tiamot_core::proto::EntityDef> {
-        let mut live: std::collections::BTreeMap<u64, tiamot_core::proto::EntityDef> =
+    pub fn entities(&self) -> std::collections::BTreeMap<u64, tiamat_core::proto::EntityDef> {
+        let mut live: std::collections::BTreeMap<u64, tiamat_core::proto::EntityDef> =
             std::collections::BTreeMap::new();
         for message in self.received().iter() {
             match message {
@@ -1637,9 +1637,9 @@ impl Bot {
     /// [`BotError::Unexpected`] if the timeout expires with nothing matching.
     pub async fn expect_entity(
         &mut self,
-        matches: impl Fn(&tiamot_core::proto::EntityDef) -> bool,
+        matches: impl Fn(&tiamat_core::proto::EntityDef) -> bool,
         timeout: std::time::Duration,
-    ) -> Result<tiamot_core::proto::EntityDef, BotError> {
+    ) -> Result<tiamat_core::proto::EntityDef, BotError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Some(found) = self.entities().into_values().find(|entity| matches(entity)) {
@@ -1674,14 +1674,14 @@ impl Bot {
     #[must_use]
     pub fn fluid_layer(
         &self,
-        pos: tiamot_core::ChunkPos,
-    ) -> Option<tiamot_core::fluid::FluidLayer> {
+        pos: tiamat_core::ChunkPos,
+    ) -> Option<tiamat_core::fluid::FluidLayer> {
         self.received()
             .iter()
             .rev()
             .find_map(|message| match message {
                 ServerMessage::ChunkFluid { pos: at, fluid } if *at == pos => {
-                    tiamot_core::fluid::codec::decode(fluid).ok()
+                    tiamat_core::fluid::codec::decode(fluid).ok()
                 }
                 _ => None,
             })
@@ -1689,9 +1689,9 @@ impl Bot {
 
     /// What the server has most recently reported at one block.
     #[must_use]
-    pub fn fluid_at(&self, pos: tiamot_core::BlockPos) -> tiamot_core::fluid::Fluid {
+    pub fn fluid_at(&self, pos: tiamat_core::BlockPos) -> tiamat_core::fluid::Fluid {
         self.fluid_layer(pos.chunk())
-            .map_or(tiamot_core::fluid::Fluid::EMPTY, |layer| {
+            .map_or(tiamat_core::fluid::Fluid::EMPTY, |layer| {
                 layer.get(pos.local())
             })
     }
@@ -1703,10 +1703,10 @@ impl Bot {
     /// [`BotError::Unexpected`] if the timeout expires first.
     pub async fn expect_light(
         &mut self,
-        pos: tiamot_core::BlockPos,
-        wanted: impl Fn(tiamot_core::light::Light) -> bool,
+        pos: tiamat_core::BlockPos,
+        wanted: impl Fn(tiamat_core::light::Light) -> bool,
         timeout: std::time::Duration,
-    ) -> Result<tiamot_core::light::Light, BotError> {
+    ) -> Result<tiamat_core::light::Light, BotError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Some(level) = self.light_at(pos)
@@ -1731,7 +1731,7 @@ impl Bot {
 
     /// Whether a cell edit setting `pos` to `material` has been broadcast.
     #[must_use]
-    pub fn saw_subnode(&self, pos: tiamot_core::SubNodePos, material: u16) -> bool {
+    pub fn saw_subnode(&self, pos: tiamat_core::SubNodePos, material: u16) -> bool {
         // **A SUB-NODE edit at that cell, which is what the name asks.** It is
         // deliberately not "is that cell now this material": the edit that
         // seeded a block also made every cell of it solid, so a broader
@@ -1742,7 +1742,7 @@ impl Bot {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
-                    edit: tiamot_core::proto::Edit::SubNode { pos: at, material: got },
+                    edit: tiamat_core::proto::Edit::SubNode { pos: at, material: got },
                     ..
                 } if *at == pos && *got == material
             )
@@ -1761,7 +1761,7 @@ impl Bot {
     /// every reason the server may refuse. Read [`Bot::notices`] for which one.
     pub async fn place(
         &mut self,
-        pos: tiamot_core::BlockPos,
+        pos: tiamat_core::BlockPos,
         material: u16,
     ) -> Result<(), BotError> {
         /// Re-sent while waiting, because a request can go missing and a
@@ -1781,13 +1781,13 @@ impl Bot {
         if self
             .tools()
             .iter()
-            .any(|tool| tool.brush == tiamot_core::dig::Brush::Block.name())
+            .any(|tool| tool.brush == tiamat_core::dig::Brush::Block.name())
         {
-            self.hold_brush(tiamot_core::dig::Brush::Block.name())
+            self.hold_brush(tiamat_core::dig::Brush::Block.name())
                 .await?;
         }
 
-        let target = tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+        let target = tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
         let deadline = tokio::time::Instant::now() + PATIENCE;
         loop {
             self.place_from_inventory(target, material).await?;
@@ -1828,7 +1828,7 @@ impl Bot {
     /// arriving.
     pub async fn expect_block(
         &mut self,
-        pos: tiamot_core::BlockPos,
+        pos: tiamat_core::BlockPos,
         material: u16,
         timeout: std::time::Duration,
     ) -> Result<(), BotError> {
@@ -1908,7 +1908,7 @@ impl Bot {
 
     /// The sounds a server's mods registered.
     #[must_use]
-    pub fn sound_table(&self) -> Option<Vec<tiamot_core::proto::SoundDef>> {
+    pub fn sound_table(&self) -> Option<Vec<tiamat_core::proto::SoundDef>> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -1919,7 +1919,7 @@ impl Bot {
 
     /// The pictures a server's mods registered.
     #[must_use]
-    pub fn picture_table(&self) -> Option<Vec<tiamot_core::proto::PictureDef>> {
+    pub fn picture_table(&self) -> Option<Vec<tiamat_core::proto::PictureDef>> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -1930,7 +1930,7 @@ impl Bot {
 
     /// The fonts a server's mods registered.
     #[must_use]
-    pub fn font_table(&self) -> Option<Vec<tiamot_core::proto::FontDef>> {
+    pub fn font_table(&self) -> Option<Vec<tiamat_core::proto::FontDef>> {
         self.received()
             .into_iter()
             .find_map(|message| match message {
@@ -1941,7 +1941,7 @@ impl Bot {
 
     /// Every dialog the server has opened or replaced, in arrival order.
     #[must_use]
-    pub fn dialogs(&self) -> Vec<(String, tiamot_core::ui::Tree)> {
+    pub fn dialogs(&self) -> Vec<(String, tiamat_core::ui::Tree)> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -1971,7 +1971,7 @@ impl Bot {
     #[must_use]
     pub fn views(
         &self,
-    ) -> std::collections::BTreeMap<String, Vec<Option<tiamot_core::proto::StackDef>>> {
+    ) -> std::collections::BTreeMap<String, Vec<Option<tiamat_core::proto::StackDef>>> {
         let mut latest = std::collections::BTreeMap::new();
         for message in self.received() {
             if let ServerMessage::ViewUpdate { view, slots, .. } = message {
@@ -1986,7 +1986,7 @@ impl Bot {
     /// A convenience over [`Bot::views`], because a test asking about one view
     /// asks about one view.
     #[must_use]
-    pub fn view(&self, name: &str) -> Option<Vec<Option<tiamot_core::proto::StackDef>>> {
+    pub fn view(&self, name: &str) -> Option<Vec<Option<tiamat_core::proto::StackDef>>> {
         self.views().remove(name)
     }
 
@@ -1997,13 +1997,13 @@ impl Bot {
     ///
     /// [`BotError`] if the connection has gone.
     pub async fn select_slot(&mut self, slot: u16) -> Result<(), BotError> {
-        self.send(&tiamot_core::proto::ClientMessage::SelectSlot { slot })
+        self.send(&tiamat_core::proto::ClientMessage::SelectSlot { slot })
             .await
     }
 
     /// What the server last said is on this player's cursor.
     #[must_use]
-    pub fn held(&self) -> Option<tiamot_core::proto::StackDef> {
+    pub fn held(&self) -> Option<tiamat_core::proto::StackDef> {
         self.received()
             .into_iter()
             .filter_map(|message| match message {
@@ -2022,8 +2022,8 @@ impl Bot {
     pub async fn until_view(
         &mut self,
         view: &str,
-        want: impl Fn(&[Option<tiamot_core::proto::StackDef>]) -> bool,
-    ) -> Result<Vec<Option<tiamot_core::proto::StackDef>>, BotError> {
+        want: impl Fn(&[Option<tiamat_core::proto::StackDef>]) -> bool,
+    ) -> Result<Vec<Option<tiamat_core::proto::StackDef>>, BotError> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if let Some(slots) = self.views().get(view)
@@ -2049,9 +2049,9 @@ impl Bot {
     pub async fn dialog_event(
         &mut self,
         form: &str,
-        event: tiamot_core::proto::DialogEvent,
+        event: tiamat_core::proto::DialogEvent,
     ) -> Result<(), BotError> {
-        self.send(&tiamot_core::proto::ClientMessage::DialogEvent {
+        self.send(&tiamat_core::proto::ClientMessage::DialogEvent {
             form: form.to_owned(),
             event,
         })
@@ -2059,7 +2059,7 @@ impl Bot {
     }
 
     pub async fn action(&mut self, id: &str, pressed: bool) -> Result<(), BotError> {
-        self.send(&tiamot_core::proto::ClientMessage::Action {
+        self.send(&tiamat_core::proto::ClientMessage::Action {
             id: id.to_owned(),
             pressed,
         })
@@ -2075,14 +2075,14 @@ impl Bot {
     /// # Errors
     ///
     /// [`BotError::Frame`] if the write fails.
-    pub async fn use_block(&mut self, target: tiamot_core::SubNodePos) -> Result<(), BotError> {
-        self.send(&tiamot_core::proto::ClientMessage::Use { target })
+    pub async fn use_block(&mut self, target: tiamat_core::SubNodePos) -> Result<(), BotError> {
+        self.send(&tiamat_core::proto::ClientMessage::Use { target })
             .await
     }
 
     pub async fn place_from_inventory(
         &mut self,
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         material: u16,
     ) -> Result<(), BotError> {
         self.place_shape_from_inventory(target, material, 0).await
@@ -2100,7 +2100,7 @@ impl Bot {
     /// [`BotError::Frame`] if the write fails.
     pub async fn place_shape_from_inventory(
         &mut self,
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         material: u16,
         shape: u32,
     ) -> Result<(), BotError> {
@@ -2122,12 +2122,12 @@ impl Bot {
     /// [`BotError::Frame`] if the write fails.
     pub async fn place_shape_against(
         &mut self,
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         material: u16,
         shape: u32,
         face: [i8; 3],
     ) -> Result<(), BotError> {
-        self.send(&tiamot_core::proto::ClientMessage::Place {
+        self.send(&tiamat_core::proto::ClientMessage::Place {
             target,
             material,
             shape,
@@ -2150,7 +2150,7 @@ impl Bot {
     /// [`BotError::Unexpected`] if the timeout expires first.
     pub async fn expect_partial(
         &mut self,
-        pos: tiamot_core::BlockPos,
+        pos: tiamat_core::BlockPos,
         material: u16,
         cells: u32,
         timeout: std::time::Duration,
@@ -2187,12 +2187,12 @@ impl Bot {
     ///
     /// Unlike [`Bot::saw_partial`] this does not care how many cells were
     /// filled — for a caller that only needs to know the placement happened.
-    fn saw_any_partial(&self, pos: tiamot_core::BlockPos, material: u16) -> bool {
+    fn saw_any_partial(&self, pos: tiamat_core::BlockPos, material: u16) -> bool {
         self.received().iter().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
-                    edit: tiamot_core::proto::Edit::Partial {
+                    edit: tiamat_core::proto::Edit::Partial {
                         pos: got,
                         material: got_material,
                         ..
@@ -2204,12 +2204,12 @@ impl Bot {
     }
 
     /// Whether a matching partial placement has been seen.
-    fn saw_partial(&self, pos: tiamot_core::BlockPos, material: u16, cells: u32) -> bool {
+    fn saw_partial(&self, pos: tiamat_core::BlockPos, material: u16, cells: u32) -> bool {
         self.received().iter().rev().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
-                    edit: tiamot_core::proto::Edit::Partial {
+                    edit: tiamat_core::proto::Edit::Partial {
                         pos: got,
                         material: got_material,
                         occupancy,
@@ -2246,19 +2246,19 @@ impl Bot {
     /// because waiting for something that should never happen has no deadline
     /// that means anything.
     #[must_use]
-    pub fn saw_block(&self, pos: tiamot_core::BlockPos, material: u16) -> bool {
+    pub fn saw_block(&self, pos: tiamat_core::BlockPos, material: u16) -> bool {
         // **Air arrives two ways now.** A dig takes a block apart one sub-node
         // at a time and never sends a whole-block edit, so "is it air yet" has
         // to count the pieces — while "is it stone yet" is still one edit,
         // because nothing builds a block up a cell at a time.
-        if material == tiamot_core::MaterialId::AIR.0 && self.block_is_empty(pos) {
+        if material == tiamat_core::MaterialId::AIR.0 && self.block_is_empty(pos) {
             return true;
         }
         self.received().iter().rev().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
-                    edit: tiamot_core::proto::Edit::Block { pos: got, material: got_material },
+                    edit: tiamat_core::proto::Edit::Block { pos: got, material: got_material },
                     ..
                 } if *got == pos && *got_material == material
             )
@@ -2268,10 +2268,10 @@ impl Bot {
     /// The most recent inventory the server sent, in units.
     ///
     /// Empty until the server has sent one. Charter rule 5: these are **units**,
-    /// so 27 is one block — use [`tiamot_core::inventory::display`] to split
+    /// so 27 is one block — use [`tiamat_core::inventory::display`] to split
     /// them into blocks and spare nodes.
     #[must_use]
-    pub fn inventory(&self) -> Vec<tiamot_core::proto::StackDef> {
+    pub fn inventory(&self) -> Vec<tiamat_core::proto::StackDef> {
         self.received()
             .iter()
             .rev()
@@ -2290,7 +2290,7 @@ impl Bot {
     pub async fn await_inventory(
         &mut self,
         timeout: std::time::Duration,
-    ) -> Result<Vec<tiamot_core::proto::StackDef>, BotError> {
+    ) -> Result<Vec<tiamat_core::proto::StackDef>, BotError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -2370,7 +2370,7 @@ impl Bot {
                 moved < 0.1
             }) {
                 stalled += 1;
-                tiamot_core::proto::actions::JUMP
+                tiamat_core::proto::actions::JUMP
             } else {
                 stalled = 0;
                 0
@@ -2391,7 +2391,7 @@ impl Bot {
 
     /// Waits roughly `ticks` server ticks.
     pub async fn sleep_ticks(&mut self, ticks: u32) {
-        tokio::time::sleep(tiamot_core::tick::TICK_DURATION * ticks).await;
+        tokio::time::sleep(tiamat_core::tick::TICK_DURATION * ticks).await;
     }
 
     /// Closes the connection cleanly.
@@ -2525,7 +2525,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedFingerprint {
         _ocsp: &[u8],
         _now: rustls_pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let actual = tiamot_server::cert::fingerprint_of(end_entity);
+        let actual = tiamat_server::cert::fingerprint_of(end_entity);
         // Constant-time comparison is not required — the expected value is
         // public, and an attacker learning it by timing has learned nothing
         // they could not read from the server's own logs.

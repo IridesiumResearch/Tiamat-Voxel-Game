@@ -19,14 +19,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 1] = ["test:stone"];
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-domains").join(name);
+    let dir = std::env::temp_dir().join("tiamat-domains").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -145,7 +145,7 @@ fn switched_to(bot: &Bot) -> Option<String> {
         .into_iter()
         .rev()
         .find_map(|message| match message {
-            tiamot_core::proto::ServerMessage::DomainChanged { domain } => Some(domain),
+            tiamat_core::proto::ServerMessage::DomainChanged { domain } => Some(domain),
             _ => None,
         })
 }
@@ -154,7 +154,7 @@ fn switched_to(bot: &Bot) -> Option<String> {
 fn chunks_seen(bot: &Bot) -> usize {
     bot.received()
         .into_iter()
-        .filter(|message| matches!(message, tiamot_core::proto::ServerMessage::ChunkData { .. }))
+        .filter(|message| matches!(message, tiamat_core::proto::ServerMessage::ChunkData { .. }))
         .count()
 }
 
@@ -162,13 +162,13 @@ fn chunks_seen(bot: &Bot) -> usize {
 ///
 /// Sampled over the chunk rather than asked of a summary: a chunk is a palette
 /// and a bit array, and "is it empty" is a question about what the blocks say.
-fn holds_anything(chunk: &tiamot_core::Chunk, at: tiamot_core::ChunkPos) -> bool {
-    let corner = tiamot_core::BlockPos::from_chunk_corner(at);
+fn holds_anything(chunk: &tiamat_core::Chunk, at: tiamat_core::ChunkPos) -> bool {
+    let corner = tiamat_core::BlockPos::from_chunk_corner(at);
     (0..16).any(|x| {
         (0..16).any(|y| {
             (0..16).any(|z| {
                 chunk
-                    .get_block(tiamot_core::BlockPos::new(
+                    .get_block(tiamat_core::BlockPos::new(
                         corner.x + x,
                         corner.y + y,
                         corner.z + z,
@@ -186,7 +186,7 @@ fn lit_chunks(bot: &Bot) -> usize {
         .filter(|message| {
             matches!(
                 message,
-                tiamot_core::proto::ServerMessage::ChunkLight { .. }
+                tiamat_core::proto::ServerMessage::ChunkLight { .. }
             )
         })
         .count()
@@ -197,7 +197,7 @@ fn saw_a_spawn(bot: &Bot) -> bool {
     bot.received().into_iter().any(|message| {
         matches!(
             message,
-            tiamot_core::proto::ServerMessage::EntitySpawn { .. }
+            tiamat_core::proto::ServerMessage::EntitySpawn { .. }
         )
     })
 }
@@ -274,8 +274,8 @@ fn a_block_can_be_placed_in_a_domain_where_the_overworld_is_solid() {
 
         // Beside the player, in open air well above the cellar's floor and
         // well below the overworld's surface.
-        let at = tiamot_core::BlockPos::new(10, -8, 8);
-        let cell = tiamot_core::SubNodePos::new(at.x * 3 + 1, at.y * 3 + 1, at.z * 3 + 1);
+        let at = tiamat_core::BlockPos::new(10, -8, 8);
+        let cell = tiamat_core::SubNodePos::new(at.x * 3 + 1, at.y * 3 + 1, at.z * 3 + 1);
         bot.place_from_inventory(cell, ground).await.expect("send");
 
         if bot
@@ -434,7 +434,7 @@ fn a_player_in_another_domain_is_told_nothing_of_the_one_they_left() {
         let before = traveller.received().len();
 
         let here = digger.settle().await.expect("settle").block();
-        let target = tiamot_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
+        let target = tiamat_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
         digger.dig_block(target).await.expect("dig");
         settle_for(&mut traveller, 60).await;
 
@@ -445,7 +445,7 @@ fn a_player_in_another_domain_is_told_nothing_of_the_one_they_left() {
             .filter(|message| {
                 matches!(
                     message,
-                    tiamot_core::proto::ServerMessage::BlockDelta { .. }
+                    tiamat_core::proto::ServerMessage::BlockDelta { .. }
                 )
             })
             .collect();
@@ -574,8 +574,8 @@ fn a_player_who_moves_stops_seeing_the_bodies_they_left_behind() {
             .filter(|message| {
                 matches!(
                     message,
-                    tiamot_core::proto::ServerMessage::EntitySpawn { .. }
-                        | tiamot_core::proto::ServerMessage::EntityState { .. }
+                    tiamat_core::proto::ServerMessage::EntitySpawn { .. }
+                        | tiamat_core::proto::ServerMessage::EntityState { .. }
                 )
             })
             .collect();
@@ -629,7 +629,7 @@ fn an_edit_in_another_domain_survives_a_restart_and_the_overworld_is_untouched()
         settle_for(&mut bot, 40).await;
 
         let here = bot.settle().await.expect("settle").block();
-        let block = tiamot_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
+        let block = tiamat_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
         bot.dig_block(block).await.expect("dig in the attic");
         *target.lock().expect("lock") = Some(block);
 
@@ -644,9 +644,9 @@ fn an_edit_in_another_domain_survives_a_restart_and_the_overworld_is_untouched()
     // **Asked of the world file, not of a client's memory.** A second session
     // has been told nothing about what happened in the first, so a delta-based
     // check would pass on a world where nothing was written at all.
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen the world");
@@ -724,9 +724,9 @@ fn a_mob_spawned_in_another_domain_comes_back_after_a_restart() {
 
     // Asked of the world file: a mob in the attic must be written under the
     // ATTIC's key and not the overworld's, and there must be one.
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen the world");
@@ -735,7 +735,7 @@ fn a_mob_spawned_in_another_domain_comes_back_after_a_restart() {
     // would satisfy a check on `stored_domains`, and the chunks are written
     // because the player stood there — which would make this pass with the mob
     // still in the overworld or nowhere at all.
-    let home = tiamot_core::ChunkPos::new(0, 0, 0);
+    let home = tiamat_core::ChunkPos::new(0, 0, 0);
     let in_the_attic = db
         .load_chunk_entities_in("places:attic", home)
         .expect("read the attic's entities");
@@ -821,9 +821,9 @@ fn a_domain_nobody_visits_costs_nothing_and_a_sparse_one_never_holds_voxels() {
     });
     assert!(server.stop(), "the world should close cleanly");
 
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen the world");
@@ -938,9 +938,9 @@ fn a_sparse_domain_takes_a_body_and_never_stores_a_voxel() {
     });
     assert!(server.stop(), "the world should close cleanly");
 
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen the world");
@@ -992,9 +992,9 @@ fn a_domain_whose_mod_was_removed_keeps_its_contents_and_gives_them_back() {
     assert!(first.stop(), "the world should close cleanly");
 
     let stored_before = {
-        let mut registry = tiamot_core::Registry::new();
-        let db = tiamot_core::persist::WorldDb::open(
-            world.join(tiamot_server::handle::WORLD_FILE),
+        let mut registry = tiamat_core::Registry::new();
+        let db = tiamat_core::persist::WorldDb::open(
+            world.join(tiamat_server::handle::WORLD_FILE),
             &mut registry,
         )
         .expect("reopen");
@@ -1033,9 +1033,9 @@ fn a_domain_whose_mod_was_removed_keeps_its_contents_and_gives_them_back() {
     );
 
     let stored_after = {
-        let mut registry = tiamot_core::Registry::new();
-        let db = tiamot_core::persist::WorldDb::open(
-            world.join(tiamot_server::handle::WORLD_FILE),
+        let mut registry = tiamat_core::Registry::new();
+        let db = tiamat_core::persist::WorldDb::open(
+            world.join(tiamat_server::handle::WORLD_FILE),
             &mut registry,
         )
         .expect("a world with an unregistered domain must still open");
@@ -1130,9 +1130,9 @@ fn a_ship_with_somebody_in_it_is_not_scuttled() {
     });
     assert!(server.stop(), "the world should close cleanly");
 
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen");
@@ -1174,7 +1174,7 @@ fn what_a_player_carries_and_who_they_are_survive_the_move() {
         // Dig something, so there is something to carry. Non-vacuous by
         // construction: an empty inventory survives every possible bug.
         let here = bot.settle().await.expect("settle").block();
-        let block = tiamot_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
+        let block = tiamat_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
         bot.dig_block(block).await.expect("dig");
         let carried: u32 = bot
             .await_inventory(Duration::from_secs(5))
@@ -1246,7 +1246,7 @@ fn a_ship_keeps_what_was_built_in_it_across_a_restart() {
         settle_for(&mut bot, 40).await;
 
         let here = bot.settle().await.expect("settle").block();
-        let block = tiamot_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
+        let block = tiamat_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
         bot.dig_block(block).await.expect("dig aboard");
         *target.lock().expect("lock") = Some(block);
         bot.disconnect().await;
@@ -1254,9 +1254,9 @@ fn a_ship_keeps_what_was_built_in_it_across_a_restart() {
     assert!(server.stop(), "the world should close cleanly");
 
     let block = dug.lock().expect("lock").expect("a block was dug");
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen");
@@ -1335,9 +1335,9 @@ fn a_domain_is_filled_by_its_own_generator_and_not_by_the_overworlds() {
     });
     assert!(server.stop(), "the world should close cleanly");
 
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen");
@@ -1345,29 +1345,29 @@ fn a_domain_is_filled_by_its_own_generator_and_not_by_the_overworlds() {
     // The overworld is full, which is what says the fixture's generator ran at
     // all — without this, "the attic is empty" is also true of a broken world.
     let ground = db
-        .load_chunk(tiamot_core::ChunkPos::new(0, -1, 0))
+        .load_chunk(tiamat_core::ChunkPos::new(0, -1, 0))
         .expect("read")
         .expect("the overworld under the player was written");
     assert!(
-        holds_anything(&ground, tiamot_core::ChunkPos::new(0, -1, 0)),
+        holds_anything(&ground, tiamat_core::ChunkPos::new(0, -1, 0)),
         "the overworld generated nothing, so this cannot tell an empty domain \
          from an empty world"
     );
 
     let void = db
-        .load_chunk_in("places:void", tiamot_core::ChunkPos::new(0, -1, 0))
+        .load_chunk_in("places:void", tiamat_core::ChunkPos::new(0, -1, 0))
         .expect("read");
     assert!(
-        void.is_none_or(|chunk| !holds_anything(&chunk, tiamot_core::ChunkPos::new(0, -1, 0))),
+        void.is_none_or(|chunk| !holds_anything(&chunk, tiamat_core::ChunkPos::new(0, -1, 0))),
         "a domain that named no generator was filled by the overworld's"
     );
 
     let loft = db
-        .load_chunk_in("places:loft", tiamot_core::ChunkPos::new(0, -1, 0))
+        .load_chunk_in("places:loft", tiamat_core::ChunkPos::new(0, -1, 0))
         .expect("read")
         .expect("a domain with its own generator was written");
     assert!(
-        holds_anything(&loft, tiamot_core::ChunkPos::new(0, -1, 0)),
+        holds_anything(&loft, tiamat_core::ChunkPos::new(0, -1, 0)),
         "a domain's own generator did not fill it"
     );
 }
@@ -1422,7 +1422,7 @@ fn a_second_domain_is_lit_by_its_own_sky() {
                 .filter(|message| {
                     matches!(
                         message,
-                        tiamot_core::proto::ServerMessage::ChunkLight { .. }
+                        tiamat_core::proto::ServerMessage::ChunkLight { .. }
                     )
                 })
                 .count();
@@ -1474,14 +1474,14 @@ fn a_mod_writes_the_space_it_names() {
     });
     assert!(server.stop(), "the world should close cleanly");
 
-    let mut registry = tiamot_core::Registry::new();
-    let db = tiamot_core::persist::WorldDb::open(
-        world.join(tiamot_server::handle::WORLD_FILE),
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
         &mut registry,
     )
     .expect("reopen");
 
-    let at = tiamot_core::ChunkPos::new(0, -1, 0);
+    let at = tiamat_core::ChunkPos::new(0, -1, 0);
     let void = db
         .load_chunk_in("places:void", at)
         .expect("read")

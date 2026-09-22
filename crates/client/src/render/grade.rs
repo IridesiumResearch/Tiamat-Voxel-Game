@@ -5,7 +5,7 @@
 //!
 //! # What a mod says, and what happens to it
 //!
-//! A sky keyframe carries a [`SkyGrade`](tiamot_core::proto::SkyGrade): exposure,
+//! A sky keyframe carries a [`SkyGrade`](tiamat_core::proto::SkyGrade): exposure,
 //! tint, offset, contrast, saturation, gamma. The client interpolates those six
 //! between keyframes (`crate::sky`), bakes the result into a small 3D texture
 //! here, and the composite pass looks every finished pixel up in it. Exposure is
@@ -43,7 +43,7 @@
 //! Task 08's screenshot hashes are asserted on exact values. So the composite
 //! carries a flag and grades nothing when the grade is [`SkyGrade::NONE`].
 
-use tiamot_core::proto::SkyGrade;
+use tiamat_core::proto::SkyGrade;
 
 /// Samples per axis in the table.
 ///
@@ -202,7 +202,7 @@ fn table(grade: &SkyGrade) -> Vec<u8> {
 /// The grade itself: what one display-referred colour becomes.
 ///
 /// The order is fixed and documented on
-/// [`SkyGrade`](tiamot_core::proto::SkyGrade): contrast about [`PIVOT`],
+/// [`SkyGrade`](tiamat_core::proto::SkyGrade): contrast about [`PIVOT`],
 /// saturation towards luma, `tint` then `offset`, and `gamma` last. Exposure is
 /// not here — it applies before the tonemap, upstream of anything this sees.
 #[expect(

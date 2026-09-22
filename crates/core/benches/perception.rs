@@ -32,12 +32,12 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
-use tiamot_core::block::BlockValue;
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::{BlockPos, ChunkPos};
-use tiamot_core::path::{self, Options};
-use tiamot_core::phys::ChunkLookup;
-use tiamot_core::{MaterialId, sight};
+use tiamat_core::block::BlockValue;
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::{BlockPos, ChunkPos};
+use tiamat_core::path::{self, Options};
+use tiamat_core::phys::ChunkLookup;
+use tiamat_core::{MaterialId, sight};
 
 const STONE: MaterialId = MaterialId(2);
 
@@ -57,9 +57,9 @@ impl Field {
                 let below = ChunkPos::new(x, -1, z);
                 let mut solid = Chunk::new(below, MaterialId::AIR);
                 let corner = BlockPos::from_chunk_corner(below);
-                for by in 0..tiamot_core::CHUNK_BLOCKS as i32 {
-                    for bz in 0..tiamot_core::CHUNK_BLOCKS as i32 {
-                        for bx in 0..tiamot_core::CHUNK_BLOCKS as i32 {
+                for by in 0..tiamat_core::CHUNK_BLOCKS as i32 {
+                    for bz in 0..tiamat_core::CHUNK_BLOCKS as i32 {
+                        for bx in 0..tiamat_core::CHUNK_BLOCKS as i32 {
                             solid
                                 .set_block(
                                     BlockPos::new(corner.x + bx, corner.y + by, corner.z + bz),
@@ -79,7 +79,7 @@ impl Field {
 
     /// A wall across the whole slab, two blocks tall, with no way through.
     fn walled(mut self) -> Self {
-        for z in 0..(8 * tiamot_core::CHUNK_BLOCKS as i32) {
+        for z in 0..(8 * tiamat_core::CHUNK_BLOCKS as i32) {
             for y in 0..2 {
                 let block = BlockPos::new(40, y, z);
                 let chunk = block.chunk();

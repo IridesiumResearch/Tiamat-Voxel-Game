@@ -20,8 +20,8 @@
 //! fit and no more — the oldest are not evicted, because a spray that has
 //! already started is what the player is looking at.
 
-use tiamot_core::atmosphere::Precipitation;
-use tiamot_core::particle::Burst;
+use tiamat_core::atmosphere::Precipitation;
+use tiamat_core::particle::Burst;
 
 /// The most particles alive at once.
 ///
@@ -54,7 +54,7 @@ pub struct Particle {
     ///
     /// Carried from the burst — Life ask 15. A hash the client has never
     /// heard of, or one whose bytes have not arrived yet, draws the disc.
-    pub texture: Option<tiamot_core::proto::ContentHash>,
+    pub texture: Option<tiamat_core::proto::ContentHash>,
 }
 
 impl Particle {
@@ -236,7 +236,7 @@ impl Emitter {
             self.shape = precipitation;
         }
         self.elapsed = 0.0;
-        self.duration = tiamot_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
+        self.duration = tiamat_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
     }
 
     /// Particles a second, now.
@@ -259,7 +259,7 @@ impl Emitter {
         // The engine's own floor: `f32::floor` is on the banned list for
         // the crates the determinism rules cover, and one floor is the same
         // everywhere.
-        let owed = tiamot_core::detgen::floor_to_i32(self.carry).max(0);
+        let owed = tiamat_core::detgen::floor_to_i32(self.carry).max(0);
         self.carry -= owed as f32;
         if self.rate() <= 0.0 && self.elapsed >= self.duration {
             // Died away: forget the shape, so a later `None` eases nothing.

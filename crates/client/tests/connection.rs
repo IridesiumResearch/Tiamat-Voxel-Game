@@ -18,18 +18,18 @@ use std::time::{Duration, Instant};
 use client::cache::ContentCache;
 use client::net::{Connection, Event};
 use client::world::ChunkStore;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::MaterialDef;
-use tiamot_core::{BlockPos, MaterialId};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::MaterialDef;
+use tiamat_core::{BlockPos, MaterialId};
+use tiamat_server::{ServerHandle, Settings};
 
 /// Long enough for a cold start under a loaded CI runner, short enough that a
 /// hang is a failure rather than a timeout of the whole suite.
 const PATIENCE: Duration = Duration::from_secs(20);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-client-net").join(name);
+    let dir = std::env::temp_dir().join("tiamat-client-net").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -169,9 +169,9 @@ struct Seen {
     /// Authoritative positions, in the order they arrived.
     states: Vec<client::predict::Authoritative>,
     /// The tool table, which charter rule 1 says only the mods can supply.
-    tools: Vec<tiamot_core::proto::ToolDef>,
-    actions: Vec<tiamot_core::proto::ActionDef>,
-    sounds: Vec<tiamot_core::proto::SoundDef>,
+    tools: Vec<tiamat_core::proto::ToolDef>,
+    actions: Vec<tiamat_core::proto::ActionDef>,
+    sounds: Vec<tiamat_core::proto::SoundDef>,
     heard: u32,
     decoded: u32,
     /// The sky, which charter rule 1 says the same about.
@@ -181,31 +181,31 @@ struct Seen {
     /// The radius the server said it is streaming at.
     view_distance: Option<(u8, u8)>,
     entities: client::entities::Entities,
-    dialogs: std::collections::BTreeMap<String, tiamot_core::ui::Tree>,
+    dialogs: std::collections::BTreeMap<String, tiamat_core::ui::Tree>,
     /// HUD scripts the server pushed, with their source, in arrival order.
     hud_scripts: Vec<(String, String)>,
     /// The tallest reserve any pushed HUD asked for, in virtual pixels.
     hud_reserve: Option<u16>,
     /// The look the server's mods asked the engine's screens to wear.
-    theme: Option<tiamot_core::proto::ThemeDef>,
+    theme: Option<tiamat_core::proto::ThemeDef>,
     /// Pictures whose bytes arrived and decoded, by content hash.
-    pictures: Vec<tiamot_core::proto::ContentHash>,
+    pictures: Vec<tiamat_core::proto::ContentHash>,
     /// The cloud deck the server sent, if the message arrived at all. The
     /// outer option is "was told", the inner is "there is one".
-    cloud_layer: Option<Option<tiamot_core::atmosphere::CloudLayer>>,
+    cloud_layer: Option<Option<tiamat_core::atmosphere::CloudLayer>>,
     /// How much cloud this player was last told they are under.
-    clouds: Option<tiamot_core::atmosphere::Clouds>,
+    clouds: Option<tiamat_core::atmosphere::Clouds>,
     /// Models that arrived and parsed: id, scale, vertices, clips.
     models: Vec<(String, f32, usize, usize)>,
-    hud_values: std::collections::BTreeMap<String, tiamot_core::hud::Values>,
+    hud_values: std::collections::BTreeMap<String, tiamat_core::hud::Values>,
     /// Which sound each named event plays, as the server last said.
-    bindings: Vec<tiamot_core::proto::SoundBinding>,
+    bindings: Vec<tiamat_core::proto::SoundBinding>,
     /// Loops currently running, by id.
     loops: Vec<String>,
     /// Chunks the server sent a horizon for.
-    summaries: Vec<tiamot_core::ChunkPos>,
+    summaries: Vec<tiamat_core::ChunkPos>,
     /// What the server said this player may do.
-    abilities: Option<tiamot_core::phys::Abilities>,
+    abilities: Option<tiamat_core::phys::Abilities>,
     /// Skins a mod's models arrived wearing, as `(model id, one pixel)`.
     skins: Vec<(String, [u8; 4])>,
     /// The cover map, as `(origin, cell, size, first cover, last cover)`.
@@ -811,27 +811,27 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
     // The source arrived, so run it — in the same sandbox the client runs it
     // in, which is headless and is why this can be asserted without a window.
     // What is under test is that the REFERENCE MOD draws a hotbar, not that the
-    // VM works; that has its own tests in `tiamot_core::script::hud_vm`.
+    // VM works; that has its own tests in `tiamat_core::script::hud_vm`.
     let mut vm =
-        tiamot_core::script::HudVm::new(tiamot_core::script::HudLimits::default()).expect("hud vm");
+        tiamat_core::script::HudVm::new(tiamat_core::script::HudLimits::default()).expect("hud vm");
     vm.load(&mod_id, &source)
         .expect("core_ui's HUD script loads");
 
-    let state = tiamot_core::hud::State {
+    let state = tiamat_core::hud::State {
         selected: 1,
         // **A hole in the middle**, because that is what a hotbar has: these
         // are the player's own slots and the third one is empty. A HUD that
         // compacted them would draw the fourth stack under the third key.
         carried: vec![
-            Some(tiamot_core::hud::Carried {
-                material: tiamot_core::MaterialId(3),
+            Some(tiamat_core::hud::Carried {
+                material: tiamat_core::MaterialId(3),
                 name: "core_blocks:white".to_owned(),
                 units: 27,
                 shape: 0,
                 detail: None,
             }),
-            Some(tiamot_core::hud::Carried {
-                material: tiamot_core::MaterialId(4),
+            Some(tiamat_core::hud::Carried {
+                material: tiamat_core::MaterialId(4),
                 name: "core_blocks:black".to_owned(),
                 // Charter rule 5's example: forty units is one block and
                 // thirteen spare nodes, and the HUD must say so.
@@ -840,15 +840,15 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
                 detail: None,
             }),
             None,
-            Some(tiamot_core::hud::Carried {
-                material: tiamot_core::MaterialId(5),
+            Some(tiamat_core::hud::Carried {
+                material: tiamat_core::MaterialId(5),
                 name: "core_blocks:grey".to_owned(),
                 units: 9,
                 shape: 0,
                 detail: None,
             }),
         ],
-        ..tiamot_core::hud::State::default()
+        ..tiamat_core::hud::State::default()
     };
     let faults = vm.draw(&state);
     assert!(faults.is_empty(), "core_ui's HUD faulted: {faults:?}");
@@ -858,13 +858,13 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
             let icons = frame
                 .commands()
                 .iter()
-                .filter(|command| matches!(command, tiamot_core::hud::Command::Icon { .. }))
+                .filter(|command| matches!(command, tiamat_core::hud::Command::Icon { .. }))
                 .count();
             let labels: Vec<String> = frame
                 .commands()
                 .iter()
                 .filter_map(|command| match command {
-                    tiamot_core::hud::Command::Text { text, .. } => Some(text.clone()),
+                    tiamat_core::hud::Command::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 })
                 .collect();
@@ -1012,12 +1012,12 @@ fn a_mods_own_numbers_reach_a_mods_own_hud_script() {
     assert_eq!(mod_id, "gauge");
 
     let mut vm =
-        tiamot_core::script::HudVm::new(tiamot_core::script::HudLimits::default()).expect("hud vm");
+        tiamat_core::script::HudVm::new(tiamat_core::script::HudLimits::default()).expect("hud vm");
     vm.load(&mod_id, &source).expect("the HUD script loads");
 
-    let state = tiamot_core::hud::State {
+    let state = tiamat_core::hud::State {
         values: seen.hud_values.clone(),
-        ..tiamot_core::hud::State::default()
+        ..tiamat_core::hud::State::default()
     };
     assert!(vm.draw(&state).is_empty(), "the script faulted");
 
@@ -1027,7 +1027,7 @@ fn a_mods_own_numbers_reach_a_mods_own_hud_script() {
                 .commands()
                 .iter()
                 .filter_map(|command| match command {
-                    tiamot_core::hud::Command::Text { text, .. } => Some(text.clone()),
+                    tiamat_core::hud::Command::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 })
                 .collect()

@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::{self, ViewDistance};
-use tiamot_core::proto::ServerMessage;
-use tiamot_core::{BlockPos, ChunkPos, MaterialId};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::{self, ViewDistance};
+use tiamat_core::proto::ServerMessage;
+use tiamat_core::{BlockPos, ChunkPos, MaterialId};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 
@@ -25,11 +25,11 @@ const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 /// magic numbers, so the day that scale moves again this says what it means
 /// instead of what it used to equal.
 fn declared() -> [u8; 3] {
-    [0.2, 0.8, 0.4].map(tiamot_core::proto::Tint::quantise)
+    [0.2, 0.8, 0.4].map(tiamat_core::proto::Tint::quantise)
 }
 
 fn world_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-stream-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-stream-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -100,7 +100,7 @@ fn start_without_ground(name: &str, view: ViewDistance) -> ServerHandle {
 }
 
 fn stone_id() -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for (index, name) in MATERIALS.iter().enumerate() {
         let assigned = registry.register(name).expect("register");
@@ -413,10 +413,10 @@ fn a_mods_fog_reaches_the_client_by_both_paths() {
         world_options: Vec::new(),
     })
     .expect("start");
-    let check = |who: &str, fogs: Vec<(ChunkPos, Option<tiamot_core::proto::ChunkFog>)>| {
+    let check = |who: &str, fogs: Vec<(ChunkPos, Option<tiamat_core::proto::ChunkFog>)>| {
         assert!(!fogs.is_empty(), "{who} was sent no chunks");
         for (pos, fog) in fogs {
-            let expected = (pos.x % 2 == 0).then_some(tiamot_core::proto::ChunkFog {
+            let expected = (pos.x % 2 == 0).then_some(tiamat_core::proto::ChunkFog {
                 colour: [51, 102, 51],
                 visibility: 24,
                 top: Some(pos.y * 16 + 5),
@@ -565,11 +565,11 @@ fn a_streamed_chunk_carries_the_edits_made_to_it() {
             .await
             .expect("collect");
 
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         for name in MATERIALS {
             registry.register(name).expect("register");
         }
-        let db = tiamot_core::WorldDb::open_in_memory(&mut registry).expect("id map");
+        let db = tiamat_core::WorldDb::open_in_memory(&mut registry).expect("id map");
 
         let chunk = latecomer
             .decode_chunk(pos.chunk(), db.materials())
@@ -757,12 +757,12 @@ fn a_streamed_chunk_carries_generated_terrain() {
         // missing one of them cannot translate the blob at all, and the error
         // says "could not translate material ids" rather than naming the block
         // that is absent.
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         let white = registry.register("core:white").expect("register");
         for name in ["core:lamp", "core:crumb", "core:pitch", "core:ground"] {
             registry.register(name).expect("register");
         }
-        let db = tiamot_core::WorldDb::open_in_memory(&mut registry).expect("id map");
+        let db = tiamat_core::WorldDb::open_in_memory(&mut registry).expect("id map");
 
         // Below the surface: solid.
         let underground = BlockPos::new(0, -4, 0);
@@ -846,12 +846,12 @@ fn generated_terrain_is_the_same_after_a_restart() {
             .expect("collect");
 
         // As above: every reference block, in registration order.
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         let white = registry.register("core:white").expect("register");
         for name in ["core:lamp", "core:crumb", "core:pitch", "core:ground"] {
             registry.register(name).expect("register");
         }
-        let db = tiamot_core::WorldDb::open_in_memory(&mut registry).expect("id map");
+        let db = tiamat_core::WorldDb::open_in_memory(&mut registry).expect("id map");
 
         let underground = BlockPos::new(0, -4, 0);
         let chunk = bob
@@ -997,7 +997,7 @@ fn a_client_that_talks_constantly_still_receives_its_world() {
         while std::time::Instant::now() < deadline {
             // Faster than the 50 ms beat, which is the whole point.
             alice
-                .send(&tiamot_core::proto::ClientMessage::PlayerInput {
+                .send(&tiamat_core::proto::ClientMessage::PlayerInput {
                     tick,
                     movement: [0.0, 0.0, 0.0],
                     look: [0.0, 0.0],

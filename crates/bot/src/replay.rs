@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use tiamot_core::{BlockPos, SubNodePos};
+use tiamat_core::{BlockPos, SubNodePos};
 
 use crate::client::{Bot, BotError};
 use crate::script::Command;
@@ -202,7 +202,7 @@ pub async fn run(mut bot: Bot, recorded: &[Recorded], name: &str) -> Result<usiz
         // Honour the GAP, not the absolute tick — see the module docs.
         let gap = entry.tick.saturating_sub(previous_tick);
         if gap > 0 {
-            tokio::time::sleep(tiamot_core::tick::TICK_DURATION * u32::try_from(gap).unwrap_or(1))
+            tokio::time::sleep(tiamat_core::tick::TICK_DURATION * u32::try_from(gap).unwrap_or(1))
                 .await;
         }
         previous_tick = entry.tick;

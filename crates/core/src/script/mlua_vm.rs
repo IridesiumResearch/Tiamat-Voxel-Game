@@ -46,13 +46,13 @@ use crate::script::vm::{
 
 /// Registry key holding the mods that registered `on_dig_complete`.
 ///
-/// A list of mod ids in load order, exactly like `tiamot.tickers`; the callback
+/// A list of mod ids in load order, exactly like `tiamat.tickers`; the callback
 /// itself lives under [`MluaVm::hook_key`]. Two structures because the ORDER is
 /// the contract and a Lua table keyed by mod id has no order at all.
-const DIGGERS: &str = "tiamot.diggers";
+const DIGGERS: &str = "tiamat.diggers";
 
 /// Registry key holding the mods that registered `on_place`.
-const PLACERS: &str = "tiamot.placers";
+const PLACERS: &str = "tiamat.placers";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_DIG: &str = "on_dig_complete";
@@ -61,13 +61,13 @@ const HOOK_DIG: &str = "on_dig_complete";
 const HOOK_PLACE: &str = "on_place";
 
 /// Registry key holding the mods that registered `on_use`.
-const USERS: &str = "tiamot.users";
+const USERS: &str = "tiamat.users";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_USE: &str = "on_use";
 
 /// Registry key holding the mods that registered `on_fluid_flow`.
-const FLOWERS: &str = "tiamot.flowers";
+const FLOWERS: &str = "tiamat.flowers";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_FLOW: &str = "on_fluid_flow";
@@ -172,19 +172,19 @@ fn validate_mod_path(what: &str, path: &str) -> Result<String, String> {
 
 /// Registry key holding each mod's directory, `mod_id -> path`, for the
 /// calls that hash a file the mod ships.
-const MOD_DIRS: &str = "tiamot.mod_dirs";
+const MOD_DIRS: &str = "tiamat.mod_dirs";
 
 /// Registry key holding the mods that registered `on_punch`.
-const PUNCHERS: &str = "tiamot.punchers";
+const PUNCHERS: &str = "tiamat.punchers";
 
 /// Registry key holding the mods that registered `on_player_join`.
-const JOINERS: &str = "tiamot.joiners";
+const JOINERS: &str = "tiamat.joiners";
 /// Registry key for the mods listening for a departure.
-const LEAVERS: &str = "tiamot.leavers";
+const LEAVERS: &str = "tiamat.leavers";
 /// Mods with an `on_domain_exit` handler.
-const DOMAIN_EXITERS: &str = "tiamot.domain_exiters";
+const DOMAIN_EXITERS: &str = "tiamat.domain_exiters";
 /// Mods with an `on_domain_enter` handler.
-const DOMAIN_ENTERERS: &str = "tiamot.domain_enterers";
+const DOMAIN_ENTERERS: &str = "tiamat.domain_enterers";
 /// Registry table of random-tick handlers, keyed by numeric material id.
 ///
 /// **By material and not by mod**, unlike every other hook: the engine picks
@@ -192,10 +192,10 @@ const DOMAIN_ENTERERS: &str = "tiamot.domain_enterers";
 /// to a callback rather than from a mod to a list. One handler per material —
 /// a second registration is an error, for the reason a second `on_player_join`
 /// is.
-const RANDOM_TICKS: &str = "tiamot.random_ticks";
+const RANDOM_TICKS: &str = "tiamat.random_ticks";
 /// The same, mapping a material id to the mod that owns its handler, for
 /// attributing a fault (charter rule 10).
-const RANDOM_TICK_OWNERS: &str = "tiamot.random_tick_owners";
+const RANDOM_TICK_OWNERS: &str = "tiamat.random_tick_owners";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_JOIN: &str = "on_player_join";
@@ -206,12 +206,12 @@ const HOOK_DOMAIN_EXIT: &str = "on_domain_exit";
 /// The hook asked before a body enters one.
 const HOOK_DOMAIN_ENTER: &str = "on_domain_enter";
 /// The registry key holding every `on_action` callback.
-const ACTORS: &str = "tiamot.actors";
-const DIALOGISTS: &str = "tiamot.dialogists";
-const CHATTERS: &str = "tiamot.chatters";
+const ACTORS: &str = "tiamat.actors";
+const DIALOGISTS: &str = "tiamat.dialogists";
+const CHATTERS: &str = "tiamat.chatters";
 
 /// Mods that registered a `chunk_tint` callback.
-const CHUNK_TINTERS: &str = "tiamot.chunk_tinters";
+const CHUNK_TINTERS: &str = "tiamat.chunk_tinters";
 
 /// One of the two per-place callbacks: where its owners are listed, where a
 /// mod's callback is kept, and what it is called in an error.
@@ -235,13 +235,13 @@ impl PlaceHook {
     };
 }
 /// Each mod's declared dependencies, `mod_id -> { dep_id = true }`.
-const DEPENDENCIES: &str = "tiamot.deps";
+const DEPENDENCIES: &str = "tiamat.deps";
 /// Each mod's exported table, `mod_id -> table`, as `game.export` left it.
-const EXPORTS: &str = "tiamot.exports";
+const EXPORTS: &str = "tiamat.exports";
 
 /// Registry key holding the mods that registered `register_chunk_fog`, in load
 /// order — the order that decides whose fog a place has: the last to answer.
-const CHUNK_FOGGERS: &str = "tiamot.chunk_foggers";
+const CHUNK_FOGGERS: &str = "tiamat.chunk_foggers";
 /// What an `on_action` hook is called in errors.
 const HOOK_ACTION: &str = "on_action";
 const HOOK_DIALOG: &str = "on_dialog_event";
@@ -1139,7 +1139,7 @@ const DEFAULT_START_TIME: f32 = 0.35;
 impl MluaVm {
     /// The registry key under which a mod's `on_generate` callback is stored.
     fn generator_key(mod_id: &str) -> String {
-        format!("tiamot.on_generate.{mod_id}")
+        format!("tiamat.on_generate.{mod_id}")
     }
 
     /// One channel of a mod's colour as a byte.
@@ -1187,12 +1187,12 @@ impl MluaVm {
 
     /// Where one mod's chunk-tint callback lives.
     fn tint_key(mod_id: &str) -> String {
-        format!("tiamot.chunk_tint.{mod_id}")
+        format!("tiamat.chunk_tint.{mod_id}")
     }
 
     /// Where one mod's chunk-fog callback lives.
     fn fog_key(mod_id: &str) -> String {
-        format!("tiamot.chunk_fog.{mod_id}")
+        format!("tiamat.chunk_fog.{mod_id}")
     }
 
     /// Reads a fog out of a mod's answer table.
@@ -1486,7 +1486,7 @@ fn material_of(lua: &mlua::Lua, value: &mlua::Value) -> mlua::Result<crate::mate
             .map_err(|_| mlua::Error::external(format!("material id {id} is out of range"))),
         mlua::Value::String(id) => {
             let id = id.to_str()?.to_owned();
-            let registry: Table = lua.named_registry_value("tiamot.blocks")?;
+            let registry: Table = lua.named_registry_value("tiamat.blocks")?;
             registry
                 .get::<Option<u16>>(id.clone())?
                 .map(crate::material::MaterialId)
@@ -1877,7 +1877,7 @@ fn fill_detail_of(options: Option<&Table>) -> mlua::Result<Option<crate::detgen:
 /// on the result saw nothing at all. Reported from the window as exactly
 /// that. Keyed weakly on the proxy so a proxy nobody holds is collected with
 /// everything else.
-const CROSSED: &str = "tiamot.crossed";
+const CROSSED: &str = "tiamat.crossed";
 
 /// What a proxy stands for, or `None` for a value that is not one.
 fn uncross(lua: &Lua, value: &Value) -> mlua::Result<Option<(Value, String)>> {
@@ -2260,7 +2260,7 @@ impl ScriptVm for MluaVm {
         // registry. Setting only the Rust-side one left registration open after
         // freeze — charter rule 9 violated in silence.
         self.lua
-            .set_named_registry_value("tiamot.frozen", true)
+            .set_named_registry_value("tiamat.frozen", true)
             .map_err(|err| self.vm_error(&err))?;
         self.frozen = true;
         Ok(())
@@ -2309,7 +2309,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_sounds(&self) -> Vec<crate::sound::Sound> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.sounds") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.sounds") else {
             return Vec::new();
         };
         // A sequence, so iterating it is load order — the order the settings
@@ -2330,7 +2330,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_fonts(&self) -> Vec<crate::font::Font> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.fonts") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.fonts") else {
             return Vec::new();
         };
         registry
@@ -2350,7 +2350,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_pictures(&self) -> Vec<crate::picture::Picture> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.pictures") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.pictures") else {
             return Vec::new();
         };
         registry
@@ -2368,7 +2368,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_bindings(&self) -> Vec<crate::sound::Binding> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.bindings") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.bindings") else {
             return Vec::new();
         };
         registry
@@ -2385,7 +2385,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_hud_scripts(&self) -> Vec<crate::hud::ScriptFile> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.hud_scripts") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.hud_scripts") else {
             return Vec::new();
         };
         // Load order, which is DRAW order on the client: a mod loaded later
@@ -2481,7 +2481,7 @@ impl ScriptVm for MluaVm {
                 tracing::error!(%name, "could not record a fluid id: {err}");
             }
         }
-        if let Err(err) = self.lua.set_named_registry_value("tiamot.fluid_ids", table) {
+        if let Err(err) = self.lua.set_named_registry_value("tiamat.fluid_ids", table) {
             tracing::error!("could not install the fluid ids: {err}");
         }
     }
@@ -2533,7 +2533,7 @@ impl ScriptVm for MluaVm {
         }
         if let Err(err) = self
             .lua
-            .set_named_registry_value("tiamot.world_options", table)
+            .set_named_registry_value("tiamat.world_options", table)
         {
             tracing::error!("could not install the world options: {err}");
         }
@@ -2599,7 +2599,7 @@ impl ScriptVm for MluaVm {
         // so this is a clone of a few strings against a chunk's worth of work.
         let fluids: BTreeMap<String, u8> = self
             .lua
-            .named_registry_value::<Table>("tiamot.fluid_ids")
+            .named_registry_value::<Table>("tiamat.fluid_ids")
             .ok()
             .map(|table| table.pairs::<String, u8>().filter_map(Result::ok).collect())
             .unwrap_or_default();
@@ -2623,7 +2623,7 @@ impl ScriptVm for MluaVm {
             // Read from the registry, which is where registration actually
             // wrote.
             self.lua
-                .named_registry_value::<Table>("tiamot.generators")
+                .named_registry_value::<Table>("tiamat.generators")
                 .map_err(|err| self.vm_error(&err))?
                 .sequence_values::<String>()
                 .filter_map(Result::ok)
@@ -2635,7 +2635,7 @@ impl ScriptVm for MluaVm {
         } else {
             let owners: Table = self
                 .lua
-                .named_registry_value("tiamot.domain_generators")
+                .named_registry_value("tiamat.domain_generators")
                 .map_err(|err| self.vm_error(&err))?;
             // **An instance is filled by its TEMPLATE's generator.** Nobody
             // wrote worldgen for `ship/17` — they wrote it for `ship`, once,
@@ -2699,7 +2699,7 @@ impl ScriptVm for MluaVm {
     fn world_init(&mut self) -> Result<Vec<(String, ScriptError)>, ScriptError> {
         let owners: Vec<String> = self
             .lua
-            .named_registry_value::<Table>("tiamot.world_init")
+            .named_registry_value::<Table>("tiamat.world_init")
             .map_err(|err| self.vm_error(&err))?
             .sequence_values::<String>()
             .filter_map(Result::ok)
@@ -2735,7 +2735,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn load_maps(&mut self, maps: Vec<(String, String, crate::detgen::Map)>) {
-        let Ok(held) = self.lua.named_registry_value::<Table>("tiamot.maps") else {
+        let Ok(held) = self.lua.named_registry_value::<Table>("tiamat.maps") else {
             return;
         };
         for (mod_id, name, map) in maps {
@@ -2750,7 +2750,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn take_maps(&mut self) -> Vec<(String, String, crate::detgen::Map)> {
-        let Ok(held) = self.lua.named_registry_value::<Table>("tiamot.maps") else {
+        let Ok(held) = self.lua.named_registry_value::<Table>("tiamat.maps") else {
             return Vec::new();
         };
         let mut maps = Vec::new();
@@ -2773,7 +2773,7 @@ impl ScriptVm for MluaVm {
     fn tick(&mut self, dt_ticks: u32) -> Result<Vec<(String, ScriptError)>, ScriptError> {
         let tickers: Vec<String> = self
             .lua
-            .named_registry_value::<Table>("tiamot.tickers")
+            .named_registry_value::<Table>("tiamat.tickers")
             .map_err(|err| self.vm_error(&err))?
             .sequence_values::<String>()
             .filter_map(Result::ok)
@@ -2856,7 +2856,7 @@ impl ScriptVm for MluaVm {
 
     fn entity_steppers(&self) -> Vec<String> {
         self.lua
-            .named_registry_value::<Table>("tiamot.entity_steppers")
+            .named_registry_value::<Table>("tiamat.entity_steppers")
             .map(|table| {
                 table
                     .sequence_values::<String>()
@@ -3122,7 +3122,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_blocks(&self) -> Vec<(String, MaterialId)> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.blocks") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.blocks") else {
             return Vec::new();
         };
         let mut blocks: Vec<(String, MaterialId)> = registry
@@ -3140,7 +3140,7 @@ impl ScriptVm for MluaVm {
     fn registered_block_textures(&self) -> Vec<BlockTexture> {
         let Ok(registry) = self
             .lua
-            .named_registry_value::<Table>("tiamot.block_textures")
+            .named_registry_value::<Table>("tiamat.block_textures")
         else {
             return Vec::new();
         };
@@ -3177,7 +3177,7 @@ impl ScriptVm for MluaVm {
         let ids = self.block_ids();
         let rules = self
             .lua
-            .named_registry_value::<Table>("tiamot.block_rules")
+            .named_registry_value::<Table>("tiamat.block_rules")
             .ok();
 
         // Driven by the block list, not by the rules table: every registered
@@ -3291,7 +3291,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_domains(&self) -> Vec<(String, crate::domain::Spec)> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.domains") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.domains") else {
             return Vec::new();
         };
         let mut domains: Vec<(String, crate::domain::Spec)> = registry
@@ -3321,7 +3321,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_fluids(&self) -> Vec<FluidRules> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.fluids") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.fluids") else {
             return Vec::new();
         };
 
@@ -3355,7 +3355,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_tools(&self) -> Vec<Tool> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.tools") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.tools") else {
             return Vec::new();
         };
 
@@ -3379,7 +3379,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_items(&self) -> Vec<String> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.items") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.items") else {
             return Vec::new();
         };
         let mut items: Vec<String> = registry
@@ -3392,7 +3392,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_views(&self) -> Vec<crate::inventory::ViewDef> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.views") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.views") else {
             return Vec::new();
         };
         let mut views: Vec<crate::inventory::ViewDef> = registry
@@ -3408,7 +3408,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_actions(&self) -> Vec<super::vm::Action> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.actions") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.actions") else {
             return Vec::new();
         };
         // A sequence, not a map: `register_action` pushes, so iterating it in
@@ -3430,7 +3430,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_settings(&self) -> Vec<super::vm::Setting> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.settings") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.settings") else {
             return Vec::new();
         };
         // Load order, for the reason actions are: it is what the screen groups
@@ -3452,7 +3452,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn set_player_setting(&mut self, player: &crate::identity::PlayerUuid, id: &str, value: u32) {
-        let Ok(answers) = self.lua.named_registry_value::<Table>("tiamot.answers") else {
+        let Ok(answers) = self.lua.named_registry_value::<Table>("tiamat.answers") else {
             return;
         };
         // Keyed by UUID and then by setting id: a preference belongs to a
@@ -3473,7 +3473,7 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_models(&self) -> Vec<crate::model::ModelFile> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.models") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.models") else {
             return Vec::new();
         };
         registry
@@ -3500,7 +3500,7 @@ impl ScriptVm for MluaVm {
     fn registered_clouds(&self) -> Option<crate::atmosphere::CloudLayer> {
         let registry = self
             .lua
-            .named_registry_value::<Table>("tiamot.clouds")
+            .named_registry_value::<Table>("tiamat.clouds")
             .ok()?;
         let mut entries: Vec<(String, Table)> = registry
             .pairs::<String, Table>()
@@ -3527,7 +3527,7 @@ impl ScriptVm for MluaVm {
     fn registered_sky(&self) -> Option<Sky> {
         let registry = self
             .lua
-            .named_registry_value::<Table>("tiamot.skies")
+            .named_registry_value::<Table>("tiamat.skies")
             .ok()?;
 
         // Lowest mod id wins where several register one, the same rule the
@@ -3726,7 +3726,7 @@ impl MluaVm {
         let export = self
             .lua
             .create_function(move |lua, table: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: game.export is for the registration window; the \
@@ -3799,7 +3799,7 @@ impl MluaVm {
         let world_option = self
             .lua
             .create_function(|lua, id: String| {
-                let Ok(table) = lua.named_registry_value::<Table>("tiamot.world_options") else {
+                let Ok(table) = lua.named_registry_value::<Table>("tiamat.world_options") else {
                     return Ok(Value::Nil);
                 };
                 table.get::<Value>(id)
@@ -3926,7 +3926,7 @@ impl MluaVm {
         self.lua
             .create_function(
                 move |lua, (material, callback): (mlua::Value, mlua::Function)| {
-                    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                     if frozen {
                         return Err(mlua::Error::external(format!(
                             "mod `{owner}`: registration is closed"
@@ -3960,7 +3960,7 @@ impl MluaVm {
         let key = Self::hook_key(&hook, mod_id);
         self.lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4009,7 +4009,7 @@ impl MluaVm {
         let register_sound = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4028,7 +4028,7 @@ impl MluaVm {
                     "pitch_variance",
                     spec.get::<Option<f32>>("pitch_variance")?.unwrap_or(0.0),
                 )?;
-                let sounds: Table = lua.named_registry_value("tiamot.sounds")?;
+                let sounds: Table = lua.named_registry_value("tiamat.sounds")?;
                 sounds.push(entry)?;
                 Ok(())
             })
@@ -4199,7 +4199,7 @@ impl MluaVm {
         let bind = self
             .lua
             .create_function(move |lua, (cue, sound): (String, String)| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4224,7 +4224,7 @@ impl MluaVm {
                 entry.set("cue", cue)?;
                 entry.set("sound", sound)?;
                 entry.set("mod_id", owner.clone())?;
-                let bindings: Table = lua.named_registry_value("tiamot.bindings")?;
+                let bindings: Table = lua.named_registry_value("tiamat.bindings")?;
                 bindings.push(entry)?;
                 Ok(())
             })
@@ -4268,7 +4268,7 @@ impl MluaVm {
                          raise it"
                     )));
                 }
-                let bindings: Table = lua.named_registry_value("tiamot.bindings")?;
+                let bindings: Table = lua.named_registry_value("tiamat.bindings")?;
                 // Later wins, so the search runs backwards.
                 let mut sound: Option<String> = None;
                 for entry in bindings.sequence_values::<Table>().flatten() {
@@ -4652,7 +4652,7 @@ impl MluaVm {
         let register = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4707,7 +4707,7 @@ impl MluaVm {
                     }
                 }
 
-                let models: Table = lua.named_registry_value("tiamot.models")?;
+                let models: Table = lua.named_registry_value("tiamat.models")?;
                 // **Last registration of an id wins**, the rule a sound and a
                 // picture follow: a mod reloading its own model should replace
                 // it rather than double it.
@@ -4765,7 +4765,7 @@ impl MluaVm {
         let register_clouds = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4783,7 +4783,7 @@ impl MluaVm {
                     }
                 }
                 let layer = cloud_layer_of(&spec)?;
-                let registry: Table = lua.named_registry_value("tiamot.clouds")?;
+                let registry: Table = lua.named_registry_value("tiamat.clouds")?;
                 let entry = lua.create_table()?;
                 entry.set("base", layer.base)?;
                 entry.set("thickness", layer.thickness)?;
@@ -4825,7 +4825,7 @@ impl MluaVm {
         let register_hud = self
             .lua
             .create_function(move |lua, spec: mlua::Value| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4859,7 +4859,7 @@ impl MluaVm {
                         )));
                     }
                 };
-                let scripts: Table = lua.named_registry_value("tiamot.hud_scripts")?;
+                let scripts: Table = lua.named_registry_value("tiamat.hud_scripts")?;
                 for existing in scripts.clone().sequence_values::<Table>().flatten() {
                     if existing.get::<String>("mod_id").ok().as_deref() == Some(owner.as_str()) {
                         existing.set("file", file)?;
@@ -4885,7 +4885,7 @@ impl MluaVm {
         let register_picture = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4905,7 +4905,7 @@ impl MluaVm {
                 )?;
                 entry.set("mod_id", owner.clone())?;
                 entry.set("file", file)?;
-                let pictures: Table = lua.named_registry_value("tiamot.pictures")?;
+                let pictures: Table = lua.named_registry_value("tiamat.pictures")?;
                 if pictures.raw_len() >= crate::picture::MAX_PICTURES {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: a server may push at most {} pictures",
@@ -4945,7 +4945,7 @@ impl MluaVm {
         let register_font = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -4959,7 +4959,7 @@ impl MluaVm {
                 )?;
                 entry.set("mod_id", owner.clone())?;
                 entry.set("file", spec.get::<String>("file")?)?;
-                let fonts: Table = lua.named_registry_value("tiamot.fonts")?;
+                let fonts: Table = lua.named_registry_value("tiamat.fonts")?;
                 // **Refused rather than truncated later.** A mod that registers
                 // a ninth font should hear about it where it asked, not have
                 // the server quietly drop whichever came last.
@@ -5046,12 +5046,12 @@ impl MluaVm {
     /// usually registers another.
     fn install_world_tables(&mut self) -> Result<(), ScriptError> {
         for name in [
-            "tiamot.domain_generators",
-            "tiamot.domains",
-            "tiamot.fluids",
-            "tiamot.skies",
-            "tiamot.clouds",
-            "tiamot.models",
+            "tiamat.domain_generators",
+            "tiamat.domains",
+            "tiamat.fluids",
+            "tiamat.skies",
+            "tiamat.clouds",
+            "tiamat.models",
         ] {
             let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
             self.lua
@@ -5070,11 +5070,11 @@ impl MluaVm {
     fn install_setting_tables(&mut self) -> Result<(), ScriptError> {
         let settings = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.settings", settings)
+            .set_named_registry_value("tiamat.settings", settings)
             .map_err(|err| self.vm_error(&err))?;
         let answers = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.answers", answers)
+            .set_named_registry_value("tiamat.answers", answers)
             .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
@@ -5100,7 +5100,7 @@ impl MluaVm {
         let registrar = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -5154,7 +5154,7 @@ impl MluaVm {
                     list.push(option)?;
                 }
                 entry.set("options", list)?;
-                let settings: Table = lua.named_registry_value("tiamot.settings")?;
+                let settings: Table = lua.named_registry_value("tiamat.settings")?;
                 settings.push(entry)?;
                 Ok(())
             })
@@ -5167,7 +5167,7 @@ impl MluaVm {
         let registrar = self
             .lua
             .create_function(move |lua, spec: Table| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -5194,7 +5194,7 @@ impl MluaVm {
                     spec.get::<Option<String>>("default_key")?
                         .unwrap_or_default(),
                 )?;
-                let actions: Table = lua.named_registry_value("tiamot.actions")?;
+                let actions: Table = lua.named_registry_value("tiamat.actions")?;
                 actions.push(entry)?;
                 Ok(())
             })
@@ -5215,7 +5215,7 @@ impl MluaVm {
         let register_chunk_tint = self
             .lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -5241,7 +5241,7 @@ impl MluaVm {
         let register_chunk_fog = self
             .lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -5282,14 +5282,14 @@ impl MluaVm {
         let register_on_generate = self
             .lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
                     )));
                 }
                 lua.set_named_registry_value(&key, callback)?;
-                let generators: Table = lua.named_registry_value("tiamot.generators")?;
+                let generators: Table = lua.named_registry_value("tiamat.generators")?;
                 generators.push(owner.clone())?;
                 Ok(())
             })
@@ -5347,7 +5347,7 @@ impl MluaVm {
         let register_on_tick = self
             .lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -5357,7 +5357,7 @@ impl MluaVm {
                 // Registration order is the call order, and it is stable
                 // because it is the order mods loaded in — which the resolver
                 // already made deterministic.
-                let tickers: Table = lua.named_registry_value("tiamot.tickers")?;
+                let tickers: Table = lua.named_registry_value("tiamat.tickers")?;
                 tickers.push(owner.clone())?;
                 Ok(())
             })
@@ -5398,7 +5398,7 @@ impl MluaVm {
     fn setting_reader(&self) -> Result<mlua::Function, ScriptError> {
         self.lua
             .create_function(move |lua, (player, id): (String, String)| {
-                let settings: Table = lua.named_registry_value("tiamot.settings")?;
+                let settings: Table = lua.named_registry_value("tiamat.settings")?;
                 let Some(def) = settings
                     .sequence_values::<Table>()
                     .filter_map(Result::ok)
@@ -5410,7 +5410,7 @@ impl MluaVm {
                     // is not.
                     return Ok(mlua::Value::Nil);
                 };
-                let answers: Table = lua.named_registry_value("tiamot.answers")?;
+                let answers: Table = lua.named_registry_value("tiamat.answers")?;
                 let chosen = answers
                     .get::<Option<Table>>(player)
                     .ok()
@@ -7194,14 +7194,14 @@ impl MluaVm {
         let register = self
             .lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
                     )));
                 }
                 lua.set_named_registry_value(&key, callback)?;
-                let owners: Table = lua.named_registry_value("tiamot.world_init")?;
+                let owners: Table = lua.named_registry_value("tiamat.world_init")?;
                 let already = owners
                     .sequence_values::<String>()
                     .filter_map(Result::ok)
@@ -7228,7 +7228,7 @@ impl MluaVm {
         let register_on_entity_step = self
             .lua
             .create_function(move |lua, callback: mlua::Function| {
-                let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
                         "mod `{owner}`: registration is closed"
@@ -7238,7 +7238,7 @@ impl MluaVm {
                 // The same registration-order list `on_tick` keeps, for the
                 // same reason: load order is the call order, and the resolver
                 // already made load order deterministic.
-                let steppers: Table = lua.named_registry_value("tiamot.entity_steppers")?;
+                let steppers: Table = lua.named_registry_value("tiamat.entity_steppers")?;
                 let already = steppers
                     .sequence_values::<String>()
                     .filter_map(Result::ok)
@@ -7283,7 +7283,7 @@ impl MluaVm {
         let get_block_id = self
             .lua
             .create_function(|lua, id: String| {
-                let registry: Table = lua.named_registry_value("tiamot.blocks")?;
+                let registry: Table = lua.named_registry_value("tiamat.blocks")?;
                 registry.get::<Option<u16>>(id.clone())?.ok_or_else(|| {
                     mlua::Error::external(format!("no block registered with id `{id}`"))
                 })
@@ -7300,7 +7300,7 @@ impl MluaVm {
         let block_of = self
             .lua
             .create_function(|lua, material: u16| {
-                let registry: Table = lua.named_registry_value("tiamot.blocks")?;
+                let registry: Table = lua.named_registry_value("tiamat.blocks")?;
                 for pair in registry.pairs::<String, u16>() {
                     let (id, numeric) = pair?;
                     if numeric == material {
@@ -7332,14 +7332,14 @@ impl MluaVm {
         // Mods with an `on_world_init`, in load order.
         let world_init = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.world_init", world_init)
+            .set_named_registry_value("tiamat.world_init", world_init)
             .map_err(|err| self.vm_error(&err))?;
         // Maps a mod has asked for, by `mod\u{1f}name` — a separator no id can
         // contain, so splitting the key back apart is exact rather than a
         // guess about where a name starts.
         let maps = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.maps", maps)
+            .set_named_registry_value("tiamat.maps", maps)
             .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
@@ -7364,7 +7364,7 @@ impl MluaVm {
                 let origin_x: i32 = spec.get("origin_x").unwrap_or(0);
                 let origin_z: i32 = spec.get("origin_z").unwrap_or(0);
 
-                let held: Table = lua.named_registry_value("tiamot.maps")?;
+                let held: Table = lua.named_registry_value("tiamat.maps")?;
                 let key = format!("{owner}\u{1f}{name}");
                 if let Ok(existing) = held.get::<mlua::AnyUserData>(key.clone()) {
                     let handle = existing.borrow::<MapHandle>()?;
@@ -7631,36 +7631,36 @@ impl MluaVm {
         let bindings = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.install_setting_tables()?;
         self.lua
-            .set_named_registry_value("tiamot.blocks", blocks)
+            .set_named_registry_value("tiamat.blocks", blocks)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.block_textures", block_textures)
+            .set_named_registry_value("tiamat.block_textures", block_textures)
             .map_err(|err| self.vm_error(&err))?;
         let block_rules = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.block_rules", block_rules)
+            .set_named_registry_value("tiamat.block_rules", block_rules)
             .map_err(|err| self.vm_error(&err))?;
         let items = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.items", items)
+            .set_named_registry_value("tiamat.items", items)
             .map_err(|err| self.vm_error(&err))?;
         let views = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.views", views)
+            .set_named_registry_value("tiamat.views", views)
             .map_err(|err| self.vm_error(&err))?;
         let tools = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.tools", tools)
+            .set_named_registry_value("tiamat.tools", tools)
             .map_err(|err| self.vm_error(&err))?;
         self.install_world_tables()?;
         self.install_map_registry()?;
         let tickers = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.tickers", tickers)
+            .set_named_registry_value("tiamat.tickers", tickers)
             .map_err(|err| self.vm_error(&err))?;
         let steppers = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.entity_steppers", steppers)
+            .set_named_registry_value("tiamat.entity_steppers", steppers)
             .map_err(|err| self.vm_error(&err))?;
         // **Every list a `register_on_*` appends to.** A hook whose list is
         // missing makes `hook_registrar` fail, which disables the mod at load
@@ -7690,37 +7690,37 @@ impl MluaVm {
                 .map_err(|err| self.vm_error(&err))?;
         }
         self.lua
-            .set_named_registry_value("tiamot.generators", generators)
+            .set_named_registry_value("tiamat.generators", generators)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.actions", actions)
+            .set_named_registry_value("tiamat.actions", actions)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.sounds", sounds)
+            .set_named_registry_value("tiamat.sounds", sounds)
             .map_err(|err| self.vm_error(&err))?;
         let fonts = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.fonts", fonts)
+            .set_named_registry_value("tiamat.fonts", fonts)
             .map_err(|err| self.vm_error(&err))?;
         let pictures = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.pictures", pictures)
+            .set_named_registry_value("tiamat.pictures", pictures)
             .map_err(|err| self.vm_error(&err))?;
         let mod_dirs = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         self.lua
             .set_named_registry_value(MOD_DIRS, mod_dirs)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.hud_scripts", hud_scripts)
+            .set_named_registry_value("tiamat.hud_scripts", hud_scripts)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.bindings", bindings)
+            .set_named_registry_value("tiamat.bindings", bindings)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.next_material", self.next_material)
+            .set_named_registry_value("tiamat.next_material", self.next_material)
             .map_err(|err| self.vm_error(&err))?;
         self.lua
-            .set_named_registry_value("tiamot.frozen", false)
+            .set_named_registry_value("tiamat.frozen", false)
             .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
@@ -7738,12 +7738,12 @@ impl MluaVm {
 
     /// Registry key holding a mod's `on_tick` callback.
     fn tick_key(mod_id: &str) -> String {
-        format!("tiamot.on_tick.{mod_id}")
+        format!("tiamat.on_tick.{mod_id}")
     }
 
     /// Where one mod's callback for a named hook is stashed.
     fn hook_key(hook: &str, mod_id: &str) -> String {
-        format!("tiamot.{hook}.{mod_id}")
+        format!("tiamat.{hook}.{mod_id}")
     }
 
     /// Runs one cancellable hook across every mod that registered it.
@@ -7924,7 +7924,7 @@ impl MluaVm {
     /// This one exists for lookups, where order does not matter.
     #[must_use]
     pub fn block_ids(&self) -> BTreeMap<String, MaterialId> {
-        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamot.blocks") else {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.blocks") else {
             return BTreeMap::new();
         };
         registry
@@ -8107,7 +8107,7 @@ fn step_sound_of(owner: &str, spec: &Table, entry: &Table) -> mlua::Result<()> {
 /// and only some of those are blocks. `placeable` is what tells them apart, and
 /// the world palette must never contain a `false` one.
 fn register_item(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8138,22 +8138,22 @@ fn register_item(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
         None => None,
     };
 
-    let registry: Table = lua.named_registry_value("tiamot.blocks")?;
+    let registry: Table = lua.named_registry_value("tiamat.blocks")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
             "`{qualified}` is already registered"
         )));
     }
-    let next: u16 = lua.named_registry_value("tiamot.next_material")?;
+    let next: u16 = lua.named_registry_value("tiamat.next_material")?;
     registry.set(qualified.clone(), next)?;
-    lua.set_named_registry_value("tiamot.next_material", next + 1)?;
+    lua.set_named_registry_value("tiamat.next_material", next + 1)?;
 
     // The one thing that makes it an item rather than a block.
-    let items: Table = lua.named_registry_value("tiamot.items")?;
+    let items: Table = lua.named_registry_value("tiamat.items")?;
     items.set(qualified.clone(), true)?;
 
     if let Some(path) = texture {
-        let textures: Table = lua.named_registry_value("tiamot.block_textures")?;
+        let textures: Table = lua.named_registry_value("tiamat.block_textures")?;
         let entry = lua.create_table()?;
         entry.set("mod", owner)?;
         entry.set("path", path)?;
@@ -8163,7 +8163,7 @@ fn register_item(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
     // A display name, on the same table blocks use, so an interface asking what
     // to call something asks one question.
     if let Some(name) = spec.get::<Option<String>>("name")? {
-        let rules: Table = lua.named_registry_value("tiamot.block_rules")?;
+        let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
         let entry = if let Some(entry) = rules.get::<Option<Table>>(qualified.clone())? {
             entry
         } else {
@@ -8242,7 +8242,7 @@ fn friction_of(id: &str, spec: &Table) -> mlua::Result<Option<f32>> {
 }
 
 fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8264,15 +8264,15 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
         None => None,
     };
 
-    let registry: Table = lua.named_registry_value("tiamot.blocks")?;
+    let registry: Table = lua.named_registry_value("tiamat.blocks")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
             "block `{qualified}` is already registered"
         )));
     }
-    let next: u16 = lua.named_registry_value("tiamot.next_material")?;
+    let next: u16 = lua.named_registry_value("tiamat.next_material")?;
     registry.set(qualified.clone(), next)?;
-    lua.set_named_registry_value("tiamot.next_material", next + 1)?;
+    lua.set_named_registry_value("tiamat.next_material", next + 1)?;
 
     // Breaking rules, recorded whether or not the mod set them: an absent
     // entry and a defaulted one must not be distinguishable downstream.
@@ -8338,7 +8338,7 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
             }
             entry.set("drops", parsed)?;
         }
-        let rules: Table = lua.named_registry_value("tiamot.block_rules")?;
+        let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
         rules.set(qualified.clone(), entry)?;
     }
 
@@ -8351,7 +8351,7 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
         // matching if that ever loosens.
         entry.set("mod", owner.to_owned())?;
         entry.set("path", path)?;
-        let textures: Table = lua.named_registry_value("tiamot.block_textures")?;
+        let textures: Table = lua.named_registry_value("tiamat.block_textures")?;
         textures.set(qualified, entry)?;
     }
     Ok(next)
@@ -8469,11 +8469,11 @@ fn fluid_colour(spec: &Table, qualified: &str) -> mlua::Result<[u8; 3]> {
 /// Where one domain's generator callback lives. Mirrors
 /// `MluaVm::domain_generator_key`, which is the reader.
 fn domain_generator_key(domain: &str) -> String {
-    format!("tiamot.domain_generate.{domain}")
+    format!("tiamat.domain_generate.{domain}")
 }
 
 fn register_domain(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8524,11 +8524,11 @@ fn register_domain(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
             )));
         }
         lua.set_named_registry_value(&domain_generator_key(&qualified), generator)?;
-        let owners: Table = lua.named_registry_value("tiamot.domain_generators")?;
+        let owners: Table = lua.named_registry_value("tiamat.domain_generators")?;
         owners.set(qualified.clone(), owner.to_owned())?;
     }
 
-    let registry: Table = lua.named_registry_value("tiamot.domains")?;
+    let registry: Table = lua.named_registry_value("tiamat.domains")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
             "register_domain(\"{qualified}\"): already registered; a second registration \
@@ -8544,7 +8544,7 @@ fn register_domain(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
 }
 
 fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8645,7 +8645,7 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         )));
     }
 
-    let registry: Table = lua.named_registry_value("tiamot.fluids")?;
+    let registry: Table = lua.named_registry_value("tiamat.fluids")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
             "fluid `{qualified}` is already registered"
@@ -8682,7 +8682,7 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
 /// mod's; the engine gives them a name and a size and moves stacks between
 /// them. See [`crate::inventory::Slots::for_player_with`].
 fn register_view(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8705,7 +8705,7 @@ fn register_view(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         )));
     }
 
-    let views: Table = lua.named_registry_value("tiamot.views")?;
+    let views: Table = lua.named_registry_value("tiamat.views")?;
     if views.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
             "register_view(\"{qualified}\"): already registered"
@@ -8716,7 +8716,7 @@ fn register_view(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
 }
 
 fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8759,7 +8759,7 @@ fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         )));
     }
 
-    let registry: Table = lua.named_registry_value("tiamot.tools")?;
+    let registry: Table = lua.named_registry_value("tiamat.tools")?;
     if registry.contains_key(qualified.clone())? {
         return Err(mlua::Error::external(format!(
             "tool `{qualified}` is already registered"
@@ -8785,7 +8785,7 @@ fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
 /// advance a number and how to interpolate colours, and a mod supplies both the
 /// number's period and the colours.
 fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
-    let frozen: bool = lua.named_registry_value("tiamot.frozen").unwrap_or(false);
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
         return Err(mlua::Error::external(format!(
             "mod `{owner}`: registration is closed"
@@ -8858,7 +8858,7 @@ fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         ));
     }
 
-    let registry: Table = lua.named_registry_value("tiamot.skies")?;
+    let registry: Table = lua.named_registry_value("tiamat.skies")?;
     let entry = lua.create_table()?;
     entry.set("day_length_ticks", day_length_ticks)?;
     entry.set("keyframes", keyframes)?;
@@ -9882,7 +9882,7 @@ const MAX_DENSITY_NESTING: usize = 64;
 /// Turns a mod's density table into postfix operations.
 ///
 /// **Children first, then the operation** — the order
-/// [`tiamot_core::detgen::Density`] evaluates in. A binary node compiles `a`
+/// [`tiamat_core::detgen::Density`] evaluates in. A binary node compiles `a`
 /// before `b`, so `{ op = "sub", a = x, b = y }` is `x - y` and reads the way
 /// it is written.
 fn compile_density(
@@ -10924,7 +10924,7 @@ mod tests {
         // content index — asserted against `content::hash_bytes` directly. A
         // path that escapes the mod, a file that is not there, and a file
         // clients are not sent are errors where they are written.
-        let dir = std::env::temp_dir().join("tiamot-vm-pictures");
+        let dir = std::env::temp_dir().join("tiamat-vm-pictures");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("textures")).expect("mod dir");
         let png = b"\x89PNG\r\n\x1a\nnot really a picture, but bytes with a hash";
@@ -12810,7 +12810,7 @@ mod tests {
 
     #[test]
     fn a_mod_cannot_require_outside_its_directory() {
-        let dir = std::env::temp_dir().join("tiamot-require-test");
+        let dir = std::env::temp_dir().join("tiamat-require-test");
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("inside.lua"), "return 42").expect("write");
 

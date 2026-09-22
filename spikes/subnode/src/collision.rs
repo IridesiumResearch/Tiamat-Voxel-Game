@@ -33,7 +33,7 @@
 //! The useful finding stands, with the correction: collision needs no
 //! transcendental, so Task 09 can stay inside the subset without contortion.
 
-use tiamot_core::detgen::floor_to_i32;
+use tiamat_core::detgen::floor_to_i32;
 
 use crate::mesher::{N, SubNodeGrid};
 use crate::scenes::Rng;
@@ -242,8 +242,8 @@ pub fn simulate(
 mod tests {
     use super::*;
     use crate::scenes::{STONE, Scene};
-    use tiamot_core::coords::SubNodePos;
-    use tiamot_core::{Chunk, ChunkPos};
+    use tiamat_core::coords::SubNodePos;
+    use tiamat_core::{Chunk, ChunkPos};
 
     fn grid_of(scene: Scene) -> SubNodeGrid {
         SubNodeGrid::from_chunk(&scene.build(0xC0111DE))

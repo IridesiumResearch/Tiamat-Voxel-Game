@@ -301,12 +301,12 @@ pub struct Listing {
     /// Whether it loads.
     pub enabled: bool,
     /// The choices it offers when a world is made — see
-    /// `tiamot_core::modload::WorldOption`. Drawn beside the seed box, and
+    /// `tiamat_core::modload::WorldOption`. Drawn beside the seed box, and
     /// only for mods that are on.
-    pub world_options: Vec<tiamot_core::modload::WorldOption>,
+    pub world_options: Vec<tiamat_core::modload::WorldOption>,
     /// How it wants the engine's own screens to look, if it says — see
-    /// `tiamot_core::modload::Theme`.
-    pub theme: Option<tiamot_core::modload::Theme>,
+    /// `tiamat_core::modload::Theme`.
+    pub theme: Option<tiamat_core::modload::Theme>,
     /// The directory it was found in, which its theme's files are relative to.
     ///
     /// **Kept because the start screen has no server to fetch from.** In a
@@ -356,7 +356,7 @@ impl Catalogue {
             .and_then(|text| toml::from_str::<Enabled>(&text).ok())
             .map(|saved| saved.disabled.into_iter().collect())
             .unwrap_or_default();
-        let (found, problem) = match tiamot_core::modload::scan_directory(mods_dir) {
+        let (found, problem) = match tiamat_core::modload::scan_directory(mods_dir) {
             Ok(found) => (found, None),
             // A directory that is not there at all is not a problem worth
             // reporting: a client that only ever joins other people's servers
@@ -498,7 +498,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tiamot-launcher-{name}"));
+        let dir = std::env::temp_dir().join(format!("tiamat-launcher-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
         dir

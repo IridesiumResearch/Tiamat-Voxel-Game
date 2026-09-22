@@ -4,7 +4,7 @@
 //! What a density program near the cap costs per chunk — World ask 30.
 
 use std::time::Instant;
-use tiamot_core::detgen::{Axis, Density, Op, Region3d, UNSTRETCHED, default_params};
+use tiamat_core::detgen::{Axis, Density, Op, Region3d, UNSTRETCHED, default_params};
 
 /// A program of roughly `ops` operations with `noises` noise reads in it,
 /// shaped like a shore program: noise, arithmetic on it, folded together.

@@ -9,7 +9,7 @@
 //! clippy's line ceiling.
 //!
 //! See `clouds.wgsl` for the field and the march, and
-//! [`tiamot_core::atmosphere::CloudLayer`] for why a deck is a field rather
+//! [`tiamat_core::atmosphere::CloudLayer`] for why a deck is a field rather
 //! than a mesh of cubes.
 //!
 //! # Where it draws in the frame
@@ -20,7 +20,7 @@
 //! looks down on the tops — and drawing it before the transparent things means
 //! those still sort against the clouds.
 
-use tiamot_core::atmosphere::{CloudLayer, Clouds};
+use tiamat_core::atmosphere::{CloudLayer, Clouds};
 
 use super::{DEPTH_FORMAT, Gpu, graph};
 
@@ -153,8 +153,8 @@ struct Uniforms {
 }
 
 /// How many `vec4`s the packed cover map takes: two cells each.
-const MAP_VEC4S: usize = (tiamot_core::atmosphere::MAX_MAP_SIZE as usize
-    * tiamot_core::atmosphere::MAX_MAP_SIZE as usize)
+const MAP_VEC4S: usize = (tiamat_core::atmosphere::MAX_MAP_SIZE as usize
+    * tiamat_core::atmosphere::MAX_MAP_SIZE as usize)
     .div_ceil(2);
 
 /// What the pass needs to know about the frame.
@@ -200,7 +200,7 @@ pub struct Pass {
     /// **Beside the deck rather than in it.** `Deck` is `Copy` and is handed
     /// over every frame; a grid is half a kilobyte, and it changes when the
     /// weather does rather than when the frame does.
-    map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>,
+    map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
     /// Seconds since the client started, for drift and evolution.
     seconds: f32,
 }
@@ -259,7 +259,7 @@ impl Pass {
     }
 
     /// Lays a coarse cover map over the world, or takes it away — ask W10.
-    pub fn set_map(&mut self, map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>) {
+    pub fn set_map(&mut self, map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>) {
         self.map = map;
     }
 

@@ -19,6 +19,6 @@ publish.workspace = true
 # `core` nor `server`.
 
 [dependencies]
-tiamot-core.workspace = true
+tiamat-core.workspace = true
 bevy_ecs = "0.19"
 hecs = "0.11"

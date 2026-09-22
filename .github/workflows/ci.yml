@@ -175,7 +175,7 @@ jobs:
         run: |
           for backend in vm-luajit vm-luau; do
             echo "::group::$backend"
-            cargo clippy -p tiamot-core --lib \
+            cargo clippy -p tiamat-core --lib \
               --no-default-features --features "$backend" -- -D warnings
             echo "::endgroup::"
           done
@@ -336,7 +336,7 @@ jobs:
       # software Vulkan implementation — because the point is to notice that
       # rendering silently broke, and that does not need a GPU.
       #
-      # TIAMOT_REQUIRE_GPU turns "no adapter" from a skip into a failure. The
+      # TIAMAT_REQUIRE_GPU turns "no adapter" from a skip into a failure. The
       # tests skip loudly on a developer machine with no Vulkan, so that
       # `cargo test` still passes there and nobody learns to ignore red; without
       # this variable a CI image that lost its driver would quietly stop testing
@@ -357,7 +357,7 @@ jobs:
       # nobody is versioning.
       #
       # A missing driver fails the job rather than skipping the gates, for the
-      # same reason TIAMOT_REQUIRE_GPU exists: a render gate that quietly stops
+      # same reason TIAMAT_REQUIRE_GPU exists: a render gate that quietly stops
       # rendering is worse than no gate, because it still reports green.
       - name: Install a software Vulkan driver
         run: |
@@ -378,7 +378,7 @@ jobs:
 
       - name: Screenshot smoke test (lavapipe)
         env:
-          TIAMOT_REQUIRE_GPU: "1"
+          TIAMAT_REQUIRE_GPU: "1"
         run: cargo test -p client --test screenshot -- --nocapture
 
       # The whole client except the window: an embedded server started
@@ -387,7 +387,7 @@ jobs:
       # under it is not, and this is where that line is drawn.
       - name: Client session against an embedded server (lavapipe)
         env:
-          TIAMOT_REQUIRE_GPU: "1"
+          TIAMAT_REQUIRE_GPU: "1"
         run: cargo test -p client --test session -- --nocapture
 
       - name: Reference mods check clean

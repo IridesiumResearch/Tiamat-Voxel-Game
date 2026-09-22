@@ -27,11 +27,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tiamot_core::fluid::FluidLayer;
-use tiamot_core::light::{Light, LightLayer};
-use tiamot_core::phys::ChunkLookup as _;
-use tiamot_core::proto::Edit;
-use tiamot_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId, SubNodePos};
+use tiamat_core::fluid::FluidLayer;
+use tiamat_core::light::{Light, LightLayer};
+use tiamat_core::phys::ChunkLookup as _;
+use tiamat_core::proto::Edit;
+use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId, SubNodePos};
 
 use crate::mesher::{Absent, Neighbours};
 
@@ -154,11 +154,11 @@ pub struct ChunkStore {
     /// Zero means "no fluid registered under that id", which is both the
     /// untouched state and the honest answer for a payload naming a fluid this
     /// client was never told about.
-    fluid_materials: [u16; tiamot_core::fluid::MAX_FLUIDS + 1],
+    fluid_materials: [u16; tiamat_core::fluid::MAX_FLUIDS + 1],
     /// How deep each level of each fluid sits, in twenty-sevenths.
     ///
     /// Sent by the server rather than recomputed here — see
-    /// `tiamot_core::proto::FluidDef`. Two sides disagreeing about where a
+    /// `tiamat_core::proto::FluidDef`. Two sides disagreeing about where a
     /// surface is would show as milk at one height on screen and another under
     /// your feet.
     /// What each fluid looks like from inside, as `0..=1` per channel.
@@ -166,14 +166,14 @@ pub struct ChunkStore {
     /// **The same space the sky's colours are in**, because this is fed to the
     /// same `set_sky` they are — a fluid tinted in a different space would be a
     /// different colour on screen from the one the mod chose.
-    fluid_colours: [[f32; 3]; tiamot_core::fluid::MAX_FLUIDS + 1],
+    fluid_colours: [[f32; 3]; tiamat_core::fluid::MAX_FLUIDS + 1],
     /// Summaries of chunks too far away to be sent in full.
     ///
     /// **Disjoint from `chunks` by construction**, because they are the same
     /// chunk at two resolutions: holding both would draw both, and the coarse
     /// copy would poke through the fine one. Every path that adds to one takes
     /// the position out of the other.
-    summaries: BTreeMap<ChunkPos, tiamot_core::lod::Summary>,
+    summaries: BTreeMap<ChunkPos, tiamat_core::lod::Summary>,
     /// Summaries whose mesh needs rebuilding.
     ///
     /// Its own set rather than `dirty`, because the two are rebuilt by
@@ -235,7 +235,7 @@ impl ChunkStore {
         self.tints
             .get(&(x, z))
             .copied()
-            .unwrap_or(tiamot_core::proto::Tint::NEUTRAL)
+            .unwrap_or(tiamat_core::proto::Tint::NEUTRAL)
     }
 
     /// Stores a chunk's light, marking it for remeshing.
@@ -274,9 +274,9 @@ impl ChunkStore {
     /// chunk holding milk has no idea what to draw it as and meshed it dry. In
     /// practice the table lands before the first chunk, so this marks nothing —
     /// which is the point of doing it anyway rather than relying on the order.
-    pub fn set_fluid_table(&mut self, fluids: &[tiamot_core::proto::FluidDef]) {
-        self.fluid_materials = [0; tiamot_core::fluid::MAX_FLUIDS + 1];
-        self.fluid_colours = [[1.0; 3]; tiamot_core::fluid::MAX_FLUIDS + 1];
+    pub fn set_fluid_table(&mut self, fluids: &[tiamat_core::proto::FluidDef]) {
+        self.fluid_materials = [0; tiamat_core::fluid::MAX_FLUIDS + 1];
+        self.fluid_colours = [[1.0; 3]; tiamat_core::fluid::MAX_FLUIDS + 1];
         for def in fluids {
             let Some(slot) = usize::from(def.id).checked_sub(0) else {
                 continue;
@@ -297,7 +297,7 @@ impl ChunkStore {
     /// White for a fluid this client was never told about, which is the same
     /// answer as no tint at all rather than a black screen.
     #[must_use]
-    pub fn fluid_colour(&self, fluid: tiamot_core::fluid::FluidId) -> [f32; 3] {
+    pub fn fluid_colour(&self, fluid: tiamat_core::fluid::FluidId) -> [f32; 3] {
         self.fluid_colours
             .get(usize::from(fluid.0))
             .copied()
@@ -319,7 +319,7 @@ impl ChunkStore {
     /// about — which is a server sending a fluid it did not register, and is
     /// drawn as nothing rather than guessed at.
     #[must_use]
-    pub fn fluid_fill(&self, value: tiamot_core::fluid::Fluid) -> Option<(u16, u8)> {
+    pub fn fluid_fill(&self, value: tiamat_core::fluid::Fluid) -> Option<(u16, u8)> {
         if value.is_empty() {
             return None;
         }
@@ -364,10 +364,10 @@ impl ChunkStore {
     /// inventing milk that is not there would be visible and wrong, and the
     /// keyframe that follows corrects it either way.
     #[must_use]
-    pub fn fluid_at(&self, pos: tiamot_core::BlockPos) -> tiamot_core::fluid::Fluid {
+    pub fn fluid_at(&self, pos: tiamat_core::BlockPos) -> tiamat_core::fluid::Fluid {
         self.fluid
             .get(&pos.chunk())
-            .map_or(tiamot_core::fluid::Fluid::EMPTY, |layer| {
+            .map_or(tiamat_core::fluid::Fluid::EMPTY, |layer| {
                 layer.get(pos.local())
             })
     }
@@ -399,7 +399,7 @@ impl ChunkStore {
     /// guessing daylight would flash the inside of a cave white as it streamed
     /// in.
     #[must_use]
-    pub fn light_at(&self, pos: tiamot_core::BlockPos) -> Light {
+    pub fn light_at(&self, pos: tiamat_core::BlockPos) -> Light {
         self.light
             .get(&pos.chunk())
             .map_or(Light::DARK, |layer| layer.get(pos.local()))
@@ -449,7 +449,7 @@ impl ChunkStore {
     /// Drops any full chunk at that position, for the reason on `summaries`:
     /// the server sends one or the other, and this is the client walking away
     /// from terrain it used to be standing in.
-    pub fn set_summary(&mut self, pos: ChunkPos, summary: tiamot_core::lod::Summary) {
+    pub fn set_summary(&mut self, pos: ChunkPos, summary: tiamat_core::lod::Summary) {
         if self.chunks.remove(&pos).is_some() {
             // Its light and its dirty mark go with it, exactly as `remove`
             // does — a summary is not lit, and a mesh queued for a chunk that
@@ -480,7 +480,7 @@ impl ChunkStore {
 
     /// The summary held for a chunk, if there is one.
     #[must_use]
-    pub fn summary(&self, pos: ChunkPos) -> Option<&tiamot_core::lod::Summary> {
+    pub fn summary(&self, pos: ChunkPos) -> Option<&tiamat_core::lod::Summary> {
         self.summaries.get(&pos)
     }
 
@@ -501,7 +501,7 @@ impl ChunkStore {
         let solid = |at: ChunkPos| {
             self.summaries
                 .get(&at)
-                .is_some_and(tiamot_core::lod::Summary::is_solid)
+                .is_some_and(tiamat_core::lod::Summary::is_solid)
         };
         solid(pos)
             && [
@@ -607,7 +607,7 @@ impl ChunkStore {
                 // would be the same geometry in a different representation, and
                 // the two would then mesh from different code paths for a
                 // difference nobody can see.
-                if occupancy == (1 << tiamot_core::UNITS_PER_BLOCK) - 1 {
+                if occupancy == (1 << tiamat_core::UNITS_PER_BLOCK) - 1 {
                     BlockValue::Uniform(MaterialId(material))
                 } else {
                     BlockValue::Partial {
@@ -635,7 +635,7 @@ impl ChunkStore {
         self.mark_touched_neighbours(
             chunk_pos,
             [local.x, local.y, local.z],
-            tiamot_core::CHUNK_BLOCKS,
+            tiamat_core::CHUNK_BLOCKS,
         );
         true
     }
@@ -656,14 +656,14 @@ impl ChunkStore {
         // in. Caught by `a_sub_node_edit_on_the_last_cell_dirties_the_neighbour`,
         // which failed the other way: the cell it edits is at block-local 2,
         // so the real border was never marked at all.
-        let cells = tiamot_core::CHUNK_SUBNODES as i32;
+        let cells = tiamat_core::CHUNK_SUBNODES as i32;
         let local = [
             pos.x.rem_euclid(cells) as u32,
             pos.y.rem_euclid(cells) as u32,
             pos.z.rem_euclid(cells) as u32,
         ];
         self.mark(chunk_pos);
-        self.mark_touched_neighbours(chunk_pos, local, tiamot_core::CHUNK_SUBNODES);
+        self.mark_touched_neighbours(chunk_pos, local, tiamat_core::CHUNK_SUBNODES);
         true
     }
 
@@ -769,7 +769,7 @@ impl ChunkStore {
         // `HashMap`, even though nothing here is part of the hash gate.
         candidates.sort_by_key(|pos| {
             (
-                tiamot_core::interest::squared_distance(centre, *pos),
+                tiamat_core::interest::squared_distance(centre, *pos),
                 pos.x,
                 pos.y,
                 pos.z,
@@ -810,12 +810,12 @@ impl ChunkStore {
 /// Lets the client's physics collide against the chunks it has been sent.
 ///
 /// The same trait the server implements over its own store, so
-/// `tiamot_core::phys` runs unchanged on both sides — which is what makes a
+/// `tiamat_core::phys` runs unchanged on both sides — which is what makes a
 /// client's prediction agree with the server's answer rather than approximate
 /// it. Chunks still in flight are absent here, and `Voxels` treats absent as
 /// solid, so a player at the edge of what has arrived stops rather than
 /// falling through the world.
-impl tiamot_core::phys::ChunkLookup for ChunkStore {
+impl tiamat_core::phys::ChunkLookup for ChunkStore {
     fn chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
         self.get(pos)
     }
@@ -829,7 +829,7 @@ impl tiamot_core::phys::ChunkLookup for ChunkStore {
 /// to `phys::Voxels::with_fluid` twice — which is the arrangement that makes a
 /// client's prediction of a swim agree with the server's answer instead of
 /// approximating it.
-impl tiamot_core::phys::FluidLookup for ChunkStore {
+impl tiamat_core::phys::FluidLookup for ChunkStore {
     fn fluid_layer(&self, pos: ChunkPos) -> Option<&FluidLayer> {
         self.fluid.get(&pos)
     }
@@ -899,8 +899,8 @@ impl crate::mesher::FluidFill for ChunkFluid<'_> {
 
     /// Whether a dry block is terrain the milk is held in by.
     fn solid(&self, x: i32, y: i32, z: i32) -> bool {
-        let span = tiamot_core::CHUNK_BLOCKS as i32;
-        let at = tiamot_core::BlockPos::new(
+        let span = tiamat_core::CHUNK_BLOCKS as i32;
+        let at = tiamat_core::BlockPos::new(
             self.pos.x * span + x,
             self.pos.y * span + y,
             self.pos.z * span + z,
@@ -911,8 +911,8 @@ impl crate::mesher::FluidFill for ChunkFluid<'_> {
     }
 
     fn fill(&self, x: i32, y: i32, z: i32) -> Option<(u16, u8)> {
-        let span = tiamot_core::CHUNK_BLOCKS as i32;
-        let at = tiamot_core::BlockPos::new(
+        let span = tiamat_core::CHUNK_BLOCKS as i32;
+        let at = tiamat_core::BlockPos::new(
             self.pos.x * span + x,
             self.pos.y * span + y,
             self.pos.z * span + z,
@@ -925,11 +925,11 @@ impl crate::mesher::FluidFill for ChunkFluid<'_> {
         // gap between each — the surface rule applied to a block that has no
         // surface, because the block above is milk too. The same rule every
         // fluid renderer has, and the reason a waterfall reads as a column.
-        let above = tiamot_core::BlockPos::new(at.x, at.y + 1, at.z);
+        let above = tiamat_core::BlockPos::new(at.x, at.y + 1, at.z);
         if !self.store.fluid_at(above).is_empty() {
             return Some((
                 material,
-                u8::try_from(tiamot_core::UNITS_PER_BLOCK).unwrap_or(u8::MAX),
+                u8::try_from(tiamat_core::UNITS_PER_BLOCK).unwrap_or(u8::MAX),
             ));
         }
         Some((material, depth))
@@ -939,7 +939,7 @@ impl crate::mesher::FluidFill for ChunkFluid<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::BlockPos;
+    use tiamat_core::BlockPos;
 
     const STONE: MaterialId = MaterialId(2);
 
@@ -961,16 +961,16 @@ mod tests {
         // world position and always could have been. This is the half that says
         // `ChunkFluid` actually answers for coordinates outside its own chunk,
         // which is what the mesher's seam test assumes and cannot check.
-        use tiamot_core::coords::LocalBlock;
-        use tiamot_core::fluid::{Fluid, FluidId, FluidLayer};
+        use tiamat_core::coords::LocalBlock;
+        use tiamat_core::fluid::{Fluid, FluidId, FluidLayer};
 
         let mut store = ChunkStore::new();
-        store.set_fluid_table(&[tiamot_core::proto::FluidDef {
+        store.set_fluid_table(&[tiamat_core::proto::FluidDef {
             id: 1,
             name: "test:milk".into(),
             material: STONE.get(),
             color: [255, 255, 255],
-            opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+            opacity: tiamat_core::script::FluidRules::DEFAULT_OPACITY,
         }]);
 
         // Milk in the neighbour only, in the block against the shared face.
@@ -978,12 +978,12 @@ mod tests {
         let id = FluidId(1);
         layer.set(
             LocalBlock::new(0, 4, 4),
-            Fluid::new(id, tiamot_core::fluid::MAX_VOLUME),
+            Fluid::new(id, tiamat_core::fluid::MAX_VOLUME),
         );
         store.set_fluid(ChunkPos::new(1, 0, 0), layer);
 
         let fluid = store.fluid_for(ChunkPos::new(0, 0, 0));
-        let span = tiamot_core::CHUNK_BLOCKS as i32;
+        let span = tiamat_core::CHUNK_BLOCKS as i32;
         assert!(
             crate::mesher::FluidFill::fill(&fluid, span, 4, 4).is_some(),
             "chunk 0 cannot see the milk one block past its own edge, so it \
@@ -1352,7 +1352,7 @@ mod tests {
         // A layer that is not what the neighbour last assumed.
         let mut layer = LightLayer::dark();
         layer.set(
-            tiamot_core::coords::LocalBlock::new(15, 8, 8),
+            tiamat_core::coords::LocalBlock::new(15, 8, 8),
             Light::new(0, 15, 0, 0),
         );
         store.set_light(ChunkPos::new(0, 0, 0), layer);
@@ -1368,11 +1368,11 @@ mod tests {
         );
     }
     /// A summary whose cells are all one material.
-    fn summary(level: u8, material: u16) -> tiamot_core::lod::Summary {
-        let n = tiamot_core::lod::cells_per_axis(level).expect("a level");
-        tiamot_core::lod::Summary::from_parts(
+    fn summary(level: u8, material: u16) -> tiamat_core::lod::Summary {
+        let n = tiamat_core::lod::cells_per_axis(level).expect("a level");
+        tiamat_core::lod::Summary::from_parts(
             level,
-            vec![tiamot_core::MaterialId(material); (n * n * n) as usize],
+            vec![tiamat_core::MaterialId(material); (n * n * n) as usize],
         )
         .expect("build")
     }
@@ -1385,11 +1385,11 @@ mod tests {
         let mut store = ChunkStore::new();
         let pos = ChunkPos::new(3, 0, 0);
 
-        store.set_summary(pos, summary(tiamot_core::lod::FINEST, 1));
+        store.set_summary(pos, summary(tiamat_core::lod::FINEST, 1));
         assert!(store.summary(pos).is_some());
         assert!(store.get(pos).is_none());
 
-        store.insert(Chunk::new(pos, tiamot_core::MaterialId(1)));
+        store.insert(Chunk::new(pos, tiamat_core::MaterialId(1)));
         assert!(store.get(pos).is_some());
         assert!(
             store.summary(pos).is_none(),
@@ -1411,11 +1411,11 @@ mod tests {
         // costs a queue slot every frame and rebuilds nothing.
         let mut store = ChunkStore::new();
         let pos = ChunkPos::new(0, 0, 0);
-        store.insert(Chunk::new(pos, tiamot_core::MaterialId(1)));
+        store.insert(Chunk::new(pos, tiamat_core::MaterialId(1)));
         store.set_light(pos, LightLayer::dark());
         assert!(store.has_light(pos));
 
-        store.set_summary(pos, summary(tiamot_core::lod::FINEST, 1));
+        store.set_summary(pos, summary(tiamat_core::lod::FINEST, 1));
         assert!(
             !store.has_light(pos),
             "light for a chunk the client no longer holds was kept"
@@ -1454,10 +1454,10 @@ mod tests {
         assert!(store.horizon_is_buried(buried));
 
         // Open the sky above it, and it is the surface again.
-        let n = tiamot_core::lod::cells_per_axis(3).expect("a level");
-        let air = tiamot_core::lod::Summary::from_parts(
+        let n = tiamat_core::lod::cells_per_axis(3).expect("a level");
+        let air = tiamat_core::lod::Summary::from_parts(
             3,
-            vec![tiamot_core::MaterialId::AIR; (n * n * n) as usize],
+            vec![tiamat_core::MaterialId::AIR; (n * n * n) as usize],
         )
         .expect("build");
         store.set_summary(ChunkPos::new(0, 1, 0), air);

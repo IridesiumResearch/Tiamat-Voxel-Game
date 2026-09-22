@@ -18,7 +18,7 @@
 # The glTF corpus is SEEDS AND REGRESSIONS ONLY, which departs from the rule
 # above deliberately. A protocol seed is tens of bytes; a `.glb` is tens of
 # kilobytes, and ten minutes of fuzzing left a 12 MB corpus. The named `.glb`
-# files are the seed set (`cargo run -p tiamot-core --example gltf_seeds`) plus
+# files are the seed set (`cargo run -p tiamat-core --example gltf_seeds`) plus
 # every input that has ever crashed the reader; everything a fuzzer derives from
 # those is reproducible in minutes and is not worth carrying in the history.
 /fuzz/corpus/gltf_ingest/*
@@ -37,7 +37,7 @@
 # The dialog corpus, on the same rule as the two above. A seed is a few dozen
 # bytes and five minutes of fuzzing left 1,131 derived entries — which went into
 # a commit once before this rule existed. The named files are the seed set
-# (`cargo run -p tiamot-core --example dialog_seeds`) plus anything that has
+# (`cargo run -p tiamat-core --example dialog_seeds`) plus anything that has
 # ever crashed the target; everything a fuzzer derives from those is
 # reproducible in minutes and is not worth carrying in the history.
 /fuzz/corpus/dialog_schema/*
@@ -98,8 +98,8 @@ Thumbs.db
 # is nearly a megabyte, so they stay out of history.
 /spikes/subnode/out/*.obj
 
-# Session traces. `TIAMOT_TRACE_FRAMES`, `TIAMOT_TRACE_PHYSICS` and
-# `TIAMOT_TRACE_SERVER` write these, and a run of them is tens of thousands of
+# Session traces. `TIAMAT_TRACE_FRAMES`, `TIAMAT_TRACE_PHYSICS` and
+# `TIAMAT_TRACE_SERVER` write these, and a run of them is tens of thousands of
 # lines about one machine on one afternoon. The findings belong in a commit
 # message; the logs do not belong in history. The chunk-frame bug (d5ed968) was
 # read out of a set that lived here.

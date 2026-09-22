@@ -1,7 +1,7 @@
 -- SPDX-FileCopyrightText: Iridesium
 -- SPDX-License-Identifier: MIT
 --
--- Type stubs for the Tiamot mod API, annotated for the Lua Language Server.
+-- Type stubs for the Tiamat mod API, annotated for the Lua Language Server.
 --
 -- MIT licensed, unlike the engine — copy this file into your mod, closed-source
 -- or otherwise. See ../README.md.
@@ -37,7 +37,7 @@
 
 ---@meta
 
----@class Tiamot.ChunkPos
+---@class Tiamat.ChunkPos
 ---@field x integer Chunk x, in chunks.
 ---@field y integer Chunk y, in chunks.
 ---@field z integer Chunk z, in chunks.
@@ -45,7 +45,7 @@
 
 ---A per-column height field. Produced and consumed natively; you cannot read
 ---the individual heights, by design.
----@class Tiamot.Heightmap
+---@class Tiamat.Heightmap
 local Heightmap = {}
 
 ---Number of columns. 256 for a chunk.
@@ -57,7 +57,7 @@ function Heightmap:len() end
 ---Every operation is whole-buffer or whole-block. Block-level calls are the
 ---cheap default; sub-node calls expand the buffer 27x and are opt-in (see the
 ---Sub-Node Contract, §5).
----@class Tiamot.ChunkBuffer
+---@class Tiamat.ChunkBuffer
 local ChunkBuffer = {}
 
 ---Fills every block with one material.
@@ -65,7 +65,7 @@ local ChunkBuffer = {}
 function ChunkBuffer:fill_all(material) end
 
 ---Fills every block below the given surface. The workhorse terrain operation.
----@param heightmap Tiamot.Heightmap
+---@param heightmap Tiamat.Heightmap
 ---@param material integer
 function ChunkBuffer:fill_below_heightmap(heightmap, material) end
 
@@ -110,7 +110,7 @@ function ChunkBuffer:fill_below_heightmap(heightmap, material) end
 ---buf:fill_density(field, stone, { detail = "smooth" })   -- no staircases
 ---buf:fill_density(field, stone, { detail = "sampled" })  -- and fine detail
 ---```
----@param density Tiamot.Density
+---@param density Tiamat.Density
 ---@param material integer
 ---@param options table? `{ detail = "smooth" | "sampled" }`
 function ChunkBuffer:fill_density(density, material, options) end
@@ -148,7 +148,7 @@ function ChunkBuffer:fill_density(density, material, options) end
 ---than as a block-thick stair under it.
 ---
 ---At most 16 bands. Thresholds must be distinct numbers; the engine sorts them.
----@param density Tiamot.Density
+---@param density Tiamat.Density
 ---@param bands { above: number, material: integer }[]
 ---@param options table? `{ detail = "smooth" | "sampled" }`
 function ChunkBuffer:fill_palette(density, bands, options) end
@@ -179,8 +179,8 @@ function ChunkBuffer:fill_palette(density, bands, options) end
 ---    { code = 2, to = 0.004, material = snow },
 ---})
 ---```
----@param depth Tiamot.Density
----@param code Tiamot.Density
+---@param depth Tiamat.Density
+---@param code Tiamat.Density
 ---@param layers { code: integer, from: number?, to: number, material: integer }[]
 function ChunkBuffer:fill_layers(depth, code, layers) end
 --- A layer whose `code` is -1 takes EVERY block, and `to` may be `math.huge`:
@@ -237,7 +237,7 @@ function ChunkBuffer:fill_layers(depth, code, layers) end
 ---buf:fill_cover(allium, { cells = 6, take = rare })   -- two blocks tall
 ---```
 ---@param material integer
----@param options table? `{ cells = 1..9, take = Tiamot.Density }`
+---@param options table? `{ cells = 1..9, take = Tiamat.Density }`
 function ChunkBuffer:fill_cover(material, options) end
 
 ---Fills every block below `level` with a fluid, around the terrain.
@@ -322,7 +322,7 @@ function ChunkBuffer:fill_fluid_below(level, fluid) end
 ---Run it after the terrain, and after anything stamped into the channel: the
 ---fluid takes the room the blocks leave. Returns how many blocks became lips,
 ---and raises an error if `within` reads height (see above).
----@param spec { level: Tiamot.Density, within: Tiamot.Density?, fluid: string, lip: integer? }
+---@param spec { level: Tiamat.Density, within: Tiamat.Density?, fluid: string, lip: integer? }
 ---@return integer lips
 function ChunkBuffer:fill_fluid_terraced(spec) end
 
@@ -408,13 +408,13 @@ function ChunkBuffer:is_expanded() end
 ---block the smooth detail leaves; 0 stands it on top.
 ---
 ---Returns how many structures wrote at least one block into this chunk.
----@param spec { depth: Tiamot.Density, stand: Tiamot.Density?, schematics: Tiamot.Schematic[], cell: integer?, chance: number?, salt: integer?, sink: integer? }
+---@param spec { depth: Tiamat.Density, stand: Tiamat.Density?, schematics: Tiamat.Schematic[], cell: integer?, chance: number?, salt: integer?, sink: integer? }
 ---@return integer placed
 function ChunkBuffer:scatter(spec) end
 
 ---A named random stream. Reproducible for the same world seed, chunk and name;
 ---uncorrelated with streams under other names.
----@class Tiamot.Stream
+---@class Tiamat.Stream
 local Stream = {}
 
 ---A uniformly distributed integer in `0..bound-1`.
@@ -427,7 +427,7 @@ function Stream:below(bound) end
 function Stream:next_bool() end
 
 ---Options for `game.noise_heightmap`.
----@class Tiamot.NoiseOptions
+---@class Tiamat.NoiseOptions
 ---@field octaves integer? Detail levels. Each doubles the cost. Default 4, capped at 16.
 ---@field frequency number? Inverse feature size. Default 0.02.
 ---@field lacunarity number? Frequency multiplier per octave. Default 2.0.
@@ -437,7 +437,7 @@ function Stream:next_bool() end
 
 ---Fields accepted by `game.register_block`. Anything else is an error naming
 ---the field — a typo should stop you, not silently take a default.
----@class Tiamot.BlockSpec
+---@class Tiamat.BlockSpec
 ---@field id string Required. Namespaced with your mod id automatically.
 ---@field name string? Display name.
 ---@field description string? One-line description.
@@ -445,9 +445,9 @@ function Stream:next_bool() end
 ---@field dominance number? How strongly this material imposes its hardness on a block it is only part of. Default 1.0. Must be positive. See below.
 ---@field drops table<string, integer>? Overrides what breaking it yields: block id to UNITS (27 to a block). Omit for the ordinary rule — the block drops itself, 27 units whole or one per occupied sub-node. Bare ids are namespaced with your mod id.
 ---@field tags string[]? Arbitrary tags for other mods to match on.
----@field textures Tiamot.BlockTextures? Which images clients draw this block with.
+---@field textures Tiamat.BlockTextures? Which images clients draw this block with.
 ---@field sounds { step: string }? What this block sounds like underfoot. The client plays its own footsteps from its own movement, so this is the only way it can know. Unqualified ids mean your own mod's.
----@field light_emit Tiamot.LightEmit? Light this block gives off. Omit for anything that is not a lamp.
+---@field light_emit Tiamat.LightEmit? Light this block gives off. Omit for anything that is not a lamp.
 ---@field transparent boolean? Whether this block can be seen through: glass. **A flag, not an alpha value** — what it looks like is its texture's own alpha, and a second opacity number beside it would be two sources of truth for one appearance. Three things change (Sub-Node Contract §8.1): a face draws where exactly one side of it is transparent, so a wall behind a window is not a hole and two panes together do not double up; the block is drawn in a blended pass after the opaque world; and light passes through it, so a glass roof does not make a dark room. **Collision does NOT change — glass is solid** and you cannot walk through a window. Only a whole block of one transparent material passes light; a chiselled or mixed block holding glass falls back to the ordinary cell rule.
 ---@field cutout boolean? Whether this block is see-through in PLACES rather than everywhere: leaves, a fern, a grate. **Not a variant of `transparent` — the opposite culling rule**, and a block declaring both is refused rather than given whichever the engine tests first. Glass hides the face between two panes so a window does not double up; foliage KEEPS the faces between two leaf blocks, because culled, a canopy is a hollow shell whose alpha holes look straight through the world at the sky. Drawn alpha-tested with the opaque world rather than blended, so it writes depth, occludes itself correctly at every angle, and needs none of the sorting §8.1 gave up on. Light passes as it does through glass; dappled shade is not expressible. Collision does NOT change — leaves are solid. The cost is that every interior face of a mass of foliage is drawn (Sub-Node Contract §8.2), which is what makes it look like foliage rather than a painted box.
 ---@field passable boolean? Whether a body walks through it: grass, ferns, vines. **Collision only.** The cell is still there for everything else — it meshes, it is lit, and a ray still STOPS at it, which is what lets a player aim at a tuft and break it. **It does not hold fluid out:** a block holding nothing but passable cells takes a whole block of water, so a plant under water is saturated rather than standing in a bubble of air, and a body swimming through it is as submerged as the water beside it. Without this every plant is a lip: collision is at sub-node resolution, so a two-cell fern is two thirds of a yard to climb, and foliage has to be built around that rather than around what it should look like (Sub-Node Contract §2).
@@ -493,7 +493,7 @@ function Stream:next_bool() end
 ---**The engine registers no light sources of its own.** A world whose mods
 ---define no emissive block is lit only by the sky — that is a mod set's
 ---decision, the same way a world with no tools is one nobody can dig in.
----@class Tiamot.LightEmit
+---@class Tiamat.LightEmit
 ---@field r integer? Red, 0..15. Default 0.
 ---@field g integer? Green, 0..15. Default 0.
 ---@field b integer? Blue, 0..15. Default 0.
@@ -506,11 +506,11 @@ function Stream:next_bool() end
 ---deliberately not reserved in advance: adding them later is additive, whereas
 ---shipping a six-key schema nothing renders yet would freeze a guess into the
 ---mod API.
----@class Tiamot.BlockTextures
+---@class Tiamat.BlockTextures
 ---@field all string Required. The image every face uses, e.g. `"textures/white.png"`.
 
 ---Fields accepted by `game.register_tool`.
----@class Tiamot.ToolSpec
+---@class Tiamat.ToolSpec
 ---@field id string Required. Namespaced with your mod id automatically.
 ---@field name string? Display name.
 ---@field brush string? What shape it removes: `"block"` (default) or `"subnode"`.
@@ -522,9 +522,9 @@ function Stream:next_bool() end
 ---**Registration window only.** The engine has no sky of its own: a world whose
 ---mods register none has no day and holds its colours fixed, which is a
 ---legitimate world rather than a missing feature.
----@class Tiamot.SkySpec
+---@class Tiamat.SkySpec
 ---@field day_length_ticks integer Required. Ticks in a full day, at 20 ticks a second. Must be at least 1.
----@field keyframes Tiamot.SkyKeyframe[]
+---@field keyframes Tiamat.SkyKeyframe[]
 ---@field start_time number? Where a fresh world's clock starts, 0..1. Defaults to mid-morning: a counter left at zero opens every world at midnight, which is the one hour with no sun in it. Required, and not empty. Need not be sorted — the engine sorts them, because an out-of-order list would make the sky walk backwards partway through the day.
 
 ---One moment in your day.
@@ -532,12 +532,12 @@ function Stream:next_bool() end
 ---The client interpolates between keyframes, so a handful describes a whole
 ---day. Make the last keyframe restate the first's colours, or the sky cuts hard
 ---at the moment the clock wraps.
----@class Tiamot.SkyKeyframe
+---@class Tiamat.SkyKeyframe
 ---@field time number Required. When in the day, 0 to 1, where 0 is midnight and 0.5 is noon.
 ---@field sky number[] Required. `{r, g, b}` for the sky itself. Distance fog fades towards this, so it is also the horizon.
 ---@field sun number[] Required. `{r, g, b}` tinting the sunlight stored in the world.
 ---@field intensity number Required, 0 to 1. Scales stored sunlight at DRAW time — which is why a day/night cycle costs nothing: the world's sunlight is always full daylight and never needs relighting.
----@field grade Tiamot.SkyGrade? Optional. How the finished picture is graded at this moment. Omit it and nothing is graded.
+---@field grade Tiamat.SkyGrade? Optional. How the finished picture is graded at this moment. Omit it and nothing is graded.
 
 ---How a moment's finished picture is graded.
 ---
@@ -555,7 +555,7 @@ function Stream:next_bool() end
 ---highlight roll-off (which is what makes it decide how much of the picture
 ---rolls off at all), then, on the finished image, `contrast` about mid grey,
 ---`saturation`, `tint` then `offset`, and `gamma` last.
----@class Tiamot.SkyGrade
+---@class Tiamat.SkyGrade
 ---@field exposure number? 0 to 4, default 1. Multiplies the scene before the tonemap.
 ---@field tint number[]? `{r, g, b}`, each 0 to 4, default `{1, 1, 1}`. Multiplies the graded image.
 ---@field offset number[]? `{r, g, b}`, each -1 to 1, default `{0, 0, 0}`. Added after `tint`.
@@ -564,7 +564,7 @@ function Stream:next_bool() end
 ---@field gamma number? 0.1 to 4, default 1. Applied last, per channel. Never 0 — a zero exponent maps the whole frame to white.
 
 ---Fields accepted by `game.register_action`.
----@class Tiamot.ActionSpec
+---@class Tiamat.ActionSpec
 ---@field id string Required. Namespaced with your mod id automatically.
 ---@field default_key string? Suggested default binding, as a key name: "KeyF", "Space", "BracketLeft". The engine owns bindings; mods never read keys, and there is deliberately no way to ask which key a player chose.
 ---@field description string? One line for the settings screen, shown beside your mod's name.
@@ -572,7 +572,7 @@ function Stream:next_bool() end
 ---The mod API.
 ---
 ---Available inside your `init.lua` and every callback you register.
----@class Tiamot.Game
+---@class Tiamat.Game
 ---@field CHUNK_BLOCKS integer Blocks along each axis of a chunk. 16.
 ---@field UNITS_PER_BLOCK integer Sub-node units in a block. 27.
 ---@field OCCUPANCY_FULL integer Every one of a block's 27 sub-nodes, as a mask. Compare `game.get_block`'s `occupancy` against it to ask "is this a whole block".
@@ -590,7 +590,7 @@ function game.log(message) end
 ---
 ---**Registration window only.** Calling this after the engine freezes the
 ---registries is an error — that is what makes numeric ids safe to persist.
----@param spec Tiamot.BlockSpec
+---@param spec Tiamat.BlockSpec
 ---@return integer id The numeric id, for use with the fill operations.
 function game.register_block(spec) end
 
@@ -601,7 +601,7 @@ function game.register_block(spec) end
 ---Everything a player would call "the sky" is yours. The engine advances a
 ---number from 0 to 1 over the period you set and interpolates between the
 ---colours you list; it has no idea what dawn is.
----@param spec Tiamot.SkySpec
+---@param spec Tiamat.SkySpec
 function game.register_sky(spec) end
 
 ---Lays weather over one player's sky: a standing change to the keyframes,
@@ -657,7 +657,7 @@ function game.set_sky_modifier(player, modifier) end
 ---Defaults: white, `radius` 256, `intensity` 1, one tick up, six down. Wrong
 ---numbers are clamped (intensity up to 4, radius up to 1024, attack up to 100
 ---ticks, decay up to 400).
----@param spec { pos: Tiamot.BlockPos, radius?: number, intensity?: number, colour?: number[]|{ r: number, g: number, b: number }, attack_ticks?: integer, decay_ticks?: integer }
+---@param spec { pos: Tiamat.BlockPos, radius?: number, intensity?: number, colour?: number[]|{ r: number, g: number, b: number }, attack_ticks?: integer, decay_ticks?: integer }
 ---@return integer told
 function game.flash(spec) end
 
@@ -701,7 +701,7 @@ function game.set_precipitation(player, precipitation) end
 ---removes the whole block containing the targeted cell; `"subnode"` removes
 ---only the cell under the crosshair, which is how a chisel works. An unknown
 ---brush is an error naming it rather than a silent fallback.
----@param spec Tiamot.ToolSpec
+---@param spec Tiamat.ToolSpec
 function game.register_tool(spec) end
 
 ---Makes an inventory that belongs to the WORLD rather than to a player.
@@ -922,7 +922,7 @@ function game.register_item(spec) end
 ---Lua state kept between calls is one worker's, not the world's. Write it as the
 ---pure function of `pos` (which carries the seed) it was always meant to be. An
 ---error here disables the mod in every VM at once. See `AGENTS.md` §5.
----@param callback fun(buf: Tiamot.ChunkBuffer, pos: Tiamot.ChunkPos)
+---@param callback fun(buf: Tiamat.ChunkBuffer, pos: Tiamat.ChunkPos)
 function game.register_on_generate(callback) end
 
 ---Gives one chunk its biome colour: a multiplier every TINTED material in it
@@ -1161,7 +1161,7 @@ function game.register_on_tick(callback) end
 ---    return game.AIR
 ---end
 ---```
----@param position Tiamot.BlockPos
+---@param position Tiamat.BlockPos
 ---@return { material: integer|nil, occupancy: integer, cells: integer[]|nil }|nil
 ---
 ---**Every position may name a domain.** `{ x, y, z, domain = "mod:ship/17" }`
@@ -1312,7 +1312,7 @@ function game.line_of_sight(from, to) end
 
 ---Options for `game.find_path`. Every field is optional; the defaults describe
 ---something humanoid.
----@class Tiamot.PathOptions
+---@class Tiamat.PathOptions
 ---@field budget? integer Blocks the search may expand before giving up. Default 2000, capped at 10000, and 0 means the default. A search is unbounded work wearing the shape of a function call, and this is what bounds it. **There is also a pool of 8000 expansions shared by every search in one tick**, so what you ask for is capped by what the tick has left — measured, 2000 expansions is about 0.5 ms, or 1% of a tick, and the whole pool is about 4%. A mob that cannot find a way in two thousand blocks should do something else, not stall the server.
 ---@field height? integer Blocks of clear space the body needs above its feet. Default 2. Not read off the entity's collider on purpose: you may want a mob to route only where it would also fit crouching, or to reserve headroom it does not strictly need.
 ---@field step_up? integer How far it climbs in one move, in blocks. Default 1. Zero for something that cannot climb at all.
@@ -1537,7 +1537,7 @@ function game.take(player, spec) end
 function game.register_on_chat(callback) end
 
 ---Fields accepted by `game.register_sound`.
----@class Tiamot.SoundSpec
+---@class Tiamat.SoundSpec
 ---@field id string Required. Namespaced with your mod id automatically.
 ---@field file string Required. Path inside your mod directory, e.g. "sounds/break.ogg". Ogg Vorbis or WAV — see the limits below.
 ---@field gain number? Loudness multiplier on the file's own level. Default 1.
@@ -1552,11 +1552,11 @@ function game.register_on_chat(callback) end
 ---Types: `container`, `label`, `button`, `image`, `text_input`, `checkbox`,
 ---`slider`, `dropdown`, `item_slot`, `item_grid`, `scroll`, `spacer`,
 ---`progress`, `shape_editor`.
----@class Tiamot.Widget
+---@class Tiamat.Widget
 ---@field type string Required. One of the types above.
 ---@field name string? What events from this widget carry, so you can tell two buttons apart.
----@field children Tiamot.Widget[]? Only for `container` and `scroll`.
----@field style Tiamot.WidgetStyle?
+---@field children Tiamat.Widget[]? Only for `container` and `scroll`.
+---@field style Tiamat.WidgetStyle?
 ---@field grow integer? Share of the parent's leftover space. 0 takes only what it needs.
 ---@field size integer? Fixed size along the parent's direction, in virtual pixels.
 ---@field cross_size integer? Fixed size across it.
@@ -1584,7 +1584,7 @@ function game.register_on_chat(callback) end
 ---@field material integer? `shape_editor`: which material the cells are drawn as.
 
 ---What a widget may say about how it looks. Deliberately small.
----@class Tiamot.WidgetStyle
+---@class Tiamat.WidgetStyle
 ---@field background integer[]? `{r, g, b}` or `{r, g, b, a}`.
 ---@field border integer[]? Same shape. The width is the client's.
 ---@field nine_slice string|integer[]? A content hash — the hex `game.content_hash` answers, or 32 bytes in a table — drawn as a nine-slice frame behind the widget. **The border is a THIRD of the image**, both ways: draw your frame so its corners are the outer third and they keep their size at any box size while the edges stretch. That is what a nine-slice is for, and it is why there is no border argument. Goes UNDER `background` and `border`, so a widget with both gets the flat colour inside the frame. Fetched by hash like a texture; a frame that has not arrived yet draws nothing and fills in when it lands.
@@ -1593,10 +1593,10 @@ function game.register_on_chat(callback) end
 ---@field text_size integer? In virtual pixels; the client keeps it legible.
 
 ---Fields accepted by `game.show_dialog` and `game.update_dialog`.
----@class Tiamot.DialogSpec
+---@class Tiamat.DialogSpec
 ---@field player string Required. The player's UUID — never their display name (charter rule 13).
 ---@field form string Required. Your name for this dialog, namespaced with your mod id automatically.
----@field tree Tiamot.Widget Required. The root widget.
+---@field tree Tiamat.Widget Required. The root widget.
 ---@field compact boolean? Draw it as a small prompt sized to its contents rather than as a full screen. Default `false`.
 
 ---Shows a dialog on a player's screen.
@@ -1620,7 +1620,7 @@ function game.register_on_chat(callback) end
 ---
 ---Returns whether the player was there to show it to, which is NOT a promise it
 ---rendered.
----@param spec Tiamot.DialogSpec
+---@param spec Tiamat.DialogSpec
 ---@return boolean shown
 function game.show_dialog(spec) end
 
@@ -1629,7 +1629,7 @@ function game.show_dialog(spec) end
 ---A whole tree, not a patch: a dialog is small, and a patch stream that ever
 ---dropped a message would leave a player looking at something you do not
 ---believe is there.
----@param spec Tiamot.DialogSpec
+---@param spec Tiamat.DialogSpec
 ---@return boolean shown
 function game.update_dialog(spec) end
 
@@ -1696,7 +1696,7 @@ function game.register_on_dialog_event(callback) end
 ---A file that is missing, oversized or malformed disables that ONE sound, with
 ---a warning naming the server. It never refuses the join and never stops the
 ---client.
----@param spec Tiamot.SoundSpec
+---@param spec Tiamat.SoundSpec
 function game.register_sound(spec) end
 
 ---Registers a font your interface can draw text in.
@@ -2182,11 +2182,11 @@ function game.chat_to(player, text) end
 ---A reserve you leave out is none, which is what every mod written before this
 ---existed asks for.
 ---
----@param file string|Tiamot.HudScriptSpec Path to the Lua file inside your mod directory, or a table.
+---@param file string|Tiamat.HudScriptSpec Path to the Lua file inside your mod directory, or a table.
 function game.register_hud_script(file) end
 
 ---Fields accepted by the table form of `game.register_hud_script`.
----@class Tiamot.HudScriptSpec
+---@class Tiamat.HudScriptSpec
 ---@field file string Required. Path to the Lua file inside your mod directory.
 ---@field reserve number? Virtual pixels at the bottom of the canvas to keep the engine's sheets clear of. Default 0, clamped to 540.
 
@@ -2223,11 +2223,11 @@ function game.register_hud_script(file) end
 ---
 ---At most 64 models per server.
 ---
----@param spec Tiamot.ModelSpec
+---@param spec Tiamat.ModelSpec
 function game.register_model(spec) end
 
 ---Fields accepted by `game.register_model`.
----@class Tiamot.ModelSpec
+---@class Tiamat.ModelSpec
 ---@field id string Required. Unqualified means your own mod's namespace.
 ---@field file string Required. A self-contained `.glb` inside your mod directory.
 ---@field scale number? Multiplies the model's size. Default 1, from 0.01 to 64.
@@ -2272,11 +2272,11 @@ function game.register_model(spec) end
 ---The player can turn clouds down or off in their own graphics settings, and
 ---is never asked to tell the server.
 ---
----@param spec Tiamot.CloudSpec
+---@param spec Tiamat.CloudSpec
 function game.register_clouds(spec) end
 
 ---Fields accepted by `game.register_clouds`.
----@class Tiamot.CloudSpec
+---@class Tiamat.CloudSpec
 ---@field base number? World y of the deck's floor. Default 256.
 ---@field thickness number? Blocks from the base to the tallest top. Default 64, at most 1024.
 ---@field cell number? Blocks per cube. Default 8, from 1 to 64.
@@ -2342,20 +2342,20 @@ function game.register_clouds(spec) end
 ---Returns whether that player was there to tell.
 ---
 ---@param uuid string The player's UUID.
----@param spec Tiamot.CloudsSpec|nil
+---@param spec Tiamat.CloudsSpec|nil
 ---@return boolean told
 function game.set_clouds(uuid, spec) end
 
 ---Fields accepted by `game.set_clouds`.
----@class Tiamot.CloudsSpec
+---@class Tiamat.CloudsSpec
 ---@field cover number? 0 is clear, 1 is overcast. Default 0.
 ---@field darkness number? 0 is fair-weather white, 1 is storm grey. Default 0.
 ---@field base number? Overrides the registered floor for this player.
 ---@field ease_ticks integer? How long the client takes to get there. Default 0, at most 2400.
----@field map Tiamot.CloudMapSpec? A coarse grid of weather over the world, for a storm that can be seen coming. Omit it for one sky everywhere; a call that omits it clears the last one.
+---@field map Tiamat.CloudMapSpec? A coarse grid of weather over the world, for a storm that can be seen coming. Omit it for one sky everywhere; a call that omits it clears the last one.
 
 ---A coarse grid of cloud cover over the world — one cell is hundreds of blocks.
----@class Tiamot.CloudMapSpec
+---@class Tiamat.CloudMapSpec
 ---@field origin { x: number, z: number } The world x and z of the grid's corner, in blocks.
 ---@field cell number How many blocks a cell covers.
 ---@field size integer How many cells a side, 1 to 16. Sixteen 256-block cells is four kilometres, which is past any view distance the engine serves.
@@ -2374,7 +2374,7 @@ function game.set_clouds(uuid, spec) end
 ---a theme is the furniture around a screen, your styles are what is in it.
 
 ---Fields accepted by `game.play_sound`.
----@class Tiamot.PlaySpec
+---@class Tiamat.PlaySpec
 ---@field sound string Required. A sound id; unqualified means your own.
 ---@field pos { x: number, y: number, z: number } Required. Where it happens, in world blocks. Ignored when `entity` is set.
 ---@field radius number? How far it carries, in blocks. Default 16, capped at 512. Players outside are not sent it at all.
@@ -2389,13 +2389,13 @@ function game.set_clouds(uuid, spec) end
 ---
 ---A careless number is clamped rather than refused: `0/0` is a quiet NaN in Lua
 ---and would otherwise reach a mixer.
----@param spec Tiamot.PlaySpec
+---@param spec Tiamat.PlaySpec
 ---@return integer told
 function game.play_sound(spec) end
 
 ---Fields accepted by `game.emit_particles`. Every number is clamped into its
 ---range rather than refused; a wrong TYPE is an error.
----@class Tiamot.ParticleSpec
+---@class Tiamat.ParticleSpec
 ---@field pos { x: number, y: number, z: number, domain: string? } Required. The burst's centre, in world blocks.
 ---@field count integer? How many particles. Default 8, at most 256.
 ---@field colour { r: number?, g: number?, b: number?, a: number? }? Colour and opacity, 0..1; an unnamed channel is 1. Lit by where the burst is, so a spray at night is dim.
@@ -2439,12 +2439,12 @@ function game.play_sound(spec) end
 ---connection sends, and a client draws at most 8,192 particles at once. Call it
 ---from a tick or a hook; from a generator it does nothing, since generation runs
 ---in worker VMs with nobody to show a spray to.
----@param spec Tiamot.ParticleSpec
+---@param spec Tiamat.ParticleSpec
 ---@return integer told
 function game.emit_particles(spec) end
 
 ---Fields accepted by `game.show_over`.
----@class Tiamot.BadgeSpec
+---@class Tiamat.BadgeSpec
 ---@field picture string Required. The 64 hex characters `game.register_picture` answered. Every icon in the row draws it.
 ---@field count integer? How many icons, side by side. Default 1, at most 16. **Zero takes the badge down** before its time — a mob back to full health should not wear an empty bar.
 ---@field seconds number? How long it stays, before fading over its last fifth. Default 2, at most 30.
@@ -2482,7 +2482,7 @@ function game.emit_particles(spec) end
 ---game.show_over(cow, { picture = heart, count = 0 })
 ---```
 ---@param entity integer The entity to hang it over.
----@param spec Tiamot.BadgeSpec
+---@param spec Tiamat.BadgeSpec
 ---@return integer told
 function game.show_over(entity, spec) end
 
@@ -2525,13 +2525,13 @@ function game.show_over(entity, spec) end
 ---```
 ---@param from { x: number, y: number, z: number }
 ---@param to { x: number, y: number, z: number }
----@param options? Tiamot.PathOptions
+---@param options? Tiamat.PathOptions
 ---@return { x: number, y: number, z: number }[]|nil route
 ---@return string|nil reason `"unreachable"`, `"budget"` or `"no world"` when there is no route
 function game.find_path(from, to, options) end
 
 ---Fields accepted by `game.register_fluid`.
----@class Tiamot.FluidSpec
+---@class Tiamat.FluidSpec
 ---@field id string Unqualified id. `"milk"` from mod `core_milk` becomes `"core_milk:milk"`.
 ---@field material string The registered block a full block of it is drawn as. REQUIRED — a fluid with no material cannot be drawn, and the engine does not get to decide what your fluid looks like (charter rule 1). Qualified against your own mod, so a fluid can name its own block.
 ---@field tick_rate? integer Simulation ticks between updates. Default 1, which is every fluid tick (10 Hz). Larger is slower and more viscous, and costs proportionally less to simulate.
@@ -2592,7 +2592,7 @@ Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ---game.register_fluid{ id = "lava", material = "molten", opacity = 1.0, tick_rate = 4 }
 ---game.register_fluid{ id = "brine", material = "water", light_falloff = 1 }  -- a dark deep sea
 ---```
----@param spec Tiamot.FluidSpec
+---@param spec Tiamat.FluidSpec
 function game.register_fluid(spec) end
 
 ---What this world chose for one of its mods' WORLD options, or `nil`.
@@ -2863,7 +2863,7 @@ function game.set_fluid(position, spec) end
 function game.set_block(position, block, occupancy, options) end
 
 ---A dig about to happen.
----@class Tiamot.DigEvent
+---@class Tiamat.DigEvent
 ---@field player string Who is digging, as 64 hex characters. This is the canonical player UUID — key any per-player state on it, never on the display name, which a player can change and which is not unique across servers.
 ---@field x integer Sub-node cell being dug. These are CELL coordinates, three per block on each axis, so the block is `x // 3`.
 ---@field y integer
@@ -2872,7 +2872,7 @@ function game.set_block(position, block, occupancy, options) end
 ---@field brush string `"block"` for the whole block, `"subnode"` for the single cell.
 
 ---A placement about to happen.
----@class Tiamot.PlaceEvent
+---@class Tiamat.PlaceEvent
 ---@field player string Who is placing, as 64 hex characters.
 ---@field x integer The BLOCK being written — block coordinates, not cells.
 ---@field y integer
@@ -2882,7 +2882,7 @@ function game.set_block(position, block, occupancy, options) end
 ---@field units integer How many units it would cost, which is the number of set bits in `occupancy`.
 
 ---The place control landing on a block with nothing to place.
----@class Tiamot.UseEvent
+---@class Tiamat.UseEvent
 ---@field player string Who is using, as 64 hex characters.
 ---@field x integer The CELL under the crosshair — cell coordinates, three to a block, as a dig's are. `x // 3` is the block.
 ---@field y integer
@@ -2919,7 +2919,7 @@ function game.set_block(position, block, occupancy, options) end
 ---dug answers what it holds before anything is removed, so a hook can decide by
 ---the whole block rather than by the one material the event names. Writes from
 ---a veto are still refused.
----@param callback fun(event: Tiamot.DigEvent): boolean|string|nil
+---@param callback fun(event: Tiamat.DigEvent): boolean|string|nil
 function game.register_on_dig_complete(callback) end
 
 ---Registers a veto on placements.
@@ -2948,7 +2948,7 @@ function game.register_on_dig_complete(callback) end
 ---The same rules as `game.register_on_dig_complete` otherwise: the first
 ---cancellation stops the rest, and an error disables your mod while letting the
 ---placement through — and `game.get_block` answers inside it.
----@param callback fun(event: Tiamot.PlaceEvent): boolean|string|nil
+---@param callback fun(event: Tiamat.PlaceEvent): boolean|string|nil
 function game.register_on_place(callback) end
 
 ---Registers a handler for USING a block: the place control with nothing to place.
@@ -2987,11 +2987,11 @@ function game.register_on_place(callback) end
 ---    return ""                                          -- handled, silently
 ---end)
 ---```
----@param callback fun(event: Tiamot.UseEvent): boolean|string|nil
+---@param callback fun(event: Tiamat.UseEvent): boolean|string|nil
 function game.register_on_use(callback) end
 
 ---Somebody hitting something.
----@class Tiamot.PunchEvent
+---@class Tiamat.PunchEvent
 ---@field attacker string Who threw the punch, as 64 hex characters.
 ---@field target integer The entity that took it, as `game.entity` names one. Everything in the world is an entity, including the other players.
 ---@field owner string|nil The player that entity belongs to, if it belongs to one — so "did somebody hit a person" is one field rather than a lookup.
@@ -3016,7 +3016,7 @@ function game.register_on_use(callback) end
 ---    end
 ---end)
 ---```
----@param callback fun(event: Tiamot.PunchEvent): boolean?
+---@param callback fun(event: Tiamat.PunchEvent): boolean?
 function game.register_on_punch(callback) end
 
 ---Fluid pressing against something it cannot get into.
@@ -3024,7 +3024,7 @@ function game.register_on_punch(callback) end
 ---Coordinates are BLOCKS on both ends, and they are named rather than being bare
 ---`x`/`y`/`z` — a dig event's `x`/`y`/`z` are CELLS, and the two have been
 ---confused before.
----@class Tiamot.FluidFlowEvent
+---@class Tiamat.FluidFlowEvent
 ---@field from { x: integer, y: integer, z: integer } The block the fluid is in.
 ---@field into { x: integer, y: integer, z: integer } The block it could not enter.
 ---@field fluid string The fluid's registered id, e.g. `"core:milk"`.
@@ -3081,7 +3081,7 @@ function game.register_on_punch(callback) end
 ---Nothing fires for a settled world at all. The solver only examines blocks an
 ---edit woke or a flow is moving through, so a pond nobody has touched costs
 ---nothing here either.
----@param callback fun(event: Tiamot.FluidFlowEvent)
+---@param callback fun(event: Tiamat.FluidFlowEvent)
 function game.register_on_fluid_flow(callback) end
 
 ---Registers a named input action.
@@ -3090,7 +3090,7 @@ function game.register_on_fluid_flow(callback) end
 ---Stored now, inert until Task 13.
 ---
 ---**Registration window only.**
----@param spec Tiamot.ActionSpec
+---@param spec Tiamat.ActionSpec
 function game.register_action(spec) end
 
 ---Offers the player an option, shown in the in-game settings screen.
@@ -3175,15 +3175,15 @@ function game.block_of(material) end
 ---
 ---One call fills all 256 columns natively. There is no per-sample entry point,
 ---and that is the point — see the rule at the top of this file.
----@param pos Tiamot.ChunkPos
----@param options Tiamot.NoiseOptions
----@return Tiamot.Heightmap
+---@param pos Tiamat.ChunkPos
+---@param options Tiamat.NoiseOptions
+---@return Tiamat.Heightmap
 function game.noise_heightmap(pos, options) end
 
----A compiled density field. Opaque, like `Tiamot.Heightmap`, and for the same
+---A compiled density field. Opaque, like `Tiamat.Heightmap`, and for the same
 ---reason: a script that could read it back would be one sample away from
 ---looping over it.
----@class Tiamot.Density
+---@class Tiamat.Density
 local Density = {}
 
 ---How many operations it compiled to. For checking your table became what you
@@ -3339,7 +3339,7 @@ function Density:at(x, y, z, seed) end
 ---  features four times as tall here, as if sampled at `y / 4` — for rock that
 ---  flutes vertically or strata that run level; an axis left out is 1. Every
 ---  value must be above zero. Bounds follow it, so pruning still works.
----- `{ op = "map", map = <a Tiamot.Map> }` — the map's value under this
+---- `{ op = "map", map = <a Tiamat.Map> }` — the map's value under this
 ---  sample, ignoring y. **The way an eroded field becomes terrain.** A map is
 ---  a surface, so subtract `y` to get a density from it. The node takes a COPY
 ---  of the map as it is when `game.density` is called: a program that read a
@@ -3354,7 +3354,7 @@ function Density:at(x, y, z, seed) end
 ---deep, needs more than 8 buffers at once, or compiles to more than 512
 ---operations. A field a person writes is a dozen.
 ---@param spec table
----@return Tiamot.Density
+---@return Tiamat.Density
 function game.density(spec) end
 
 ---A `contour` node: `{ op = "contour", stream = "cracks", frequency = 1/80 }`
@@ -3384,7 +3384,7 @@ function game.density(spec) end
 ---Opaque, like a density: a mod that could read it back would be one loop
 ---away from writing it by hand, which is the cost this exists to remove.
 ---@param blocks integer[][]
----@return Tiamot.Schematic
+---@return Tiamat.Schematic
 function game.schematic(blocks) end
 
 ---A structure CUT from shapes, for `buf:scatter` to stamp: paths with a
@@ -3424,11 +3424,11 @@ function game.schematic(blocks) end
 ---}
 ---```
 ---@param shapes table[]
----@return Tiamot.Schematic
+---@return Tiamat.Schematic
 function game.schematic_shapes(shapes) end
 
 ---A structure for `buf:scatter`. See `game.schematic`.
----@class Tiamot.Schematic
+---@class Tiamat.Schematic
 local Schematic = {}
 
 ---How many blocks it holds.
@@ -3439,7 +3439,7 @@ function Schematic:len() end
 ---
 ---Fetched by name, not created: the first run builds it, every run after gets
 ---the one stored with the world. See `game.map`.
----@class Tiamot.Map
+---@class Tiamat.Map
 local Map = {}
 
 ---Samples along one side.
@@ -3484,7 +3484,7 @@ function Map:blur(radius) end
 ---`how` is `"add"`, `"mul"`, `"min"` or `"max"`. The two maps must be the same
 ---shape, and a map cannot be combined with itself — `scale_by` says "twice
 ---this" without the aliasing.
----@param other Tiamot.Map
+---@param other Tiamat.Map
 ---@param how string
 function Map:combine(other, how) end
 
@@ -3511,7 +3511,7 @@ function Map:combine(other, how) end
 ---
 ---One evaluation per cell at the map's own resolution, in world coordinates,
 ---so two maps of the same region with the same field and seed agree.
----@param density Tiamot.Density
+---@param density Tiamat.Density
 ---@param options { y: number?, seed: integer? }?
 function Map:fill(density, options) end
 
@@ -3521,8 +3521,8 @@ function Map:fill(density, options) end
 ---table of numbers: it produces all 256 columns natively, in the order
 ---`buf:fill_below_heightmap` consumes. Reading samples one at a time from Lua
 ---is the per-sample loop charter rule 4 forbids.
----@param pos Tiamot.ChunkPos
----@return Tiamot.Heightmap
+---@param pos Tiamat.ChunkPos
+---@return Tiamat.Heightmap
 function Map:heightmap(pos) end
 
 ---Fetches this mod's map by name, building an empty one the first time.
@@ -3554,7 +3554,7 @@ function Map:heightmap(pos) end
 ---end)
 ---```
 ---@param spec { name: string, side: integer?, scale: integer?, origin_x: integer?, origin_z: integer? }
----@return Tiamot.Map
+---@return Tiamat.Map
 function game.map(spec) end
 
 ---Runs ONCE in a world's life, before the first chunk is generated.
@@ -3573,7 +3573,7 @@ function game.register_on_world_init(callback) end
 
 ---A heightmap with the same height in every column.
 ---@param height integer World block height.
----@return Tiamot.Heightmap
+---@return Tiamat.Heightmap
 function game.flat_heightmap(height) end
 
 ---Opens a named random stream for a chunk.
@@ -3582,9 +3582,9 @@ function game.flat_heightmap(height) end
 ---uncorrelated, so drawing more numbers for one cannot shift another — which
 ---means you can change one generator without moving everything else in the
 ---world.
----@param pos Tiamot.ChunkPos
+---@param pos Tiamat.ChunkPos
 ---@param name string
----@return Tiamot.Stream
+---@return Tiamat.Stream
 function game.rng_stream(pos, name) end
 
 --- ENTITIES ----------------------------------------------------------------

@@ -20,15 +20,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::{BlockPos, MaterialId, SubNodePos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::{BlockPos, MaterialId, SubNodePos};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 1] = ["test:stone"];
 
 fn stone() -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for name in MATERIALS {
         id = registry.register(name).expect("register");
@@ -37,7 +37,7 @@ fn stone() -> u16 {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-mod-hooks").join(name);
+    let dir = std::env::temp_dir().join("tiamat-mod-hooks").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -266,14 +266,14 @@ fn a_mod_that_throws_while_vetoing_does_not_stop_the_dig() {
 /// Waits for a quiet beat rather than a fixed sleep: quiet is the condition
 /// that actually matters, and a sleep long enough for a loaded runner is dead
 /// time on every other one.
-async fn settled_inventory(bot: &mut Bot) -> Vec<tiamot_core::proto::StackDef> {
+async fn settled_inventory(bot: &mut Bot) -> Vec<tiamat_core::proto::StackDef> {
     fn updates(bot: &Bot) -> usize {
         bot.received()
             .iter()
             .filter(|message| {
                 matches!(
                     message,
-                    tiamot_core::proto::ServerMessage::InventoryUpdate { .. }
+                    tiamat_core::proto::ServerMessage::InventoryUpdate { .. }
                 )
             })
             .count()
@@ -561,11 +561,11 @@ fn a_client_is_told_which_tools_the_mods_registered() {
 
     block_on(async {
         let bot = join(&server).await;
-        let tools: Vec<tiamot_core::proto::ToolDef> = bot
+        let tools: Vec<tiamat_core::proto::ToolDef> = bot
             .received()
             .into_iter()
             .find_map(|message| match message {
-                tiamot_core::proto::ServerMessage::ToolTable { tools } => Some(tools),
+                tiamat_core::proto::ServerMessage::ToolTable { tools } => Some(tools),
                 _ => None,
             })
             .expect("the server should send a tool table on join");
@@ -610,7 +610,7 @@ fn a_world_with_no_tool_mods_sends_an_empty_table() {
             .received()
             .into_iter()
             .find_map(|message| match message {
-                tiamot_core::proto::ServerMessage::ToolTable { tools } => Some(tools),
+                tiamat_core::proto::ServerMessage::ToolTable { tools } => Some(tools),
                 _ => None,
             })
             .expect("a tool table should be sent even when it is empty");

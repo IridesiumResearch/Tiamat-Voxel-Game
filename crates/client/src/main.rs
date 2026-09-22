@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The Tiamot client: a window onto a running server.
+//! The Tiamat client: a window onto a running server.
 //!
 //! # Singleplayer starts a server
 //!
@@ -25,7 +25,7 @@ use client::config::{Config, ServerChoice};
 use client::input::{Bindings, Input as Control};
 use client::net::Connection;
 use client::render::{Gpu, Renderer};
-use tiamot_core::identity::Identity;
+use tiamat_core::identity::Identity;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -99,7 +99,7 @@ fn main() -> std::process::ExitCode {
             // Printed as well as logged: a player who ran this from a desktop
             // launcher never sees the log, and "it closed immediately" is not
             // a bug report anyone can act on.
-            eprintln!("tiamot client: {err}");
+            eprintln!("tiamat client: {err}");
             let mut source = std::error::Error::source(&*err);
             while let Some(cause) = source {
                 eprintln!("  caused by: {cause}");
@@ -114,6 +114,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load_or_default(std::path::Path::new(CONFIG_FILE))?;
     let bindings = Bindings::load_or_default(std::path::Path::new(BINDINGS_FILE))?;
     let data = config.data_dir();
+    // Carried across once, for a player who last ran this when it was called
+    // Tiamot: their identity key, worlds and trust store live in there.
+    if let Some(was) = client::config::adopt_former_data_dir(&data) {
+        tracing::info!(from = %was.display(), to = %data.display(),
+                       "carried the data directory across from the old name");
+    }
     std::fs::create_dir_all(&data)?;
 
     // The identity is created on first run and never leaves this machine
@@ -442,18 +448,18 @@ struct WorldPaths<'a> {
 
 fn start_local_world(
     paths: &WorldPaths<'_>,
-    view: tiamot_core::interest::ViewDistance,
+    view: tiamat_core::interest::ViewDistance,
     enabled_mods: Vec<String>,
-    operator: &tiamot_core::identity::PlayerUuid,
+    operator: &tiamat_core::identity::PlayerUuid,
     lan: bool,
     // The world seed, or `None` for a random one. Used only when the world is
     // NEW: an existing one keeps the seed it was created with, or terrain
     // beyond the explored edge would change shape under the player.
     seed: Option<u64>,
     world_options: Vec<(String, String)>,
-) -> Result<tiamot_server::ServerHandle, Box<dyn std::error::Error>> {
-    Ok(tiamot_server::ServerHandle::start(
-        &tiamot_server::Settings {
+) -> Result<tiamat_server::ServerHandle, Box<dyn std::error::Error>> {
+    Ok(tiamat_server::ServerHandle::start(
+        &tiamat_server::Settings {
             // **Loopback unless asked otherwise.** A world hosted for one
             // person should not be reachable from the network because it
             // happens to be running; opening it is a decision somebody makes
@@ -475,7 +481,7 @@ fn start_local_world(
             // One is right for a world nobody else can reach, and would be a
             // baffling refusal for one they can.
             max_players: if lan { 8 } else { 1 },
-            allowlist: tiamot_core::identity::Allowlist::open(),
+            allowlist: tiamat_core::identity::Allowlist::open(),
             // **Your own world, your own powers.** A player hosting a world for
             // themselves is its operator, which is what makes flight available
             // for testing without a command to type. A world somebody ELSE
@@ -526,7 +532,7 @@ struct Client {
     /// Taken when the window is created.
     connection: Option<Connection>,
     /// Kept alive for as long as the client runs. Dropping it stops the world.
-    embedded: Option<tiamot_server::ServerHandle>,
+    embedded: Option<tiamat_server::ServerHandle>,
     /// Which world is open, by name, while one is.
     ///
     /// A mod's options are answered per world, so writing them back needs to
@@ -538,7 +544,7 @@ struct Client {
     ///
     /// Dropped when the world is left, which stops the beacon — a world nobody
     /// is hosting must not still be advertised.
-    beacon: Option<tiamot_server::announce::Announcer>,
+    beacon: Option<tiamat_server::announce::Announcer>,
     window: Option<Surface>,
     held: Held,
     /// The player's saved bindings, until the `App` exists to hold them.
@@ -941,7 +947,7 @@ impl Client {
         event_loop: &ActiveEventLoop,
     ) -> Result<Surface, Box<dyn std::error::Error>> {
         let attributes = Window::default_attributes()
-            .with_title("Tiamot")
+            .with_title("Tiamat")
             .with_inner_size(winit::dpi::LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1));
         let window = Arc::new(event_loop.create_window(attributes)?);
 
@@ -1091,7 +1097,7 @@ impl Client {
         // reading it would be process-global state a caller cannot control,
         // which is a poor thing for tests and a worse one for an embedded
         // server.
-        if let Some(path) = std::env::var_os("TIAMOT_TRACE_FRAMES") {
+        if let Some(path) = std::env::var_os("TIAMAT_TRACE_FRAMES") {
             let path = std::path::PathBuf::from(path);
             if app.log_frames_to(&path) {
                 tracing::info!(path = %path.display(), "logging every frame");
@@ -1099,7 +1105,7 @@ impl Client {
                 tracing::warn!(path = %path.display(), "could not open the frame log");
             }
         }
-        if let Some(path) = std::env::var_os("TIAMOT_TRACE_PHYSICS") {
+        if let Some(path) = std::env::var_os("TIAMAT_TRACE_PHYSICS") {
             let path = std::path::PathBuf::from(path);
             if app.trace_physics_to(&path) {
                 tracing::info!(path = %path.display(), "tracing physics per tick");
@@ -1739,7 +1745,7 @@ fn draw_sound_attribution(app: &App, ui: &mut egui::Ui) {
 /// trusted (charter rule 14).
 fn draw_entering(ctx: &egui::Context, domain: &str) {
     let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new("tiamot.entering"))
+    egui::Area::new(egui::Id::new("tiamat.entering"))
         .fixed_pos(screen.center() - egui::vec2(0.0, 24.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -1750,7 +1756,7 @@ fn draw_entering(ctx: &egui::Context, domain: &str) {
         });
 }
 
-/// A script draws on a canvas [`tiamot_core::hud::VIRTUAL_HEIGHT`] tall and as
+/// A script draws on a canvas [`tiamat_core::hud::VIRTUAL_HEIGHT`] tall and as
 /// wide as this window's aspect ratio makes it. Everything scales by the height
 /// alone, so a HUD is the same apparent size on every monitor and anchors take
 /// care of the width. Points rather than physical pixels, because egui works in
@@ -1768,7 +1774,7 @@ fn draw_hud_scripts(app: &mut App, ctx: &egui::Context, icons: client::icons::Ic
     // must not sit under an OS status bar or a display notch. A crosshair in
     // the middle would not care; a hotbar 16 up from the bottom would.
     let screen = ctx.content_rect();
-    let scale = screen.height() / f32::from(tiamot_core::hud::VIRTUAL_HEIGHT);
+    let scale = screen.height() / f32::from(tiamat_core::hud::VIRTUAL_HEIGHT);
     let virtual_width = if scale > 0.0 {
         screen.width() / scale
     } else {
@@ -1788,7 +1794,7 @@ fn draw_hud_scripts(app: &mut App, ctx: &egui::Context, icons: client::icons::Ic
             for command in frame.commands() {
                 paint_hud_command(&painter, command, virtual_width, scale, &art, icons);
             }
-            frame.hides(tiamot_core::hud::Builtin::Crosshair)
+            frame.hides(tiamat_core::hud::Builtin::Crosshair)
         })
         .unwrap_or(false);
 
@@ -1841,19 +1847,19 @@ fn paint_crosshair(painter: &egui::Painter, centre: egui::Pos2, scale: f32) {
 /// a list and paints it.
 fn paint_hud_command(
     painter: &egui::Painter,
-    command: &tiamot_core::hud::Command,
+    command: &tiamat_core::hud::Command,
     virtual_width: f32,
     scale: f32,
     art: &client::pictures::Resolved,
     icons: client::icons::Icons<'_>,
 ) {
-    use tiamot_core::hud::Command;
+    use tiamat_core::hud::Command;
 
-    let place = |anchor: tiamot_core::hud::Anchor, x: i16, y: i16| {
+    let place = |anchor: tiamat_core::hud::Anchor, x: i16, y: i16| {
         let (vx, vy) = anchor.resolve(virtual_width, x, y);
         egui::pos2(vx * scale, vy * scale)
     };
-    let rgba = |colour: tiamot_core::ui::Colour| {
+    let rgba = |colour: tiamat_core::ui::Colour| {
         egui::Color32::from_rgba_unmultiplied(colour[0], colour[1], colour[2], colour[3])
     };
 
@@ -2247,13 +2253,13 @@ fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dr
                         }
                         let current = app.mod_setting(def);
                         match def.kind {
-                            tiamot_core::proto::SettingKind::Toggle => {
+                            tiamat_core::proto::SettingKind::Toggle => {
                                 let mut on = current != 0;
                                 if ui.checkbox(&mut on, &def.name).changed() {
                                     app.set_mod_setting(&def.id, u32::from(on));
                                 }
                             }
-                            tiamot_core::proto::SettingKind::Choice => {
+                            tiamat_core::proto::SettingKind::Choice => {
                                 let index =
                                     (current as usize).min(def.options.len().saturating_sub(1));
                                 let shown = def
@@ -2894,7 +2900,7 @@ mod tests {
         // files alone, so the name is free and the directory is not. Checking
         // the list would have found nothing wrong; the disk is what has to be
         // asked.
-        let root = std::env::temp_dir().join("tiamot-world-names");
+        let root = std::env::temp_dir().join("tiamat-world-names");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("scratch");
 
@@ -2927,7 +2933,7 @@ mod tests {
         // **Not a duplicate of the `world_directory` test below.** That one is
         // about the slug; this is about the whole path the uniquifying step
         // builds out of it, which is the part that could newly escape.
-        let root = std::env::temp_dir().join("tiamot-world-names-safe");
+        let root = std::env::temp_dir().join("tiamat-world-names-safe");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("scratch");
         for name in ["../../etc", "a/b", "   ", "..", ""] {

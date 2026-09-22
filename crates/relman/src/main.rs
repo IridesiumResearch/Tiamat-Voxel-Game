@@ -10,7 +10,7 @@
 //! fetch, and this is the one program whose output decides what other people's
 //! machines will run.
 //!
-//! The rules it enforces live in `tiamot_core::release`, which is also what
+//! The rules it enforces live in `tiamat_core::release`, which is also what
 //! the client and the updater check with. One implementation, because two
 //! would eventually disagree about what is authentic.
 
@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use tiamot_core::release::{Artifact, Manifest, ReleaseError, SCHEMA, to_hex};
+use tiamat_core::release::{Artifact, Manifest, ReleaseError, SCHEMA, to_hex};
 
 #[derive(Parser)]
-#[command(name = "relman", about = "Build and sign a Tiamot release manifest.")]
+#[command(name = "relman", about = "Build and sign a Tiamat release manifest.")]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -379,12 +379,12 @@ fn verify(check: &Check) -> Result<(), String> {
     Ok(())
 }
 
-/// `tiamot-0.2.0-x86_64-unknown-linux-gnu.tar.gz` -> the triple.
+/// `tiamat-0.2.0-x86_64-unknown-linux-gnu.tar.gz` -> the triple.
 fn target_of(name: &str) -> Option<String> {
     let stem = name
         .strip_suffix(".tar.gz")
         .or_else(|| name.strip_suffix(".zip"))?;
-    let rest = stem.strip_prefix("tiamot-")?;
+    let rest = stem.strip_prefix("tiamat-")?;
     // The version comes first and has no dashes in it, so the target is
     // everything after the first one.
     let (_, target) = rest.split_once('-')?;
@@ -396,7 +396,7 @@ fn version_of(name: &str) -> Option<String> {
     let stem = name
         .strip_suffix(".tar.gz")
         .or_else(|| name.strip_suffix(".zip"))?;
-    let rest = stem.strip_prefix("tiamot-")?;
+    let rest = stem.strip_prefix("tiamat-")?;
     let (version, _) = rest.split_once('-')?;
     (!version.is_empty()).then(|| version.to_owned())
 }

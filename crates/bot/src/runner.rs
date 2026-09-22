@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use tiamot_core::identity::Identity;
+use tiamat_core::identity::Identity;
 
 use crate::client::{Bot, BotError};
 use crate::script::{Command, Reply};
@@ -291,7 +291,7 @@ pub async fn wander(
         // standing on drops you into the hole, and putting it back is then
         // refused for being inside a player — the rule working, and the
         // scenario staging it wrong. `churn.lua` learned this first.
-        let pos = tiamot_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
+        let pos = tiamat_core::BlockPos::new(here.x + 1, here.y - 1, here.z);
 
         // **Dig first, build second.** This used to place and then dig, which
         // needed the bot to be carrying something before it had mined anything.

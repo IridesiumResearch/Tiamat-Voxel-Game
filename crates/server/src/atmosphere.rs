@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use tiamot_core::atmosphere::{Clouds, Precipitation, SkyModifier};
-use tiamot_core::identity::PlayerUuid;
+use tiamat_core::atmosphere::{Clouds, Precipitation, SkyModifier};
+use tiamat_core::identity::PlayerUuid;
 
 /// The atmosphere seam over the connection state, as [`crate::hud::Shared`].
 #[derive(Clone)]
@@ -22,7 +22,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::atmosphere::Access for Shared {
+impl tiamat_core::atmosphere::Access for Shared {
     fn set_sky_modifier(&self, player: PlayerUuid, modifier: Option<SkyModifier>) -> bool {
         // Whether the player is here, not whether the write happened — as
         // the HUD has it, and for its reason.
@@ -33,7 +33,7 @@ impl tiamot_core::atmosphere::Access for Shared {
         true
     }
 
-    fn flash(&self, request: &tiamot_core::atmosphere::FlashRequest) -> u32 {
+    fn flash(&self, request: &tiamat_core::atmosphere::FlashRequest) -> u32 {
         // **Who can see it, decided here and not by the client**, as a
         // sound's earshot is: the domain and the radius, and a client told
         // about every strike on the server would light up for storms it is
@@ -41,7 +41,7 @@ impl tiamot_core::atmosphere::Access for Shared {
         let Ok(bodies) = self.endpoint.bodies.lock() else {
             return 0;
         };
-        let message = tiamot_core::proto::ServerMessage::Flash {
+        let message = tiamat_core::proto::ServerMessage::Flash {
             flash: request.flash,
         };
         let radius = f64::from(request.radius);
@@ -51,7 +51,7 @@ impl tiamot_core::atmosphere::Access for Shared {
                 continue;
             }
             let at =
-                tiamot_core::ent::Transform::at(player.origin, player.body.position).to_world();
+                tiamat_core::ent::Transform::at(player.origin, player.body.position).to_world();
             let offset = [
                 at[0] - request.pos[0],
                 at[1] - request.pos[1],
@@ -88,7 +88,7 @@ impl tiamot_core::atmosphere::Access for Shared {
     fn set_cloud_map(
         &self,
         player: PlayerUuid,
-        map: Option<tiamot_core::atmosphere::CloudMap>,
+        map: Option<tiamat_core::atmosphere::CloudMap>,
     ) -> bool {
         if !self.endpoint.is_online(&player) {
             return false;

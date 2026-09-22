@@ -78,7 +78,7 @@ impl PlayerUuid {
         // Domain-separated so a hash of a pubkey in one context can never be
         // mistaken for a hash of the same bytes in another.
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"tiamot:player-uuid:v1");
+        hasher.update(b"tiamat:player-uuid:v1");
         hasher.update(root.as_bytes());
         Self(*hasher.finalize().as_bytes())
     }
@@ -377,7 +377,7 @@ pub fn challenge_payload(
     let mut payload = Vec::with_capacity(NONCE_BYTES + server_cert_fingerprint.len() + 4 + 24);
     // Domain separation, so this signature can never be confused with one made
     // over an AddKey or a RotateKey record.
-    payload.extend_from_slice(b"tiamot:auth-challenge:v1");
+    payload.extend_from_slice(b"tiamat:auth-challenge:v1");
     payload.extend_from_slice(nonce);
     payload.extend_from_slice(server_cert_fingerprint);
     payload.extend_from_slice(&protocol_version.to_le_bytes());
@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     fn a_key_file_round_trips_and_is_owner_only() {
-        let dir = std::env::temp_dir().join("tiamot-identity-test");
+        let dir = std::env::temp_dir().join("tiamat-identity-test");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("identity.key");
 
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn a_truncated_key_file_is_an_error_not_a_panic() {
-        let dir = std::env::temp_dir().join("tiamot-identity-truncated");
+        let dir = std::env::temp_dir().join("tiamat-identity-truncated");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("identity.key");

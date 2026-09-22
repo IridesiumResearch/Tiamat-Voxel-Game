@@ -25,13 +25,13 @@ use std::time::Duration;
 use bot::runner::SwarmStats;
 use bot::script::Channel;
 use clap::{Parser, Subcommand};
-use tiamot_core::identity::Identity;
+use tiamat_core::identity::Identity;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
 #[command(
     name = "bot",
-    about = "Scripted headless Tiamot client: integration tests, load, and benchmarks",
+    about = "Scripted headless Tiamat client: integration tests, load, and benchmarks",
     version
 )]
 struct Cli {
@@ -368,11 +368,11 @@ fn bench_mode(
     bots: u32,
     rounds: u64,
 ) -> u8 {
-    use tiamot_core::identity::Allowlist;
-    use tiamot_core::interest::ViewDistance;
-    use tiamot_server::{ServerHandle, Settings};
+    use tiamat_core::identity::Allowlist;
+    use tiamat_core::interest::ViewDistance;
+    use tiamat_server::{ServerHandle, Settings};
 
-    let world = std::env::temp_dir().join("tiamot-macro-bench");
+    let world = std::env::temp_dir().join("tiamat-macro-bench");
     let _ = std::fs::remove_dir_all(&world);
     if let Err(err) = std::fs::create_dir_all(&world) {
         eprintln!("could not create the benchmark world: {err}");

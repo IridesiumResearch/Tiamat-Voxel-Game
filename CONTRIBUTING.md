@@ -41,7 +41,7 @@ sign-off.
 
 On Linux, install the client's system dependencies first — see
 [README's *System dependencies*](README.md#system-dependencies). Without them
-the build fails inside `alsa-sys` before any Tiamot code compiles.
+the build fails inside `alsa-sys` before any Tiamat code compiles.
 
 Run what CI runs:
 

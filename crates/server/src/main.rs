@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Headless Tiamot server.
+//! Headless Tiamat server.
 //!
 //! The server is the game (charter rule 2). Singleplayer runs this same code
 //! embedded over loopback, so there is exactly one simulation path and no
@@ -15,16 +15,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use tiamot_core::identity::Allowlist;
-use tiamot_server::config::{Config, ConfigError};
-use tiamot_server::{ServerHandle, Settings, StartError, checkmods, shutdown};
+use tiamat_core::identity::Allowlist;
+use tiamat_server::config::{Config, ConfigError};
+use tiamat_server::{ServerHandle, Settings, StartError, checkmods, shutdown};
 use tracing::{error, info};
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
 #[command(
     name = "server",
-    about = "Headless Tiamot voxel engine server",
+    about = "Headless Tiamat voxel engine server",
     version
 )]
 struct Cli {
@@ -118,7 +118,7 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
         bind_addr = %config.bind_addr,
         world_path = %config.world_path.display(),
         max_players = config.max_players,
-        "tiamot server starting"
+        "tiamat server starting"
     );
 
     // The SAME call singleplayer makes. Charter rule 2: the server is the game,
@@ -141,7 +141,7 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
             .collect(),
         mods_path: config.mods_path.clone(),
         enabled_mods: config.enabled_mods.clone(),
-        view_distance: tiamot_core::interest::ViewDistance::clamped(
+        view_distance: tiamat_core::interest::ViewDistance::clamped(
             config.view_distance,
             config.vertical_view_distance,
         ),
@@ -156,7 +156,7 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
 
     info!(
         local_addr = %server.local_addr(),
-        tick_rate_hz = tiamot_core::tick::TICK_RATE_HZ,
+        tick_rate_hz = tiamat_core::tick::TICK_RATE_HZ,
         "server running — waiting for shutdown signal (ctrl-c or SIGTERM)"
     );
 

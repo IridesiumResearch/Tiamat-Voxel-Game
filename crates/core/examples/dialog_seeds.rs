@@ -3,7 +3,7 @@
 
 //! Regenerates the `dialog_schema` fuzz corpus seeds.
 //!
-//! Run: `cargo run --release -p tiamot-core --example dialog_seeds -- fuzz/corpus/dialog_schema`
+//! Run: `cargo run --release -p tiamat-core --example dialog_seeds -- fuzz/corpus/dialog_schema`
 //!
 //! # Why seeds, when random bytes already decode
 //!
@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use tiamot_core::ui::{Align, Build, Direction, Node, Style, Tree, Widget};
+use tiamat_core::ui::{Align, Build, Direction, Node, Style, Tree, Widget};
 
 fn main() {
     let out = std::env::args()
@@ -30,7 +30,7 @@ fn main() {
     }
 
     for (name, tree) in seeds() {
-        let bytes = match tiamot_core::proto::encode(&tree) {
+        let bytes = match tiamat_core::proto::encode(&tree) {
             Ok(bytes) => bytes,
             Err(err) => {
                 eprintln!("could not encode `{name}`: {err}");

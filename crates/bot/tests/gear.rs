@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-gear").join(name);
+    let dir = std::env::temp_dir().join("tiamat-gear").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -176,7 +176,7 @@ fn a_player_arrives_holding_an_item_and_cannot_place_it() {
         // (charter rule 2); the client refuses too, but a bot is not a client
         // and this is the half that matters.
         let before: u32 = bot.inventory().iter().map(|stack| stack.units).sum();
-        let _ = bot.place(tiamot_core::BlockPos::new(0, 0, 0), sword).await;
+        let _ = bot.place(tiamat_core::BlockPos::new(0, 0, 0), sword).await;
 
         // Driven to a condition: what matters is that the units never move,
         // because a refusal that spent the item would be worse than one that
@@ -296,8 +296,8 @@ fn what_a_player_drops_lands_as_an_entity_and_comes_back() {
                 })
                 .map(|entity| {
                     let cells =
-                        f32::from(u16::try_from(tiamot_core::SUBNODES_PER_AXIS).unwrap_or(3));
-                    let span = tiamot_core::CHUNK_BLOCKS as f32;
+                        f32::from(u16::try_from(tiamat_core::SUBNODES_PER_AXIS).unwrap_or(3));
+                    let span = tiamat_core::CHUNK_BLOCKS as f32;
                     [
                         entity.chunk.x as f32 * span + entity.local[0] / cells,
                         entity.chunk.z as f32 * span + entity.local[2] / cells,
@@ -368,7 +368,7 @@ fn a_registered_view_reaches_the_player_at_the_size_it_asked_for() {
         assert!(
             tree.nodes.iter().any(|node| matches!(
                 &node.widget,
-                tiamot_core::ui::Widget::ItemGrid { view, .. } if view == "core_gear:worn"
+                tiamat_core::ui::Widget::ItemGrid { view, .. } if view == "core_gear:worn"
             )),
             "the screen does not show the view the mod registered"
         );
@@ -510,8 +510,8 @@ fn a_dropped_stack_can_still_be_picked_up_after_the_world_is_reopened() {
                         .is_some_and(|stack| stack.material == sword)
                 })
                 .unwrap_or_else(|| dropped.clone());
-            let cells = f32::from(u16::try_from(tiamot_core::SUBNODES_PER_AXIS).unwrap_or(3));
-            let span = tiamot_core::CHUNK_BLOCKS as f32;
+            let cells = f32::from(u16::try_from(tiamat_core::SUBNODES_PER_AXIS).unwrap_or(3));
+            let span = tiamat_core::CHUNK_BLOCKS as f32;
             let _ = bot
                 .move_to(
                     at.chunk.x as f32 * span + at.local[0] / cells,

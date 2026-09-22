@@ -227,7 +227,7 @@ impl Voice {
     /// sound and a pitch variance of 40 is not a sound at all, so both are
     /// clamped here rather than trusted into a backend.
     #[must_use]
-    pub fn of(sound: &tiamot_core::proto::SoundDef) -> Self {
+    pub fn of(sound: &tiamat_core::proto::SoundDef) -> Self {
         Self {
             gain: if sound.gain.is_finite() {
                 sound.gain.clamp(0.0, 4.0)
@@ -936,7 +936,7 @@ mod tests {
     /// A server's numbers are a claim, and these two reach a backend.
     #[test]
     fn a_hostile_voice_is_brought_into_range() {
-        let wild = tiamot_core::proto::SoundDef {
+        let wild = tiamat_core::proto::SoundDef {
             id: "evil:sound".to_owned(),
             mod_id: "evil".to_owned(),
             file: None,
@@ -950,7 +950,7 @@ mod tests {
             "{voice:?}"
         );
 
-        let negative = tiamot_core::proto::SoundDef {
+        let negative = tiamat_core::proto::SoundDef {
             gain: -3.0,
             pitch_variance: f32::NAN,
             ..wild

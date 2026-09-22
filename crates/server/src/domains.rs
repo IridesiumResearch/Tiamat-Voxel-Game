@@ -3,7 +3,7 @@
 
 //! The live domain registry, and where a mod's runtime calls reach it.
 //!
-//! The registry itself is [`tiamot_core::domain::Registry`]; this is the shared
+//! The registry itself is [`tiamat_core::domain::Registry`]; this is the shared
 //! handle around it, the same arrangement `ent::Shared` and `fluid::Shared`
 //! use and behind a lock for the same reason: `game.create_domain` runs inside
 //! a tick, on the simulation thread, and cannot borrow what the tick is
@@ -20,7 +20,7 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use tiamot_core::domain::{Access, Registry};
+use tiamat_core::domain::{Access, Registry};
 
 /// A handle on the domain registry, for the mod API.
 pub struct Shared {
@@ -92,7 +92,7 @@ impl Access for Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::domain::Spec;
+    use tiamat_core::domain::Spec;
 
     fn registry_with_a_template() -> Arc<RwLock<Registry>> {
         let mut registry = Registry::new();
@@ -139,7 +139,7 @@ mod tests {
         let registry = registry_with_a_template();
         let shared = Shared::new(registry);
         assert_eq!(shared.create("mod:nothing", "17"), None);
-        assert_eq!(shared.create(tiamot_core::domain::OVERWORLD, "17"), None);
+        assert_eq!(shared.create(tiamat_core::domain::OVERWORLD, "17"), None);
     }
 
     #[test]
@@ -168,7 +168,7 @@ mod tests {
         let shared = Shared::new(registry_with_a_template());
         assert!(!shared.destroy("mod:ship/17"), "it was never created");
         assert!(!shared.destroy("mod:ship"), "a template is not an instance");
-        assert!(!shared.destroy(tiamot_core::domain::OVERWORLD));
+        assert!(!shared.destroy(tiamat_core::domain::OVERWORLD));
         assert!(shared.take_doomed().is_empty());
     }
 }

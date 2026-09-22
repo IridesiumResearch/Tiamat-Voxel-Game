@@ -87,11 +87,11 @@ jobs:
         # and a build pointed at a hostile one still refuses everything it is
         # offered.
         env:
-          TIAMOT_MANIFEST_URL: ${{ vars.TIAMOT_MANIFEST_URL }}
+          TIAMAT_MANIFEST_URL: ${{ vars.TIAMAT_MANIFEST_URL }}
         run: |
           channel="${{ inputs.channel || 'test' }}"
-          if [ -z "${TIAMOT_MANIFEST_URL:-}" ]; then
-            echo "::warning::No TIAMOT_MANIFEST_URL variable is set, so this build"
+          if [ -z "${TIAMAT_MANIFEST_URL:-}" ]; then
+            echo "::warning::No TIAMAT_MANIFEST_URL variable is set, so this build"
             echo "::warning::will not look for updates. Set it under Settings ->"
             echo "::warning::Secrets and variables -> Actions -> Variables."
           fi
@@ -101,7 +101,7 @@ jobs:
       # something to download and try.
       - uses: actions/upload-artifact@v4
         with:
-          name: tiamot-${{ matrix.target }}
+          name: tiamat-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -119,6 +119,6 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" \
               --draft \
-              --title "Tiamot $GITHUB_REF_NAME" \
+              --title "Tiamat $GITHUB_REF_NAME" \
               --notes "Unsigned test build. See docs/distribution.md for what to do with it."
-          gh release upload "$GITHUB_REF_NAME" dist/tiamot-*.tar.gz dist/tiamot-*.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/tiamat-*.tar.gz dist/tiamat-*.zip --clobber

@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::content::hash_bytes;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::ContentHash;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::content::hash_bytes;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::ContentHash;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-content-push").join(name);
+    let dir = std::env::temp_dir().join("tiamat-content-push").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -80,7 +80,7 @@ async fn authenticate(server: &ServerHandle, name: &str) -> Bot {
     .expect("connect");
     let nonce = bot.hello(name).await.expect("challenge");
     bot.authenticate(&nonce).await.expect("auth");
-    bot.recv_until(|m| matches!(m, tiamot_core::proto::ServerMessage::ModManifest { .. }))
+    bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ModManifest { .. }))
         .await
         .expect("manifest");
     bot
@@ -348,7 +348,7 @@ fn content_is_available_before_entering_the_world() {
         assert_eq!(
             bot.received()
                 .iter()
-                .filter(|m| matches!(m, tiamot_core::proto::ServerMessage::JoinWorld { .. }))
+                .filter(|m| matches!(m, tiamat_core::proto::ServerMessage::JoinWorld { .. }))
                 .count(),
             0,
             "this bot has not joined the world yet"

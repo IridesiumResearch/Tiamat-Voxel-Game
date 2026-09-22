@@ -592,7 +592,7 @@ dependencies = [
  "server",
  "socket2",
  "thiserror 2.0.19",
- "tiamot-core",
+ "tiamat-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -807,7 +807,7 @@ dependencies = [
  "socket2",
  "symphonia",
  "thiserror 2.0.19",
- "tiamot-core",
+ "tiamat-core",
  "tokio",
  "toml",
  "tracing",
@@ -1320,7 +1320,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "hecs",
- "tiamot-core",
+ "tiamat-core",
 ]
 
 [[package]]
@@ -3703,7 +3703,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "serde_json",
- "tiamot-core",
+ "tiamat-core",
 ]
 
 [[package]]
@@ -4032,7 +4032,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "thiserror 2.0.19",
- "tiamot-core",
+ "tiamat-core",
  "tokio",
  "toml",
  "tracing",
@@ -4245,7 +4245,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "pollster",
- "tiamot-core",
+ "tiamat-core",
  "wgpu",
  "zstd",
 ]
@@ -4467,7 +4467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiamot-core"
+name = "tiamat-core"
 version = "0.1.0"
 dependencies = [
  "bip39",
@@ -4795,7 +4795,7 @@ dependencies = [
  "serde_json",
  "tar",
  "thiserror 2.0.19",
- "tiamot-core",
+ "tiamat-core",
 ]
 
 [[package]]

@@ -5,8 +5,8 @@
 //!
 //! **Reported from the window**: "I don't want kids to have to type in a LAN
 //! server address. I want them to be able to detect LAN servers." The host half
-//! is `tiamot_server::announce`; the format, and why none of it is trusted, is
-//! [`tiamot_core::discover`].
+//! is `tiamat_server::announce`; the format, and why none of it is trusted, is
+//! [`tiamat_core::discover`].
 //!
 //! # Why this holds a thread and not a future
 //!
@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tiamot_core::discover::{Beacon, MAX_DATAGRAM, PORT, STALE_MS};
+use tiamat_core::discover::{Beacon, MAX_DATAGRAM, PORT, STALE_MS};
 
 /// A world heard on the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +90,7 @@ impl Discovery {
         let writing = Arc::clone(&found);
         let stopping = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
-            .name("tiamot-discovery".to_owned())
+            .name("tiamat-discovery".to_owned())
             .spawn(move || {
                 // **Sized once, outside the loop.** A buffer allocated per
                 // datagram would let anything on the network set this client's
@@ -121,7 +121,7 @@ impl Discovery {
                                 name: beacon.name,
                                 players: beacon.players,
                                 max_players: beacon.max_players,
-                                compatible: beacon.protocol == tiamot_core::proto::PROTOCOL_VERSION,
+                                compatible: beacon.protocol == tiamat_core::proto::PROTOCOL_VERSION,
                             },
                             Instant::now(),
                         ),
@@ -224,7 +224,7 @@ mod tests {
     /// Sends one beacon to a port on this machine.
     fn announce(name: &str, port: u16, to: u16) -> std::io::Result<()> {
         let beacon = Beacon {
-            protocol: tiamot_core::proto::PROTOCOL_VERSION,
+            protocol: tiamat_core::proto::PROTOCOL_VERSION,
             port,
             players: 1,
             max_players: 8,

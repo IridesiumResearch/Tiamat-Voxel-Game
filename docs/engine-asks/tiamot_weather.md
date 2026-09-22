@@ -1,4 +1,4 @@
-# Engine asks from Tiamot Weather
+# Engine asks from Tiamat Weather
 
 From the `tiamot_weather` mod (repo `Tiamot_Default_Weather`, beside the
 engine checkout). Kept here, in the engine's `docs/engine-asks/`, so the

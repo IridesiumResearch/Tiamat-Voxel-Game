@@ -25,8 +25,8 @@
 use std::time::Duration;
 
 use client::entities::{Entities, INTERPOLATION_DELAY};
-use tiamot_core::ChunkPos;
-use tiamot_core::proto::{EntityDef, EntityDelta};
+use tiamat_core::ChunkPos;
+use tiamat_core::proto::{EntityDef, EntityDelta};
 
 /// The server's rate, and therefore the spacing of updates.
 const TICK: Duration = Duration::from_millis(50);
@@ -164,7 +164,7 @@ fn between(at: f32) -> [f32; 3] {
     // `detgen::floor_to_i32` rather than `f32::floor`: the determinism lint is
     // scoped to the whole workspace and takes no exemption for a test, which is
     // the gate working — a habit that stops at test files is not a habit.
-    let index = tiamot_core::detgen::floor_to_i32(at).max(0) as u64;
+    let index = tiamat_core::detgen::floor_to_i32(at).max(0) as u64;
     let fraction = at - index as f32;
     let a = truth(index.min(TICKS - 1));
     let b = truth((index + 1).min(TICKS - 1));

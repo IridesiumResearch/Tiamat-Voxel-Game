@@ -14,12 +14,12 @@
 use std::path::{Path, PathBuf};
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-lan").join(name);
+    let dir = std::env::temp_dir().join("tiamat-lan").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -188,7 +188,7 @@ fn an_open_world_says_it_is_here_on_the_network() {
 
     // Decoded with the engine's own parser, so what is checked is the datagram
     // that actually goes out and not a round trip through the code that sent it.
-    let mut buffer = [0u8; tiamot_core::discover::MAX_DATAGRAM];
+    let mut buffer = [0u8; tiamat_core::discover::MAX_DATAGRAM];
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let heard = loop {
         assert!(
@@ -198,7 +198,7 @@ fn an_open_world_says_it_is_here_on_the_network() {
         let Ok((read, _)) = listening.recv_from(&mut buffer) else {
             continue;
         };
-        if let Some(beacon) = tiamot_core::discover::Beacon::decode(&buffer[..read]) {
+        if let Some(beacon) = tiamat_core::discover::Beacon::decode(&buffer[..read]) {
             break beacon;
         }
     };
@@ -212,7 +212,7 @@ fn an_open_world_says_it_is_here_on_the_network() {
     assert_eq!(heard.max_players, 8);
     assert_eq!(
         heard.protocol,
-        tiamot_core::proto::PROTOCOL_VERSION,
+        tiamat_core::proto::PROTOCOL_VERSION,
         "a beacon that did not say which protocol it speaks"
     );
 
@@ -223,7 +223,7 @@ fn an_open_world_says_it_is_here_on_the_network() {
     let mut repeats = 0;
     while std::time::Instant::now() < second && repeats == 0 {
         if let Ok((read, _)) = listening.recv_from(&mut buffer)
-            && tiamot_core::discover::Beacon::decode(&buffer[..read]).is_some()
+            && tiamat_core::discover::Beacon::decode(&buffer[..read]).is_some()
         {
             repeats += 1;
         }
@@ -243,7 +243,7 @@ fn an_open_world_says_it_is_here_on_the_network() {
         let Ok((read, _)) = listening.recv_from(&mut buffer) else {
             continue;
         };
-        if tiamot_core::discover::Beacon::decode(&buffer[..read]).is_some() {
+        if tiamat_core::discover::Beacon::decode(&buffer[..read]).is_some() {
             last_heard = Some(std::time::Instant::now());
         }
     }

@@ -32,11 +32,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::{Bot, Impairment};
-use tiamot_core::fluid::FluidLayer;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::{BlockPos, ChunkPos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::fluid::FluidLayer;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::{BlockPos, ChunkPos};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 1] = ["test:stone"];
 
@@ -45,7 +45,7 @@ const MATERIALS: [&str; 1] = ["test:stone"];
 const POND: BlockPos = BlockPos::new(2, 4, 2);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-fluid-mp").join(name);
+    let dir = std::env::temp_dir().join("tiamat-fluid-mp").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -173,7 +173,7 @@ async fn until(bot: &mut Bot, timeout: Duration, done: impl Fn(&Bot) -> bool) ->
 
 /// A layer's contents as one number, for comparing two peers' views.
 ///
-/// Folded in [`tiamot_core::coords::LocalBlock`] index order, which is what the
+/// Folded in [`tiamat_core::coords::LocalBlock`] index order, which is what the
 /// layer iterates in, so two equal layers hash equally whatever order their
 /// blocks were written in.
 fn fingerprint(layer: &FluidLayer) -> u64 {

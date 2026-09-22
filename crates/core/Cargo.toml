@@ -1,5 +1,5 @@
 [package]
-name = "tiamot-core"
+name = "tiamat-core"
 description = "Voxel data, simulation, Lua runtime, physics, persistence, and protocol types."
 version.workspace = true
 edition.workspace = true

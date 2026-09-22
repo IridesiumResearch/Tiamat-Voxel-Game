@@ -27,13 +27,13 @@ use client::cache::ContentCache;
 use client::mesher;
 use client::net::{Command, Connection, Event, Pinning};
 use client::world::{ABSENT_POLICY, ChunkStore};
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::{BlockPos, ChunkPos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::{BlockPos, ChunkPos};
+use tiamat_server::{ServerHandle, Settings};
 
 /// Meshing asks for light and none of these worlds are about light.
-const DAY: client::shade::Uniform = client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: client::shade::Uniform = client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 /// How long a sea has to arrive before the wait is called a failure.
 const PATIENCE: Duration = Duration::from_secs(40);
@@ -42,7 +42,7 @@ const PATIENCE: Duration = Duration::from_secs(40);
 const QUIET: Duration = Duration::from_secs(2);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-sea-seams").join(name);
+    let dir = std::env::temp_dir().join("tiamat-sea-seams").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -85,8 +85,8 @@ impl std::fmt::Debug for Wall {
 /// player would be looking at.
 fn seam_walls(store: &ChunkStore) -> Vec<Wall> {
     let mut walls = Vec::new();
-    let edge = tiamot_core::CHUNK_SUBNODES;
-    let per = tiamot_core::SUBNODES_PER_AXIS;
+    let edge = tiamat_core::CHUNK_SUBNODES;
+    let per = tiamat_core::SUBNODES_PER_AXIS;
     for pos in store.positions().collect::<Vec<_>>() {
         let Some(chunk) = store.get(pos) else {
             continue;
@@ -130,7 +130,7 @@ fn seam_walls(store: &ChunkStore) -> Vec<Wall> {
                 span(va).any(|v| {
                     let mut block = [0i32; 3];
                     block[usize::from(axis)] = if positive {
-                        tiamot_core::CHUNK_BLOCKS as i32
+                        tiamat_core::CHUNK_BLOCKS as i32
                     } else {
                         -1
                     };
@@ -313,7 +313,7 @@ impl Diver {
         // The counter-example. A layer of a fluid this client was never told
         // about is water to `fluid_at` and nothing to the mesher, so every wet
         // neighbour stands a wall against it.
-        use tiamot_core::phys::FluidLookup;
+        use tiamat_core::phys::FluidLookup;
         let wet = self
             .store
             .positions()
@@ -322,14 +322,14 @@ impl Diver {
             panic!("no chunk of the sea holds water at all");
         };
         let held = self.store.fluid_layer(wet).cloned().expect("held");
-        let mut unknown = tiamot_core::fluid::FluidLayer::default();
-        for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
-            let local = tiamot_core::coords::LocalBlock::from_index(index);
+        let mut unknown = tiamat_core::fluid::FluidLayer::default();
+        for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+            let local = tiamat_core::coords::LocalBlock::from_index(index);
             unknown.set(
                 local,
-                tiamot_core::fluid::Fluid::new(
-                    tiamot_core::fluid::FluidId(u8::MAX),
-                    tiamot_core::fluid::MAX_VOLUME,
+                tiamat_core::fluid::Fluid::new(
+                    tiamat_core::fluid::FluidId(u8::MAX),
+                    tiamat_core::fluid::MAX_VOLUME,
                 ),
             );
         }

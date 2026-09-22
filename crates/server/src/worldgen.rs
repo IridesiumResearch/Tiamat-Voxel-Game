@@ -45,7 +45,7 @@
 //!
 //! # Determinism
 //!
-//! Every worker asserts IEEE mode at spawn ([`tiamot_core::assert_ieee_mode`]),
+//! Every worker asserts IEEE mode at spawn ([`tiamat_core::assert_ieee_mode`]),
 //! as the simulation thread does. `tests::a_worker_generates_the_chunk_the_tick_would`
 //! holds the two VMs to bit-identical output over a real generator.
 //!
@@ -64,8 +64,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 
-use tiamot_core::script::{MluaVm, ModHost, ScriptVm as _, VmLimits};
-use tiamot_core::{Chunk, ChunkPos, MaterialId};
+use tiamat_core::script::{MluaVm, ModHost, ScriptVm as _, VmLimits};
+use tiamat_core::{Chunk, ChunkPos, MaterialId};
 use tracing::{error, info, warn};
 
 /// Everything a worker needs to build a VM that generates what the tick's
@@ -83,7 +83,7 @@ pub struct WorkerSpec {
     /// The VM limits the tick's VM was built with.
     pub limits: VmLimits,
     /// Fluid ids as the world assigned them, so an ocean is the same liquid.
-    pub fluid_ids: Vec<(String, tiamot_core::fluid::FluidId)>,
+    pub fluid_ids: Vec<(String, tiamat_core::fluid::FluidId)>,
     /// The fluids as the world registered them, for the summary chain.
     ///
     /// **A worker encodes its chunk's summaries**, and a summary carries the
@@ -92,9 +92,9 @@ pub struct WorkerSpec {
     /// world's rather than the worker's, for exactly the reason `blocks` is
     /// here: a worker that numbered anything differently would encode a horizon
     /// the world does not agree with.
-    pub fluids: tiamot_core::fluid::Fluids,
+    pub fluids: tiamat_core::fluid::Fluids,
     /// Every map the world holds, as the pre-pass left them.
-    pub maps: Vec<(String, String, tiamot_core::detgen::Map)>,
+    pub maps: Vec<(String, String, tiamat_core::detgen::Map)>,
     /// The materials the tick's VM registered, in order, with their ids.
     ///
     /// A worker whose VM registers anything else is refused: its chunks would
@@ -129,11 +129,11 @@ pub struct Done {
     /// The chunk.
     pub chunk: Chunk,
     /// Any fluid the generator placed.
-    pub fluid: tiamot_core::fluid::FluidLayer,
+    pub fluid: tiamat_core::fluid::FluidLayer,
     /// The mod's colour for this chunk, white if it has none.
     pub tint: [u8; 3],
     /// The mod's fog for this chunk's column, if it gives one.
-    pub fog: Option<tiamot_core::proto::ChunkFog>,
+    pub fog: Option<tiamat_core::proto::ChunkFog>,
     /// The summary chain, encoded, one entry per level.
     pub summaries: Vec<(u8, Vec<u8>)>,
     /// Mods this job faulted in the worker, for the tick to fault everywhere.
@@ -200,11 +200,11 @@ pub const JOBS_PER_WORKER: usize = 2;
 /// is memory for VMs that mostly wait: a chunk is asked for at the rate a
 /// connection's in-flight cap allows, not as fast as it can be made.
 ///
-/// `TIAMOT_GEN_THREADS` overrides it, `0` meaning generate on the tick as
+/// `TIAMAT_GEN_THREADS` overrides it, `0` meaning generate on the tick as
 /// before — there to measure one against the other, not to configure a server.
 #[must_use]
 pub fn worker_count() -> usize {
-    if let Some(forced) = std::env::var("TIAMOT_GEN_THREADS")
+    if let Some(forced) = std::env::var("TIAMAT_GEN_THREADS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
     {
@@ -368,7 +368,7 @@ fn worker(
     ready: &mpsc::Sender<(usize, Result<(), String>)>,
 ) {
     // Charter rule 4: a thread generating terrain is a simulation thread.
-    tiamot_core::assert_ieee_mode();
+    tiamat_core::assert_ieee_mode();
     let mut host = match load(spec) {
         Ok(host) => host,
         Err(reason) => {
@@ -444,7 +444,7 @@ fn load(spec: &WorkerSpec) -> Result<ModHost<MluaVm>, String> {
 fn generate(
     host: &mut ModHost<MluaVm>,
     job: &Job,
-    fluids: &tiamot_core::fluid::Fluids,
+    fluids: &tiamat_core::fluid::Fluids,
     known_faulted: &mut BTreeSet<String>,
 ) -> Done {
     let before: BTreeSet<String> = host.disabled().into_iter().collect();
@@ -461,13 +461,13 @@ fn generate(
                     warn!(pos = ?job.pos, "chunk generation failed, falling back to air: {err}");
                     (
                         Chunk::new(job.pos, MaterialId::AIR),
-                        tiamot_core::fluid::FluidLayer::default(),
+                        tiamat_core::fluid::FluidLayer::default(),
                     )
                 }
             };
         let tint = host
             .chunk_tint(&job.domain, job.seed, job.pos)
-            .unwrap_or(tiamot_core::proto::Tint::NEUTRAL);
+            .unwrap_or(tiamat_core::proto::Tint::NEUTRAL);
         let fog = host
             .chunk_fog(&job.domain, job.seed, job.pos)
             .ok()
@@ -480,8 +480,8 @@ fn generate(
             error!(pos = ?job.pos, "generation panicked; the chunk is air");
             (
                 Chunk::new(job.pos, MaterialId::AIR),
-                tiamot_core::fluid::FluidLayer::default(),
-                tiamot_core::proto::Tint::NEUTRAL,
+                tiamat_core::fluid::FluidLayer::default(),
+                tiamat_core::proto::Tint::NEUTRAL,
                 None,
             )
         }
@@ -510,7 +510,7 @@ mod tests {
     /// A mod with a real generator: sampled terrain, a pond, and a biome tint,
     /// so every field of a [`Done`] has something in it to compare.
     fn write_mod(name: &str, extra: &str) -> PathBuf {
-        let root = std::env::temp_dir().join("tiamot-worldgen-pool").join(name);
+        let root = std::env::temp_dir().join("tiamat-worldgen-pool").join(name);
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("terrain");
         std::fs::create_dir_all(&dir).expect("mod dir");
@@ -556,7 +556,7 @@ mod tests {
             enabled: None,
             limits: VmLimits::default(),
             fluid_ids: Vec::new(),
-            fluids: tiamot_core::fluid::Fluids::new(),
+            fluids: tiamat_core::fluid::Fluids::new(),
             maps: Vec::new(),
             blocks: host.vm().registered_blocks(),
         };

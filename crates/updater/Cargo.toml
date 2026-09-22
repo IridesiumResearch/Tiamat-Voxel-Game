@@ -14,7 +14,7 @@ publish.workspace = true
 # network: the client downloads, this applies. No GUI: it runs for a fraction
 # of a second.
 [dependencies]
-tiamot-core.workspace = true
+tiamat-core.workspace = true
 blake3.workspace = true
 ed25519-dalek.workspace = true
 serde.workspace = true
@@ -30,5 +30,5 @@ name = "updater"
 path = "src/lib.rs"
 
 [[bin]]
-name = "tiamot"
+name = "tiamat"
 path = "src/main.rs"

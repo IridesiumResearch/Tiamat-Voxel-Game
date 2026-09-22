@@ -34,13 +34,13 @@ pub use script::{Channel, Command, Reply, ScriptOutcome, run_script};
 /// The engine's chunk size, for tests that assert against it.
 #[must_use]
 pub fn chunk_blocks() -> u32 {
-    tiamot_core::CHUNK_BLOCKS
+    tiamat_core::CHUNK_BLOCKS
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn links_against_core() {
-        assert_eq!(super::chunk_blocks(), tiamot_core::CHUNK_BLOCKS);
+        assert_eq!(super::chunk_blocks(), tiamat_core::CHUNK_BLOCKS);
     }
 }

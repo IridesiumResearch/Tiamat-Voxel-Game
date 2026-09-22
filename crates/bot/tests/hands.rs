@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-hands").join(name);
+    let dir = std::env::temp_dir().join("tiamat-hands").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -185,7 +185,7 @@ fn a_body_faces_the_way_its_owner_is_looking() {
             }
 
             // What the SERVER says the body faces, quantised to a byte.
-            let want = tiamot_core::ent::replicate::quantise_yaw(tiamot_core::ent::figure_yaw(
+            let want = tiamat_core::ent::replicate::quantise_yaw(tiamat_core::ent::figure_yaw(
                 turns * std::f32::consts::TAU,
             ));
             assert!(

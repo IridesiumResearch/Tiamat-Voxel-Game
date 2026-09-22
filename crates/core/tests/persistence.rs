@@ -12,16 +12,16 @@ use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
 
-use tiamot_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::material::MaterialRegistry;
-use tiamot_core::persist::{DEFAULT_DOMAIN, WorldDb};
-use tiamot_core::{BLOCKS_PER_CHUNK, BlockValue, ChunkPos, MaterialId, Registry};
+use tiamat_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::material::MaterialRegistry;
+use tiamat_core::persist::{DEFAULT_DOMAIN, WorldDb};
+use tiamat_core::{BLOCKS_PER_CHUNK, BlockValue, ChunkPos, MaterialId, Registry};
 
 /// A unique scratch path per test, so tests can run in parallel.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-persist-tests");
+    let dir = std::env::temp_dir().join("tiamat-persist-tests");
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let path = dir.join(format!("{name}.sqlite"));
     // WAL leaves sidecars; a stale one from a previous run would mask a bug.
@@ -55,7 +55,7 @@ fn material(count: u16) -> impl Strategy<Value = MaterialId> {
 fn block_value(count: u16) -> impl Strategy<Value = BlockValue> {
     prop_oneof![
         4 => material(count).prop_map(BlockValue::Uniform),
-        3 => (material(count), 0u32..=tiamot_core::block::OCCUPANCY_FULL)
+        3 => (material(count), 0u32..=tiamat_core::block::OCCUPANCY_FULL)
             .prop_map(|(m, occupancy)| BlockValue::Partial { material: m, occupancy }),
         3 => proptest::collection::vec(material(count), SUBNODES_PER_BLOCK).prop_map(|drawn| {
             let mut cells = EMPTY_CELLS;
@@ -154,7 +154,7 @@ fn a_batch_save_writes_every_chunk() {
 
 #[test]
 fn a_pond_survives_a_round_trip_through_the_database() {
-    use tiamot_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
+    use tiamat_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
 
     let mut registry = registry_with(&[]);
     let db = WorldDb::open_in_memory(&mut registry).expect("open");
@@ -187,7 +187,7 @@ fn a_dry_chunk_has_no_row_at_all() {
     let db = WorldDb::open_in_memory(&mut registry).expect("open");
     let pos = ChunkPos::new(0, 0, 0);
 
-    db.save_chunk_fluid(pos, &tiamot_core::fluid::FluidLayer::empty())
+    db.save_chunk_fluid(pos, &tiamat_core::fluid::FluidLayer::empty())
         .expect("save");
     assert!(db.load_chunk_fluid(pos).expect("load").is_none());
 }
@@ -198,7 +198,7 @@ fn a_pond_that_drains_does_not_come_back() {
     // the second save upserted an empty layer instead of deleting the row, or
     // skipped the write because there was nothing to write, the milk would
     // reappear the next time the chunk loaded.
-    use tiamot_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
+    use tiamat_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
 
     let mut registry = registry_with(&[]);
     let db = WorldDb::open_in_memory(&mut registry).expect("open");
@@ -221,7 +221,7 @@ fn a_pond_that_drains_does_not_come_back() {
 
 #[test]
 fn a_fluid_batch_writes_the_ponds_and_removes_the_drains_together() {
-    use tiamot_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
+    use tiamat_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
 
     let mut registry = registry_with(&[]);
     let mut db = WorldDb::open_in_memory(&mut registry).expect("open");
@@ -265,7 +265,7 @@ fn terrain_and_fluid_are_independent_rows() {
     // A chunk can hold milk with no terrain edits and terrain edits with no
     // milk, and neither save may disturb the other — which is the property that
     // makes them separate tables rather than one blob.
-    use tiamot_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
+    use tiamat_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
 
     let mut registry = registry_with(&["core:stone"]);
     let db = WorldDb::open_in_memory(&mut registry).expect("open");
@@ -300,8 +300,8 @@ fn terrain_and_fluid_are_independent_rows() {
 // ---------------------------------------------------------------------------
 
 /// A fluid registration under a name, with milk-ish rules.
-fn fluid_named(name: &str) -> tiamot_core::fluid::Registered {
-    tiamot_core::fluid::Registered {
+fn fluid_named(name: &str) -> tiamat_core::fluid::Registered {
+    tiamat_core::fluid::Registered {
         name: name.to_owned(),
         waterlogs_at: 14,
         tick_rate: 1,
@@ -309,7 +309,7 @@ fn fluid_named(name: &str) -> tiamot_core::fluid::Registered {
         evaporates: 0,
         color: [255, 255, 255],
         material: MaterialId(4),
-        opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+        opacity: tiamat_core::script::FluidRules::DEFAULT_OPACITY,
         light_falloff: 0,
     }
 }
@@ -324,7 +324,7 @@ fn a_pond_is_still_milk_after_another_mod_loads_ahead_of_it() {
     // after it — and the renumbering went straight to disk, so every stored pond
     // silently became a different fluid. The byte stays perfectly valid, which
     // is what makes it the kind of bug nobody finds by looking.
-    use tiamot_core::fluid::{Fluid, FluidLayer, Fluids, MAX_VOLUME};
+    use tiamat_core::fluid::{Fluid, FluidLayer, Fluids, MAX_VOLUME};
 
     let path = scratch("fluid-ids-reordered");
     let pos = ChunkPos::new(1, 0, 2);
@@ -353,7 +353,7 @@ fn a_pond_is_still_milk_after_another_mod_loads_ahead_of_it() {
     fluids.register(fluid_named("core_milk:milk")).expect("reg");
     assert_eq!(
         fluids.id_of("core_milk:milk"),
-        Some(tiamot_core::fluid::FluidId(2)),
+        Some(tiamat_core::fluid::FluidId(2)),
         "the staging is wrong: milk was supposed to be renumbered this session"
     );
     db.reconcile_fluids(&mut fluids).expect("reconcile");
@@ -387,7 +387,7 @@ fn a_pond_whose_mod_was_removed_survives_and_comes_back() {
     // Charter rule 8's round trip. Disabling a mod must not delete the world's
     // record of what it made — and re-enabling it must give the same blocks
     // back, unchanged.
-    use tiamot_core::fluid::{Fluid, FluidLayer, Fluids};
+    use tiamat_core::fluid::{Fluid, FluidLayer, Fluids};
 
     let path = scratch("fluid-mod-removed");
     let pos = ChunkPos::new(-4, 1, 0);
@@ -596,7 +596,7 @@ fn a_build_survives_its_mod_being_removed_and_restored() {
 // ---------------------------------------------------------------------------
 
 /// Set in the child process to tell it which world to crash while writing.
-const CRASH_ENV: &str = "TIAMOT_CRASH_TARGET";
+const CRASH_ENV: &str = "TIAMAT_CRASH_TARGET";
 
 /// Meta key the child commits before starting the doomed write.
 const CHILD_REACHED: &str = "test_child_reached";
@@ -744,7 +744,7 @@ fn an_identity_holds_a_set_of_keys_with_a_single_root() {
 
     // Charter rule 13: the root key has no adder; every other key was added by
     // a signature from an existing one.
-    db.add_player_key(&tiamot_core::persist::PlayerKey {
+    db.add_player_key(&tiamat_core::persist::PlayerKey {
         uuid: "uuid-1",
         pubkey: b"root",
         next_key_hash: Some(b"hash-of-successor"),
@@ -752,7 +752,7 @@ fn an_identity_holds_a_set_of_keys_with_a_single_root() {
         added_by: None,
     })
     .expect("root key");
-    db.add_player_key(&tiamot_core::persist::PlayerKey {
+    db.add_player_key(&tiamat_core::persist::PlayerKey {
         uuid: "uuid-1",
         pubkey: b"second-device",
         next_key_hash: None,
@@ -776,7 +776,7 @@ fn an_identity_holds_a_set_of_keys_with_a_single_root() {
 fn revoking_a_key_hides_it_without_deleting_the_record() {
     let mut registry = registry_with(&[]);
     let db = WorldDb::open_in_memory(&mut registry).expect("open");
-    db.add_player_key(&tiamot_core::persist::PlayerKey {
+    db.add_player_key(&tiamat_core::persist::PlayerKey {
         uuid: "uuid-1",
         pubkey: b"lost-device",
         next_key_hash: None,
@@ -830,7 +830,7 @@ fn the_world_seed_round_trips() {
 
 #[test]
 fn a_world_file_is_created_on_a_path_that_does_not_exist_yet() {
-    let dir = std::env::temp_dir().join("tiamot-persist-tests/nested/deeper");
+    let dir = std::env::temp_dir().join("tiamat-persist-tests/nested/deeper");
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("world.sqlite");
 
@@ -845,11 +845,11 @@ fn a_world_file_is_created_on_a_path_that_does_not_exist_yet() {
 // ---------------------------------------------------------------------------
 
 /// A mob with everything filled in, so a round trip has something to lose.
-fn furnished_mob(chunk: ChunkPos, label: &str) -> tiamot_core::ent::Entity {
-    use tiamot_core::ent::{AnimTag, Collider, Entity, HUMANOID_MODEL, Health, Nametag, Transform};
+fn furnished_mob(chunk: ChunkPos, label: &str) -> tiamat_core::ent::Entity {
+    use tiamat_core::ent::{AnimTag, Collider, Entity, HUMANOID_MODEL, Health, Nametag, Transform};
     Entity {
         health: Some(Health::full(20)),
-        nametag: Some(Nametag::Player(tiamot_core::PlayerUuid::from_bytes(
+        nametag: Some(Nametag::Player(tiamat_core::PlayerUuid::from_bytes(
             [9; 32],
         ))),
         model: Some(HUMANOID_MODEL.to_owned()),
@@ -869,7 +869,7 @@ fn a_chunks_entities_survive_a_freeze_and_a_thaw() {
     // Freeze: the live store hands the chunk's entities over and the world
     // writes them. This is what a chunk unloading does.
     let frozen = {
-        let mut world = tiamot_core::ent::Entities::new();
+        let mut world = tiamat_core::ent::Entities::new();
         world.spawn(furnished_mob(home, "test:first"));
         world.spawn(furnished_mob(ChunkPos::new(9, 9, 9), "test:elsewhere"));
         world.spawn(furnished_mob(home, "test:second"));
@@ -907,7 +907,7 @@ fn a_chunks_entities_survive_a_freeze_and_a_thaw() {
     assert!(
         thawed
             .iter()
-            .all(|e| e.anim == tiamot_core::ent::AnimTag::IDLE),
+            .all(|e| e.anim == tiamat_core::ent::AnimTag::IDLE),
         "an animation tag survived to disk"
     );
 }
@@ -988,7 +988,7 @@ fn an_entity_written_by_a_newer_format_is_refused_rather_than_guessed_at() {
     let conn = rusqlite::Connection::open(&path).expect("raw open");
     conn.execute(
         "UPDATE entities SET version = ?1",
-        [i64::from(tiamot_core::persist::ENTITY_FORMAT_VERSION) + 1],
+        [i64::from(tiamat_core::persist::ENTITY_FORMAT_VERSION) + 1],
     )
     .expect("bump");
     drop(conn);
@@ -1010,11 +1010,11 @@ fn a_mods_facts_survive_a_restart_and_stay_its_own() {
     // A mob imprinting on a player is exactly this: a fact about the world that
     // is not attached to a block, a chunk or an entity, and that has to be the
     // same fact after the server comes back up.
-    use tiamot_core::storage::{Bag, Value};
+    use tiamat_core::storage::{Bag, Value};
 
     let path = scratch("mod-storage");
     let mut registry = registry_with(&["core:stone"]);
-    let uuid = tiamot_core::PlayerUuid::from_bytes([0x5A; 32]);
+    let uuid = tiamat_core::PlayerUuid::from_bytes([0x5A; 32]);
 
     {
         let db = WorldDb::open(&path, &mut registry).expect("open");
@@ -1068,7 +1068,7 @@ fn a_mods_facts_survive_a_restart_and_stay_its_own() {
 fn saving_a_mods_storage_replaces_it_rather_than_merging() {
     // The caller holds the whole bag in memory, so a merge would leave a
     // deleted key on disk for ever — and the next load would bring it back.
-    use tiamot_core::storage::{Bag, Value};
+    use tiamat_core::storage::{Bag, Value};
 
     let path = scratch("mod-storage-replace");
     let mut registry = registry_with(&["core:stone"]);
@@ -1271,9 +1271,9 @@ fn summaries_built_by_another_rule_are_forgotten_when_the_world_opens() {
     let mut registry = registry_with(&["test:stone"]);
     let stone = registry.register("test:stone").expect("register");
     let at = ChunkPos::new(0, 0, 0);
-    let chain: Vec<(u8, Vec<u8>)> = tiamot_core::lod::Summary::chain(&Chunk::new(at, stone))
+    let chain: Vec<(u8, Vec<u8>)> = tiamat_core::lod::Summary::chain(&Chunk::new(at, stone))
         .iter()
-        .map(|summary| (summary.level(), tiamot_core::lod::codec::encode(summary)))
+        .map(|summary| (summary.level(), tiamat_core::lod::codec::encode(summary)))
         .collect();
 
     let db = WorldDb::open(&path, &mut registry).expect("open");
@@ -1288,8 +1288,8 @@ fn summaries_built_by_another_rule_are_forgotten_when_the_world_opens() {
     );
     // As a world written before this rule would be: an older number.
     db.set_meta(
-        tiamot_core::persist::meta_keys::SUMMARY_RULE,
-        &(tiamot_core::lod::SUMMARY_RULE - 1).to_le_bytes(),
+        tiamat_core::persist::meta_keys::SUMMARY_RULE,
+        &(tiamat_core::lod::SUMMARY_RULE - 1).to_le_bytes(),
     )
     .expect("set");
     db.close().expect("close");
@@ -1319,9 +1319,9 @@ fn an_edit_forgets_every_level_above_it_and_leaves_its_neighbours_alone() {
     let neighbour = ChunkPos::new(1, 0, 0);
     let chunk = Chunk::new(edited, stone);
 
-    let chain: Vec<(u8, Vec<u8>)> = tiamot_core::lod::Summary::chain(&chunk)
+    let chain: Vec<(u8, Vec<u8>)> = tiamat_core::lod::Summary::chain(&chunk)
         .iter()
-        .map(|summary| (summary.level(), tiamot_core::lod::codec::encode(summary)))
+        .map(|summary| (summary.level(), tiamat_core::lod::codec::encode(summary)))
         .collect();
     let levels = chain.len();
     assert!(levels > 1, "a chain of one level cannot test a column");
@@ -1375,12 +1375,12 @@ fn a_second_domains_summaries_do_not_collide_with_the_overworlds() {
     let db = WorldDb::open(&path, &mut registry).expect("open");
 
     let at = ChunkPos::new(0, 0, 0);
-    let overworld = tiamot_core::lod::Summary::chain(&Chunk::new(at, stone));
-    let ship = tiamot_core::lod::Summary::chain(&Chunk::new(at, dirt));
-    let encode = |chain: &[tiamot_core::lod::Summary]| -> Vec<(u8, Vec<u8>)> {
+    let overworld = tiamat_core::lod::Summary::chain(&Chunk::new(at, stone));
+    let ship = tiamat_core::lod::Summary::chain(&Chunk::new(at, dirt));
+    let encode = |chain: &[tiamat_core::lod::Summary]| -> Vec<(u8, Vec<u8>)> {
         chain
             .iter()
-            .map(|summary| (summary.level(), tiamot_core::lod::codec::encode(summary)))
+            .map(|summary| (summary.level(), tiamat_core::lod::codec::encode(summary)))
             .collect()
     };
 
@@ -1389,7 +1389,7 @@ fn a_second_domains_summaries_do_not_collide_with_the_overworlds() {
     db.save_summaries("mod:ship/17", at, &encode(&ship))
         .expect("save");
 
-    let level = tiamot_core::lod::FINEST;
+    let level = tiamat_core::lod::FINEST;
     let from_overworld = db
         .load_summary(DEFAULT_DOMAIN, level, at)
         .expect("read")
@@ -1428,9 +1428,9 @@ fn destroying_a_domain_takes_its_summaries_too() {
     let db = WorldDb::open(&path, &mut registry).expect("open");
 
     let at = ChunkPos::new(0, 0, 0);
-    let chain: Vec<(u8, Vec<u8>)> = tiamot_core::lod::Summary::chain(&Chunk::new(at, stone))
+    let chain: Vec<(u8, Vec<u8>)> = tiamat_core::lod::Summary::chain(&Chunk::new(at, stone))
         .iter()
-        .map(|summary| (summary.level(), tiamot_core::lod::codec::encode(summary)))
+        .map(|summary| (summary.level(), tiamat_core::lod::codec::encode(summary)))
         .collect();
     db.save_summaries("mod:ship/17", at, &chain).expect("save");
     db.save_summaries(DEFAULT_DOMAIN, at, &chain).expect("save");
@@ -1458,9 +1458,9 @@ fn saving_a_chunk_forgets_the_summaries_that_described_it() {
 
     let at = ChunkPos::new(2, 0, 0);
     let batched = ChunkPos::new(3, 0, 0);
-    let chain: Vec<(u8, Vec<u8>)> = tiamot_core::lod::Summary::chain(&Chunk::new(at, stone))
+    let chain: Vec<(u8, Vec<u8>)> = tiamat_core::lod::Summary::chain(&Chunk::new(at, stone))
         .iter()
-        .map(|summary| (summary.level(), tiamot_core::lod::codec::encode(summary)))
+        .map(|summary| (summary.level(), tiamat_core::lod::codec::encode(summary)))
         .collect();
     db.save_summaries(DEFAULT_DOMAIN, at, &chain).expect("save");
     db.save_summaries(DEFAULT_DOMAIN, batched, &chain)

@@ -37,7 +37,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tiamot_core::ui::{Limits, Measure, Rect, Style, Tree, Widget, check, layout};
+use tiamat_core::ui::{Limits, Measure, Rect, Style, Tree, Widget, check, layout};
 
 /// Every leaf is ten by ten.
 ///
@@ -53,14 +53,14 @@ impl Measure for Ruler {
 
 fuzz_target!(|data: &[u8]| {
     // Property 1. Most inputs are not a tree, and should not be.
-    let Ok(tree) = tiamot_core::proto::decode::<Tree>(data) else {
+    let Ok(tree) = tiamat_core::proto::decode::<Tree>(data) else {
         return;
     };
 
     // Property 4, before anything else touches it.
-    let bytes = tiamot_core::proto::encode(&tree).expect("what decoded must encode");
+    let bytes = tiamat_core::proto::encode(&tree).expect("what decoded must encode");
     let again: Tree =
-        tiamot_core::proto::decode(&bytes).expect("what this crate encoded, it must decode");
+        tiamat_core::proto::decode(&bytes).expect("what this crate encoded, it must decode");
     assert_eq!(
         tree, again,
         "a tree decoded, re-encoded, and decoded to something else"

@@ -19,12 +19,12 @@
 use std::path::{Path, PathBuf};
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-crowd").join(name);
+    let dir = std::env::temp_dir().join("tiamat-crowd").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -91,7 +91,7 @@ async fn stand(bot: &mut Bot, ticks: u64) -> [f64; 3] {
             0 => at.chunk.x,
             1 => at.chunk.y,
             _ => at.chunk.z,
-        }) * f64::from(tiamot_core::CHUNK_SUBNODES)
+        }) * f64::from(tiamat_core::CHUNK_SUBNODES)
             + f64::from(at.local[index])
     };
     [axis(0), axis(1), axis(2)]
@@ -136,7 +136,7 @@ fn two_players_on_one_spot_lean_apart() {
         // spawned on one spot come to rest a snug body-width apart, which is
         // the distance `phys::crowd::separate` pushes to and then stops at.
         let resting =
-            f64::from(tiamot_core::phys::PLAYER_WIDTH * tiamot_core::phys::crowd::SNUGNESS);
+            f64::from(tiamat_core::phys::PLAYER_WIDTH * tiamat_core::phys::crowd::SNUGNESS);
         assert!(
             at_last >= resting - 0.05,
             "two players standing on one spot did not make room for each other: \

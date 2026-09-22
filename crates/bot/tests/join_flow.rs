@@ -18,11 +18,11 @@
 use std::path::PathBuf;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity, challenge_payload};
-use tiamot_core::proto::{
+use tiamat_core::identity::{Allowlist, Identity, challenge_payload};
+use tiamat_core::proto::{
     ClientMessage, DisconnectReason, PROTOCOL_VERSION, ServerMessage, WireSignature,
 };
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_server::{ServerHandle, Settings};
 
 /// Another handle on the same identity.
 ///
@@ -36,7 +36,7 @@ fn same_identity(identity: &Identity) -> Identity {
 
 /// A fresh world directory. Removed first so a previous run cannot leak state.
 fn world_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-join-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-join-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -51,7 +51,7 @@ fn settings(dir: &std::path::Path, allowlist: Allowlist) -> Settings {
         allowlist,
         operators: Vec::new(),
         rcon: None,
-        view_distance: tiamot_core::interest::ViewDistance::MINIMUM,
+        view_distance: tiamat_core::interest::ViewDistance::MINIMUM,
         mods_path: None,
         enabled_mods: None,
         seed: Some(1),

@@ -42,10 +42,10 @@
 // `face_shade` here is the mode 1 directional constant below; the light
 // sampler comes in under a name that says which one it is.
 use crate::shade::{BlockLight, Shade, face_shade as sample_corner_light};
-use tiamot_core::block::{BlockView, subnode_index};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BLOCKS_PER_CHUNK, CHUNK_SUBNODES, SUBNODES_PER_AXIS};
+use tiamat_core::block::{BlockView, subnode_index};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BLOCKS_PER_CHUNK, CHUNK_SUBNODES, SUBNODES_PER_AXIS};
 
 /// Sub-node cells per axis in a chunk.
 pub const N: usize = CHUNK_SUBNODES as usize;
@@ -270,11 +270,11 @@ pub struct SubNodeGrid {
 /// other two, and the two surfaces meet at different heights — a step down the
 /// line of every seam. One block of overlap and both sides average the same
 /// four.
-const PADDED_BLOCKS: usize = tiamot_core::CHUNK_BLOCKS as usize + 2;
+const PADDED_BLOCKS: usize = tiamat_core::CHUNK_BLOCKS as usize + 2;
 
 /// Index into [`SubNodeGrid::heights`], for block coordinates in `-1..=16`.
 const fn height_index(bx: i32, by: i32, bz: i32) -> Option<usize> {
-    let last = tiamot_core::CHUNK_BLOCKS as i32;
+    let last = tiamat_core::CHUNK_BLOCKS as i32;
     if bx < -1 || by < -1 || bz < -1 || bx > last || by > last || bz > last {
         return None;
     }
@@ -409,7 +409,7 @@ impl SubNodeGrid {
         // extra `fill` calls off every dry chunk in the world, which is nearly
         // all of them.
         if heights.is_some() {
-            let last = tiamot_core::CHUNK_BLOCKS as i32;
+            let last = tiamat_core::CHUNK_BLOCKS as i32;
             let mut blocked = vec![false; PADDED_BLOCKS * PADDED_BLOCKS * PADDED_BLOCKS];
             for bz in -1..=last {
                 for by in -1..=last {
@@ -423,7 +423,7 @@ impl SubNodeGrid {
                         match fluid.fill(bx, by, bz) {
                             Some((_, depth)) if shell => {
                                 let height = (u32::from(depth) * FULL_BLOCK
-                                    / tiamot_core::UNITS_PER_BLOCK)
+                                    / tiamat_core::UNITS_PER_BLOCK)
                                     .min(FULL_BLOCK);
                                 if let Some(heights) = heights.as_mut() {
                                     heights[index] = u8::try_from(height).unwrap_or(u8::MAX).max(1);
@@ -482,7 +482,7 @@ impl SubNodeGrid {
         transparent: &impl Transparency,
     ) {
         let per_axis = SUBNODES_PER_AXIS as usize;
-        let last = tiamot_core::CHUNK_BLOCKS as i32;
+        let last = tiamat_core::CHUNK_BLOCKS as i32;
 
         for (axis, positive) in FACES {
             let neighbour = neighbours.side(axis, positive);
@@ -739,7 +739,7 @@ const fn block_cell(axis: usize, u: i32, v: i32, w: i32) -> (i32, i32, i32) {
 }
 
 /// The material of one sub-node cell of a chunk, by cell coordinates.
-fn cell_material(chunk: &Chunk, x: usize, y: usize, z: usize) -> tiamot_core::MaterialId {
+fn cell_material(chunk: &Chunk, x: usize, y: usize, z: usize) -> tiamat_core::MaterialId {
     let per_axis = SUBNODES_PER_AXIS as usize;
     let local = LocalBlock::new(
         u32::try_from(x / per_axis).unwrap_or(0),
@@ -1152,7 +1152,7 @@ fn fill_fluid(
     // one — reads it as dry and counts it as zero. See the skirt pass in
     // `from_chunk_with_fluid`.
     if let Some(depth) = depth {
-        let height = (u32::from(depth) * FULL_BLOCK / tiamot_core::UNITS_PER_BLOCK).min(FULL_BLOCK);
+        let height = (u32::from(depth) * FULL_BLOCK / tiamat_core::UNITS_PER_BLOCK).min(FULL_BLOCK);
         let heights = heights.get_or_insert_with(|| vec![0u8; PADDED_BLOCKS.pow(3)]);
         // At least one unit: zero is how `block_height` says "dry", and a puddle
         // that exists to the physics and to `get_fluid` but not to the mesher is
@@ -1717,13 +1717,13 @@ pub struct PackedVertex {
     /// x:6 | y:6 | z:6 | axis:2 | positive:1 | occlusion:2 | fine light:8
     ///
     /// The fine half is two more bits per light channel — quarter levels — in
-    /// the same channel order as [`tiamot_core::light::Light`]. See
+    /// the same channel order as [`tiamat_core::light::Light`]. See
     /// [`crate::shade`] for why four bits alone cannot describe a gradient of
     /// one level per block, and note that this still leaves one bit spare.
     pub packed: u32,
     /// material:16 | light:16
     ///
-    /// The light half is a packed [`tiamot_core::light::Light`] — sun and RGB,
+    /// The light half is a packed [`tiamat_core::light::Light`] — sun and RGB,
     /// four bits each. Task 08 reserved these bits for it, which is why mode 2
     /// costs nothing per vertex over mode 1 and Task 02b's VRAM figures still
     /// hold.
@@ -1745,7 +1745,7 @@ impl PackedVertex {
             positive,
             material,
             crate::shade::Corner {
-                light: tiamot_core::light::Light::DAYLIGHT,
+                light: tiamat_core::light::Light::DAYLIGHT,
                 fine: 0,
                 occlusion: 3,
             },
@@ -1786,8 +1786,8 @@ impl PackedVertex {
 
     /// The light level this vertex carries.
     #[must_use]
-    pub const fn light(&self) -> tiamot_core::light::Light {
-        tiamot_core::light::Light((self.material >> 16) as u16)
+    pub const fn light(&self) -> tiamat_core::light::Light {
+        tiamat_core::light::Light((self.material >> 16) as u16)
     }
 
     /// The same vertex, marked as the top edge of its quad.
@@ -2226,7 +2226,7 @@ impl MeshJob {
         fluid: &impl FluidFill,
         transparent: &impl Transparency,
     ) -> Option<Self> {
-        if chunk.is_uniform() == Some(tiamot_core::MaterialId::AIR) && !fluid.any() {
+        if chunk.is_uniform() == Some(tiamat_core::MaterialId::AIR) && !fluid.any() {
             return None;
         }
         let grid =
@@ -2391,7 +2391,7 @@ pub fn mesh_chunk(
     // chunks; air draws nothing on its own account, full stop. The fluid guard
     // is not optional — a pond sits in blocks that are air, and skipping the
     // scan without asking would stop drawing it.
-    if chunk.is_uniform() == Some(tiamot_core::MaterialId::AIR) && !fluid.any() {
+    if chunk.is_uniform() == Some(tiamat_core::MaterialId::AIR) && !fluid.any() {
         return Mesh::default();
     }
     mesh(
@@ -2459,7 +2459,7 @@ pub struct Billboard {
     pub height: u8,
     /// What it is made of, for the atlas.
     pub material: u16,
-    /// The light where it stands, packed as [`tiamot_core::light::Light`].
+    /// The light where it stands, packed as [`tiamat_core::light::Light`].
     pub light: u16,
     /// Two fixed crossed cards rather than one turned to the camera: the
     /// renderer draws it as two instances at fixed headings. Contract §8.4.
@@ -2803,7 +2803,7 @@ fn greedy_merge(
 pub mod reference {
     use super::{Absent, N, Neighbours, Quad, SubNodeGrid, cell_material};
     use crate::shade::BlockLight;
-    use tiamot_core::chunk::Chunk;
+    use tiamat_core::chunk::Chunk;
 
     /// Every exposed face, one quad per cell, unmerged.
     #[must_use]
@@ -2887,8 +2887,8 @@ pub mod reference {
 #[cfg(test)]
 mod summary_tests {
     use super::*;
-    use tiamot_core::MaterialId;
-    use tiamot_core::lod::{FINEST, Summary};
+    use tiamat_core::MaterialId;
+    use tiamat_core::lod::{FINEST, Summary};
 
     /// A summary at `level` whose bottom `height` layers of cells are solid.
     ///
@@ -2896,7 +2896,7 @@ mod summary_tests {
     /// chunks whose surfaces sit at different heights because they were
     /// summarised at different levels.
     fn slab(level: u8, height: u32, material: u16) -> Summary {
-        let n = tiamot_core::lod::cells_per_axis(level).expect("a level");
+        let n = tiamat_core::lod::cells_per_axis(level).expect("a level");
         let mut cells = vec![MaterialId::AIR; (n * n * n) as usize];
         for z in 0..n {
             for y in 0..height.min(n) {
@@ -2910,7 +2910,7 @@ mod summary_tests {
 
     #[test]
     fn an_empty_summary_draws_nothing() {
-        let n = tiamot_core::lod::cells_per_axis(FINEST).expect("a level");
+        let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let empty = Summary::from_parts(FINEST, vec![MaterialId::AIR; (n * n * n) as usize])
             .expect("build");
         assert!(mesh_summary(&empty).quads.is_empty());
@@ -2921,8 +2921,8 @@ mod summary_tests {
         // Six faces of a chunk, at whatever the level's cell size is — and
         // crucially the INTERIOR faces are culled, or a level-1 summary would
         // be 4096 cubes rather than a shell.
-        for level in FINEST..=tiamot_core::lod::COARSEST {
-            let n = tiamot_core::lod::cells_per_axis(level).expect("a level");
+        for level in FINEST..=tiamat_core::lod::COARSEST {
+            let n = tiamat_core::lod::cells_per_axis(level).expect("a level");
             let solid = Summary::from_parts(level, vec![MaterialId(1); (n * n * n) as usize])
                 .expect("build");
             let mesh = mesh_summary(&solid);
@@ -2946,7 +2946,7 @@ mod summary_tests {
         // The fake is the sky-visibility term that stored sunlight would have
         // carried, which is what the detail radius gets for real: up sees the
         // whole sky, a wall sees about half, down sees almost none.
-        let n = tiamot_core::lod::cells_per_axis(FINEST).expect("a level");
+        let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let solid =
             Summary::from_parts(FINEST, vec![MaterialId(1); (n * n * n) as usize]).expect("build");
         let mesh = mesh_summary(&solid);
@@ -3064,11 +3064,11 @@ mod tests {
     /// These tests are about geometry, and a uniform field is the case that
     /// leaves greedy merging exactly as it was — so a quad count here still
     /// measures merging rather than lighting.
-    const DAY: crate::shade::Uniform = crate::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+    const DAY: crate::shade::Uniform = crate::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
     use super::*;
-    use tiamot_core::coords::SubNodePos;
-    use tiamot_core::{BlockPos, BlockValue, ChunkPos, MaterialId};
+    use tiamat_core::coords::SubNodePos;
+    use tiamat_core::{BlockPos, BlockValue, ChunkPos, MaterialId};
 
     const STONE: MaterialId = MaterialId(2);
     const WOOD: MaterialId = MaterialId(3);
@@ -3130,7 +3130,7 @@ mod tests {
         let chunk = empty();
         assert_eq!(
             chunk.is_uniform(),
-            Some(tiamot_core::MaterialId::AIR),
+            Some(tiamat_core::MaterialId::AIR),
             "the fixture must be the case the fast path would skip"
         );
         let pond = Pond {
@@ -4700,7 +4700,7 @@ mod tests {
         // means; a lamp's falloff is close to linear, and bilinear
         // interpolation of a linear field is exact.
         use crate::shade::BlockLight;
-        use tiamot_core::light::{Light, MAX_LEVEL};
+        use tiamat_core::light::{Light, MAX_LEVEL};
 
         struct OneLitBlock;
         impl BlockLight for OneLitBlock {
@@ -4794,7 +4794,7 @@ mod tests {
         // quad, or the interpolation runs the gradient across the whole face
         // and the shadow edge disappears.
         use crate::shade::BlockLight;
-        use tiamot_core::light::{Light, MAX_LEVEL};
+        use tiamat_core::light::{Light, MAX_LEVEL};
 
         struct HalfLit;
         impl BlockLight for HalfLit {
@@ -4943,7 +4943,7 @@ mod tests {
 /// so a fixed directional tint would be counting the sun twice and would drift
 /// out of agreement as the sun moved.
 fn summary_shade(axis: usize, positive: bool) -> crate::shade::Shade {
-    use tiamot_core::light::{Light, MAX_LEVEL};
+    use tiamat_core::light::{Light, MAX_LEVEL};
 
     // Axis 1 is vertical. Fractions of `MAX_LEVEL` rather than literals so the
     // relationship survives the range changing.
@@ -4989,7 +4989,7 @@ fn summary_shade(axis: usize, positive: bool) -> crate::shade::Shade {
 /// term that stored sunlight would have carried, faked from the face direction:
 /// see [`summary_shade`].
 #[must_use]
-pub fn mesh_summary(summary: &tiamot_core::lod::Summary) -> Mesh {
+pub fn mesh_summary(summary: &tiamat_core::lod::Summary) -> Mesh {
     let width = summary.width() as usize;
     // How many sub-nodes one cell spans. The whole chunk is `CHUNK_SUBNODES`
     // across at every level, so this is exact and never a remainder.
@@ -4998,7 +4998,7 @@ pub fn mesh_summary(summary: &tiamot_core::lod::Summary) -> Mesh {
     };
     let cells = summary.cells();
     let at = |x: usize, y: usize, z: usize| -> u16 { cells[(z * width + y) * width + x].0 };
-    let air = tiamot_core::MaterialId::AIR.0;
+    let air = tiamat_core::MaterialId::AIR.0;
 
     let mut quads = Vec::new();
     // One plane at a time, greedily merged within it — the same shape as the

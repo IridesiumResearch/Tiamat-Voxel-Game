@@ -5,7 +5,7 @@
 //!
 //! Singleplayer is an embedded server over loopback, so this crate never
 //! simulates anything itself (charter rule 2). It renders what
-//! [`tiamot_core`] tells it and sends input actions back.
+//! [`tiamat_core`] tells it and sends input actions back.
 //!
 //! Presentation code is explicitly exempt from the Deterministic Float Subset
 //! (charter rule 4). Rendering, audio, UI layout, camera smoothing, and
@@ -374,14 +374,14 @@ pub mod panel {
 
     /// How many points at the bottom of `area` a HUD's `reserve` asks for.
     ///
-    /// A HUD is drawn against a canvas [`tiamot_core::hud::VIRTUAL_HEIGHT`]
+    /// A HUD is drawn against a canvas [`tiamat_core::hud::VIRTUAL_HEIGHT`]
     /// tall whatever the window is, so a reserve is in those units too and is
     /// converted here — the one place it happens. A reserve in points would
     /// protect a different fraction of the screen on every monitor while the
     /// HUD it is protecting scaled with the canvas.
     #[must_use]
     pub fn reserve_points(area: (f32, f32), reserve: u16) -> f32 {
-        let canvas = f32::from(tiamot_core::hud::VIRTUAL_HEIGHT);
+        let canvas = f32::from(tiamat_core::hud::VIRTUAL_HEIGHT);
         (f32::from(reserve) / canvas * area.1).clamp(0.0, area.1)
     }
 
@@ -457,7 +457,7 @@ pub mod panel {
     /// Everything about a sheet except what goes in it.
     ///
     /// A struct rather than five more parameters, for the reason
-    /// [`tiamot_core::ui`]'s `Flow` is one: they travel together, they are read
+    /// [`tiamat_core::ui`]'s `Flow` is one: they travel together, they are read
     /// together, and passed separately they are two `Option<&str>` and a `bool`
     /// in a row — which is how a heading ends up where a Back label was meant
     /// to go.
@@ -817,18 +817,18 @@ pub mod world;
 
 /// The engine's units-per-block constant, re-exported.
 ///
-/// A one-line proof that the client links against the same `tiamot_core` the
+/// A one-line proof that the client links against the same `tiamat_core` the
 /// server simulates with — charter rule 5's 27 units are not the client's to
 /// decide.
 #[must_use]
 pub fn units_per_block() -> u32 {
-    tiamot_core::UNITS_PER_BLOCK
+    tiamat_core::UNITS_PER_BLOCK
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn links_against_core() {
-        assert_eq!(super::units_per_block(), tiamot_core::UNITS_PER_BLOCK);
+        assert_eq!(super::units_per_block(), tiamat_core::UNITS_PER_BLOCK);
     }
 }

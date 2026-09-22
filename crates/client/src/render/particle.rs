@@ -27,7 +27,7 @@ pub struct Sprite {
     /// Life ask 15. Sprites are grouped by this before they are uploaded, so
     /// each picture is one bind and one draw — a particle is a hot path and a
     /// bind group per particle would be worse than the pixels it replaces.
-    pub texture: Option<tiamot_core::proto::ContentHash>,
+    pub texture: Option<tiamat_core::proto::ContentHash>,
 }
 
 /// One particle, as the shader reads it.
@@ -75,7 +75,7 @@ pub struct Pass {
     /// The layout a picture is bound with: a view and a sampler.
     picture_layout: wgpu::BindGroupLayout,
     /// One bind group per picture the renderer has been given.
-    pictures: std::collections::BTreeMap<tiamot_core::proto::ContentHash, wgpu::BindGroup>,
+    pictures: std::collections::BTreeMap<tiamat_core::proto::ContentHash, wgpu::BindGroup>,
     /// **Nearest, because a picture on a particle is pixel art.** A heart is
     /// sixteen pixels across and drawn a few dozen wide; filtering it turns
     /// the outline into a smear.
@@ -83,7 +83,7 @@ pub struct Pass {
     /// Where each picture's instances start and end in the buffer, in the
     /// order they were uploaded. Untextured ones come first.
     groups: Vec<(
-        Option<tiamot_core::proto::ContentHash>,
+        Option<tiamat_core::proto::ContentHash>,
         std::ops::Range<u32>,
     )>,
     direct: wgpu::RenderPipeline,
@@ -210,7 +210,7 @@ impl Pass {
     pub fn set_picture(
         &mut self,
         gpu: &Gpu,
-        hash: tiamot_core::proto::ContentHash,
+        hash: tiamat_core::proto::ContentHash,
         image: &crate::texture::Image,
     ) {
         let view = upload(gpu, image);
@@ -254,7 +254,7 @@ impl Pass {
 
         let mut instances: Vec<Instance> = Vec::with_capacity(ordered.len());
         self.groups.clear();
-        let mut run: Option<(Option<tiamot_core::proto::ContentHash>, u32)> = None;
+        let mut run: Option<(Option<tiamat_core::proto::ContentHash>, u32)> = None;
         for sprite in ordered {
             let index = u32::try_from(instances.len()).unwrap_or(0);
             match run {

@@ -55,7 +55,7 @@ pub enum Action {
         /// What the player chose for each enabled mod's world options, as
         /// `(qualified id, value text)` — every option, defaults included, so
         /// the world file says what it was made with. See
-        /// `tiamot_core::modload::WorldOption`.
+        /// `tiamat_core::modload::WorldOption`.
         world_options: Vec<(String, String)>,
     },
     /// Keep this entry in the list. A server somebody typed an address for.
@@ -185,11 +185,11 @@ impl Front {
                     .copied()
                     .unwrap_or(option.default);
                 let value = if option.is_toggle() {
-                    tiamot_core::modload::WorldOptionValue::Toggle(picked != 0)
+                    tiamat_core::modload::WorldOptionValue::Toggle(picked != 0)
                 } else {
                     let index = usize::try_from(picked.saturating_sub(1)).unwrap_or(0);
                     match option.options.get(index) {
-                        Some(text) => tiamot_core::modload::WorldOptionValue::Choice(text.clone()),
+                        Some(text) => tiamat_core::modload::WorldOptionValue::Choice(text.clone()),
                         None => option.default_value(),
                     }
                 };
@@ -264,7 +264,7 @@ impl Front {
         let dressing = self.worn;
         crate::panel::sheet_with(
             ctx,
-            crate::panel::Sheet::titled("Tiamot").themed(dressing),
+            crate::panel::Sheet::titled("Tiamat").themed(dressing),
             |ui| {
                 // **Quit above the tabs, not beside them.** The strip draws the
                 // page edge across the whole sheet — that line under the inactive
@@ -766,7 +766,7 @@ impl Front {
                     // where it starts is a setting that looks broken.
                     egui::Slider::new(
                         &mut config.vertical_view_distance,
-                        1..=tiamot_core::interest::ViewDistance::MAXIMUM.vertical,
+                        1..=tiamat_core::interest::ViewDistance::MAXIMUM.vertical,
                     )
                     .text("vertical view distance"),
                 )
@@ -1139,7 +1139,7 @@ mod tests {
         // enabled mod's world options as text — defaults included, so the
         // world file records what it was made with — and nothing for a mod
         // that is off, because there is nobody to answer.
-        let option = |id: &str, options: &[&str]| tiamot_core::modload::WorldOption {
+        let option = |id: &str, options: &[&str]| tiamat_core::modload::WorldOption {
             id: id.to_owned(),
             name: id.to_owned(),
             description: String::new(),

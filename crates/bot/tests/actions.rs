@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::{ClientMessage, ServerMessage};
-use tiamot_core::{BlockPos, SubNodePos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::{ClientMessage, ServerMessage};
+use tiamat_core::{BlockPos, SubNodePos};
+use tiamat_server::{ServerHandle, Settings};
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -27,7 +27,7 @@ fn repo() -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-actions").join(name);
+    let dir = std::env::temp_dir().join("tiamat-actions").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -103,13 +103,13 @@ fn cells_taken(bot: &Bot, at: BlockPos) -> usize {
             match edit {
                 // Still possible from a mod's `set_block`, and still a whole
                 // block when it happens.
-                tiamot_core::proto::Edit::Block { pos, material }
-                    if pos == at && material == tiamot_core::MaterialId::AIR.0 =>
+                tiamat_core::proto::Edit::Block { pos, material }
+                    if pos == at && material == tiamat_core::MaterialId::AIR.0 =>
                 {
-                    return tiamot_core::block::SUBNODES_PER_BLOCK;
+                    return tiamat_core::block::SUBNODES_PER_BLOCK;
                 }
-                tiamot_core::proto::Edit::SubNode { pos, material }
-                    if pos.block() == at && material == tiamot_core::MaterialId::AIR.0 =>
+                tiamat_core::proto::Edit::SubNode { pos, material }
+                    if pos.block() == at && material == tiamat_core::MaterialId::AIR.0 =>
                 {
                     gone.insert((pos.x, pos.y, pos.z));
                 }
@@ -147,7 +147,7 @@ async fn dig_with_whatever_is_held(bot: &mut Bot, at: BlockPos) -> Took {
     let mut settled_at: Option<(usize, tokio::time::Instant)> = None;
     while tokio::time::Instant::now() < deadline {
         let taken = cells_taken(bot, at);
-        if taken >= tiamot_core::block::SUBNODES_PER_BLOCK {
+        if taken >= tiamat_core::block::SUBNODES_PER_BLOCK {
             return Took::Block;
         }
         // A count that has not moved for a beat is a dig that has finished.

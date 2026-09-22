@@ -53,9 +53,9 @@ pub fn decode_isolated(bytes: &[u8], limits: Limits) -> Result<Clip, AudioError>
 /// to the session and is replaced wholesale when a player joins somewhere else.
 #[must_use]
 pub fn by_mod(
-    sounds: &[tiamot_core::proto::SoundDef],
-) -> Vec<(&str, Vec<&tiamot_core::proto::SoundDef>)> {
-    let mut groups: Vec<(&str, Vec<&tiamot_core::proto::SoundDef>)> = Vec::new();
+    sounds: &[tiamat_core::proto::SoundDef],
+) -> Vec<(&str, Vec<&tiamat_core::proto::SoundDef>)> {
+    let mut groups: Vec<(&str, Vec<&tiamat_core::proto::SoundDef>)> = Vec::new();
     for sound in sounds {
         if let Some(group) = groups.iter_mut().find(|(id, _)| *id == sound.mod_id) {
             group.1.push(sound);
@@ -68,7 +68,7 @@ pub fn by_mod(
 
 #[cfg(test)]
 mod tests {
-    use tiamot_core::proto::SoundDef;
+    use tiamat_core::proto::SoundDef;
 
     fn sound(id: &str, mod_id: &str) -> SoundDef {
         SoundDef {

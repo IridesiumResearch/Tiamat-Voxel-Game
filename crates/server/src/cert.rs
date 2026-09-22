@@ -5,7 +5,7 @@
 //!
 //! # There is no certificate authority
 //!
-//! Tiamot servers are run by anyone, on any address, usually without a domain
+//! Tiamat servers are run by anyone, on any address, usually without a domain
 //! name. A CA-issued certificate would require every operator to own a domain
 //! and renew a certificate to host a game server, which is not a trade anyone
 //! would take. So certificates are self-signed and trust is
@@ -46,7 +46,7 @@ const CERT_FILE: &str = "server-cert.pem";
 ///
 /// Meaningless under TOFU — nothing checks it, because there is no CA and no
 /// domain. It exists because a certificate must carry *some* subject.
-const SUBJECT: &str = "tiamot-server";
+const SUBJECT: &str = "tiamat-server";
 
 /// Something went wrong producing or loading the server certificate.
 #[derive(Debug, thiserror::Error)]
@@ -189,7 +189,7 @@ impl ServerCert {
 #[must_use]
 pub fn fingerprint_of(der: &CertificateDer<'_>) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:server-cert:v1");
+    hasher.update(b"tiamat:server-cert:v1");
     hasher.update(der.as_ref());
     *hasher.finalize().as_bytes()
 }
@@ -272,7 +272,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("tiamot-cert-tests").join(name);
+        let dir = std::env::temp_dir().join("tiamat-cert-tests").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir

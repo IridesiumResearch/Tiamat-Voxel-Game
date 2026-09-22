@@ -19,10 +19,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::{ServerMessage, StackDef};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::{ServerMessage, StackDef};
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -37,7 +37,7 @@ const STAIR: u32 = 0b1_1111;
 const PER_STAIR: u32 = 5;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-crafting-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-crafting-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -398,19 +398,19 @@ fn what_a_player_chisels_is_what_the_mod_gets_back() {
             .nodes
             .iter()
             .find_map(|node| match node.widget {
-                tiamot_core::ui::Widget::ShapeEditor { shape, .. } => Some(shape),
+                tiamat_core::ui::Widget::ShapeEditor { shape, .. } => Some(shape),
                 _ => None,
             })
             .expect("the bench has a shape editor in it");
         assert_eq!(
             opened,
-            tiamot_core::inventory::Shape::ALL,
+            tiamat_core::inventory::Shape::ALL,
             "an editor that opens empty has nothing to chisel"
         );
 
         bot.dialog_event(
             &form,
-            tiamot_core::proto::DialogEvent::Chiselled {
+            tiamat_core::proto::DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: CARVED,
             },
@@ -419,7 +419,7 @@ fn what_a_player_chisels_is_what_the_mod_gets_back() {
         .expect("send");
         bot.dialog_event(
             &form,
-            tiamot_core::proto::DialogEvent::Pressed {
+            tiamat_core::proto::DialogEvent::Pressed {
                 name: "make".to_owned(),
             },
         )
@@ -494,7 +494,7 @@ fn placing_a_cut_stack_puts_that_cut_in_the_world() {
 
         // In reach, empty, and not where the player is standing — a placement
         // inside a body is refused with "someone is standing there".
-        let at = tiamot_core::SubNodePos::new(7, 3, 7);
+        let at = tiamat_core::SubNodePos::new(7, 3, 7);
         bot.place_shape_from_inventory(at, stone, cut.shape)
             .await
             .expect("the placement should reach the server");
@@ -508,8 +508,8 @@ fn placing_a_cut_stack_puts_that_cut_in_the_world() {
                 .received()
                 .into_iter()
                 .find_map(|message| match message {
-                    tiamot_core::proto::ServerMessage::BlockDelta {
-                        edit: tiamot_core::proto::Edit::Partial { pos, occupancy, .. },
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::Partial { pos, occupancy, .. },
                         ..
                     } if pos == at.block() => Some(occupancy),
                     _ => None,
@@ -573,12 +573,12 @@ fn a_cut_turns_to_face_whoever_places_it() {
             bot.recv().await.expect("recv");
         };
 
-        let placed = |bot: &Bot, at: tiamot_core::SubNodePos| {
+        let placed = |bot: &Bot, at: tiamat_core::SubNodePos| {
             bot.received()
                 .into_iter()
                 .find_map(|message| match message {
-                    tiamot_core::proto::ServerMessage::BlockDelta {
-                        edit: tiamot_core::proto::Edit::Partial { pos, occupancy, .. },
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::Partial { pos, occupancy, .. },
                         ..
                     } if pos == at.block() => Some(occupancy),
                     _ => None,
@@ -605,8 +605,8 @@ fn a_cut_turns_to_face_whoever_places_it() {
         };
 
         // On the ground, and on a wall, in two different blocks.
-        let on_ground = tiamot_core::SubNodePos::new(7, 3, 7);
-        let on_wall = tiamot_core::SubNodePos::new(10, 3, 7);
+        let on_ground = tiamat_core::SubNodePos::new(7, 3, 7);
+        let on_wall = tiamat_core::SubNodePos::new(10, 3, 7);
         let flat = land(&mut bot, on_ground, [0, 1, 0]).await;
         let upright = land(&mut bot, on_wall, [1, 0, 0]).await;
 

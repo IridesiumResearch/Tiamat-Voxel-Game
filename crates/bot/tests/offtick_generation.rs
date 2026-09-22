@@ -11,7 +11,7 @@
 //! one request is always served so a slow machine still finishes loading. With
 //! a 60 ms chunk, that floor *is* the overrun.
 //!
-//! So generation left the tick: `tiamot_server::worldgen` runs each mod set in
+//! So generation left the tick: `tiamat_server::worldgen` runs each mod set in
 //! its own VM on worker threads, and the tick adopts, lights, encodes and sends
 //! what comes back. This file holds the mechanism through the real endpoint.
 //!
@@ -28,9 +28,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 /// What the fixture's `return 0.2, 0.8, 0.4` comes back as.
 ///
@@ -39,11 +39,11 @@ use tiamot_server::{ServerHandle, Settings};
 /// magic numbers, so the day that scale moves again this says what it means
 /// instead of what it used to equal.
 fn declared() -> [u8; 3] {
-    [0.2, 0.8, 0.4].map(tiamot_core::proto::Tint::quantise)
+    [0.2, 0.8, 0.4].map(tiamat_core::proto::Tint::quantise)
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-offtick").join(name);
+    let dir = std::env::temp_dir().join("tiamat-offtick").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -118,8 +118,8 @@ fn expensive_terrain_is_generated_by_the_workers_and_the_tick_keeps_its_budget()
     let control = server.control().clone();
     let addr = server.local_addr();
     let fingerprint = server.cert_fingerprint();
-    let expected = tiamot_core::interest::chunks_around(
-        tiamot_core::BlockPos::new(0, 1, 0).chunk(),
+    let expected = tiamat_core::interest::chunks_around(
+        tiamat_core::BlockPos::new(0, 1, 0).chunk(),
         ViewDistance {
             horizontal: 2,
             vertical: 2,
@@ -199,7 +199,7 @@ fn a_summary_of_land_never_visited_is_generated_off_the_tick() {
         let mut summaries = 0;
         while summaries < 4 && tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_secs(5), alice.recv()).await {
-                Ok(Ok(tiamot_core::proto::ServerMessage::ChunkSummary { .. })) => summaries += 1,
+                Ok(Ok(tiamat_core::proto::ServerMessage::ChunkSummary { .. })) => summaries += 1,
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => panic!("connection failed: {err}"),
                 Err(_) => {}
@@ -278,7 +278,7 @@ fn every_vm_knows_the_world_seed() {
 
         alice
             .expect_block(
-                tiamot_core::BlockPos::new(1, 8, 1),
+                tiamat_core::BlockPos::new(1, 8, 1),
                 marker,
                 Duration::from_secs(20),
             )

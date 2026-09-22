@@ -43,7 +43,7 @@
 //! being loosened for everyone.
 
 use glam::{Mat4, Vec3};
-use tiamot_core::{CHUNK_BLOCKS, ChunkPos, SUBNODES_PER_AXIS};
+use tiamat_core::{CHUNK_BLOCKS, ChunkPos, SUBNODES_PER_AXIS};
 
 /// Blocks per chunk, as `f64` for the offset arithmetic.
 const CHUNK_SPAN: f64 = CHUNK_BLOCKS as f64;

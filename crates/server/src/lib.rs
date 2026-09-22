@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The Tiamot server, as a library.
+//! The Tiamat server, as a library.
 //!
 //! Charter rule 2: the server is the game. Singleplayer is this server running
 //! in-process on loopback, which is why this is a library with a thin binary on

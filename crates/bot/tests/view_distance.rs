@@ -24,15 +24,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::{self, ViewDistance};
-use tiamot_core::proto::{ClientMessage, ServerMessage};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::{self, ViewDistance};
+use tiamat_core::proto::{ClientMessage, ServerMessage};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 1] = ["test:stone"];
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-view-distance").join(name);
+    let dir = std::env::temp_dir().join("tiamat-view-distance").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -197,7 +197,7 @@ fn asking_for_less_is_granted_and_costs_the_server_less() {
                 bot.chunks_received().iter().any(|pos| {
                     !interest::contains(
                         spawn,
-                        tiamot_core::lod::horizon_for(ViewDistance::MINIMUM),
+                        tiamat_core::lod::horizon_for(ViewDistance::MINIMUM),
                         *pos,
                     )
                 })

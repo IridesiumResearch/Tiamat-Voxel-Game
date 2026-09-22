@@ -10,7 +10,7 @@
 //!
 //! # This is a hint, not an authority
 //!
-//! A beacon says only "something at this address claims to be a Tiamot server
+//! A beacon says only "something at this address claims to be a Tiamat server
 //! called this". Anything on the network can send one, so nothing here is
 //! trusted: the address is a suggestion the player still has to accept, and the
 //! name is a display string that goes through [`Beacon::decode`]'s filter
@@ -60,7 +60,7 @@ pub const MAX_NAME: usize = 48;
 /// The trailing byte is the beacon format's own version, which is NOT the
 /// protocol version — a client that cannot speak to a server should still be
 /// able to see it and say so.
-const MAGIC: [u8; 8] = *b"TIAMOTd\x01";
+const MAGIC: [u8; 8] = *b"TIAMATd\x01";
 
 /// Bytes after the magic and before the name: protocol, port, players, maximum,
 /// and the name's length.

@@ -16,7 +16,7 @@
 //! authenticity — a mirror is allowed to be somebody else's machine.
 //!
 //! Everything is capped before it is allocated (charter rule 14): the manifest
-//! at [`tiamot_core::release::MAX_MANIFEST_BYTES`], the archive at the size
+//! at [`tiamat_core::release::MAX_MANIFEST_BYTES`], the archive at the size
 //! the signed manifest declares, and the whole exchange behind timeouts so a
 //! server that accepts a connection and then says nothing cannot hold the
 //! front screen for ever.
@@ -30,13 +30,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tiamot_core::release::Manifest;
+use tiamat_core::release::Manifest;
 
 /// The public key releases are signed with, from `release-key.pub`.
 ///
 /// `None` in a build that found no key, which then never offers an update —
 /// the same rule the launcher follows.
-const RELEASE_KEY: Option<&str> = option_env!("TIAMOT_RELEASE_KEY");
+const RELEASE_KEY: Option<&str> = option_env!("TIAMAT_RELEASE_KEY");
 
 /// How long any single request may take before it is given up on.
 ///
@@ -147,7 +147,7 @@ impl Updates {
     /// Whether this build looks for updates at all.
     #[must_use]
     pub fn configured(&self) -> bool {
-        tiamot_core::build::MANIFEST_URL.is_some()
+        tiamat_core::build::MANIFEST_URL.is_some()
             && RELEASE_KEY.is_some()
             && self.install.is_some()
     }
@@ -170,7 +170,7 @@ impl Updates {
             });
             match outcome {
                 Ok(manifest) => {
-                    let installed = tiamot_core::build::VERSION;
+                    let installed = tiamat_core::build::VERSION;
                     if manifest.newer_than(installed).is_err() {
                         set(&status, Status::UpToDate);
                         return;
@@ -330,8 +330,8 @@ fn verify(bytes: &[u8], signature: &[u8]) -> Result<Manifest, UpdateError> {
 
 /// The manifest and its detached signature.
 fn fetch_manifest() -> Result<(Vec<u8>, Vec<u8>), UpdateError> {
-    let url = tiamot_core::build::MANIFEST_URL.ok_or(UpdateError::NotConfigured)?;
-    let manifest = get(url, tiamot_core::release::MAX_MANIFEST_BYTES as u64, |_| {})?;
+    let url = tiamat_core::build::MANIFEST_URL.ok_or(UpdateError::NotConfigured)?;
+    let manifest = get(url, tiamat_core::release::MAX_MANIFEST_BYTES as u64, |_| {})?;
     // The signature sits beside the manifest, which is one fewer thing to
     // configure and one fewer thing to get wrong.
     let signature = get(&format!("{url}.sig"), 64, |_| {})?;
@@ -340,7 +340,7 @@ fn fetch_manifest() -> Result<(Vec<u8>, Vec<u8>), UpdateError> {
 
 /// The archive, from the first URL that yields it.
 fn fetch_artifact(
-    artifact: &tiamot_core::release::Artifact,
+    artifact: &tiamat_core::release::Artifact,
     mut progress: impl FnMut(u64),
 ) -> Result<Vec<u8>, UpdateError> {
     let mut last = None;
@@ -365,7 +365,7 @@ fn get(url: &str, limit: u64, mut progress: impl FnMut(u64)) -> Result<Vec<u8>, 
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(CHECK_TIMEOUT))
-        .user_agent(format!("Tiamot/{}", tiamot_core::build::VERSION))
+        .user_agent(format!("Tiamat/{}", tiamat_core::build::VERSION))
         .build()
         .into();
     let response = agent
@@ -419,7 +419,7 @@ fn decode_key(hex: &str) -> Option<ed25519_dalek::VerifyingKey> {
 }
 
 /// The target triple this build is for, as the manifest names it.
-const TARGET: &str = env!("TIAMOT_TARGET");
+const TARGET: &str = env!("TIAMAT_TARGET");
 
 /// The install root: the directory above the one holding this binary.
 ///

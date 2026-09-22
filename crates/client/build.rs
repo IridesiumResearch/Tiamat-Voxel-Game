@@ -12,11 +12,11 @@ use std::path::Path;
 
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
-    println!("cargo:rustc-env=TIAMOT_TARGET={target}");
+    println!("cargo:rustc-env=TIAMAT_TARGET={target}");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=TIAMOT_RELEASE_KEY");
+    println!("cargo:rerun-if-env-changed=TIAMAT_RELEASE_KEY");
 
-    if std::env::var_os("TIAMOT_RELEASE_KEY").is_some() {
+    if std::env::var_os("TIAMAT_RELEASE_KEY").is_some() {
         return;
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../release-key.pub");
@@ -32,6 +32,6 @@ fn main() {
         && key.len() == 64
         && key.chars().all(|c| c.is_ascii_hexdigit())
     {
-        println!("cargo:rustc-env=TIAMOT_RELEASE_KEY={key}");
+        println!("cargo:rustc-env=TIAMAT_RELEASE_KEY={key}");
     }
 }

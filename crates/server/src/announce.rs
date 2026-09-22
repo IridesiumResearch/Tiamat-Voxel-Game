@@ -7,7 +7,7 @@
 //! server address. I want them to be able to detect LAN servers." A host that
 //! has opened its world repeats a small datagram; a client that is looking
 //! lists what it hears. The format, and why nothing in it is trusted, is
-//! [`tiamot_core::discover`].
+//! [`tiamat_core::discover`].
 //!
 //! # Never on by default
 //!
@@ -19,7 +19,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use tiamot_core::discover::{Beacon, INTERVAL_MS, PORT};
+use tiamat_core::discover::{Beacon, INTERVAL_MS, PORT};
 use tracing::{debug, warn};
 
 use crate::sim::Control;
@@ -81,7 +81,7 @@ impl Announcer {
         // Encoded ONCE, so a name the format refuses stops the announcer here
         // rather than failing silently on every tick of a thread nobody reads.
         let beacon = Beacon {
-            protocol: tiamot_core::proto::PROTOCOL_VERSION,
+            protocol: tiamat_core::proto::PROTOCOL_VERSION,
             port,
             players: 0,
             max_players: u16::try_from(shared.max_players).unwrap_or(u16::MAX),
@@ -109,7 +109,7 @@ impl Announcer {
         let stopping = control.clone();
         let shared = Arc::clone(shared);
         let thread = std::thread::Builder::new()
-            .name("tiamot-announce".to_owned())
+            .name("tiamat-announce".to_owned())
             .spawn(move || {
                 while !stopping.stopping() {
                     let beacon = Beacon {

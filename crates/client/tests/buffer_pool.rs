@@ -27,11 +27,11 @@
 use client::config::RenderMode;
 use client::mesher::{Absent, Neighbours, mesh_chunk};
 use client::render::{Gpu, Renderer};
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BlockValue, Chunk, ChunkPos, MaterialId};
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BlockValue, Chunk, ChunkPos, MaterialId};
 
 /// Full daylight: these tests are about buffer reuse, not about light.
-const DAY: client::shade::Uniform = client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: client::shade::Uniform = client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 const STONE: MaterialId = MaterialId(2);
 const WIDTH: u32 = 320;
@@ -43,8 +43,8 @@ fn gpu() -> Option<Gpu> {
         Ok(gpu) => Some(gpu),
         Err(err) => {
             assert!(
-                std::env::var("TIAMOT_REQUIRE_GPU").is_err(),
-                "TIAMOT_REQUIRE_GPU is set and no adapter was available: {err}"
+                std::env::var("TIAMAT_REQUIRE_GPU").is_err(),
+                "TIAMAT_REQUIRE_GPU is set and no adapter was available: {err}"
             );
             println!("SKIPPING: no graphics adapter on this machine ({err})");
             None
@@ -58,9 +58,9 @@ fn gpu() -> Option<Gpu> {
 /// which would make this whole test vacuous.
 fn surfaced(pos: ChunkPos, height: u32) -> Chunk {
     let mut chunk = Chunk::new(pos, MaterialId::AIR);
-    for z in 0..tiamot_core::CHUNK_BLOCKS {
-        for x in 0..tiamot_core::CHUNK_BLOCKS {
-            for y in 0..height.min(tiamot_core::CHUNK_BLOCKS) {
+    for z in 0..tiamat_core::CHUNK_BLOCKS {
+        for x in 0..tiamat_core::CHUNK_BLOCKS {
+            for y in 0..height.min(tiamat_core::CHUNK_BLOCKS) {
                 chunk.set_block_local(LocalBlock::new(x, y, z), BlockValue::Uniform(STONE));
             }
         }
@@ -202,9 +202,9 @@ fn a_mesh_that_outgrows_its_buffer_gets_a_bigger_one() {
     // merge and produces orders of magnitude more geometry.
     let small = surfaced(pos, 1);
     let mut large = Chunk::new(pos, MaterialId::AIR);
-    for z in 0..tiamot_core::CHUNK_BLOCKS {
-        for x in 0..tiamot_core::CHUNK_BLOCKS {
-            for y in 0..tiamot_core::CHUNK_BLOCKS {
+    for z in 0..tiamat_core::CHUNK_BLOCKS {
+        for x in 0..tiamat_core::CHUNK_BLOCKS {
+            for y in 0..tiamat_core::CHUNK_BLOCKS {
                 if (x + y + z) % 2 == 0 {
                     large.set_block_local(LocalBlock::new(x, y, z), BlockValue::Uniform(STONE));
                 }

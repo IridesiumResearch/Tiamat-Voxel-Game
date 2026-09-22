@@ -3,7 +3,7 @@
 
 # Distribution and updates
 
-**Authoritative.** How a built Tiamot reaches a player and how it keeps itself
+**Authoritative.** How a built Tiamat reaches a player and how it keeps itself
 current. Any change to the manifest format, the trust rules, or the install
 layout is edited here first.
 
@@ -92,7 +92,7 @@ breath. Signed as a detached Ed25519 signature over the exact bytes.
   "artifacts": [
     {
       "target": "aarch64-apple-darwin",
-      "name": "tiamot-0.2.0-aarch64-apple-darwin.tar.gz",
+      "name": "tiamat-0.2.0-aarch64-apple-darwin.tar.gz",
       "size": 148223118,
       "hash": "b3:…",
       "urls": ["https://github.com/…", "https://…mirror…"]
@@ -134,9 +134,9 @@ instructions works:
   install.json        installed version, channel, and where it came from
 ```
 
-Windows `%LOCALAPPDATA%\Tiamot`, macOS `~/Library/Application Support/Tiamot`
-(inside a `Tiamot.app` bundle for the Finder's sake), Linux
-`~/.local/share/tiamot`. Saves, the identity key and the content cache stay
+Windows `%LOCALAPPDATA%\Tiamat`, macOS `~/Library/Application Support/Tiamat`
+(inside a `Tiamat.app` bundle for the Finder's sake), Linux
+`~/.local/share/tiamat`. Saves, the identity key and the content cache stay
 where they already live and are **never** touched by an update — a player who
 reinstalls keeps their worlds.
 

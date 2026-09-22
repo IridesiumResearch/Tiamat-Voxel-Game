@@ -16,7 +16,7 @@
 //! sized from it — the check is on the claim, and the read that follows cannot
 //! exceed it whatever the peer actually sends.
 
-use tiamot_core::proto::{MAX_MESSAGE_BYTES, ProtocolError};
+use tiamat_core::proto::{MAX_MESSAGE_BYTES, ProtocolError};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// Bytes of length prefix.
@@ -87,7 +87,7 @@ where
 
     let mut body = vec![0u8; declared];
     stream.read_exact(&mut body).await?;
-    Ok(tiamot_core::proto::decode(&body)?)
+    Ok(tiamat_core::proto::decode(&body)?)
 }
 
 /// Writes one length-prefixed message to a stream.
@@ -100,7 +100,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
     T: serde::Serialize,
 {
-    let body = tiamot_core::proto::encode(message)?;
+    let body = tiamat_core::proto::encode(message)?;
     // `encode` already enforces the cap, so this cast cannot truncate.
     let prefix = u32::try_from(body.len()).map_err(|_| FrameError::Oversized {
         declared: body.len(),
@@ -113,7 +113,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::proto::{ClientMessage, PROTOCOL_VERSION};
+    use tiamat_core::proto::{ClientMessage, PROTOCOL_VERSION};
 
     fn hello() -> ClientMessage {
         ClientMessage::Hello {

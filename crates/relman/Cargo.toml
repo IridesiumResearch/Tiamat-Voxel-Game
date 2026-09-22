@@ -14,7 +14,7 @@ publish.workspace = true
 # maintainer's machine with the signing key, and it speaks to no network: a
 # tool that could fetch could be made to fetch.
 [dependencies]
-tiamot-core.workspace = true
+tiamat-core.workspace = true
 blake3.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true

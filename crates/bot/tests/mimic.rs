@@ -20,14 +20,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-mimic").join(name);
+    let dir = std::env::temp_dir().join("tiamat-mimic").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -83,7 +83,7 @@ async fn join_as(server: &ServerHandle, identity: Identity, name: &str) -> Bot {
 
 /// The mimic, as the bot sees it: the engine's humanoid, wearing somebody's
 /// name, that is not the body of anyone connected.
-fn is_mimic(entity: &tiamot_core::proto::EntityDef, wearing: &str) -> bool {
+fn is_mimic(entity: &tiamat_core::proto::EntityDef, wearing: &str) -> bool {
     entity.model.as_deref() == Some("engine:humanoid") && entity.nametag.as_deref() == Some(wearing)
 }
 
@@ -211,9 +211,9 @@ fn the_mimic_follows_the_player_it_imprinted_on() {
 /// An entity's position in world blocks. Chunk times sixteen plus the cell
 /// offset over three — the conversion the mod API does for a mod, done here
 /// because a test reads the wire and the wire carries the chunk frame.
-fn world_of(entity: &tiamot_core::proto::EntityDef) -> [f64; 3] {
-    let span = f64::from(tiamot_core::CHUNK_SUBNODES);
-    let per_block = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+fn world_of(entity: &tiamat_core::proto::EntityDef) -> [f64; 3] {
+    let span = f64::from(tiamat_core::CHUNK_SUBNODES);
+    let per_block = f64::from(tiamat_core::SUBNODES_PER_AXIS);
     [
         (f64::from(entity.chunk.x) * span + f64::from(entity.local[0])) / per_block,
         (f64::from(entity.chunk.y) * span + f64::from(entity.local[1])) / per_block,
@@ -438,7 +438,7 @@ fn a_mimic_that_cannot_move_stands_still_rather_than_walking_on_the_spot() {
             walked = ada
                 .entities()
                 .get(&mimic.id)
-                .is_some_and(|entity| entity.anim == tiamot_core::ent::AnimTag::WALK.0);
+                .is_some_and(|entity| entity.anim == tiamat_core::ent::AnimTag::WALK.0);
         }
         assert!(
             walked,
@@ -455,10 +455,10 @@ fn a_mimic_that_cannot_move_stands_still_rather_than_walking_on_the_spot() {
         // rule everywhere, and a test that reached round it would be the first
         // place somebody looked for permission to do the same in a tick.
         let block = |x: f64, y: f64, z: f64| {
-            tiamot_core::BlockPos::new(
-                tiamot_core::detgen::floor_to_i64(x) as i32,
-                tiamot_core::detgen::floor_to_i64(y) as i32,
-                tiamot_core::detgen::floor_to_i64(z) as i32,
+            tiamat_core::BlockPos::new(
+                tiamat_core::detgen::floor_to_i64(x) as i32,
+                tiamat_core::detgen::floor_to_i64(y) as i32,
+                tiamat_core::detgen::floor_to_i64(z) as i32,
             )
         };
         let floor = ada
@@ -500,7 +500,7 @@ fn a_mimic_that_cannot_move_stands_still_rather_than_walking_on_the_spot() {
                 idle &= ada
                     .entities()
                     .get(&mimic.id)
-                    .is_some_and(|entity| entity.anim == tiamot_core::ent::AnimTag::IDLE.0);
+                    .is_some_and(|entity| entity.anim == tiamat_core::ent::AnimTag::IDLE.0);
             }
             still = idle;
         }

@@ -176,7 +176,7 @@ pub fn to_glb(model: &Model) -> Vec<u8> {
     }
 
     let mut document = json!({
-        "asset": { "version": "2.0", "generator": "tiamot" },
+        "asset": { "version": "2.0", "generator": "tiamat" },
         "scene": 0,
         "scenes": [ { "nodes": [0] } ],
         "nodes": nodes,

@@ -100,7 +100,7 @@ impl Frustum {
     /// camera is, which is what keeps this precise at the edge of the world.
     #[must_use]
     pub fn contains_chunk(&self, offset: Vec3) -> bool {
-        let span = tiamot_core::CHUNK_BLOCKS as f32;
+        let span = tiamat_core::CHUNK_BLOCKS as f32;
         self.intersects_box(offset, offset + Vec3::splat(span))
     }
 }
@@ -219,7 +219,7 @@ mod tests {
             for y in -4..=4 {
                 for z in -8..=8 {
                     total += 1;
-                    let offset = camera.chunk_offset(tiamot_core::ChunkPos::new(x, y, z));
+                    let offset = camera.chunk_offset(tiamat_core::ChunkPos::new(x, y, z));
                     if frustum.contains_chunk(offset) {
                         visible += 1;
                     }

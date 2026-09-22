@@ -23,14 +23,14 @@
 //!    was supposed to have refused before allocating for it.
 //!
 //! Seeded with the engine's own humanoid — see
-//! `cargo run --release -p tiamot-core --example fuzz_seeds`. A fuzzer starting
+//! `cargo run --release -p tiamat-core --example fuzz_seeds`. A fuzzer starting
 //! from random bytes spends its whole budget failing the magic-number check.
 //!
 //! Run: `cargo +nightly fuzz run gltf_ingest`
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tiamot_core::model::{Limits, ingest};
+use tiamat_core::model::{Limits, ingest};
 
 fuzz_target!(|data: &[u8]| {
     let limits = Limits::default();

@@ -37,8 +37,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tiamot_core::identity::{PlayerUuid, public_key_from_bytes};
-use tiamot_core::session::store;
+use tiamat_core::identity::{PlayerUuid, public_key_from_bytes};
+use tiamat_core::session::store;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
@@ -58,7 +58,7 @@ pub struct RconContext {
     /// The token an admin must present.
     pub token: String,
     /// The resolved mod set, for `mods`.
-    pub mods: Vec<tiamot_core::proto::ModEntry>,
+    pub mods: Vec<tiamat_core::proto::ModEntry>,
 }
 
 /// Runs the RCON listener until the simulation stops.
@@ -120,7 +120,7 @@ async fn session(stream: TcpStream, context: &RconContext) -> Result<(), std::io
     let mut line = String::new();
 
     write
-        .write_all(b"tiamot rcon. first line must be: auth <token>\n.\n")
+        .write_all(b"tiamat rcon. first line must be: auth <token>\n.\n")
         .await?;
 
     loop {
@@ -454,8 +454,8 @@ fn unix_now() -> i64 {
 ///
 /// [`store::StoreError`] if the write fails.
 pub fn flush_identities(
-    db: &tiamot_core::WorldDb,
-    identities: &mut tiamot_core::session::IdentityRegistry,
+    db: &tiamat_core::WorldDb,
+    identities: &mut tiamat_core::session::IdentityRegistry,
 ) -> Result<(), store::StoreError> {
     store::flush(db, identities)
 }

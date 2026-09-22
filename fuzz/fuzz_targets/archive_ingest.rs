@@ -31,7 +31,7 @@ use updater::archive::{MAX_ENTRIES, MAX_UNPACKED_BYTES, unpack_tar_gz};
 fuzz_target!(|data: &[u8]| {
     // A sentinel directory with exactly one thing in it. Anything that
     // escapes the destination lands here and is counted afterwards.
-    let sentinel = std::env::temp_dir().join("tiamot-fuzz-archive");
+    let sentinel = std::env::temp_dir().join("tiamat-fuzz-archive");
     let _ = std::fs::remove_dir_all(&sentinel);
     let into = sentinel.join("into");
     if std::fs::create_dir_all(&into).is_err() {

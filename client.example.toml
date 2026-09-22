@@ -1,4 +1,4 @@
-# Example Tiamot client configuration.
+# Example Tiamat client configuration.
 #
 # Copy this to client.toml and edit. Every key below is optional; the value
 # shown is the default the client uses when the key is absent — and a client
@@ -141,7 +141,7 @@ fly_speed = 12.0
 
 # Where to keep the identity key and the content cache. Absent means the
 # platform data directory:
-#   Linux    $XDG_DATA_HOME/tiamot, else ~/.local/share/tiamot
-#   macOS    ~/Library/Application Support/tiamot
-#   Windows  %APPDATA%\tiamot
-#data_path = "/home/you/tiamot-data"
+#   Linux    $XDG_DATA_HOME/tiamat, else ~/.local/share/tiamat
+#   macOS    ~/Library/Application Support/tiamat
+#   Windows  %APPDATA%\tiamat
+#data_path = "/home/you/tiamat-data"

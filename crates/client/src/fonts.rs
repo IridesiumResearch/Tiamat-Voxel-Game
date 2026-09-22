@@ -11,9 +11,9 @@
 //!
 //! - **Pure Rust.** egui parses through `ab_glyph`; there is no C codec here.
 //! - **A size cap before anything parses**, applied where the bytes arrive
-//!   ([`tiamot_core::font::MAX_FONT_BYTES`]).
+//!   ([`tiamat_core::font::MAX_FONT_BYTES`]).
 //! - **A count cap**, so a server cannot push a hundred
-//!   ([`tiamot_core::font::MAX_FONTS`]).
+//!   ([`tiamat_core::font::MAX_FONTS`]).
 //! - **Panic isolation.** Installing runs inside `catch_unwind`; a font that
 //!   kills the parser is dropped, the player is told, and every other font and
 //!   the whole client carry on.
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 /// Named rather than anonymous because a mod's font is added BESIDE it and not
 /// instead of it: a face with no glyph for something falls back here, which is
 /// what stops a mod's display font turning half a dialog into empty boxes.
-pub const FALLBACK: &str = "tiamot-fallback";
+pub const FALLBACK: &str = "tiamat-fallback";
 
 /// Every font this client can draw with.
 pub struct Fonts {

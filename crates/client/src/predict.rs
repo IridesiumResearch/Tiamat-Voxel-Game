@@ -12,9 +12,9 @@
 //!
 //! # Why this is not a second physics implementation
 //!
-//! It runs [`tiamot_core::phys::step`], the same function the server's tick
+//! It runs [`tiamat_core::phys::step`], the same function the server's tick
 //! calls, over the same inputs, filling input gaps by the same rule
-//! ([`tiamot_core::phys::InputQueue`]). Charter rule 4's determinism is what
+//! ([`tiamat_core::phys::InputQueue`]). Charter rule 4's determinism is what
 //! makes that agreement exact rather than approximate: identical operation
 //! sequences on IEEE floats give identical results on every supported target,
 //! so a correct prediction differs from the server by *nothing at all*, not by
@@ -48,8 +48,8 @@
 
 use std::collections::VecDeque;
 
-use tiamot_core::ChunkPos;
-use tiamot_core::phys::{self, Aabb, Body, Intent, Solid, Tuning, voxels::renormalise};
+use tiamat_core::ChunkPos;
+use tiamat_core::phys::{self, Aabb, Body, Intent, Solid, Tuning, voxels::renormalise};
 
 /// How long a correction takes to blend away, in ticks.
 ///
@@ -420,7 +420,7 @@ impl Predictor {
     /// wrong — so this stays well inside `f32`.
     fn probe(&self, solid: &impl Solid, state: &Authoritative) -> Terrain {
         solid.rebase(self.origin);
-        let span = tiamot_core::CHUNK_SUBNODES as f32;
+        let span = tiamat_core::CHUNK_SUBNODES as f32;
         let feet = [
             (state.chunk.x - self.origin.x) as f32 * span + state.local[0],
             (state.chunk.y - self.origin.y) as f32 * span + state.local[1],
@@ -436,7 +436,7 @@ impl Predictor {
         let support = Aabb {
             min: [
                 feet[0] - half,
-                feet[1] - tiamot_core::SUBNODES_PER_AXIS as f32,
+                feet[1] - tiamat_core::SUBNODES_PER_AXIS as f32,
                 feet[2] - half,
             ],
             max: [feet[0] + half, feet[1] - phys::SKIN, feet[2] + half],
@@ -459,7 +459,7 @@ impl Predictor {
             return;
         };
 
-        let span = f64::from(tiamot_core::CHUNK_SUBNODES);
+        let span = f64::from(tiamat_core::CHUNK_SUBNODES);
         let axis = |server_chunk: i32, server_local: f32, chunk: i32, local: f32| -> f64 {
             (f64::from(server_chunk) * span + f64::from(server_local))
                 - (f64::from(chunk) * span + f64::from(local))
@@ -791,7 +791,7 @@ impl Predictor {
     /// enough to hold both. This is a presentation measurement, not simulation
     /// state.
     fn world_position(&self) -> [f64; 3] {
-        let span = f64::from(tiamot_core::CHUNK_SUBNODES);
+        let span = f64::from(tiamat_core::CHUNK_SUBNODES);
         [
             f64::from(self.origin.x) * span + f64::from(self.body.position[0]),
             f64::from(self.origin.y) * span + f64::from(self.body.position[1]),
@@ -930,7 +930,7 @@ mod tests {
 
     use std::collections::BTreeSet;
 
-    use tiamot_core::phys::Gait;
+    use tiamat_core::phys::Gait;
 
     use super::*;
 
@@ -955,13 +955,13 @@ mod tests {
         let mut store = crate::world::ChunkStore::new();
         // Solid stone up to world y = 0, air above: a floor whose surface is
         // exactly the plane between chunk y −1 and chunk y 0.
-        store.insert(tiamot_core::Chunk::new(
+        store.insert(tiamat_core::Chunk::new(
             ChunkPos::new(0, -1, 0),
-            tiamot_core::MaterialId(1),
+            tiamat_core::MaterialId(1),
         ));
-        store.insert(tiamot_core::Chunk::new(
+        store.insert(tiamat_core::Chunk::new(
             ChunkPos::new(0, 0, 0),
-            tiamot_core::MaterialId::AIR,
+            tiamat_core::MaterialId::AIR,
         ));
 
         // Standing on that surface, described in the origin ABOVE it — which is
@@ -1332,7 +1332,7 @@ mod tests {
             worst < 8.0,
             "one tick of interpolation spanned {worst} cells; a chunk is {}, so the origin \
              re-home leaked into the drawn position",
-            tiamot_core::CHUNK_SUBNODES
+            tiamat_core::CHUNK_SUBNODES
         );
     }
 

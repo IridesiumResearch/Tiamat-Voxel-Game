@@ -243,12 +243,12 @@ egui-wgpu = "0.35"
 egui-winit = { version = "0.35", default-features = false, features = ["links", "wayland", "x11"] }
 
 # --- internal -------------------------------------------------------------
-# The package is `tiamot-core`, not `core`, even though it lives in
+# The package is `tiamat-core`, not `core`, even though it lives in
 # `crates/core` per charter rule 3. A package named `core` shadows the sysroot
 # `core` crate in the extern prelude, making every `use core::...` in a
 # dependent crate an E0659 ambiguity error. The directory layout the charter
 # specifies is preserved; only the package name is qualified.
-tiamot-core = { path = "crates/core" }
+tiamat-core = { path = "crates/core" }
 server = { path = "crates/server" }
 
 [profile.release]

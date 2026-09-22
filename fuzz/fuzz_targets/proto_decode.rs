@@ -13,7 +13,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tiamot_core::proto::{ClientMessage, ServerMessage, decode, encode, validate_client_message};
+use tiamat_core::proto::{ClientMessage, ServerMessage, decode, encode, validate_client_message};
 
 fuzz_target!(|data: &[u8]| {
     // Both directions: a client parses server messages and vice versa, so both

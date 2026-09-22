@@ -19,10 +19,10 @@ use client::cache::ContentCache;
 use client::config::{Config, RenderMode};
 use client::net::Connection;
 use client::render::{Gpu, Renderer};
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::transport::Impairment;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::transport::Impairment;
+use tiamat_server::{ServerHandle, Settings};
 
 /// The multiplier the fixture mod applies. Far enough from 1 that a client
 /// ignoring it predicts well over twice as far as the server lets it go.
@@ -30,7 +30,7 @@ const SPEED: f32 = 0.4;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("tiamot-client-abilities")
+        .join("tiamat-client-abilities")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -43,8 +43,8 @@ fn gpu() -> Option<Gpu> {
         Ok(gpu) => Some(gpu),
         Err(err) => {
             assert!(
-                std::env::var("TIAMOT_REQUIRE_GPU").is_err(),
-                "TIAMOT_REQUIRE_GPU is set and no adapter was available: {err}"
+                std::env::var("TIAMAT_REQUIRE_GPU").is_err(),
+                "TIAMAT_REQUIRE_GPU is set and no adapter was available: {err}"
             );
             println!("SKIPPING: no graphics adapter on this machine ({err})");
             None

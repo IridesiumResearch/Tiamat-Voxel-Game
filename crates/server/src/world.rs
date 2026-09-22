@@ -36,13 +36,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use tiamot_core::block::{BlockView, Cells, EMPTY_CELLS};
-use tiamot_core::fluid::FluidLayer;
-use tiamot_core::inventory::{self, Stack};
-use tiamot_core::lod;
-use tiamot_core::proto::Edit;
-use tiamot_core::script::ScriptVm as _;
-use tiamot_core::{
+use tiamat_core::block::{BlockView, Cells, EMPTY_CELLS};
+use tiamat_core::fluid::FluidLayer;
+use tiamat_core::inventory::{self, Stack};
+use tiamat_core::lod;
+use tiamat_core::proto::Edit;
+use tiamat_core::script::ScriptVm as _;
+use tiamat_core::{
     BlockPos, BlockValue, Chunk, ChunkPos, MaterialId, SubNodePos, WorldDb, WorldError,
 };
 use tracing::warn;
@@ -98,10 +98,10 @@ pub trait ChunkSource {
         domain: &str,
         pos: ChunkPos,
         world_seed: u64,
-    ) -> (Chunk, tiamot_core::fluid::FluidLayer) {
+    ) -> (Chunk, tiamat_core::fluid::FluidLayer) {
         (
             self.generate(domain, pos, world_seed),
-            tiamot_core::fluid::FluidLayer::default(),
+            tiamat_core::fluid::FluidLayer::default(),
         )
     }
 
@@ -117,7 +117,7 @@ pub trait ChunkSource {
     /// colour it used to be in the ground behind the player.
     fn tint(&mut self, domain: &str, pos: ChunkPos, world_seed: u64) -> [u8; 3] {
         let _ = (domain, pos, world_seed);
-        tiamot_core::proto::Tint::NEUTRAL
+        tiamat_core::proto::Tint::NEUTRAL
     }
 
     /// This chunk's column's own fog, or `None` for only the sky's.
@@ -129,7 +129,7 @@ pub trait ChunkSource {
         domain: &str,
         pos: ChunkPos,
         world_seed: u64,
-    ) -> Option<tiamot_core::proto::ChunkFog> {
+    ) -> Option<tiamat_core::proto::ChunkFog> {
         let _ = (domain, pos, world_seed);
         None
     }
@@ -167,23 +167,23 @@ impl ChunkSource for Air {
 /// Generates chunks by running the loaded mods' `on_generate` callbacks.
 ///
 /// Wraps the script host so `World` never mentions the VM.
-pub struct ModGenerator<V: tiamot_core::script::ScriptVm> {
-    host: tiamot_core::script::ModHost<V>,
+pub struct ModGenerator<V: tiamat_core::script::ScriptVm> {
+    host: tiamat_core::script::ModHost<V>,
 }
 
-impl<V: tiamot_core::script::ScriptVm> ModGenerator<V> {
+impl<V: tiamat_core::script::ScriptVm> ModGenerator<V> {
     /// Wraps a loaded, frozen mod host.
-    pub const fn new(host: tiamot_core::script::ModHost<V>) -> Self {
+    pub const fn new(host: tiamat_core::script::ModHost<V>) -> Self {
         Self { host }
     }
 
     /// The host, for tick hooks and diagnostics.
-    pub const fn host_mut(&mut self) -> &mut tiamot_core::script::ModHost<V> {
+    pub const fn host_mut(&mut self) -> &mut tiamat_core::script::ModHost<V> {
         &mut self.host
     }
 }
 
-impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
+impl<V: tiamat_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
     fn generate(&mut self, domain: &str, pos: ChunkPos, world_seed: u64) -> Chunk {
         self.generate_with_fluid(domain, pos, world_seed).0
     }
@@ -196,7 +196,7 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
         // as bright, and a faulted palette blew the world out white.
         self.host
             .chunk_tint(domain, world_seed, pos)
-            .unwrap_or(tiamot_core::proto::Tint::NEUTRAL)
+            .unwrap_or(tiamat_core::proto::Tint::NEUTRAL)
     }
 
     fn fog(
@@ -204,7 +204,7 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
         domain: &str,
         pos: ChunkPos,
         world_seed: u64,
-    ) -> Option<tiamot_core::proto::ChunkFog> {
+    ) -> Option<tiamat_core::proto::ChunkFog> {
         // As the tint: a faulted mod is disabled, and clear air is the answer.
         self.host.chunk_fog(domain, world_seed, pos).ok().flatten()
     }
@@ -214,7 +214,7 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
         domain: &str,
         pos: ChunkPos,
         world_seed: u64,
-    ) -> (Chunk, tiamot_core::fluid::FluidLayer) {
+    ) -> (Chunk, tiamat_core::fluid::FluidLayer) {
         match self
             .host
             .generate_chunk_with_fluid(domain, world_seed, pos, MaterialId::AIR)
@@ -229,7 +229,7 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
                 warn!(?pos, "chunk generation failed, falling back to air: {err}");
                 (
                     Chunk::new(pos, MaterialId::AIR),
-                    tiamot_core::fluid::FluidLayer::default(),
+                    tiamat_core::fluid::FluidLayer::default(),
                 )
             }
         }
@@ -245,7 +245,7 @@ impl<V: tiamot_core::script::ScriptVm> ChunkSource for ModGenerator<V> {
 /// beyond convenience here.
 pub enum Generator {
     /// Terrain from the loaded mods.
-    Mods(Box<ModGenerator<tiamot_core::script::MluaVm>>),
+    Mods(Box<ModGenerator<tiamat_core::script::MluaVm>>),
     /// No mods loaded, so no terrain.
     Air(Air),
 }
@@ -254,7 +254,7 @@ impl Generator {
     /// Runs every mod's `on_tick`, returning any that faulted.
     ///
     /// Empty for an [`Air`] generator — there are no mods to tick.
-    pub fn tick(&mut self, dt_ticks: u32) -> Vec<(String, tiamot_core::script::ScriptError)> {
+    pub fn tick(&mut self, dt_ticks: u32) -> Vec<(String, tiamat_core::script::ScriptError)> {
         match self {
             Self::Mods(generator) => match generator.host_mut().vm_mut().tick(dt_ticks) {
                 Ok(faults) => faults,
@@ -281,7 +281,7 @@ impl Generator {
         &mut self,
         owned: &std::collections::BTreeMap<String, Vec<u64>>,
         dt_ticks: u32,
-    ) -> Vec<(String, tiamot_core::script::ScriptError)> {
+    ) -> Vec<(String, tiamat_core::script::ScriptError)> {
         let Self::Mods(generator) = self else {
             return Vec::new();
         };
@@ -309,72 +309,72 @@ impl Generator {
     /// in mods, and no mods means no rules rather than no actions.
     pub fn may_dig(
         &mut self,
-        event: &tiamot_core::script::DigEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::DigEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().dig_complete(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
     /// Asks the mods whether a placement may proceed.
     pub fn may_place(
         &mut self,
-        event: &tiamot_core::script::PlaceEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::PlaceEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().place(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
     /// Tells the mods somebody arrived.
     pub fn player_joined(
         &mut self,
-        event: &tiamot_core::script::JoinEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::JoinEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().player_join(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
     /// Asks whether a body may leave a domain.
     pub fn domain_exited(
         &mut self,
-        event: &tiamot_core::script::DomainEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::DomainEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().domain_exit(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
     /// Asks whether a body may enter one.
     pub fn domain_entered(
         &mut self,
-        event: &tiamot_core::script::DomainEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::DomainEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().domain_enter(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
     /// Offers one randomly-chosen block to whichever mod asked for it.
     pub fn random_ticked(
         &mut self,
-        event: &tiamot_core::script::RandomTickEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::RandomTickEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().random_tick(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
     /// Which materials have a random-tick handler.
     #[must_use]
-    pub fn random_tick_materials(&self) -> Vec<tiamot_core::MaterialId> {
+    pub fn random_tick_materials(&self) -> Vec<tiamat_core::MaterialId> {
         match self {
             Self::Mods(generator) => generator.host.vm().random_tick_materials(),
             Self::Air(_) => Vec::new(),
@@ -384,11 +384,11 @@ impl Generator {
     /// Tells the mods somebody has gone.
     pub fn player_left(
         &mut self,
-        event: &tiamot_core::script::LeaveEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::LeaveEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().player_leave(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
@@ -399,11 +399,11 @@ impl Generator {
     /// engine has no damage model (charter rule 1).
     pub fn may_punch(
         &mut self,
-        event: &tiamot_core::script::PunchEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::PunchEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().punch(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
@@ -413,11 +413,11 @@ impl Generator {
     /// is every use.
     pub fn may_use(
         &mut self,
-        event: &tiamot_core::script::UseEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::UseEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().use_block(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
@@ -428,11 +428,11 @@ impl Generator {
     /// which mods errored, which is what disables them (charter rule 10).
     pub fn did_action(
         &mut self,
-        event: &tiamot_core::script::ActionEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::ActionEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().action(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
@@ -443,7 +443,7 @@ impl Generator {
     /// answer, which is why the air case does nothing rather than complaining.
     pub fn set_player_setting(
         &mut self,
-        player: &tiamot_core::identity::PlayerUuid,
+        player: &tiamat_core::identity::PlayerUuid,
         id: &str,
         value: u32,
     ) {
@@ -461,11 +461,11 @@ impl Generator {
     /// this one is a VETO, and the line does not go out if anybody refuses.
     pub fn may_chat(
         &mut self,
-        event: &tiamot_core::script::ChatEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::ChatEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().chat(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
@@ -476,11 +476,11 @@ impl Generator {
     /// stack moves — is decided after this, against the server's own inventory.
     pub fn did_dialog_event(
         &mut self,
-        event: &tiamot_core::script::DialogEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::DialogEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().dialog_event(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 
@@ -490,11 +490,11 @@ impl Generator {
     /// carries only the faults. See `ScriptVm::fluid_flow`.
     pub fn fluid_blocked(
         &mut self,
-        event: &tiamot_core::script::FluidFlowEvent,
-    ) -> tiamot_core::script::HookOutcome {
+        event: &tiamat_core::script::FluidFlowEvent,
+    ) -> tiamat_core::script::HookOutcome {
         match self {
             Self::Mods(generator) => generator.host_mut().vm_mut().fluid_flow(event),
-            Self::Air(_) => tiamot_core::script::HookOutcome::allow(),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
         }
     }
 }
@@ -519,7 +519,7 @@ impl ChunkSource for Generator {
         domain: &str,
         pos: ChunkPos,
         world_seed: u64,
-    ) -> Option<tiamot_core::proto::ChunkFog> {
+    ) -> Option<tiamat_core::proto::ChunkFog> {
         match self {
             Self::Mods(generator) => generator.fog(domain, pos, world_seed),
             Self::Air(air) => air.fog(domain, pos, world_seed),
@@ -544,7 +544,7 @@ impl ChunkSource for Generator {
         domain: &str,
         pos: ChunkPos,
         world_seed: u64,
-    ) -> (Chunk, tiamot_core::fluid::FluidLayer) {
+    ) -> (Chunk, tiamat_core::fluid::FluidLayer) {
         match self {
             Self::Mods(generator) => generator.generate_with_fluid(domain, pos, world_seed),
             Self::Air(air) => air.generate_with_fluid(domain, pos, world_seed),
@@ -617,7 +617,7 @@ pub struct World {
     /// the table that turns a fluid id into that material, set once after the
     /// registries freeze. Empty until then, and an empty table means every
     /// summary is exactly what it was.
-    fluids: tiamot_core::fluid::Fluids,
+    fluids: tiamat_core::fluid::Fluids,
 }
 
 impl World {
@@ -644,7 +644,7 @@ impl World {
             domains: BTreeMap::new(),
             computed: 0,
             served: 0,
-            fluids: tiamot_core::fluid::Fluids::new(),
+            fluids: tiamat_core::fluid::Fluids::new(),
         })
     }
 
@@ -653,8 +653,8 @@ impl World {
     /// Set once, after the registries freeze, beside
     /// [`Self::set_sparse_domains`] — a fluid is a string until there is a
     /// registry to look it up in (charter rule 8). See World ask 28 and
-    /// [`tiamot_core::lod::Summary::of_wet`].
-    pub fn set_fluids(&mut self, fluids: tiamot_core::fluid::Fluids) {
+    /// [`tiamat_core::lod::Summary::of_wet`].
+    pub fn set_fluids(&mut self, fluids: tiamat_core::fluid::Fluids) {
         self.fluids = fluids;
     }
 
@@ -730,7 +730,7 @@ impl World {
     /// generate chunks on the simulation thread at whatever rate it moves,
     /// turning a movement input into unbounded work inside the 50 ms tick.
     ///
-    /// Collision treats absence as solid (see [`tiamot_core::phys::Voxels`]),
+    /// Collision treats absence as solid (see [`tiamat_core::phys::Voxels`]),
     /// so the honest failure here is a player standing still at the edge of
     /// what is loaded rather than falling through it.
     /// Translates a WORLD material id back into the RUNTIME one.
@@ -761,7 +761,7 @@ impl World {
     /// [`WorldError`] if the row cannot be read or does not decode.
     pub fn load_player_slots(
         &self,
-        uuid: &tiamot_core::PlayerUuid,
+        uuid: &tiamat_core::PlayerUuid,
         template: &inventory::Slots,
     ) -> Result<Option<(inventory::Slots, usize)>, WorldError> {
         let Some(blob) = self.db.load_player(&uuid.to_hex())? else {
@@ -775,7 +775,7 @@ impl World {
                 reason: "the stored row is empty".to_owned(),
             });
         };
-        tiamot_core::persist::playerdata::decode(version, rest, template, self.db.materials())
+        tiamat_core::persist::playerdata::decode(version, rest, template, self.db.materials())
             .map(Some)
             .map_err(|source| WorldError::Player {
                 player: uuid.to_hex(),
@@ -790,10 +790,10 @@ impl World {
     /// [`WorldError`] if the row cannot be written.
     pub fn save_player_slots(
         &self,
-        uuid: &tiamot_core::PlayerUuid,
+        uuid: &tiamat_core::PlayerUuid,
         slots: &inventory::Slots,
     ) -> Result<(), WorldError> {
-        let (bytes, dropped) = tiamot_core::persist::playerdata::encode(slots, self.db.materials());
+        let (bytes, dropped) = tiamat_core::persist::playerdata::encode(slots, self.db.materials());
         if dropped > 0 {
             tracing::warn!(
                 player = %uuid.to_hex(),
@@ -806,11 +806,11 @@ impl World {
         // keeping them together means a row read by anything else still says
         // what shape it is.
         let mut row = Vec::with_capacity(bytes.len() + 1);
-        row.push(tiamot_core::persist::playerdata::PLAYER_FORMAT_VERSION);
+        row.push(tiamat_core::persist::playerdata::PLAYER_FORMAT_VERSION);
         row.extend_from_slice(&bytes);
         self.db.save_player(
             &uuid.to_hex(),
-            tiamot_core::persist::playerdata::PLAYER_FORMAT_VERSION,
+            tiamat_core::persist::playerdata::PLAYER_FORMAT_VERSION,
             &row,
         )
     }
@@ -840,8 +840,8 @@ impl World {
                 tracing::warn!(container = %name, "a container row is empty and was skipped");
                 continue;
             };
-            let stored_slots = sized(&name).unwrap_or(tiamot_core::inventory::MAX_VIEW_SLOTS);
-            match tiamot_core::persist::containers::decode(
+            let stored_slots = sized(&name).unwrap_or(tiamat_core::inventory::MAX_VIEW_SLOTS);
+            match tiamat_core::persist::containers::decode(
                 version,
                 rest,
                 &name,
@@ -868,7 +868,7 @@ impl World {
     ///
     /// [`WorldError`] if the row cannot be written.
     pub fn save_container(&self, name: &str, view: &inventory::View) -> Result<(), WorldError> {
-        let (bytes, dropped) = tiamot_core::persist::containers::encode(view, self.db.materials());
+        let (bytes, dropped) = tiamat_core::persist::containers::encode(view, self.db.materials());
         if dropped > 0 {
             tracing::warn!(
                 container = %name,
@@ -879,11 +879,11 @@ impl World {
         // The version travels with the blob, in its first byte, for the reason
         // a player's does: a row read by anything else still says its shape.
         let mut row = Vec::with_capacity(bytes.len() + 1);
-        row.push(tiamot_core::persist::containers::CONTAINER_FORMAT_VERSION);
+        row.push(tiamat_core::persist::containers::CONTAINER_FORMAT_VERSION);
         row.extend_from_slice(&bytes);
         self.db.save_container(
             name,
-            tiamot_core::persist::containers::CONTAINER_FORMAT_VERSION,
+            tiamat_core::persist::containers::CONTAINER_FORMAT_VERSION,
             &row,
         )
     }
@@ -926,13 +926,13 @@ impl World {
     /// a caller asking this wants "is this block one particular material", and
     /// a mixed block is not one. The world id, as the chunk stores it.
     #[must_use]
-    pub fn material_at(&self, domain: &str, pos: tiamot_core::BlockPos) -> Option<MaterialId> {
+    pub fn material_at(&self, domain: &str, pos: tiamat_core::BlockPos) -> Option<MaterialId> {
         match self.resident(domain, pos.chunk())?.get_block(pos)? {
-            tiamot_core::BlockView::Uniform(material)
-            | tiamot_core::BlockView::Partial { material, .. } => {
+            tiamat_core::BlockView::Uniform(material)
+            | tiamat_core::BlockView::Partial { material, .. } => {
                 (!material.is_air()).then_some(material)
             }
-            tiamot_core::BlockView::Mixed(_) => None,
+            tiamat_core::BlockView::Mixed(_) => None,
         }
     }
 
@@ -1028,7 +1028,7 @@ impl World {
         domain: &str,
         pos: ChunkPos,
         chunk: Chunk,
-        fluid: &tiamot_core::fluid::FluidLayer,
+        fluid: &tiamat_core::fluid::FluidLayer,
     ) -> Result<(), WorldError> {
         if self.sparse.contains(domain) {
             return Err(WorldError::NoVoxels {
@@ -1051,7 +1051,7 @@ impl World {
         domain: &str,
         pos: ChunkPos,
         chunk: Chunk,
-        fluid: &tiamot_core::fluid::FluidLayer,
+        fluid: &tiamat_core::fluid::FluidLayer,
     ) {
         // Mark it dirty so it is written — see the module docs on why a
         // generated chunk is stored rather than regenerated later.
@@ -1206,7 +1206,7 @@ impl World {
         let wet = self
             .db
             .load_chunk_fluid_in(domain, pos)?
-            .unwrap_or_else(tiamot_core::fluid::FluidLayer::empty);
+            .unwrap_or_else(tiamat_core::fluid::FluidLayer::empty);
         let chain = match self.domains.get(domain).and_then(|s| s.cache.get(&pos)) {
             Some(chunk) => lod::Summary::chain_wet(chunk, &wet, &self.fluids)
                 .iter()
@@ -1268,8 +1268,8 @@ impl World {
     #[must_use]
     pub fn encode_chain(
         chunk: &Chunk,
-        fluid: &tiamot_core::fluid::FluidLayer,
-        fluids: &tiamot_core::fluid::Fluids,
+        fluid: &tiamat_core::fluid::FluidLayer,
+        fluids: &tiamat_core::fluid::Fluids,
     ) -> Vec<(u8, Vec<u8>)> {
         lod::Summary::chain_wet(chunk, fluid, fluids)
             .iter()
@@ -1362,7 +1362,7 @@ impl World {
                 // and letting the second form exist would make a placed full
                 // block and a generated full block store and hash differently
                 // for no reason a player could observe.
-                let value = if *occupancy == (1 << tiamot_core::UNITS_PER_BLOCK) - 1 {
+                let value = if *occupancy == (1 << tiamat_core::UNITS_PER_BLOCK) - 1 {
                     BlockValue::Uniform(material)
                 } else {
                     BlockValue::Partial {
@@ -1411,7 +1411,7 @@ impl World {
     ///
     /// For callers that need the block's *composition* rather than one cell of
     /// it — how hard it is to break, chiefly, which is a question about the
-    /// mixture (see `tiamot_core::dig::hardness`). Cells rather than a
+    /// mixture (see `tiamat_core::dig::hardness`). Cells rather than a
     /// [`BlockView`] because the view borrows the chunk, and the chunk is
     /// behind a cache this method has to let go of.
     ///
@@ -1618,7 +1618,7 @@ impl World {
         &self,
         domain: &str,
         pos: ChunkPos,
-    ) -> Result<Vec<tiamot_core::ent::Entity>, WorldError> {
+    ) -> Result<Vec<tiamat_core::ent::Entity>, WorldError> {
         self.db.load_chunk_entities_in(domain, pos)
     }
 
@@ -1633,13 +1633,13 @@ impl World {
     pub fn save_entities<'a>(
         &mut self,
         domain: &str,
-        chunks: impl IntoIterator<Item = (ChunkPos, &'a [tiamot_core::ent::Entity])>,
+        chunks: impl IntoIterator<Item = (ChunkPos, &'a [tiamat_core::ent::Entity])>,
     ) -> Result<usize, WorldError> {
         // One transaction for every chunk in this save, for the reason
         // `save_dirty` batches: with two hundred mobs wandering, this is the
         // writer that touches the most chunks, and a WAL commit apiece is what
         // put 87 ms inside a 50 ms tick on the nightly's load test.
-        let chunks: Vec<(ChunkPos, &[tiamot_core::ent::Entity])> = chunks.into_iter().collect();
+        let chunks: Vec<(ChunkPos, &[tiamat_core::ent::Entity])> = chunks.into_iter().collect();
         let written: usize = chunks.iter().map(|(_, entities)| entities.len()).sum();
         self.db.save_chunk_entities_batch_in(domain, chunks)?;
         Ok(written)
@@ -1650,7 +1650,7 @@ impl World {
     /// # Errors
     ///
     /// [`WorldError`] on a SQL failure or an undecodable value.
-    pub fn load_mod_storage(&self, mod_id: &str) -> Result<tiamot_core::storage::Bag, WorldError> {
+    pub fn load_mod_storage(&self, mod_id: &str) -> Result<tiamat_core::storage::Bag, WorldError> {
         self.db.load_mod_storage(mod_id)
     }
 
@@ -1662,7 +1662,7 @@ impl World {
     pub fn save_mod_storage(
         &self,
         mod_id: &str,
-        bag: &tiamot_core::storage::Bag,
+        bag: &tiamat_core::storage::Bag,
     ) -> Result<(), WorldError> {
         self.db.save_mod_storage(mod_id, bag)
     }
@@ -1672,12 +1672,12 @@ impl World {
     /// # Errors
     ///
     /// [`WorldError`] on a SQL failure. An undecodable blob is `None` rather
-    /// than an error — see [`tiamot_core::persist::Db::load_plan`].
+    /// than an error — see [`tiamat_core::persist::Db::load_plan`].
     pub fn load_plan(
         &self,
         mod_id: &str,
         name: &str,
-    ) -> Result<Option<tiamot_core::plan::Plan>, WorldError> {
+    ) -> Result<Option<tiamat_core::plan::Plan>, WorldError> {
         self.db.load_plan(mod_id, name)
     }
 
@@ -1690,7 +1690,7 @@ impl World {
         &self,
         mod_id: &str,
         name: &str,
-        plan: &tiamot_core::plan::Plan,
+        plan: &tiamat_core::plan::Plan,
     ) -> Result<(), WorldError> {
         self.db.save_plan(mod_id, name, plan)
     }
@@ -1769,7 +1769,7 @@ impl World {
 
 /// Lets the physics collide against ONE DOMAIN without being able to change it.
 ///
-/// Note which trait this is: [`tiamot_core::phys::ChunkLookup`] reads resident
+/// Note which trait this is: [`tiamat_core::phys::ChunkLookup`] reads resident
 /// chunks, and is not the [`ChunkSource`] above, which generates them. Both
 /// exist here and they mean opposite things — see [`World::resident`].
 ///
@@ -1812,7 +1812,7 @@ impl<'a> Solid<'a> {
     }
 }
 
-impl tiamot_core::phys::ChunkLookup for Solid<'_> {
+impl tiamat_core::phys::ChunkLookup for Solid<'_> {
     fn chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
         self.resident(pos)
     }
@@ -1854,13 +1854,13 @@ mod tests {
     }
 
     fn world(name: &str) -> (World, Vec<MaterialId>) {
-        let dir = std::env::temp_dir().join("tiamot-world-tests");
+        let dir = std::env::temp_dir().join("tiamat-world-tests");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join(format!("{name}.sqlite"));
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         let ids = TEST_MATERIALS
             .iter()
             .map(|name| registry.register(name).expect("register"))
@@ -1875,9 +1875,9 @@ mod tests {
     /// second `World` finds what the first one left.
     fn reopen(name: &str) -> World {
         let path = std::env::temp_dir()
-            .join("tiamot-world-tests")
+            .join("tiamat-world-tests")
             .join(format!("{name}.sqlite"));
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         for material in TEST_MATERIALS {
             registry.register(material).expect("register");
         }
@@ -1893,17 +1893,17 @@ mod tests {
         // 50 ms tick. What it does not reach this tick it reaches on the next.
         let (mut world, ids) = world("save-budget");
         let mut flat = Flat::new(ids[0]);
-        let overworld = tiamot_core::domain::OVERWORLD;
+        let overworld = tiamat_core::domain::OVERWORLD;
 
         // Three batches' worth of dirty chunks, made dirty by an edit apiece so
         // nothing here depends on generation marking them.
         let chunks = World::CHUNKS_PER_SAVE_BATCH * 2 + 5;
         for index in 0..chunks {
-            let pos = BlockPos::new((index as i32) * tiamot_core::CHUNK_BLOCKS as i32, -1, 0);
+            let pos = BlockPos::new((index as i32) * tiamat_core::CHUNK_BLOCKS as i32, -1, 0);
             world
                 .apply(
                     overworld,
-                    &tiamot_core::proto::Edit::Block {
+                    &tiamat_core::proto::Edit::Block {
                         pos,
                         material: ids[1].0,
                     },
@@ -1959,7 +1959,7 @@ mod tests {
         // there. Both directions, or neither is pinned.
         let (mut world, ids) = world("summary-cache");
         let mut flat = Flat::new(ids[0]);
-        let overworld = tiamot_core::domain::OVERWORLD;
+        let overworld = tiamat_core::domain::OVERWORLD;
         let level = lod::FINEST;
         let pos = ChunkPos::new(0, -1, 0);
 
@@ -1994,7 +1994,7 @@ mod tests {
         // Now change the terrain under it. The edit dirties the chunk, and the
         // horizon has to show it BEFORE the save — a player who fills a hole
         // in and steps back should not watch it reopen at the ring boundary.
-        let edit = tiamot_core::proto::Edit::Block {
+        let edit = tiamat_core::proto::Edit::Block {
             pos: BlockPos::new(1, -1, 1),
             material: ids[1].0,
         };
@@ -2034,7 +2034,7 @@ mod tests {
         // at it once would cost more than the feature saves.
         let (mut world, ids) = world("summary-no-residency");
         let mut flat = Flat::new(ids[0]);
-        let overworld = tiamot_core::domain::OVERWORLD;
+        let overworld = tiamat_core::domain::OVERWORLD;
 
         world
             .summary(overworld, lod::COARSEST, ChunkPos::new(9, -1, 9), &mut flat)
@@ -2055,7 +2055,7 @@ mod tests {
         for level in [0, lod::COARSEST + 1, u8::MAX] {
             assert!(matches!(
                 world.summary(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     level,
                     ChunkPos::new(0, -1, 0),
                     &mut flat
@@ -2073,7 +2073,7 @@ mod tests {
         // one domain and a load that used another, say. Only running them
         // against each other catches that.
         use crate::fluid::Fluidics;
-        use tiamot_core::fluid::{Fluid, FluidId, Fluids, MAX_VOLUME};
+        use tiamat_core::fluid::{Fluid, FluidId, Fluids, MAX_VOLUME};
 
         let milk = FluidId(1);
         let pond = BlockPos::new(20, 5, -9);
@@ -2089,7 +2089,7 @@ mod tests {
             assert_eq!(
                 world
                     .save_fluid(
-                        tiamot_core::domain::OVERWORLD,
+                        tiamat_core::domain::OVERWORLD,
                         dirty.iter().map(|(pos, layer)| (*pos, layer))
                     )
                     .expect("save"),
@@ -2102,7 +2102,7 @@ mod tests {
         // heard of the pond.
         let world = reopen("fluid-round-trip");
         let layer = world
-            .load_fluid(tiamot_core::domain::OVERWORLD, chunk)
+            .load_fluid(tiamat_core::domain::OVERWORLD, chunk)
             .expect("read")
             .expect("the pond was not written");
 
@@ -2129,7 +2129,7 @@ mod tests {
         // layer emptied is dropped from memory, so a dirty list that followed
         // the layer would never write the removal and the milk would come back.
         use crate::fluid::Fluidics;
-        use tiamot_core::fluid::{Fluid, FluidId, Fluids, MAX_VOLUME};
+        use tiamat_core::fluid::{Fluid, FluidId, Fluids, MAX_VOLUME};
 
         let pond = BlockPos::new(3, 3, 3);
         let chunk = pond.chunk();
@@ -2142,7 +2142,7 @@ mod tests {
             let dirty = fluidics.take_dirty();
             world
                 .save_fluid(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     dirty.iter().map(|(pos, layer)| (*pos, layer)),
                 )
                 .expect("save the pond");
@@ -2152,7 +2152,7 @@ mod tests {
             assert_eq!(dirty.len(), 1, "the drain was not queued for writing");
             world
                 .save_fluid(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     dirty.iter().map(|(pos, layer)| (*pos, layer)),
                 )
                 .expect("save the drain");
@@ -2161,7 +2161,7 @@ mod tests {
 
         assert!(
             reopen("fluid-drain-round-trip")
-                .load_fluid(tiamot_core::domain::OVERWORLD, chunk)
+                .load_fluid(tiamat_core::domain::OVERWORLD, chunk)
                 .expect("read")
                 .is_none(),
             "a pond that was emptied came back after a restart"
@@ -2177,7 +2177,7 @@ mod tests {
 
         let material = world
             .block_material(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 BlockPos::new(0, -5, 0),
                 &mut flat,
             )
@@ -2198,7 +2198,7 @@ mod tests {
         let pos = BlockPos::new(0, -5, 0);
 
         world
-            .block_material(tiamot_core::domain::OVERWORLD, pos, &mut flat)
+            .block_material(tiamat_core::domain::OVERWORLD, pos, &mut flat)
             .expect("read");
         assert_eq!(
             world.dirty(),
@@ -2209,11 +2209,11 @@ mod tests {
 
         // Drop the cache and read again with a generator that would produce
         // something DIFFERENT. The stored chunk must win.
-        world.evict(tiamot_core::domain::OVERWORLD);
+        world.evict(tiamat_core::domain::OVERWORLD);
         let mut changed = Flat::new(ids[1]);
         assert_eq!(
             world
-                .block_material(tiamot_core::domain::OVERWORLD, pos, &mut changed)
+                .block_material(tiamat_core::domain::OVERWORLD, pos, &mut changed)
                 .expect("read"),
             ids[0],
             "the stored chunk must win over a changed generator"
@@ -2232,7 +2232,7 @@ mod tests {
 
         for _ in 0..5 {
             world
-                .block_material(tiamot_core::domain::OVERWORLD, pos, &mut flat)
+                .block_material(tiamat_core::domain::OVERWORLD, pos, &mut flat)
                 .expect("read");
         }
         assert_eq!(
@@ -2247,20 +2247,20 @@ mod tests {
     fn the_seed_is_fixed_at_creation() {
         // Re-rolling a seed on a later start would change terrain beyond the
         // explored edge, leaving a visible seam through the middle of the map.
-        let dir = std::env::temp_dir().join("tiamot-world-tests");
+        let dir = std::env::temp_dir().join("tiamat-world-tests");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("seed-fixed.sqlite");
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
 
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         let db = WorldDb::open(&path, &mut registry).expect("open");
         let world = World::open(db, 999).expect("open world");
         assert_eq!(world.seed(), 999);
         world.close().expect("close");
 
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         let db = WorldDb::open(&path, &mut registry).expect("reopen");
         let world = World::open(db, 4242).expect("open world");
         assert_eq!(
@@ -2279,7 +2279,7 @@ mod tests {
         assert_eq!(
             world
                 .block_material(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     BlockPos::new(0, -100, 0),
                     &mut air
                 )
@@ -2296,7 +2296,7 @@ mod tests {
 
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::Block {
                     pos,
                     material: ids[0].0,
@@ -2308,7 +2308,7 @@ mod tests {
         assert_eq!(world.dirty(), 1);
         assert_eq!(
             world
-                .block_material(tiamot_core::domain::OVERWORLD, pos, &mut air)
+                .block_material(tiamat_core::domain::OVERWORLD, pos, &mut air)
                 .expect("read"),
             ids[0]
         );
@@ -2323,7 +2323,7 @@ mod tests {
         for x in 0..5 {
             world
                 .apply(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     &Edit::Block {
                         pos: BlockPos::new(x, 0, 0),
                         material: ids[0].0,
@@ -2345,7 +2345,7 @@ mod tests {
 
         let err = world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::Block {
                     pos: BlockPos::new(9999, 0, 9999),
                     material: 60_000,
@@ -2379,7 +2379,7 @@ mod tests {
 
         let err = world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::Block {
                     pos: BlockPos::new(0, 0, 0),
                     material: unregistered.0,
@@ -2392,7 +2392,7 @@ mod tests {
         for id in &ids {
             world
                 .apply(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     &Edit::Block {
                         pos: BlockPos::new(0, 0, 0),
                         material: id.0,
@@ -2415,7 +2415,7 @@ mod tests {
         let pos = BlockPos::new(1, 2, 3);
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::Block {
                     pos,
                     material: ids[1].0,
@@ -2427,10 +2427,10 @@ mod tests {
         assert_eq!(world.save_dirty().expect("save"), 1);
         assert_eq!(world.dirty(), 0, "a save clears the dirty set");
 
-        world.evict(tiamot_core::domain::OVERWORLD);
+        world.evict(tiamat_core::domain::OVERWORLD);
         assert_eq!(
             world
-                .block_material(tiamot_core::domain::OVERWORLD, pos, &mut air)
+                .block_material(tiamat_core::domain::OVERWORLD, pos, &mut air)
                 .expect("read"),
             ids[1],
             "the edit must have reached the database"
@@ -2448,7 +2448,7 @@ mod tests {
 
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::Block {
                     pos,
                     material: ids[3].0,
@@ -2457,11 +2457,11 @@ mod tests {
             )
             .expect("apply");
         world.save_dirty().expect("save");
-        world.evict(tiamot_core::domain::OVERWORLD);
+        world.evict(tiamat_core::domain::OVERWORLD);
 
         assert_eq!(
             world
-                .block_material(tiamot_core::domain::OVERWORLD, pos, &mut flat)
+                .block_material(tiamat_core::domain::OVERWORLD, pos, &mut flat)
                 .expect("read"),
             ids[3],
             "the edit must survive"
@@ -2470,7 +2470,7 @@ mod tests {
         assert_eq!(
             world
                 .block_material(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     BlockPos::new(3, -3, 2),
                     &mut flat
                 )
@@ -2489,7 +2489,7 @@ mod tests {
         let pos = SubNodePos::new(4, 5, 6);
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::SubNode {
                     pos,
                     material: ids[2].0,
@@ -2498,11 +2498,11 @@ mod tests {
             )
             .expect("apply");
         world.save_dirty().expect("save");
-        world.evict(tiamot_core::domain::OVERWORLD);
+        world.evict(tiamat_core::domain::OVERWORLD);
 
         assert_eq!(
             world
-                .subnode(tiamot_core::domain::OVERWORLD, pos, &mut air)
+                .subnode(tiamat_core::domain::OVERWORLD, pos, &mut air)
                 .expect("read"),
             ids[2],
             "a sub-node edit must survive a save and reload"
@@ -2519,7 +2519,7 @@ mod tests {
         let target = SubNodePos::new(3, 3, 3);
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::Block {
                     pos: target.block(),
                     material: ids[0].0,
@@ -2529,7 +2529,7 @@ mod tests {
             .expect("fill the block");
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 &Edit::SubNode {
                     pos: target,
                     material: ids[3].0,
@@ -2538,18 +2538,18 @@ mod tests {
             )
             .expect("chisel one cell");
         world.save_dirty().expect("save");
-        world.evict(tiamot_core::domain::OVERWORLD);
+        world.evict(tiamat_core::domain::OVERWORLD);
 
         assert_eq!(
             world
-                .subnode(tiamot_core::domain::OVERWORLD, target, &mut air)
+                .subnode(tiamat_core::domain::OVERWORLD, target, &mut air)
                 .expect("read"),
             ids[3]
         );
         assert_eq!(
             world
                 .subnode(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     SubNodePos::new(target.x + 1, target.y, target.z),
                     &mut air,
                 )

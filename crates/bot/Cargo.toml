@@ -17,7 +17,7 @@ publish.workspace = true
 # — producing tests that pass against a codec no real client uses. Sharing one
 # codec means a framing bug fails the integration suite instead of hiding in it.
 [dependencies]
-tiamot-core.workspace = true
+tiamat-core.workspace = true
 server.workspace = true
 blake3.workspace = true
 clap.workspace = true

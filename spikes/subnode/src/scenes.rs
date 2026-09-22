@@ -11,10 +11,10 @@
 //! will actually generate, (b) is a heavily-built world, and (c) is a shape
 //! nothing produces naturally but which the storage layer must survive.
 
-use tiamot_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BLOCKS_PER_CHUNK, BlockValue, CHUNK_BLOCKS, ChunkPos, MaterialId};
+use tiamat_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BLOCKS_PER_CHUNK, BlockValue, CHUNK_BLOCKS, ChunkPos, MaterialId};
 
 pub const STONE: MaterialId = MaterialId(2);
 pub const DIRT: MaterialId = MaterialId(3);
@@ -159,7 +159,7 @@ fn checkerboard(pos: ChunkPos) -> Chunk {
         // sub-node face is a material boundary and nothing can merge.
         let mut cells = EMPTY_CELLS;
         for (cell_index, cell) in cells.iter_mut().enumerate() {
-            let (cx, cy, cz) = tiamot_core::block::subnode_offset(cell_index);
+            let (cx, cy, cz) = tiamat_core::block::subnode_offset(cell_index);
             *cell = if (cx + cy + cz) % 2 == 0 {
                 primary
             } else {

@@ -31,7 +31,7 @@ use updater::install::{Install, InstallError};
 /// Stamped at compile time by the release workflow. **A build without one
 /// applies no updates at all** and says so, which is what a working copy
 /// should do: a developer's build has no business installing anything.
-const RELEASE_KEY: Option<&str> = option_env!("TIAMOT_RELEASE_KEY");
+const RELEASE_KEY: Option<&str> = option_env!("TIAMAT_RELEASE_KEY");
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
@@ -57,7 +57,7 @@ fn main() -> std::process::ExitCode {
     match run(command, launch, &passthrough) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("tiamot: {err}");
+            eprintln!("tiamat: {err}");
             eprintln!();
             eprintln!("The game itself is in `current`, and can be started directly.");
             eprintln!("If it will not, unpack a fresh download beside this one.");
@@ -67,7 +67,7 @@ fn main() -> std::process::ExitCode {
 }
 
 const HELP: &str = "\
-tiamot — starts the game, applying any update that is waiting.
+tiamat — starts the game, applying any update that is waiting.
 
     --status     say what is installed and what is staged, and do nothing
     --rollback   put the previous version back
@@ -111,8 +111,8 @@ fn run(
         Ok(Some(version)) => println!("updated to {version}"),
         Ok(None) => {}
         Err(err) => {
-            eprintln!("tiamot: the waiting update was not applied: {err}");
-            eprintln!("tiamot: starting the version already installed.");
+            eprintln!("tiamat: the waiting update was not applied: {err}");
+            eprintln!("tiamat: starting the version already installed.");
             install.discard_staged();
         }
     }

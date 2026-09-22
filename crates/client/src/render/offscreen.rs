@@ -189,7 +189,7 @@ impl Offscreen {
 #[must_use]
 pub fn perceptual_hash(image: &crate::texture::Image) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:frame:v1");
+    hasher.update(b"tiamat:frame:v1");
 
     for cell_y in 0..HASH_GRID {
         for cell_x in 0..HASH_GRID {

@@ -23,7 +23,7 @@
 //! failing there would mean `cargo test` did not pass on a headless developer
 //! box — which teaches people to ignore failures. So they skip, loudly.
 //!
-//! **CI sets `TIAMOT_REQUIRE_GPU=1`**, which turns a missing adapter into a
+//! **CI sets `TIAMAT_REQUIRE_GPU=1`**, which turns a missing adapter into a
 //! failure. Without that, a broken CI image would quietly stop testing
 //! rendering and nothing would say so.
 
@@ -34,12 +34,12 @@ use client::mesher::{self, Absent, Neighbours};
 use client::render::offscreen::{hash_hex, perceptual_hash};
 use client::render::{Gpu, Offscreen, Renderer};
 use client::texture::{Atlas, Image};
-use tiamot_core::proto::{MaterialDef, SkyGrade};
-use tiamot_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
+use tiamat_core::proto::{MaterialDef, SkyGrade};
+use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
 /// Full daylight, so these scenes measure what they are about rather than the
 /// light that has not arrived for them.
-const DAY: client::shade::Uniform = client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: client::shade::Uniform = client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 /// Frame size for every test here.
 ///
@@ -62,11 +62,11 @@ fn gpu() -> Option<Gpu> {
         }
         Err(err) => {
             assert!(
-                std::env::var("TIAMOT_REQUIRE_GPU").is_err(),
-                "TIAMOT_REQUIRE_GPU is set and no adapter was available: {err}"
+                std::env::var("TIAMAT_REQUIRE_GPU").is_err(),
+                "TIAMAT_REQUIRE_GPU is set and no adapter was available: {err}"
             );
             println!(
-                "SKIPPING: no graphics adapter on this machine ({err}). Set TIAMOT_REQUIRE_GPU=1 \
+                "SKIPPING: no graphics adapter on this machine ({err}). Set TIAMAT_REQUIRE_GPU=1 \
                  to make this a failure."
             );
             None
@@ -415,7 +415,7 @@ fn fog_past_its_far_distance_leaves_nothing_of_the_terrain() {
 }
 
 /// A place's fog over every column of the fixed scene and around it.
-fn fog_everywhere(renderer: &mut Renderer, fog: tiamot_core::proto::ChunkFog) {
+fn fog_everywhere(renderer: &mut Renderer, fog: tiamat_core::proto::ChunkFog) {
     for x in -2..=4 {
         for z in -2..=4 {
             renderer.set_chunk_fog(ChunkPos::new(x, 0, z), Some(fog));
@@ -432,7 +432,7 @@ fn a_places_fog_hides_the_ground_in_every_mode() {
     // the fog is the control, and it must not be red.
     let Some(gpu) = gpu() else { return };
     let chunks = scene();
-    let red = tiamot_core::proto::ChunkFog {
+    let red = tiamat_core::proto::ChunkFog {
         colour: [255, 40, 40],
         visibility: 6,
         top: None,
@@ -681,7 +681,7 @@ fn a_ground_fog_lies_under_its_top() {
         let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
         fog_everywhere(
             &mut renderer,
-            tiamot_core::proto::ChunkFog {
+            tiamat_core::proto::ChunkFog {
                 colour: [255, 40, 40],
                 visibility: 6,
                 top: Some(top),
@@ -1059,7 +1059,7 @@ fn a_declared_tint_colours_the_world_and_stays_where_the_world_is() {
     // world-anchored tint must make it different — that is the whole property,
     // stated as its own opposite.
     let Some(gpu) = gpu() else { return };
-    use tiamot_core::proto::{MaterialDef, Tint};
+    use tiamat_core::proto::{MaterialDef, Tint};
 
     let near = scene();
     let mut renderer = prepare(gpu, &near, RenderMode::Textured);
@@ -1247,7 +1247,7 @@ fn dump_the_fixed_scene() {
         .capture(&mut renderer, &viewpoint())
         .expect("capture");
 
-    let path = std::env::temp_dir().join("tiamot-scene.png");
+    let path = std::env::temp_dir().join("tiamat-scene.png");
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, frame.width, frame.height);
@@ -1516,9 +1516,9 @@ fn a_surface_brighter_than_white_bleeds_light_past_its_edge() {
 
     struct Lamplit;
     impl client::shade::BlockLight for Lamplit {
-        fn at(&self, _x: i32, _y: i32, _z: i32) -> tiamot_core::light::Light {
+        fn at(&self, _x: i32, _y: i32, _z: i32) -> tiamat_core::light::Light {
             // Full block light, no sun: a room lit entirely by lamps.
-            tiamot_core::light::Light::new(0, 15, 15, 15)
+            tiamat_core::light::Light::new(0, 15, 15, 15)
         }
     }
 
@@ -1686,7 +1686,7 @@ fn mode_one_is_dark_where_the_sun_never_reaches_and_dims_as_the_day_ends() {
         let colour = average(frame, 0, HEIGHT / 2, WIDTH, HEIGHT);
         (colour[0] + colour[1] + colour[2]) / 3.0
     };
-    let under = |renderer: &mut Renderer, light: tiamot_core::light::Light| {
+    let under = |renderer: &mut Renderer, light: tiamat_core::light::Light| {
         upload_lit(renderer, &chunks, &client::shade::Uniform(light));
         luminance(&target.capture(renderer, &viewpoint()).expect("capture"))
     };
@@ -1694,8 +1694,8 @@ fn mode_one_is_dark_where_the_sun_never_reaches_and_dims_as_the_day_ends() {
     // Noon on the surface, against the same geometry with no sunlight stored on
     // it at all — which is exactly what the server propagates into a cave.
     renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
-    let daylight = under(&mut renderer, tiamot_core::light::Light::DAYLIGHT);
-    let cave = under(&mut renderer, tiamot_core::light::Light::new(0, 0, 0, 0));
+    let daylight = under(&mut renderer, tiamat_core::light::Light::DAYLIGHT);
+    let cave = under(&mut renderer, tiamat_core::light::Light::new(0, 0, 0, 0));
     assert!(
         cave < daylight * 0.5,
         "underground came out at {cave} against {daylight} in the open — mode 1 is not reading \
@@ -1708,9 +1708,9 @@ fn mode_one_is_dark_where_the_sun_never_reaches_and_dims_as_the_day_ends() {
 
     // And the cycle: the same lit surface at dusk, with nothing changed but the
     // sun's strength.
-    let noon = under(&mut renderer, tiamot_core::light::Light::DAYLIGHT);
+    let noon = under(&mut renderer, tiamat_core::light::Light::DAYLIGHT);
     renderer.set_sun(0.15, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
-    let dusk = under(&mut renderer, tiamot_core::light::Light::DAYLIGHT);
+    let dusk = under(&mut renderer, tiamat_core::light::Light::DAYLIGHT);
     assert!(
         dusk < noon * 0.5,
         "dusk came out at {dusk} against {noon} at noon — mode 1 has no day/night cycle"
@@ -1718,7 +1718,7 @@ fn mode_one_is_dark_where_the_sun_never_reaches_and_dims_as_the_day_ends() {
 
     // A lamp still works down there, which is what stops the floor above from
     // being the only thing between a player and the dark.
-    let lamplit = under(&mut renderer, tiamot_core::light::Light::new(0, 12, 12, 12));
+    let lamplit = under(&mut renderer, tiamat_core::light::Light::new(0, 12, 12, 12));
     assert!(
         lamplit > cave * 1.5,
         "a lamp underground came out at {lamplit} against {cave} with no lamp — mode 1 drops \
@@ -2287,7 +2287,7 @@ fn a_lamps_colour_survives_mode_threes_tonemap() {
     // the tonemap's shoulder only bites above its knee, so a mid-level lamp
     // never reaches the code under test. This is also the case that goes wrong
     // in game — a wall right beside a lamp.
-    let lamp = tiamot_core::light::Light::new(0, 15, 11, 6);
+    let lamp = tiamat_core::light::Light::new(0, 15, 11, 6);
 
     // How far from grey a colour is, as a share of its own brightness. Relative
     // rather than absolute, so this measures hue rather than exposure — the two
@@ -2370,7 +2370,7 @@ fn mode_twos_caves_are_darker_than_mode_threes() {
 
     // Nothing stored: no sunlight, no lamp. Whatever is left on screen IS the
     // ambient floor, which is the quantity under test.
-    let dark = tiamot_core::light::Light::new(0, 0, 0, 0);
+    let dark = tiamat_core::light::Light::new(0, 0, 0, 0);
     let luminance = |renderer: &mut Renderer, mode| {
         renderer.set_lighting_mode(mode);
         upload_lit(renderer, &chunks, &client::shade::Uniform(dark));
@@ -2551,7 +2551,7 @@ fn a_sealed_room_does_not_get_brighter_when_the_sky_does() {
     upload_lit(
         &mut renderer,
         &chunks,
-        &client::shade::Uniform(tiamot_core::light::Light::DARK),
+        &client::shade::Uniform(tiamat_core::light::Light::DARK),
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
 
@@ -2647,8 +2647,8 @@ fn an_occluded_corner_loses_its_colour_rather_than_keeping_it_dimly() {
     /// the complaint comes from.
     struct WarmLamps;
     impl client::shade::BlockLight for WarmLamps {
-        fn at(&self, _x: i32, _y: i32, _z: i32) -> tiamot_core::light::Light {
-            tiamot_core::light::Light::new(0, 15, 11, 6)
+        fn at(&self, _x: i32, _y: i32, _z: i32) -> tiamat_core::light::Light {
+            tiamat_core::light::Light::new(0, 15, 11, 6)
         }
     }
 
@@ -3087,7 +3087,7 @@ struct Scene {
     /// Lamplight needs stored BLOCK light and no sun, which is the one lighting
     /// state no scene built out of daylight can offer — and the state mode 3's
     /// `EMISSIVE_GAIN` and bloom exist for.
-    lit: Option<tiamot_core::light::Light>,
+    lit: Option<tiamat_core::light::Light>,
     camera: Camera,
     /// Whether the top of this frame can be recognised as sky *by hue*.
     ///
@@ -3142,7 +3142,7 @@ fn scenes() -> Vec<Scene> {
             // at 0.996 — indistinguishable from mode 2's 1.0, with the bloom on
             // top of it clipped as well. A saturated scene cannot tell two
             // tonemaps apart. Ten of fifteen leaves both modes room to differ.
-            lit: Some(tiamot_core::light::Light::new(0, 10, 8, 5)),
+            lit: Some(tiamat_core::light::Light::new(0, 10, 8, 5)),
             camera: viewpoint(),
             sky_above: false,
         },
@@ -3499,7 +3499,7 @@ fn a_biome_colour_blends_across_a_chunk_edge_instead_of_tiling_it() {
     // is a hard edge with a blend painted over it. And the step from one sample
     // to the next must stay small, or it is a staircase — which is what a flat
     // per-chunk colour would give and what this exists to avoid.
-    use tiamot_core::proto::{MaterialDef, Tint};
+    use tiamat_core::proto::{MaterialDef, Tint};
     let Some(gpu) = gpu() else { return };
 
     const FLOOR: MaterialId = MaterialId(2);
@@ -3997,7 +3997,7 @@ fn an_entity_is_drawn_where_the_server_put_it() {
     // Asserted by DIFFERENCE rather than by colour: a frame with an entity in
     // it and the same frame without must not be identical. Reading a hue would
     // make the test a hostage to the atlas, the lighting mode and the driver's
-    // filtering, and `tiamot-session-flake` is the memory of what that costs.
+    // filtering, and `tiamat-session-flake` is the memory of what that costs.
     let Some(gpu) = gpu() else { return };
     let chunks = scene();
     let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
@@ -4088,7 +4088,7 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
 
     // A mod's model, uploaded exactly as a pushed one is, and one figure
     // wearing it right in front of the camera.
-    renderer.add_model("zoo:cow", tiamot_core::model::humanoid(), 1.0);
+    renderer.add_model("zoo:cow", tiamat_core::model::humanoid(), 1.0);
     let ahead = camera.forward();
     let mut posed = std::collections::BTreeMap::new();
     posed.insert(
@@ -4159,7 +4159,7 @@ fn a_mods_model_casts_a_shadow_like_the_engines_own_rig() {
 
     // A mod's model, uploaded as a pushed one is, standing where the engine's
     // own figure stands in the test above.
-    renderer.add_model("zoo:cow", tiamot_core::model::humanoid(), 1.0);
+    renderer.add_model("zoo:cow", tiamat_core::model::humanoid(), 1.0);
     let mut posed = std::collections::BTreeMap::new();
     posed.insert(
         "zoo:cow".to_owned(),
@@ -4700,8 +4700,8 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
 }
 
 /// A summary whose bottom `height` cells are solid stone.
-fn slab_summary(level: u8, height: u32) -> tiamot_core::lod::Summary {
-    let n = tiamot_core::lod::cells_per_axis(level).expect("a level");
+fn slab_summary(level: u8, height: u32) -> tiamat_core::lod::Summary {
+    let n = tiamat_core::lod::cells_per_axis(level).expect("a level");
     let mut cells = vec![MaterialId::AIR; (n * n * n) as usize];
     for z in 0..n {
         for y in 0..height.min(n) {
@@ -4710,7 +4710,7 @@ fn slab_summary(level: u8, height: u32) -> tiamot_core::lod::Summary {
             }
         }
     }
-    tiamot_core::lod::Summary::from_parts(level, cells).expect("build")
+    tiamat_core::lod::Summary::from_parts(level, cells).expect("build")
 }
 
 #[test]
@@ -4763,7 +4763,7 @@ fn no_sky_shows_through_the_seam_between_two_lod_levels() {
 
     // Fine on the left, coarse on the right, the seam at x = 16. Three chunks
     // deep so the frame has ground either side of it.
-    let fine = mesher::mesh_summary(&slab_summary(tiamot_core::lod::FINEST, 6));
+    let fine = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 6));
     let coarse = mesher::mesh_summary(&slab_summary(3, 1));
     for cz in 0..3 {
         renderer.set_chunk(ChunkPos::new(0, 0, cz), &fine);
@@ -5068,7 +5068,7 @@ fn a_biome_colour_brighter_than_one_brightens_the_world() {
     // no driver's filtering decides it: the same scene, the same camera, and
     // the only difference is what the biome asked for.
     let Some(gpu) = gpu() else { return };
-    use tiamot_core::proto::{MaterialDef, Tint};
+    use tiamat_core::proto::{MaterialDef, Tint};
 
     let mut renderer = prepare(gpu, &scene(), RenderMode::Textured);
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -5384,7 +5384,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
     };
     let mut pass = client::render::clouds::Pass::new(&gpu);
 
-    let layer = tiamot_core::atmosphere::CloudLayer {
+    let layer = tiamat_core::atmosphere::CloudLayer {
         base: 420.0,
         thickness: 96.0,
         cell: 8.0,
@@ -5397,7 +5397,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         colour: [1.0; 3],
         shade: [0.42, 0.44, 0.58],
     };
-    let state = tiamot_core::atmosphere::Clouds {
+    let state = tiamat_core::atmosphere::Clouds {
         cover: 0.55,
         darkness: 0.0,
         base: None,
@@ -5463,8 +5463,8 @@ fn skyward() -> Camera {
 }
 
 /// A deck at an ordinary altitude, seen from the fixed scene's floor.
-fn low_deck() -> tiamot_core::atmosphere::CloudLayer {
-    tiamot_core::atmosphere::CloudLayer {
+fn low_deck() -> tiamat_core::atmosphere::CloudLayer {
+    tiamat_core::atmosphere::CloudLayer {
         base: 220.0,
         thickness: 70.0,
         cell: 8.0,
@@ -5497,7 +5497,7 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
     // than against a number written down here.
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
-        clouds: Some(tiamot_core::atmosphere::Clouds {
+        clouds: Some(tiamat_core::atmosphere::Clouds {
             cover: 0.0,
             darkness: 0.0,
             base: None,
@@ -5513,7 +5513,7 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
     // blue-over-red margin `is_sky` measures collapses.
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
-        clouds: Some(tiamot_core::atmosphere::Clouds {
+        clouds: Some(tiamat_core::atmosphere::Clouds {
             cover: 0.95,
             darkness: 0.0,
             base: None,
@@ -5542,7 +5542,7 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
     // machine draws it is the player's, and a mod must not be able to override
     // that. Turned off must be indistinguishable from a world that registered
     // no deck at all.
-    let overcast = tiamot_core::atmosphere::Clouds {
+    let overcast = tiamat_core::atmosphere::Clouds {
         cover: 0.95,
         darkness: 0.0,
         base: None,
@@ -5606,7 +5606,7 @@ fn a_half_covered_sky_has_cloud_and_sky_in_it_rather_than_one_flat_fill() {
 
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
-        clouds: Some(tiamot_core::atmosphere::Clouds {
+        clouds: Some(tiamat_core::atmosphere::Clouds {
             cover: 0.55,
             darkness: 0.0,
             base: None,
@@ -5659,7 +5659,7 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
     // the grid's doing.
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
-        clouds: Some(tiamot_core::atmosphere::Clouds {
+        clouds: Some(tiamat_core::atmosphere::Clouds {
             cover: 0.0,
             darkness: 0.0,
             base: None,
@@ -5695,7 +5695,7 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
             }
         }
         #[expect(clippy::cast_possible_truncation, reason = "SIZE is 16")]
-        std::sync::Arc::new(tiamot_core::atmosphere::CloudMap {
+        std::sync::Arc::new(tiamat_core::atmosphere::CloudMap {
             origin,
             cell: CELL,
             size: SIZE as u8,
@@ -5756,8 +5756,8 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
 ///
 /// Their numbers in `docs/engine-asks/tiamot_weather.md` are measured against
 /// this, so anything measured here has to use it to be comparable.
-fn tuned_deck() -> tiamot_core::atmosphere::CloudLayer {
-    tiamot_core::atmosphere::CloudLayer {
+fn tuned_deck() -> tiamat_core::atmosphere::CloudLayer {
+    tiamat_core::atmosphere::CloudLayer {
         base: 400.0,
         thickness: 110.0,
         cell: 16.0,
@@ -5791,7 +5791,7 @@ fn how_long_the_deck_costs_from_three_views() {
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
 
     let deck = tuned_deck();
-    let state = tiamot_core::atmosphere::Clouds {
+    let state = tiamat_core::atmosphere::Clouds {
         cover: 0.55,
         darkness: 0.0,
         base: None,
@@ -5857,7 +5857,7 @@ fn how_long_a_cloud_frame_takes() {
     let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
 
-    let overcast = tiamot_core::atmosphere::Clouds {
+    let overcast = tiamat_core::atmosphere::Clouds {
         cover: 0.55,
         darkness: 0.0,
         base: None,
@@ -5980,8 +5980,8 @@ fn the_sky_is_a_gradient_and_the_horizon_still_matches_the_fog() {
 }
 
 /// A deck shaped like the reference images: heaped, towering, drifting.
-fn cumulus() -> tiamot_core::atmosphere::CloudLayer {
-    tiamot_core::atmosphere::CloudLayer {
+fn cumulus() -> tiamat_core::atmosphere::CloudLayer {
+    tiamat_core::atmosphere::CloudLayer {
         // Weather's own tuned deck, with more towers: the mod chose coarse and
         // calm for cost, and the golden hour is where the towers earn their
         // keep.
@@ -6049,7 +6049,7 @@ fn dump_the_golden_hour() {
             renderer.set_lighting_mode(mode);
             renderer.set_clouds(client::render::clouds::Deck {
                 layer: Some(cumulus()),
-                clouds: Some(tiamot_core::atmosphere::Clouds {
+                clouds: Some(tiamat_core::atmosphere::Clouds {
                     cover,
                     darkness,
                     base: None,

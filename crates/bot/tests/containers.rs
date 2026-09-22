@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 /// How long to wait for something the server has to tick before it is true.
 ///
@@ -36,7 +36,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 const CHEST: &str = "chests:at:1,2,3";
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-containers").join(name);
+    let dir = std::env::temp_dir().join("tiamat-containers").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -232,7 +232,7 @@ fn a_mod_runs_a_furnace_in_a_container_nobody_has_open() {
             .expect("the mod registers the marker");
 
         bot.chat("load").await.expect("chat");
-        bot.expect_block(tiamot_core::BlockPos::new(6, 9, 6), smelted, PATIENCE)
+        bot.expect_block(tiamat_core::BlockPos::new(6, 9, 6), smelted, PATIENCE)
             .await
             .expect("the furnace never smelted what the mod put in it");
         bot.disconnect().await;
@@ -368,7 +368,7 @@ fn what_goes_into_a_container_survives_a_disconnect_and_a_restart() {
             .find(|entry| entry.name == "chests:counted_27")
             .map(|entry| entry.id)
             .expect("the mod registers the marker");
-        bot.expect_block(tiamot_core::BlockPos::new(5, 9, 5), counted, PATIENCE)
+        bot.expect_block(tiamat_core::BlockPos::new(5, 9, 5), counted, PATIENCE)
             .await
             .expect("the chest came back holding something other than 27 units");
         bot.disconnect().await;
@@ -400,7 +400,7 @@ fn two_players_cannot_hold_one_container() {
             .find(|entry| entry.name == "chests:busy")
             .map(|entry| entry.id)
             .expect("the mod registers the marker");
-        bert.expect_block(tiamot_core::BlockPos::new(9, 9, 9), busy, PATIENCE)
+        bert.expect_block(tiamat_core::BlockPos::new(9, 9, 9), busy, PATIENCE)
             .await
             .expect("a second player opened a chest somebody was already in");
         assert!(

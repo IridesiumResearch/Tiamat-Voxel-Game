@@ -37,7 +37,7 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     // The client refuses anything larger before it parses; so does this, or the
     // fuzzer spends its budget on inputs no client would ever see.
-    if data.len() as u64 > tiamot_core::font::MAX_FONT_BYTES {
+    if data.len() as u64 > tiamat_core::font::MAX_FONT_BYTES {
         return;
     }
 

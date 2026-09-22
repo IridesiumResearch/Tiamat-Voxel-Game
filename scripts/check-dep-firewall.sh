@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 # a display server, it is that the program which decides what is authentic
 # should stay small enough to read, and must never grow a way to fetch what it
 # is signing (`docs/distribution.md` §8).
-GUARDED_PACKAGES=(tiamot-core server relman updater)
+GUARDED_PACKAGES=(tiamat-core server relman updater)
 
 # Forbidden crate families. Matched as a prefix followed by end-of-name or a
 # separator, so `wgpu` also catches `wgpu-core` and `wgpu-hal`, and `egui`
@@ -70,7 +70,7 @@ for package in "${GUARDED_PACKAGES[@]}"; do
         done
         echo "  '$package' must not depend on render, window, input, audio, or UI"
         echo "  crates. These belong to 'client' alone. If a shared type is pulling"
-        echo "  one in, move the type into 'tiamot-core' rather than the dependency."
+        echo "  one in, move the type into 'tiamat-core' rather than the dependency."
         echo
     fi
 done

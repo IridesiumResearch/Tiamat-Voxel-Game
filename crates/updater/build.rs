@@ -16,11 +16,11 @@ use std::path::Path;
 
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
-    println!("cargo:rustc-env=TIAMOT_TARGET={target}");
+    println!("cargo:rustc-env=TIAMAT_TARGET={target}");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=TIAMOT_RELEASE_KEY");
+    println!("cargo:rerun-if-env-changed=TIAMAT_RELEASE_KEY");
 
-    if std::env::var_os("TIAMOT_RELEASE_KEY").is_some() {
+    if std::env::var_os("TIAMAT_RELEASE_KEY").is_some() {
         // Set in the environment: cargo passes it through to `option_env!`,
         // and this build script must not override it.
         return;
@@ -38,7 +38,7 @@ fn main() {
         .find(|line| !line.is_empty() && !line.starts_with('#'));
     match key {
         Some(key) if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) => {
-            println!("cargo:rustc-env=TIAMOT_RELEASE_KEY={key}");
+            println!("cargo:rustc-env=TIAMAT_RELEASE_KEY={key}");
         }
         _ => println!("cargo:warning=release-key.pub holds no 64-character hex key"),
     }

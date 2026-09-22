@@ -12,14 +12,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::Edit;
-use tiamot_core::{BlockPos, MaterialId};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::Edit;
+use tiamat_core::{BlockPos, MaterialId};
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-mod-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-mod-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir

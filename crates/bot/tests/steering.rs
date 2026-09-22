@@ -18,15 +18,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::ServerMessage;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::ServerMessage;
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(25);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-steer-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-steer-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -143,7 +143,7 @@ fn a_mob_climbs_out_of_a_one_block_pit_and_walks_to_where_it_was_sent() {
             .expect("the mod registers a ground block");
 
         // The mark the mod places once the mob is above the pit floor.
-        bot.expect_block(tiamot_core::BlockPos::new(0, 4, 0), ground, PATIENCE)
+        bot.expect_block(tiamat_core::BlockPos::new(0, 4, 0), ground, PATIENCE)
             .await
             .expect("the mob never got out of the pit");
 
@@ -167,7 +167,7 @@ fn a_mob_climbs_out_of_a_one_block_pit_and_walks_to_where_it_was_sent() {
                     _ => continue,
                 };
                 for (chunk, local) in entities {
-                    let at = tiamot_core::ent::Transform::at(chunk, local).to_world();
+                    let at = tiamat_core::ent::Transform::at(chunk, local).to_world();
                     #[expect(
                         clippy::cast_possible_truncation,
                         reason = "a test comparing block-scale positions"

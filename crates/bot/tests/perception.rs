@@ -27,10 +27,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::{BlockPos, SubNodePos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::{BlockPos, SubNodePos};
+use tiamat_server::{ServerHandle, Settings};
 
 /// Long enough for the mod's twentieth tick (one second) plus the round trip,
 /// short enough that a wedged server fails rather than hangs the suite.
@@ -57,7 +57,7 @@ fn centre_of(pos: BlockPos) -> SubNodePos {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-perception").join(name);
+    let dir = std::env::temp_dir().join("tiamat-perception").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir

@@ -127,7 +127,7 @@ pub fn add_key_payload(
     next_key_hash: Option<&[u8; COMMITMENT_BYTES]>,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(128);
-    payload.extend_from_slice(b"tiamot:add-key:v1");
+    payload.extend_from_slice(b"tiamat:add-key:v1");
     payload.extend_from_slice(uuid.as_bytes());
     payload.extend_from_slice(new_key.as_bytes());
     if let Some(hash) = next_key_hash {
@@ -144,7 +144,7 @@ pub fn rotate_key_payload(
     new_next_key_hash: Option<&[u8; COMMITMENT_BYTES]>,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(128);
-    payload.extend_from_slice(b"tiamot:rotate-key:v1");
+    payload.extend_from_slice(b"tiamat:rotate-key:v1");
     payload.extend_from_slice(uuid.as_bytes());
     payload.extend_from_slice(new_key.as_bytes());
     if let Some(hash) = new_next_key_hash {
@@ -157,7 +157,7 @@ pub fn rotate_key_payload(
 #[must_use]
 pub fn commit_to(successor: &VerifyingKey) -> [u8; COMMITMENT_BYTES] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:key-commitment:v1");
+    hasher.update(b"tiamat:key-commitment:v1");
     hasher.update(successor.as_bytes());
     *hasher.finalize().as_bytes()
 }

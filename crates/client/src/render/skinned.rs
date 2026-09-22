@@ -31,7 +31,7 @@
 //! (an arm across a chest, at a bias tuned for terrain) that belongs after
 //! somebody has looked at one.
 
-use tiamot_core::model::{self, Model};
+use tiamat_core::model::{self, Model};
 use wgpu::util::DeviceExt as _;
 
 use super::{DEPTH_FORMAT, Gpu, RenderMode};
@@ -227,7 +227,7 @@ impl Skinned {
     /// The joint rotations that pose a figure's arms for what it is carrying.
     ///
     /// **Anything hung off a hand must be placed with the SAME list** — see
-    /// [`tiamot_core::model::joint_matrices_with`]. That is why this is one
+    /// [`tiamat_core::model::joint_matrices_with`]. That is why this is one
     /// function rather than a rotation written out at each of the two places
     /// that need it: a block placed against an unposed arm hangs in the air
     /// beside a hand that has moved.
@@ -235,7 +235,7 @@ impl Skinned {
         clippy::disallowed_methods,
         reason = "charter rule 4 exempts rendering; this is a figure's pose, not the world"
     )]
-    fn carry_pose(&self, figure: &Figure) -> Vec<(u8, tiamot_core::model::Matrix)> {
+    fn carry_pose(&self, figure: &Figure) -> Vec<(u8, tiamat_core::model::Matrix)> {
         let (sin, cos) = (Self::CARRY_LIFT.sin(), Self::CARRY_LIFT.cos());
         // A rotation about the joint's own x, column-major, as `Matrix` is.
         let lift = [
@@ -272,7 +272,7 @@ impl Skinned {
         let index = self.model.skin.index_of(joint)?;
         let clip = self
             .model
-            .clip(model::clip_for(tiamot_core::ent::AnimTag(figure.anim)));
+            .clip(model::clip_for(tiamat_core::ent::AnimTag(figure.anim)));
         // The joint's own transform, not a skinning matrix: one of those is
         // composed with the inverse bind pose and answers where a VERTEX went,
         // which is wrong by exactly the bind pose. See `model::joint_matrices`.
@@ -312,7 +312,7 @@ impl Skinned {
             let base = u32::try_from(matrices.len() / 16).unwrap_or(0);
             let clip = self
                 .model
-                .clip(model::clip_for(tiamot_core::ent::AnimTag(figure.anim)));
+                .clip(model::clip_for(tiamat_core::ent::AnimTag(figure.anim)));
             let posed = self.carry_pose(figure);
             for matrix in model::skinning_matrices_with(&self.model, clip, figure.phase, &posed) {
                 matrices.extend_from_slice(&matrix);

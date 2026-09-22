@@ -10,8 +10,8 @@
 //! identically however they got there.
 
 use proptest::prelude::*;
-use tiamot_core::ChunkPos;
-use tiamot_core::ent::{Entities, Entity, EntityId, Transform};
+use tiamat_core::ChunkPos;
+use tiamat_core::ent::{Entities, Entity, EntityId, Transform};
 
 /// One thing a world can be asked to do.
 #[derive(Debug, Clone)]

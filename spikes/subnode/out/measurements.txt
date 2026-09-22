@@ -1,4 +1,4 @@
-Tiamot Task 02b — sub-node risk spike
+Tiamat Task 02b — sub-node risk spike
 Recorded: 2026-07-30T16:13:44Z
 Host: AMD Ryzen 7 7800X3D 8-Core Processor, 16 threads, 30 GiB RAM
 rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)

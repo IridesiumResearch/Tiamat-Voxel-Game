@@ -18,13 +18,13 @@
 //! and how many chunks it was holding. Lined up against the client's log by tick
 //! number, that is both halves of the same moment.
 //!
-//! Off unless `TIAMOT_TRACE_SERVER` names a file, and bounded, for the reasons
+//! Off unless `TIAMAT_TRACE_SERVER` names a file, and bounded, for the reasons
 //! the client's logs are.
 
 use std::io::Write as _;
 
-use tiamot_core::ChunkPos;
-use tiamot_core::phys::{Body, Intent};
+use tiamat_core::ChunkPos;
+use tiamat_core::phys::{Body, Intent};
 
 /// Lines one trace will write before it stops.
 ///
@@ -62,13 +62,13 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// Opens a trace at the path `TIAMOT_TRACE_SERVER` names, if it names one.
+    /// Opens a trace at the path `TIAMAT_TRACE_SERVER` names, if it names one.
     ///
     /// Returns `None` when the variable is unset, and when the file cannot be
     /// created: a diagnostic that refuses to start a server would be a poor one.
     #[must_use]
     pub fn from_environment() -> Option<Self> {
-        let path = std::env::var_os("TIAMOT_TRACE_SERVER")?;
+        let path = std::env::var_os("TIAMAT_TRACE_SERVER")?;
         let file = std::fs::File::create(&path).ok()?;
         let mut writer = std::io::BufWriter::new(file);
         writer

@@ -17,14 +17,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(10);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-hud-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-hud-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -84,11 +84,11 @@ fn the_reference_mods_push_exactly_one_hud_script() {
     let server = start("push");
     block_on(async {
         let bot = join(&server, "watcher").await;
-        let scripts: Vec<tiamot_core::proto::HudScriptDef> = bot
+        let scripts: Vec<tiamat_core::proto::HudScriptDef> = bot
             .received()
             .into_iter()
             .filter_map(|message| match message {
-                tiamot_core::proto::ServerMessage::HudScripts { scripts } => Some(scripts),
+                tiamat_core::proto::ServerMessage::HudScripts { scripts } => Some(scripts),
                 _ => None,
             })
             .next()
@@ -99,7 +99,7 @@ fn the_reference_mods_push_exactly_one_hud_script() {
         // reference mod is — and a developer's own mods live in `game/` by the
         // guide's own instruction, so counting every script here made this red
         // for anybody actually writing one.
-        let reference: Vec<&tiamot_core::proto::HudScriptDef> = scripts
+        let reference: Vec<&tiamat_core::proto::HudScriptDef> = scripts
             .iter()
             .filter(|script| script.mod_id.starts_with("core_"))
             .collect();
@@ -128,7 +128,7 @@ fn declaring_a_hud_script_publishes_that_file_and_no_other_lua() {
             .received()
             .into_iter()
             .find_map(|message| match message {
-                tiamot_core::proto::ServerMessage::HudScripts { scripts } => Some(scripts),
+                tiamat_core::proto::ServerMessage::HudScripts { scripts } => Some(scripts),
                 _ => None,
             })
             .expect("a HudScripts message");
@@ -182,7 +182,7 @@ fn what_a_player_digs_shows_up_in_the_slots_core_uis_screen_draws() {
 
         // `y = -1` is the surface: `fill_below_heightmap(0)` fills everything
         // BELOW zero, so the topmost solid block is under the player's feet.
-        bot.dig_block(tiamot_core::BlockPos::new(0, -1, 0))
+        bot.dig_block(tiamat_core::BlockPos::new(0, -1, 0))
             .await
             .expect("dig");
         let slots = bot
@@ -221,7 +221,7 @@ fn what_a_player_digs_shows_up_in_the_slots_core_uis_screen_draws() {
             .nodes
             .iter()
             .filter_map(|node| match &node.widget {
-                tiamot_core::ui::Widget::ItemGrid {
+                tiamat_core::ui::Widget::ItemGrid {
                     view, first, count, ..
                 } => Some((view.as_str(), *first, *count)),
                 _ => None,
@@ -260,7 +260,7 @@ fn core_uis_inventory_screen_opens_and_closes_on_the_action_it_registered() {
             .received()
             .into_iter()
             .find_map(|message| match message {
-                tiamot_core::proto::ServerMessage::ActionTable { actions } => Some(actions),
+                tiamat_core::proto::ServerMessage::ActionTable { actions } => Some(actions),
                 _ => None,
             })
             .expect("an action table");
@@ -294,7 +294,7 @@ fn core_uis_inventory_screen_opens_and_closes_on_the_action_it_registered() {
         assert!(
             tree.nodes.iter().any(|node| matches!(
                 &node.widget,
-                tiamot_core::ui::Widget::ItemGrid { view, .. } if view == "player:main"
+                tiamat_core::ui::Widget::ItemGrid { view, .. } if view == "player:main"
             )),
             "the screen should show the player's own slots"
         );
@@ -355,7 +355,7 @@ fn a_screen_closed_from_the_client_can_be_opened_again() {
         }
 
         // What Escape sends.
-        bot.dialog_event("core_ui:inventory", tiamot_core::proto::DialogEvent::Closed)
+        bot.dialog_event("core_ui:inventory", tiamat_core::proto::DialogEvent::Closed)
             .await
             .expect("send");
         let deadline = tokio::time::Instant::now() + PATIENCE;
@@ -406,8 +406,8 @@ fn a_screen_closed_from_the_client_can_be_opened_again() {
 /// Reads the tree of `core_ui`'s screen, waiting for one that satisfies `ready`.
 async fn screen(
     bot: &mut Bot,
-    ready: impl Fn(&tiamot_core::ui::Tree) -> bool,
-) -> tiamot_core::ui::Tree {
+    ready: impl Fn(&tiamat_core::ui::Tree) -> bool,
+) -> tiamat_core::ui::Tree {
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         // **The LAST tree, not the first.** `Bot::dialogs` is a log of what
@@ -440,10 +440,10 @@ async fn screen(
 }
 
 /// The name of every button in a tree.
-fn buttons(tree: &tiamot_core::ui::Tree) -> Vec<String> {
+fn buttons(tree: &tiamat_core::ui::Tree) -> Vec<String> {
     tree.nodes
         .iter()
-        .filter(|node| matches!(node.widget, tiamot_core::ui::Widget::Button { .. }))
+        .filter(|node| matches!(node.widget, tiamat_core::ui::Widget::Button { .. }))
         .map(|node| node.name.clone())
         .collect()
 }
@@ -463,7 +463,7 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
 
         // Something loose to cut. One block is 27 units and a five-cell stair
         // costs five, so one dig is more than enough.
-        bot.dig_block(tiamot_core::BlockPos::new(0, -1, 0))
+        bot.dig_block(tiamat_core::BlockPos::new(0, -1, 0))
             .await
             .expect("dig");
         bot.until_view("player:main", |slots| {
@@ -484,7 +484,7 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
         // Switch to it, and the editor appears with a whole block in it.
         bot.dialog_event(
             "core_ui:inventory",
-            tiamot_core::proto::DialogEvent::Pressed {
+            tiamat_core::proto::DialogEvent::Pressed {
                 name: "tab_shapes".to_owned(),
             },
         )
@@ -493,27 +493,27 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
         let tree = screen(&mut bot, |tree| {
             tree.nodes
                 .iter()
-                .any(|node| matches!(node.widget, tiamot_core::ui::Widget::ShapeEditor { .. }))
+                .any(|node| matches!(node.widget, tiamat_core::ui::Widget::ShapeEditor { .. }))
         })
         .await;
         let opened = tree
             .nodes
             .iter()
             .find_map(|node| match node.widget {
-                tiamot_core::ui::Widget::ShapeEditor { shape, .. } => Some(shape),
+                tiamat_core::ui::Widget::ShapeEditor { shape, .. } => Some(shape),
                 _ => None,
             })
             .expect("checked above");
         assert_eq!(
             opened,
-            tiamot_core::inventory::Shape::ALL,
+            tiamat_core::inventory::Shape::ALL,
             "chiselling is subtraction, so it starts from a whole block"
         );
 
         // Carve, then make one.
         bot.dialog_event(
             "core_ui:inventory",
-            tiamot_core::proto::DialogEvent::Chiselled {
+            tiamat_core::proto::DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: CARVED,
             },
@@ -522,7 +522,7 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
         .expect("send");
         bot.dialog_event(
             "core_ui:inventory",
-            tiamot_core::proto::DialogEvent::Pressed {
+            tiamat_core::proto::DialogEvent::Pressed {
                 name: "make".to_owned(),
             },
         )
@@ -571,7 +571,7 @@ fn the_offhand_key_swaps_and_swapping_twice_puts_it_back() {
     block_on(async {
         let mut bot = join(&server, "swapper").await;
 
-        bot.dig_block(tiamot_core::BlockPos::new(0, -1, 0))
+        bot.dig_block(tiamat_core::BlockPos::new(0, -1, 0))
             .await
             .expect("dig");
         let slots = bot
@@ -582,29 +582,29 @@ fn the_offhand_key_swaps_and_swapping_twice_puts_it_back() {
             .expect("the dug block never reached a slot");
         let held = slots[0].clone().expect("a stack in the first slot");
         assert!(
-            slots.len() > tiamot_core::inventory::PLAYER_OFFHAND_SLOT,
+            slots.len() > tiamat_core::inventory::PLAYER_OFFHAND_SLOT,
             "there is nowhere for the off-hand to be: {} slots",
             slots.len()
         );
         assert!(
-            slots[tiamot_core::inventory::PLAYER_OFFHAND_SLOT].is_none(),
+            slots[tiamat_core::inventory::PLAYER_OFFHAND_SLOT].is_none(),
             "the off-hand starts empty"
         );
         let before: u32 = bot.inventory().iter().map(|stack| stack.units).sum();
 
-        bot.send(&tiamot_core::proto::ClientMessage::SwapOffhand { slot: 0 })
+        bot.send(&tiamat_core::proto::ClientMessage::SwapOffhand { slot: 0 })
             .await
             .expect("send");
         let swapped = bot
             .until_view("player:main", |slots| {
                 slots
-                    .get(tiamot_core::inventory::PLAYER_OFFHAND_SLOT)
+                    .get(tiamat_core::inventory::PLAYER_OFFHAND_SLOT)
                     .is_some_and(Option::is_some)
             })
             .await
             .expect("nothing ever reached the off-hand");
         assert_eq!(
-            swapped[tiamot_core::inventory::PLAYER_OFFHAND_SLOT].as_ref(),
+            swapped[tiamat_core::inventory::PLAYER_OFFHAND_SLOT].as_ref(),
             Some(&held),
             "what was in the hand is not what is in the off-hand"
         );
@@ -612,7 +612,7 @@ fn the_offhand_key_swaps_and_swapping_twice_puts_it_back() {
 
         // And back, because a gesture you cannot undo without looking is one
         // nobody presses.
-        bot.send(&tiamot_core::proto::ClientMessage::SwapOffhand { slot: 0 })
+        bot.send(&tiamat_core::proto::ClientMessage::SwapOffhand { slot: 0 })
             .await
             .expect("send");
         let back = bot
@@ -626,7 +626,7 @@ fn the_offhand_key_swaps_and_swapping_twice_puts_it_back() {
             Some(&held),
             "two presses did not put it back"
         );
-        assert!(back[tiamot_core::inventory::PLAYER_OFFHAND_SLOT].is_none());
+        assert!(back[tiamat_core::inventory::PLAYER_OFFHAND_SLOT].is_none());
 
         let after: u32 = bot.inventory().iter().map(|stack| stack.units).sum();
         assert_eq!(after, before, "swapping invented or destroyed units");
@@ -650,7 +650,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
         let mut bot = join(&server, "Maker").await;
 
         // Something to cut. Digging one block is twenty-seven units.
-        bot.dig_block(tiamot_core::BlockPos::new(0, -1, 0))
+        bot.dig_block(tiamat_core::BlockPos::new(0, -1, 0))
             .await
             .expect("the block should break");
         let deadline = tokio::time::Instant::now() + PATIENCE;
@@ -685,7 +685,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
         // take, minus the clicking.
         bot.dialog_event(
             "core_ui:inventory",
-            tiamot_core::proto::DialogEvent::Pressed {
+            tiamat_core::proto::DialogEvent::Pressed {
                 name: "tab_shapes".to_owned(),
             },
         )
@@ -695,7 +695,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
         let cut = 0b1111u32;
         bot.dialog_event(
             "core_ui:inventory",
-            tiamot_core::proto::DialogEvent::Chiselled {
+            tiamat_core::proto::DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: cut,
             },
@@ -704,7 +704,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
         .expect("send");
         bot.dialog_event(
             "core_ui:inventory",
-            tiamot_core::proto::DialogEvent::Pressed {
+            tiamat_core::proto::DialogEvent::Pressed {
                 name: "make_stack".to_owned(),
             },
         )

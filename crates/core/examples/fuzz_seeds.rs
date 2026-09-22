@@ -3,7 +3,7 @@
 
 //! Regenerates the `proto_decode` fuzz corpus seeds.
 //!
-//! Run: `cargo run --release -p tiamot-core --example fuzz_seeds -- fuzz/corpus/proto_decode`
+//! Run: `cargo run --release -p tiamat-core --example fuzz_seeds -- fuzz/corpus/proto_decode`
 //!
 //! # Why seeds matter more than corpus size
 //!
@@ -21,12 +21,12 @@
 
 use std::path::PathBuf;
 
-use tiamot_core::proto::{
+use tiamat_core::proto::{
     ActionDef, ChunkFog, Click, ClientMessage, DialogEvent, DisconnectReason, Edit, EntityDef,
     EntityDelta, FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION, ServerMessage,
     SkyFrame, SkyGrade, SoundDef, WireSignature, encode,
 };
-use tiamot_core::{BlockPos, ChunkPos, SubNodePos};
+use tiamat_core::{BlockPos, ChunkPos, SubNodePos};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -58,8 +58,8 @@ fn main() {
 ///
 /// Nested and index-addressed, which is what the decoder's limits are about —
 /// an empty tree exercises the envelope and nothing else.
-fn sample_tree() -> tiamot_core::ui::Tree {
-    use tiamot_core::ui::{Align, Children, Direction, Node, Style, Tree, Widget};
+fn sample_tree() -> tiamat_core::ui::Tree {
+    use tiamat_core::ui::{Align, Children, Direction, Node, Style, Tree, Widget};
     Tree {
         nodes: vec![
             Node {
@@ -191,7 +191,7 @@ fn client_messages() -> Vec<Vec<u8>> {
             edit: Edit::Partial {
                 pos: BlockPos::new(0, 0, 0),
                 material: 1,
-                occupancy: (1 << tiamot_core::UNITS_PER_BLOCK) - 1,
+                occupancy: (1 << tiamat_core::UNITS_PER_BLOCK) - 1,
             },
         },
         ClientMessage::BlockDelta {
@@ -465,15 +465,15 @@ fn server_messages() -> Vec<Vec<u8>> {
         },
         // Protocol v54: a spray, at the edge of every range it may have.
         ServerMessage::Particles {
-            bursts: vec![tiamot_core::particle::Burst {
+            bursts: vec![tiamat_core::particle::Burst {
                 pos: [-120_000.0, 64.0, 7.5],
-                count: tiamot_core::particle::MAX_PER_BURST,
+                count: tiamat_core::particle::MAX_PER_BURST,
                 colour: [255, 0, 128, 40],
-                size: tiamot_core::particle::MAX_SIZE,
-                lifetime: tiamot_core::particle::MAX_LIFETIME,
-                velocity: [0.0, tiamot_core::particle::MAX_SPEED, -1.5],
+                size: tiamat_core::particle::MAX_SIZE,
+                lifetime: tiamat_core::particle::MAX_LIFETIME,
+                velocity: [0.0, tiamat_core::particle::MAX_SPEED, -1.5],
                 spread: 4.0,
-                area: [tiamot_core::particle::MAX_AREA, 0.0, 1.0],
+                area: [tiamat_core::particle::MAX_AREA, 0.0, 1.0],
                 gravity: -9.5,
                 collide: false,
                 // Protocol v71: a burst naming a picture, so the decoder sees
@@ -483,12 +483,12 @@ fn server_messages() -> Vec<Vec<u8>> {
         },
         // Protocol v72: a badge, at the edge of every range it may have.
         ServerMessage::ShowOver {
-            badge: tiamot_core::particle::Badge {
+            badge: tiamat_core::particle::Badge {
                 entity: u64::MAX,
                 picture: [0x5A; 32],
-                count: tiamot_core::particle::MAX_BADGE_ICONS,
-                seconds: tiamot_core::particle::MAX_LIFETIME,
-                size: tiamot_core::particle::MAX_SIZE,
+                count: tiamat_core::particle::MAX_BADGE_ICONS,
+                seconds: tiamat_core::particle::MAX_LIFETIME,
+                size: tiamat_core::particle::MAX_SIZE,
                 colour: [255, 0, 128, 40],
             },
         },
@@ -660,19 +660,19 @@ fn server_messages() -> Vec<Vec<u8>> {
         ServerMessage::ToolTable { tools: Vec::new() },
         ServerMessage::ToolTable {
             tools: vec![
-                tiamot_core::proto::ToolDef {
+                tiamat_core::proto::ToolDef {
                     id: "core_tools:hand".to_owned(),
                     name: "Bare Hand".to_owned(),
                     brush: "block".to_owned(),
                     default: true,
                 },
-                tiamot_core::proto::ToolDef {
+                tiamat_core::proto::ToolDef {
                     id: "core_tools:chisel".to_owned(),
                     name: "Chisel".to_owned(),
                     brush: "subnode".to_owned(),
                     default: false,
                 },
-                tiamot_core::proto::ToolDef {
+                tiamat_core::proto::ToolDef {
                     id: "m:big".to_owned(),
                     name: String::new(),
                     brush: "three_by_three_column".to_owned(),
@@ -695,21 +695,21 @@ fn server_messages() -> Vec<Vec<u8>> {
         // fuzzer should start from a message whose envelope parses.
         ServerMessage::ChunkLight {
             pos: ChunkPos::new(0, 0, 0),
-            light: tiamot_core::light::codec::encode(&tiamot_core::light::LightLayer::uniform(
-                tiamot_core::light::Light::DAYLIGHT,
+            light: tiamat_core::light::codec::encode(&tiamat_core::light::LightLayer::uniform(
+                tiamat_core::light::Light::DAYLIGHT,
             )),
         },
         ServerMessage::ChunkLight {
             pos: ChunkPos::new(-3, 1, 7),
             light: {
-                let mut layer = tiamot_core::light::LightLayer::dark();
-                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+                let mut layer = tiamat_core::light::LightLayer::dark();
+                for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
                     layer.set(
-                        tiamot_core::coords::LocalBlock::from_index(index),
-                        tiamot_core::light::Light::new((index % 16) as u8, 3, 0, 9),
+                        tiamat_core::coords::LocalBlock::from_index(index),
+                        tiamat_core::light::Light::new((index % 16) as u8, 3, 0, 9),
                     );
                 }
-                tiamot_core::light::codec::encode(&layer)
+                tiamat_core::light::codec::encode(&layer)
             },
         },
         ServerMessage::ChunkLight {
@@ -824,7 +824,7 @@ fn server_messages() -> Vec<Vec<u8>> {
         ServerMessage::ViewUpdate {
             view: "player:main".to_owned(),
             slots: vec![
-                Some(tiamot_core::proto::StackDef {
+                Some(tiamat_core::proto::StackDef {
                     material: 3,
                     units: 40,
                     shape: 0,
@@ -833,14 +833,14 @@ fn server_messages() -> Vec<Vec<u8>> {
                 None,
                 // Protocol v24: a shaped stack, which is the shape a decoder
                 // has never seen before this version.
-                Some(tiamot_core::proto::StackDef {
+                Some(tiamat_core::proto::StackDef {
                     material: 4,
                     units: 27,
                     shape: 0b1_0101,
                     detail: None,
                 }),
             ],
-            held: Some(tiamot_core::proto::StackDef {
+            held: Some(tiamat_core::proto::StackDef {
                 material: 3,
                 units: 13,
                 shape: 0,
@@ -850,12 +850,12 @@ fn server_messages() -> Vec<Vec<u8>> {
         // Protocol v23: the cue table and the loops.
         ServerMessage::SoundBindings {
             bindings: vec![
-                tiamot_core::proto::SoundBinding {
+                tiamat_core::proto::SoundBinding {
                     cue: "engine:jump".to_owned(),
                     sound: "core_blocks:jump".to_owned(),
                     mod_id: "core_blocks".to_owned(),
                 },
-                tiamot_core::proto::SoundBinding {
+                tiamat_core::proto::SoundBinding {
                     cue: "core_doors:open".to_owned(),
                     sound: "core_doors:creak".to_owned(),
                     mod_id: "core_doors".to_owned(),
@@ -898,7 +898,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 HudScriptDef {
                     mod_id: "broken".to_owned(),
                     file: None,
-                    reserve: tiamot_core::hud::MAX_RESERVE,
+                    reserve: tiamat_core::hud::MAX_RESERVE,
                 },
             ],
         },

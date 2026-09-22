@@ -19,10 +19,10 @@
 //! "is any face permeable" bit per block, computed on write instead of on every
 //! propagation step.
 
-use tiamot_core::block::{BlockView, subnode_index};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BLOCKS_PER_CHUNK, CHUNK_BLOCKS};
+use tiamat_core::block::{BlockView, subnode_index};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BLOCKS_PER_CHUNK, CHUNK_BLOCKS};
 
 /// Maximum light level, as Minecraft-style voxel lighting uses.
 const MAX_LIGHT: u8 = 15;
@@ -184,8 +184,8 @@ pub fn propagate(chunk: &Chunk, mode: Permeability) -> LightResult {
 mod tests {
     use super::*;
     use crate::scenes::{STONE, Scene};
-    use tiamot_core::block::OCCUPANCY_FULL;
-    use tiamot_core::{BlockValue, ChunkPos, MaterialId};
+    use tiamat_core::block::OCCUPANCY_FULL;
+    use tiamat_core::{BlockValue, ChunkPos, MaterialId};
 
     #[test]
     fn air_is_permeable_in_both_modes() {

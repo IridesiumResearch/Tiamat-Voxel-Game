@@ -24,8 +24,8 @@
 
 use std::path::Path;
 
-use tiamot_core::material::Registry;
-use tiamot_core::script::{MluaVm, ModHost, ScriptVm as _, VmLimits};
+use tiamat_core::material::Registry;
+use tiamat_core::script::{MluaVm, ModHost, ScriptVm as _, VmLimits};
 
 /// What a dry run found.
 #[derive(Debug, Default)]
@@ -195,7 +195,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("tiamot-checkmods").join(name);
+        let dir = std::env::temp_dir().join("tiamat-checkmods").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir

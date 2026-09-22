@@ -30,11 +30,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::{Bot, Impairment};
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::{Edit, ServerMessage};
-use tiamot_core::{BlockPos, MaterialId, SubNodePos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::{Edit, ServerMessage};
+use tiamat_core::{BlockPos, MaterialId, SubNodePos};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 1] = ["test:stone"];
 
@@ -46,7 +46,7 @@ const MATERIALS: [&str; 1] = ["test:stone"];
 const STEPS: i32 = 4;
 
 fn stone() -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for name in MATERIALS {
         id = registry.register(name).expect("register");
@@ -55,7 +55,7 @@ fn stone() -> u16 {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-impaired").join(name);
+    let dir = std::env::temp_dir().join("tiamat-impaired").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -216,7 +216,7 @@ fn a_staircase_survives_a_hundred_and_fifty_millisecond_round_trip_and_five_perc
             // is what forces one.
             let funded = until(&mut bot, Duration::from_secs(20), |bot| {
                 bot.inventory().iter().any(|stack| {
-                    stack.material == stone && stack.units >= tiamot_core::UNITS_PER_BLOCK
+                    stack.material == stone && stack.units >= tiamat_core::UNITS_PER_BLOCK
                 })
             })
             .await;

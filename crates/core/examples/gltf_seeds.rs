@@ -3,7 +3,7 @@
 
 //! Regenerates the `gltf_ingest` fuzz corpus seeds.
 //!
-//! Run: `cargo run --release -p tiamot-core --example gltf_seeds -- fuzz/corpus/gltf_ingest`
+//! Run: `cargo run --release -p tiamat-core --example gltf_seeds -- fuzz/corpus/gltf_ingest`
 //!
 //! # Why the shipped rig is the seed
 //!
@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use tiamot_core::model::{Model, build, humanoid};
+use tiamat_core::model::{Model, build, humanoid};
 
 fn main() {
     let mut args = std::env::args().skip(1);

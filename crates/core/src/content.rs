@@ -204,7 +204,7 @@ impl ContentIndex {
 
         let mut total = 0u64;
         let mut fingerprint = blake3::Hasher::new();
-        fingerprint.update(b"tiamot:mod-content:v1");
+        fingerprint.update(b"tiamat:mod-content:v1");
         fingerprint.update(mod_id.as_bytes());
 
         for relative in paths {
@@ -326,7 +326,7 @@ impl ContentIndex {
 #[must_use]
 pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:content:v1");
+    hasher.update(b"tiamat:content:v1");
     hasher.update(bytes);
     *hasher.finalize().as_bytes()
 }
@@ -397,7 +397,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("tiamot-content-tests").join(name);
+        let dir = std::env::temp_dir().join("tiamat-content-tests").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir

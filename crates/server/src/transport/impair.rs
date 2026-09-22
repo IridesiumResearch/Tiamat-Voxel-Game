@@ -28,7 +28,7 @@
 //! both the bot and the client already depend on this crate for exactly that
 //! reason.
 
-use tiamot_core::detgen::StreamRng;
+use tiamat_core::detgen::StreamRng;
 
 use super::frame::{self, FrameError};
 
@@ -186,7 +186,7 @@ impl Link {
             return Ok(());
         };
 
-        let body = tiamot_core::proto::encode(message)?;
+        let body = tiamat_core::proto::encode(message)?;
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(self.impairment.latency_ms);
         queue.send((deadline, body)).map_err(|_| {

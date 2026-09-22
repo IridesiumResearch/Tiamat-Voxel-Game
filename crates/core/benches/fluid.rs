@@ -43,8 +43,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use tiamot_core::coords::BlockPos;
-use tiamot_core::fluid::{Fluid, FluidId, MAX_VOLUME, Neighbourhood, Solver, Tuning};
+use tiamat_core::coords::BlockPos;
+use tiamat_core::fluid::{Fluid, FluidId, MAX_VOLUME, Neighbourhood, Solver, Tuning};
 
 /// The world seed the benchmark's fluid runs under.
 ///
@@ -96,13 +96,13 @@ impl Neighbourhood for Scene {
             return None;
         }
         Some(if self.solid.contains(&(pos.x, pos.y, pos.z)) {
-            tiamot_core::UNITS_PER_BLOCK
+            tiamat_core::UNITS_PER_BLOCK
         } else {
             0
         })
     }
 
-    fn absorbency(&self, pos: BlockPos, _fluid: tiamot_core::fluid::FluidId) -> u32 {
+    fn absorbency(&self, pos: BlockPos, _fluid: tiamat_core::fluid::FluidId) -> u32 {
         if self.absorbent && self.solid.contains(&(pos.x, pos.y, pos.z)) {
             1
         } else {
@@ -135,7 +135,7 @@ fn settle(scene: &mut Scene, solver: &mut Solver) {
         }
         solver.tick(
             scene,
-            &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+            &tiamat_core::fluid::Tunings::uniform(Tuning::DEFAULT),
             usize::MAX,
             SEED,
             0,
@@ -156,7 +156,7 @@ fn bench_settled(c: &mut Criterion) {
         b.iter(|| {
             let changes = solver.tick(
                 &mut scene,
-                &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+                &tiamat_core::fluid::Tunings::uniform(Tuning::DEFAULT),
                 VISITS,
                 SEED,
                 0,
@@ -213,7 +213,7 @@ fn bench_spreading(c: &mut Criterion) {
             }
             solver.tick(
                 &mut scene,
-                &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+                &tiamat_core::fluid::Tunings::uniform(Tuning::DEFAULT),
                 VISITS,
                 SEED,
                 0,
@@ -290,7 +290,7 @@ fn bench_sinks(c: &mut Criterion) {
                 }
                 solver.tick(
                     &mut scene,
-                    &tiamot_core::fluid::Tunings::uniform(thirsty),
+                    &tiamat_core::fluid::Tunings::uniform(thirsty),
                     usize::MAX,
                     SEED,
                     tick,

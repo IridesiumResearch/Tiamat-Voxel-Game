@@ -25,10 +25,10 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use tiamot_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BLOCKS_PER_CHUNK, BlockPos, BlockValue, ChunkPos, MaterialId};
+use tiamat_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BLOCKS_PER_CHUNK, BlockPos, BlockValue, ChunkPos, MaterialId};
 
 const STONE: MaterialId = MaterialId(2);
 const DIRT: MaterialId = MaterialId(3);
@@ -136,8 +136,8 @@ fn bench_fill(c: &mut Criterion) {
             || Chunk::air(origin()),
             |chunk| {
                 chunk.fill_region(
-                    tiamot_core::SubNodePos::new(0, 0, 0),
-                    tiamot_core::SubNodePos::new(47, 47, 47),
+                    tiamat_core::SubNodePos::new(0, 0, 0),
+                    tiamat_core::SubNodePos::new(47, 47, 47),
                     black_box(STONE),
                 );
             },
@@ -152,8 +152,8 @@ fn bench_fill(c: &mut Criterion) {
             || Chunk::air(origin()),
             |chunk| {
                 chunk.fill_region(
-                    tiamot_core::SubNodePos::new(1, 1, 1),
-                    tiamot_core::SubNodePos::new(46, 46, 46),
+                    tiamat_core::SubNodePos::new(1, 1, 1),
+                    tiamat_core::SubNodePos::new(46, 46, 46),
                     black_box(STONE),
                 );
             },

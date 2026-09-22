@@ -37,12 +37,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rustls_pki_types::CertificateDer;
-use tiamot_core::identity::{Identity, challenge_payload};
-use tiamot_core::proto::{
+use tiamat_core::identity::{Identity, challenge_payload};
+use tiamat_core::proto::{
     ClientMessage, ContentHash, DisconnectReason, Edit, MaterialDef, PROTOCOL_VERSION,
     ServerMessage, WireSignature,
 };
-use tiamot_core::{BlockPos, Chunk, ChunkPos};
+use tiamat_core::{BlockPos, Chunk, ChunkPos};
 use tokio::sync::mpsc;
 
 use crate::cache::ContentCache;
@@ -50,7 +50,7 @@ use crate::texture::{Image, decode_or_missing};
 use crate::trust::{TrustStore, to_hex};
 
 /// The ALPN the server requires. Must match `server::transport::endpoint`.
-const ALPN: &[u8] = b"tiamot/1";
+const ALPN: &[u8] = b"tiamat/1";
 
 /// How long to wait for content before entering the world without it.
 ///
@@ -129,7 +129,7 @@ pub enum Event {
     /// a player who rubber-bands continuously. See `phys::Abilities`.
     Abilities {
         /// What the player may now do.
-        abilities: tiamot_core::phys::Abilities,
+        abilities: tiamat_core::phys::Abilities,
     },
     /// The connection is up and the certificate has been accepted.
     Connected {
@@ -158,7 +158,7 @@ pub enum Event {
     /// so this is the only way a client learns that a chisel exists.
     Tools {
         /// The tools, in ascending id order.
-        tools: Vec<tiamot_core::proto::ToolDef>,
+        tools: Vec<tiamat_core::proto::ToolDef>,
     },
 
     /// Every sound the server's mods registered.
@@ -167,7 +167,7 @@ pub enum Event {
     /// pipeline, by hash, exactly as textures do.
     Sounds {
         /// The sounds, in mod load order.
-        sounds: Vec<tiamot_core::proto::SoundDef>,
+        sounds: Vec<tiamat_core::proto::SoundDef>,
     },
 
     /// Which sound each named event plays.
@@ -178,7 +178,7 @@ pub enum Event {
     /// on a button — without a round trip.
     SoundBindings {
         /// Every binding, in mod load order. Later wins.
-        bindings: Vec<tiamot_core::proto::SoundBinding>,
+        bindings: Vec<tiamat_core::proto::SoundBinding>,
     },
 
     /// Start a looping sound.
@@ -210,12 +210,12 @@ pub enum Event {
     /// What one mod wants this player's HUD to show.
     ///
     /// The whole set for that mod each time, replacing what it said before —
-    /// see [`tiamot_core::proto::ServerMessage::HudValues`].
+    /// see [`tiamat_core::proto::ServerMessage::HudValues`].
     HudValues {
         /// Whose values these are, and whose script will be handed them.
         mod_id: String,
         /// The values, by name.
-        values: tiamot_core::hud::Values,
+        values: tiamat_core::hud::Values,
     },
 
     /// The image a model wears, decoded — Life ask 0, step 2.
@@ -242,28 +242,28 @@ pub enum Event {
         /// Multiplies the model's own size.
         scale: f32,
         /// The geometry, its skeleton and its clips.
-        model: Box<tiamot_core::model::Model>,
+        model: Box<tiamat_core::model::Model>,
     },
 
     /// The cloud deck a mod registered, or `None` for a world with none.
     ///
     /// Registration state: one message in the join burst, like the sky's
-    /// keyframes. See [`tiamot_core::atmosphere::CloudLayer`].
-    CloudLayer(Option<tiamot_core::atmosphere::CloudLayer>),
+    /// keyframes. See [`tiamat_core::atmosphere::CloudLayer`].
+    CloudLayer(Option<tiamat_core::atmosphere::CloudLayer>),
 
     /// How much cloud this player is under, latest state — one message when
     /// the weather changes, eased client-side.
-    Clouds(Option<tiamot_core::atmosphere::Clouds>),
+    Clouds(Option<tiamat_core::atmosphere::Clouds>),
 
     /// The coarse cover map one player's sky is drawn from — ask W10.
     ///
     /// Behind an `Arc` because it is half a kilobyte and is handed from the
     /// network task to the app and on to the renderer every frame.
-    CloudMap(Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>),
+    CloudMap(Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>),
 
     /// How this server's mods want the engine's own screens to look, or
     /// `None` for the client's own — see [`crate::theme`].
-    Theme(Option<tiamot_core::proto::ThemeDef>),
+    Theme(Option<tiamat_core::proto::ThemeDef>),
 
     /// How much of the bottom of the canvas the loaded HUDs want kept clear,
     /// in virtual pixels — the tallest reserve any script in the table asked
@@ -310,7 +310,7 @@ pub enum Event {
     /// has downloaded.
     Picture {
         /// What it was asked for by.
-        hash: tiamot_core::proto::ContentHash,
+        hash: tiamat_core::proto::ContentHash,
         /// The decoded image, RGBA8.
         image: crate::texture::Image,
     },
@@ -331,15 +331,15 @@ pub enum Event {
 
     /// A server opened or replaced a dialog.
     ///
-    /// The tree has already passed [`tiamot_core::ui::check`] — the decoder
+    /// The tree has already passed [`tiamat_core::ui::check`] — the decoder
     /// refuses one that has not, so nothing downstream has to wonder.
     Dialog {
         /// The mod's name for it, echoed on every event.
         form: String,
         /// What to draw.
-        tree: Box<tiamot_core::ui::Tree>,
+        tree: Box<tiamat_core::ui::Tree>,
         /// Whether the mod built a prompt rather than a screen — see
-        /// [`tiamot_core::proto::ServerMessage::ShowDialog::compact`].
+        /// [`tiamat_core::proto::ServerMessage::ShowDialog::compact`].
         compact: bool,
     },
 
@@ -354,9 +354,9 @@ pub enum Event {
         /// Which view.
         view: String,
         /// Each slot, or `None` where it is empty.
-        slots: Vec<Option<tiamot_core::proto::StackDef>>,
+        slots: Vec<Option<tiamat_core::proto::StackDef>>,
         /// What is on the cursor.
-        held: Option<tiamot_core::proto::StackDef>,
+        held: Option<tiamat_core::proto::StackDef>,
     },
 
     /// Something happened near enough to hear.
@@ -383,7 +383,7 @@ pub enum Event {
     /// means (charter rule 11).
     Actions {
         /// The actions, in mod load order.
-        actions: Vec<tiamot_core::proto::ActionDef>,
+        actions: Vec<tiamat_core::proto::ActionDef>,
     },
 
     /// The options a server's mods offer, sent once on join.
@@ -392,7 +392,7 @@ pub enum Event {
     /// declares, the player answers, and the answer is the client's to keep.
     ModSettings {
         /// The settings, in mod load order.
-        settings: Vec<tiamot_core::proto::SettingDef>,
+        settings: Vec<tiamat_core::proto::SettingDef>,
     },
 
     /// What the player is carrying, in **units** (charter rule 5).
@@ -402,7 +402,7 @@ pub enum Event {
     /// wrong with no way to notice.
     Inventory {
         /// What the player holds, in ascending material order.
-        stacks: Vec<tiamot_core::proto::StackDef>,
+        stacks: Vec<tiamat_core::proto::StackDef>,
     },
 
     /// The player is in the world.
@@ -426,13 +426,13 @@ pub enum Event {
     ///
     /// With the chunk's biome colour and its column's own fog, which arrive in
     /// the same message so no frame draws the terrain without them.
-    Chunk(Box<Chunk>, [u8; 3], Option<tiamot_core::proto::ChunkFog>),
+    Chunk(Box<Chunk>, [u8; 3], Option<tiamat_core::proto::ChunkFog>),
 
     /// Bursts of particles a mod scattered nearby.
-    Particles(Vec<tiamot_core::particle::Burst>),
+    Particles(Vec<tiamat_core::particle::Burst>),
 
     /// A row of pictures to hang over an entity — Life ask 15.
-    ShowOver(tiamot_core::particle::Badge),
+    ShowOver(tiamat_core::particle::Badge),
 
     /// A downsampled chunk, for the horizon.
     ///
@@ -441,16 +441,16 @@ pub enum Event {
     /// different resolutions, and holding both would draw both.
     ChunkSummary {
         /// Which chunk.
-        pos: tiamot_core::ChunkPos,
+        pos: tiamat_core::ChunkPos,
         /// The summary, at whatever level the distance called for.
-        summary: Box<tiamot_core::lod::Summary>,
+        summary: Box<tiamat_core::lod::Summary>,
     },
 
     /// A chunk's light levels, initial or updated.
     ///
     /// Boxed for the same reason [`Event::Chunk`] is, if less dramatically: a
     /// dense layer is 8 KiB and every other variant is a handful of bytes.
-    ChunkLight(ChunkPos, Box<tiamot_core::light::LightLayer>),
+    ChunkLight(ChunkPos, Box<tiamat_core::light::LightLayer>),
 
     /// A chunk's fluid, as a whole layer.
     ///
@@ -458,7 +458,7 @@ pub enum Event {
     /// full layer rather than a delta — see `ServerMessage::ChunkFluid` — so
     /// applying one is a replacement rather than a merge, and a client that
     /// missed the last one is repaired by this one.
-    ChunkFluid(ChunkPos, Box<tiamot_core::fluid::FluidLayer>),
+    ChunkFluid(ChunkPos, Box<tiamat_core::fluid::FluidLayer>),
 
     /// Entities that have come into view.
     ///
@@ -466,7 +466,7 @@ pub enum Event {
     /// spawn for an entity already known REPLACES it, which is the recovery
     /// path when a server's queue to this client overflowed and it re-sent
     /// everything from scratch.
-    EntitySpawn(Vec<tiamot_core::proto::EntityDef>),
+    EntitySpawn(Vec<tiamat_core::proto::EntityDef>),
 
     /// Entities that have left view or stopped existing.
     ///
@@ -479,7 +479,7 @@ pub enum Event {
     /// Reliable, like the spawn and unlike the state delta: a lost position is
     /// corrected 50 ms later and a lost hand is not corrected at all until its
     /// holder next changes it.
-    EntityArmed(Vec<tiamot_core::proto::EntityHands>),
+    EntityArmed(Vec<tiamat_core::proto::EntityHands>),
 
     /// Where the entities in view are now.
     ///
@@ -491,7 +491,7 @@ pub enum Event {
         /// Server tick, for ordering.
         tick: u64,
         /// One entry per entity that moved.
-        entities: Vec<tiamot_core::proto::EntityDelta>,
+        entities: Vec<tiamat_core::proto::EntityDelta>,
     },
 
     /// Every fluid the server's mods registered, sent once on join.
@@ -500,7 +500,7 @@ pub enum Event {
     /// `ServerMessage::FluidTable`.
     Fluids {
         /// In ascending id order.
-        fluids: Vec<tiamot_core::proto::FluidDef>,
+        fluids: Vec<tiamat_core::proto::FluidDef>,
     },
 
     /// How far the server is actually streaming.
@@ -520,13 +520,13 @@ pub enum Event {
     Sky(crate::sky::Sky),
 
     /// A mod's standing change to this player's sky, or none.
-    SkyModifier(Option<tiamot_core::atmosphere::SkyModifier>),
+    SkyModifier(Option<tiamat_core::atmosphere::SkyModifier>),
 
     /// A flash of light: lightning, seen.
-    Flash(tiamot_core::atmosphere::Flash),
+    Flash(tiamat_core::atmosphere::Flash),
 
     /// The rain around this player, or none.
-    Precipitation(Option<tiamot_core::atmosphere::Precipitation>),
+    Precipitation(Option<tiamat_core::atmosphere::Precipitation>),
 
     /// Where the server's clock stands in the day, `0.0..1.0`.
     TimeOfDay(f32),
@@ -565,7 +565,7 @@ pub enum Event {
     /// How far along the local player's dig is, for the crack overlay.
     DigProgress {
         /// Which cell is being broken.
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         /// How far along, `0.0..=1.0`.
         progress: f32,
     },
@@ -610,7 +610,7 @@ pub enum Command {
     /// Start or re-aim a dig, or stop one with `None`.
     Dig {
         /// The cell under the crosshair, or `None` to cancel.
-        target: Option<tiamot_core::SubNodePos>,
+        target: Option<tiamat_core::SubNodePos>,
     },
     /// Report something a player did in a dialog.
     ///
@@ -619,7 +619,7 @@ pub enum Command {
         /// Which dialog.
         form: String,
         /// What happened.
-        event: tiamot_core::proto::DialogEvent,
+        event: tiamat_core::proto::DialogEvent,
     },
     /// Hit an entity the crosshair is on.
     Punch {
@@ -658,10 +658,10 @@ pub enum Command {
     /// Ask to place material from the inventory into a cell.
     ///
     /// A request: the server decides whether it happens, and says why when it
-    /// does not. See `tiamot_core::place`.
+    /// does not. See `tiamat_core::place`.
     Place {
         /// The cell to fill, already stepped across the face being looked at.
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         /// Which material, as a world material id.
         material: u16,
         /// The cut being placed, or `0` for loose material.
@@ -680,7 +680,7 @@ pub enum Command {
     /// handles it (`register_on_use`).
     Use {
         /// The cell under the crosshair — the one a dig would take.
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
     },
 
     /// Report that a mod-registered action was pressed or released.
@@ -707,7 +707,7 @@ pub enum Command {
     /// work that way: QUIC retransmits, and what this simulates is a message
     /// the application never sends again. So a test joins cleanly and impairs
     /// afterwards, exactly as the bot harness does.
-    Impair(tiamot_server::transport::Impairment),
+    Impair(tiamat_server::transport::Impairment),
 }
 
 /// A live connection, as the render loop sees it.
@@ -761,7 +761,7 @@ impl Connection {
             display_name,
             cache,
             pinning,
-            tiamot_server::transport::Impairment::default(),
+            tiamat_server::transport::Impairment::default(),
         )
     }
 
@@ -771,7 +771,7 @@ impl Connection {
     /// correct on loopback by construction — the round trip is microseconds, so
     /// the client is barely ahead of the server and there is nothing to
     /// reconcile — which means every bug in them hides on the only network the
-    /// suite has. See [`tiamot_server::transport::Impairment`].
+    /// suite has. See [`tiamat_server::transport::Impairment`].
     ///
     /// # Errors
     ///
@@ -782,12 +782,12 @@ impl Connection {
         display_name: String,
         cache: ContentCache,
         pinning: Pinning<'_>,
-        impairment: tiamot_server::transport::Impairment,
+        impairment: tiamat_server::transport::Impairment,
     ) -> Result<Self, NetError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
-            .thread_name("tiamot-client-net")
+            .thread_name("tiamat-client-net")
             .build()
             .map_err(NetError::Thread)?;
 
@@ -919,7 +919,7 @@ async fn connect(address: SocketAddr, pinning: Pinning<'_>) -> Result<Connected,
     endpoint.set_default_client_config(client_config(verifier));
 
     let attempt = endpoint
-        .connect(address, "tiamot-server")
+        .connect(address, "tiamat-server")
         .map_err(|err| fail(err.to_string()))?;
 
     let connection = tokio::time::timeout(CONNECT_TIMEOUT, attempt)
@@ -1026,7 +1026,7 @@ async fn session(
     cache: ContentCache,
     events: mpsc::UnboundedSender<Event>,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    impairment: tiamot_server::transport::Impairment,
+    impairment: tiamat_server::transport::Impairment,
 ) {
     let Connected {
         endpoint,
@@ -1041,19 +1041,19 @@ async fn session(
     // Everything this task writes goes through the link, so a test can make
     // the network bad without any of the code below knowing. Unimpaired — the
     // only case in production — it is a direct write.
-    let mut send = tiamot_server::transport::Link::new(send);
+    let mut send = tiamat_server::transport::Link::new(send);
 
     // The sound table, kept so an arriving content chunk can be matched to the
     // sound that wanted it.
-    let mut awaited_sounds: Vec<tiamot_core::proto::SoundDef> = Vec::new();
-    let mut awaited_hud_scripts: Vec<tiamot_core::proto::HudScriptDef> = Vec::new();
+    let mut awaited_sounds: Vec<tiamat_core::proto::SoundDef> = Vec::new();
+    let mut awaited_hud_scripts: Vec<tiamat_core::proto::HudScriptDef> = Vec::new();
     // Pictures an open dialog draws. **Unlike sounds and scripts there is no
     // table for these**: nothing in the protocol lists a dialog's art, so the
     // tree is the manifest and this is what it said — see `ui::Tree::content`.
-    let mut awaited_pictures: Vec<tiamot_core::proto::ContentHash> = Vec::new();
+    let mut awaited_pictures: Vec<tiamat_core::proto::ContentHash> = Vec::new();
     // Fonts a server registered, waiting for their files.
-    let mut awaited_fonts: Vec<tiamot_core::proto::FontDef> = Vec::new();
-    let mut awaited_models: Vec<tiamot_core::proto::ModelDef> = Vec::new();
+    let mut awaited_fonts: Vec<tiamat_core::proto::FontDef> = Vec::new();
+    let mut awaited_models: Vec<tiamat_core::proto::ModelDef> = Vec::new();
     send.impair(impairment);
 
     let _ = events.send(Event::Connected {
@@ -1086,7 +1086,7 @@ async fn session(
     // A passthrough map: a client has no `id_map` table to reconcile against,
     // so the world ids in a blob ARE the ids it works in. The names come from
     // the material table.
-    let materials = tiamot_core::persist::idmap::MaterialMap::passthrough();
+    let materials = tiamat_core::persist::idmap::MaterialMap::passthrough();
     let content_deadline = tokio::time::Instant::now() + CONTENT_DEADLINE;
 
     // Reading happens in its own task, feeding a channel — the same shape the
@@ -1107,12 +1107,12 @@ async fn session(
     //
     // A channel receive IS cancellation-safe, so selecting on one is correct.
     let (incoming_tx, mut incoming) = tokio::sync::mpsc::channel::<
-        Result<ServerMessage, tiamot_server::transport::frame::FrameError>,
+        Result<ServerMessage, tiamat_server::transport::frame::FrameError>,
     >(64);
     let reader = tokio::spawn(async move {
         loop {
             let message =
-                tiamot_server::transport::frame::read::<_, ServerMessage>(&mut recv).await;
+                tiamat_server::transport::frame::read::<_, ServerMessage>(&mut recv).await;
             let failed = message.is_err();
             if incoming_tx.send(message).await.is_err() || failed {
                 break;
@@ -1138,7 +1138,7 @@ async fn session(
                     // a decoded message is not a trustworthy one. The server is
                     // as unvalidated a peer as the client is, and a `PlayerState`
                     // carrying a NaN would land in the client's own physics.
-                    Ok(message) => match tiamot_core::proto::validate_server_message(&message) {
+                    Ok(message) => match tiamat_core::proto::validate_server_message(&message) {
                         Ok(()) => Some(message),
                         Err(err) => {
                             finish(format!("the server sent a message that failed validation: {err}"));
@@ -1429,7 +1429,7 @@ async fn session(
                 // The same bounded decoder the world file uses. A blob that
                 // does not decode costs one chunk and a warning; there is no
                 // version of this that should end a session.
-                match tiamot_core::persist::codec::decode_chunk(pos, &blob, &materials, &[]) {
+                match tiamat_core::persist::codec::decode_chunk(pos, &blob, &materials, &[]) {
                     Ok(chunk) => {
                         let _ = events.send(Event::Chunk(Box::new(chunk), tint, fog));
                     }
@@ -1452,7 +1452,7 @@ async fn session(
                 // decoder takes its allocation from the level in the header,
                 // which it checks first, so a blob cannot choose how much
                 // memory it costs. A refusal loses one chunk of horizon.
-                match tiamot_core::lod::codec::decode(&blob) {
+                match tiamat_core::lod::codec::decode(&blob) {
                     Ok(summary) => {
                         let _ = events.send(Event::ChunkSummary {
                             pos,
@@ -1470,7 +1470,7 @@ async fn session(
                 // decode costs that chunk its light and earns a warning; it
                 // does not end the session, and it does not reach the store
                 // half-applied.
-                match tiamot_core::light::codec::decode(&light) {
+                match tiamat_core::light::codec::decode(&light) {
                     Ok(layer) => {
                         let _ = events.send(Event::ChunkLight(pos, Box::new(layer)));
                     }
@@ -1516,7 +1516,7 @@ async fn session(
                 // decoder is where the bounds are. Doing it here also keeps a
                 // malformed payload from costing a frame — a warning and a
                 // dropped message rather than a hitch.
-                match tiamot_core::fluid::codec::decode(&fluid) {
+                match tiamat_core::fluid::codec::decode(&fluid) {
                     Ok(layer) => {
                         let _ = events.send(Event::ChunkFluid(pos, Box::new(layer)));
                     }
@@ -1600,7 +1600,7 @@ async fn session(
                 // **Fetched after the join, not before it.** The material
                 // textures gate the join because a world drawn without them is
                 // a grid of grey; a world with no sound yet is merely quiet.
-                let wanted: Vec<tiamot_core::proto::ContentHash> =
+                let wanted: Vec<tiamat_core::proto::ContentHash> =
                     sounds.iter().filter_map(|sound| sound.file).collect();
                 let missing = cache.missing(&wanted);
                 for sound in &sounds {
@@ -1666,7 +1666,7 @@ async fn session(
                 // differs is what the bytes are handed to — a font parser, on
                 // input a server chose, which is why `core::font` caps them
                 // harder than any other file and why the parse is isolated.
-                let wanted: Vec<tiamot_core::proto::ContentHash> =
+                let wanted: Vec<tiamat_core::proto::ContentHash> =
                     fonts.iter().filter_map(|font| font.file).collect();
                 let missing = cache.missing(&wanted);
                 for font in &fonts {
@@ -1700,7 +1700,7 @@ async fn session(
                 // every count before it allocates and parses under
                 // `catch_unwind`.
                 // The `.glb` and the skin beside it, both by hash.
-                let wanted: Vec<tiamot_core::proto::ContentHash> = models
+                let wanted: Vec<tiamat_core::proto::ContentHash> = models
                     .iter()
                     .flat_map(|model| [model.file, model.texture])
                     .flatten()
@@ -1748,7 +1748,7 @@ async fn session(
                 // join, a client that has the bytes asks for nothing — but
                 // from a table, because a HUD script names a picture only
                 // when it draws one and the frame does not wait.
-                let wanted: Vec<tiamot_core::proto::ContentHash> =
+                let wanted: Vec<tiamat_core::proto::ContentHash> =
                     pictures.iter().filter_map(|picture| picture.file).collect();
                 for hash in &wanted {
                     if !awaited_pictures.contains(hash) {
@@ -1773,7 +1773,7 @@ async fn session(
                 // for nothing. What makes this one different is that the bytes
                 // are CODE — which is handled where it runs, in the sandbox,
                 // not here.
-                let wanted: Vec<tiamot_core::proto::ContentHash> =
+                let wanted: Vec<tiamat_core::proto::ContentHash> =
                     scripts.iter().filter_map(|script| script.file).collect();
                 let missing = cache.missing(&wanted);
                 for script in &scripts {
@@ -1910,10 +1910,10 @@ const MAX_HUD_SCRIPT_BYTES: usize = 64 * 1024;
 /// makes it text rather than what makes it valid: the bytes are bounded before
 /// being copied and refused unless they are UTF-8. Everything else that keeps
 /// this safe — no filesystem, no network, no `load`, an instruction ceiling per
-/// frame — is the sandbox's, in `tiamot_core::script::HudVm`, because those are
+/// frame — is the sandbox's, in `tiamat_core::script::HudVm`, because those are
 /// properties of running it and not of reading it.
 fn offer_hud_script(
-    script: &tiamot_core::proto::HudScriptDef,
+    script: &tiamat_core::proto::HudScriptDef,
     cache: &ContentCache,
     events: &mpsc::UnboundedSender<Event>,
 ) {
@@ -1953,7 +1953,7 @@ fn offer_hud_script(
 /// are among the most attacked surfaces there are. Three things stand between
 /// one and this client:
 ///
-/// - [`tiamot_core::font::MAX_FONT_BYTES`], checked HERE, before anything
+/// - [`tiamat_core::font::MAX_FONT_BYTES`], checked HERE, before anything
 ///   parses — well under the general file cap, because a font is not a texture
 ///   pack;
 /// - a pure-Rust parser (`ab_glyph`, through egui), so no C codec is in the
@@ -1962,7 +1962,7 @@ fn offer_hud_script(
 ///
 /// `fuzz/fuzz_targets/font_ingest.rs` fuzzes the same entry point.
 fn offer_font(
-    font: &tiamot_core::proto::FontDef,
+    font: &tiamat_core::proto::FontDef,
     cache: &ContentCache,
     events: &mpsc::UnboundedSender<Event>,
 ) {
@@ -1973,12 +1973,12 @@ fn offer_font(
     let Some(bytes) = cache.get(&hash) else {
         return;
     };
-    if bytes.len() as u64 > tiamot_core::font::MAX_FONT_BYTES {
+    if bytes.len() as u64 > tiamat_core::font::MAX_FONT_BYTES {
         let _ = events.send(Event::Warning(format!(
             "font `{}` is {} bytes, over the {} a font may be, and will not be loaded",
             font.id,
             bytes.len(),
-            tiamot_core::font::MAX_FONT_BYTES
+            tiamat_core::font::MAX_FONT_BYTES
         )));
         return;
     }
@@ -2001,7 +2001,7 @@ fn offer_font(
 /// entities using it draw nothing — which is what they did before it was
 /// pushed at all.
 fn offer_model(
-    model: &tiamot_core::proto::ModelDef,
+    model: &tiamat_core::proto::ModelDef,
     cache: &ContentCache,
     events: &mpsc::UnboundedSender<Event>,
 ) {
@@ -2019,7 +2019,7 @@ fn offer_model(
     // A real worker: parsing geometry is milliseconds, and this task is the
     // network pump.
     tokio::task::spawn_blocking(move || {
-        match tiamot_core::model::load_isolated(&bytes, &tiamot_core::model::Limits::default()) {
+        match tiamat_core::model::load_isolated(&bytes, &tiamat_core::model::Limits::default()) {
             Ok(model) => {
                 let _ = events.send(Event::Model {
                     id,
@@ -2051,7 +2051,7 @@ fn offer_model(
 /// somebody's art failing to appear, and painting a magenta square over their
 /// panel helps nobody.
 fn offer_picture(
-    hash: tiamot_core::proto::ContentHash,
+    hash: tiamat_core::proto::ContentHash,
     cache: &ContentCache,
     events: &mpsc::UnboundedSender<Event>,
 ) {
@@ -2079,7 +2079,7 @@ fn offer_picture(
 /// that never named one — so a cow whose skin will not decode looks like a cow
 /// nobody painted rather than like a bug in the world.
 fn offer_model_texture(
-    model: &tiamot_core::proto::ModelDef,
+    model: &tiamat_core::proto::ModelDef,
     cache: &ContentCache,
     events: &mpsc::UnboundedSender<Event>,
 ) {
@@ -2108,7 +2108,7 @@ fn offer_model_texture(
 }
 
 fn decode_when_ready(
-    sound: &tiamot_core::proto::SoundDef,
+    sound: &tiamat_core::proto::SoundDef,
     cache: &ContentCache,
     events: &mpsc::UnboundedSender<Event>,
 ) {
@@ -2291,7 +2291,7 @@ impl rustls::client::danger::ServerCertVerifier for RecordingVerifier {
         _ocsp: &[u8],
         _now: rustls_pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let actual = tiamot_server::cert::fingerprint_of(end_entity);
+        let actual = tiamat_server::cert::fingerprint_of(end_entity);
         if let Ok(mut seen) = self.seen.lock() {
             *seen = Some(actual);
         }
@@ -2367,7 +2367,7 @@ mod tests {
     }
 
     fn cache(name: &str) -> ContentCache {
-        let dir = std::env::temp_dir().join("tiamot-net-tests").join(name);
+        let dir = std::env::temp_dir().join("tiamat-net-tests").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         ContentCache::open(&dir).expect("cache")
     }
@@ -2387,7 +2387,7 @@ mod tests {
     fn a_complete_transfer_verifies_and_caches() {
         let cache = cache("complete");
         let bytes = png(&Image::white_with_border());
-        let hash = tiamot_core::content::hash_bytes(&bytes);
+        let hash = tiamat_core::content::hash_bytes(&bytes);
         let compressed = zstd::encode_all(bytes.as_slice(), 3).expect("compress");
 
         let mut pending = Pending::default();
@@ -2410,7 +2410,7 @@ mod tests {
         // The one part of a server's claim a client can check for itself. A
         // client that skipped it would hand whatever arrived to a decoder.
         let cache = cache("wrong-bytes");
-        let asked_for = tiamot_core::content::hash_bytes(b"the texture I asked for");
+        let asked_for = tiamat_core::content::hash_bytes(b"the texture I asked for");
         let sent = b"something else".to_vec();
         let compressed = zstd::encode_all(sent.as_slice(), 3).expect("compress");
 
@@ -2435,7 +2435,7 @@ mod tests {
         // order the server never sent, and the hash check would then reject a
         // file the server transferred correctly — blaming the wrong thing.
         let cache = cache("out-of-order");
-        let hash = tiamot_core::content::hash_bytes(b"whatever");
+        let hash = tiamat_core::content::hash_bytes(b"whatever");
         let compressed = zstd::encode_all(&b"tail"[..], 3).expect("compress");
 
         let mut pending = Pending::default();
@@ -2453,7 +2453,7 @@ mod tests {
         // The claim is refused before anything is allocated for it — the same
         // rule as the frame length prefix and the PNG header.
         let cache = cache("oversized");
-        let hash = tiamot_core::content::hash_bytes(b"x");
+        let hash = tiamat_core::content::hash_bytes(b"x");
 
         let mut pending = Pending::default();
         let err = accept_slice(
@@ -2473,7 +2473,7 @@ mod tests {
         // Charter rule 14: a bad asset disables that asset, never the client.
         let (events, mut received) = mpsc::unbounded_channel();
         let garbage = b"this is not a PNG".to_vec();
-        let hash = tiamot_core::content::hash_bytes(&garbage);
+        let hash = tiamat_core::content::hash_bytes(&garbage);
 
         let mut pending = Pending {
             table: table(&[(2, "core:white", Some(hash))]),

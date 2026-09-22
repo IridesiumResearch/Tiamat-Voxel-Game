@@ -44,10 +44,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use tiamot_core::coords::{BlockPos, ChunkPos};
-use tiamot_core::light::propagate::{Neighbourhood, Region};
-use tiamot_core::light::{Emissions, Faces, Light, LightLayer, propagate};
-use tiamot_core::{CHUNK_BLOCKS, MaterialId};
+use tiamat_core::coords::{BlockPos, ChunkPos};
+use tiamat_core::light::propagate::{Neighbourhood, Region};
+use tiamat_core::light::{Emissions, Faces, Light, LightLayer, propagate};
+use tiamat_core::{CHUNK_BLOCKS, MaterialId};
 
 use crate::world::World;
 
@@ -55,7 +55,7 @@ use crate::world::World;
 ///
 /// This is the whole of `game.get_light`'s implementation: the VM lives in
 /// core and cannot know about [`Lighting`] (charter rule 3), so it asks through
-/// [`tiamot_core::light::LightSource`] and this is what answers.
+/// [`tiamat_core::light::LightSource`] and this is what answers.
 ///
 /// **Read-only, deliberately.** A mod that could write light would be writing a
 /// derived value — the next relight would overwrite it, and the disagreement in
@@ -88,12 +88,12 @@ impl Shared {
 /// position alone, and nothing about lighting is cross-domain.
 #[derive(Debug)]
 pub struct Lights {
-    emissions: tiamot_core::light::Emissions,
+    emissions: tiamat_core::light::Emissions,
     /// Which materials light passes through, shared by every domain: a world's
     /// mod set is one set, whatever domains it grows.
-    see_through: tiamot_core::light::SeeThrough,
+    see_through: tiamat_core::light::SeeThrough,
     /// How much each material dims what passes through it: a canopy.
-    dimming: tiamot_core::light::Dimming,
+    dimming: tiamat_core::light::Dimming,
     domains: std::collections::BTreeMap<String, Lighting>,
 }
 
@@ -101,9 +101,9 @@ impl Lights {
     /// A set of stores for a world whose mods emit these levels.
     #[must_use]
     pub fn new(
-        emissions: tiamot_core::light::Emissions,
-        see_through: tiamot_core::light::SeeThrough,
-        dimming: tiamot_core::light::Dimming,
+        emissions: tiamat_core::light::Emissions,
+        see_through: tiamat_core::light::SeeThrough,
+        dimming: tiamat_core::light::Dimming,
     ) -> Self {
         Self {
             emissions,
@@ -143,7 +143,7 @@ impl Lights {
     }
 }
 
-impl tiamot_core::light::LightSource for Shared {
+impl tiamat_core::light::LightSource for Shared {
     fn light_at(&self, domain: &str, pos: BlockPos) -> Light {
         // A poisoned lock means the simulation thread panicked, in which case
         // there is no light and no world; darkness is the honest answer and
@@ -164,14 +164,14 @@ pub struct Lighting {
     dark_shortcuts: usize,
     emissions: Emissions,
     /// Which materials light passes straight through: glass. Contract §8.1.
-    see_through: tiamot_core::light::SeeThrough,
+    see_through: tiamat_core::light::SeeThrough,
     /// How much each material dims what it passes: foliage. Contract §8.2.
     ///
     /// **Beside `see_through` rather than inside it.** Leaves are permeable and
     /// they dim; a material that stopped light would be neither, and folding
     /// the two would make a uniform chunk of leaves read as dark solid and be
     /// short-circuited to black without a relight.
-    dimming: tiamot_core::light::Dimming,
+    dimming: tiamat_core::light::Dimming,
 }
 
 impl Lighting {
@@ -179,8 +179,8 @@ impl Lighting {
     #[must_use]
     pub fn new(
         emissions: Emissions,
-        see_through: tiamot_core::light::SeeThrough,
-        dimming: tiamot_core::light::Dimming,
+        see_through: tiamat_core::light::SeeThrough,
+        dimming: tiamat_core::light::Dimming,
     ) -> Self {
         Self {
             layers: HashMap::new(),
@@ -244,7 +244,7 @@ impl Lighting {
     /// seen until something digs into it. Kept together so the two can never
     /// disagree about what "solid" means; both need the same two tables.
     #[must_use]
-    pub fn is_dark_solid(&self, chunk: &tiamot_core::Chunk) -> bool {
+    pub fn is_dark_solid(&self, chunk: &tiamat_core::Chunk) -> bool {
         chunk.is_uniform().is_some_and(|material| {
             !material.is_air()
                 && !self.see_through.is(material)
@@ -496,20 +496,20 @@ struct Touched {
 /// rest of [`Lit`] exists to avoid.
 pub trait Glowing {
     /// A chunk's fluid, if anything has pooled there.
-    fn layer(&self, pos: ChunkPos) -> Option<&tiamot_core::fluid::FluidLayer>;
+    fn layer(&self, pos: ChunkPos) -> Option<&tiamat_core::fluid::FluidLayer>;
 
     /// What a full block of a fluid is drawn as, for [`Emissions::of`].
-    fn material(&self, fluid: tiamot_core::fluid::FluidId) -> Option<MaterialId>;
+    fn material(&self, fluid: tiamat_core::fluid::FluidId) -> Option<MaterialId>;
 
     /// Levels a block of this fluid takes out of the light reaching it.
     ///
     /// World ask 25. `0` is "like air", which is what every fluid was until a
     /// mod said otherwise, and is what keeps a world with no falloff in it
     /// lighting exactly as it did — see
-    /// [`propagate::Neighbourhood::falloff`](tiamot_core::light::Neighbourhood::falloff).
+    /// [`propagate::Neighbourhood::falloff`](tiamat_core::light::Neighbourhood::falloff).
     ///
     /// Defaulted, so a test fixture and [`Dry`] say nothing about it.
-    fn falloff(&self, fluid: tiamot_core::fluid::FluidId) -> u8 {
+    fn falloff(&self, fluid: tiamat_core::fluid::FluidId) -> u8 {
         let _ = fluid;
         0
     }
@@ -533,11 +533,11 @@ pub trait Glowing {
 pub struct Dry;
 
 impl Glowing for Dry {
-    fn layer(&self, _pos: ChunkPos) -> Option<&tiamot_core::fluid::FluidLayer> {
+    fn layer(&self, _pos: ChunkPos) -> Option<&tiamat_core::fluid::FluidLayer> {
         None
     }
 
-    fn material(&self, _fluid: tiamot_core::fluid::FluidId) -> Option<MaterialId> {
+    fn material(&self, _fluid: tiamat_core::fluid::FluidId) -> Option<MaterialId> {
         None
     }
 }
@@ -593,13 +593,13 @@ struct Lit<'a> {
     /// `ChunkPos` division and a `HashMap` probe before reaching the blocks.
     /// The overwhelming majority are inside the centre, so resolving it once
     /// turns the probe into a comparison.
-    centre_blocks: Option<&'a tiamot_core::chunk::Chunk>,
+    centre_blocks: Option<&'a tiamat_core::chunk::Chunk>,
     /// The last non-centre chunk looked up, and it.
     ///
     /// One entry, because the rest of what a pass touches is the ring of
     /// neighbours it floods into and it works along one at a time. A bigger
     /// cache would be a second copy of the map it is standing in front of.
-    memo: std::cell::Cell<Option<(ChunkPos, &'a tiamot_core::chunk::Chunk)>>,
+    memo: std::cell::Cell<Option<(ChunkPos, &'a tiamat_core::chunk::Chunk)>>,
     /// The fluid this pass can see glowing. See [`Glowing`].
     fluid: &'a dyn Glowing,
     /// The last fluid layer looked up, by the same argument as `memo`.
@@ -607,7 +607,7 @@ struct Lit<'a> {
     /// `Some(None)` is "asked, and that chunk is dry" — worth remembering,
     /// because a dry chunk is the overwhelmingly common case and re-asking is
     /// the probe this exists to skip.
-    fluid_memo: std::cell::Cell<Option<(ChunkPos, Option<&'a tiamot_core::fluid::FluidLayer>)>>,
+    fluid_memo: std::cell::Cell<Option<(ChunkPos, Option<&'a tiamat_core::fluid::FluidLayer>)>>,
     /// Whether any registered fluid dims what passes through it, resolved once
     /// when the pass starts. See [`Glowing::any_falloff`].
     any_falloff: bool,
@@ -615,7 +615,7 @@ struct Lit<'a> {
 
 impl<'a> Lit<'a> {
     /// The blocks of whatever chunk `pos` is in, if it is resident.
-    fn blocks(&self, pos: ChunkPos) -> Option<&'a tiamot_core::chunk::Chunk> {
+    fn blocks(&self, pos: ChunkPos) -> Option<&'a tiamat_core::chunk::Chunk> {
         if pos == self.centre {
             return self.centre_blocks;
         }
@@ -715,7 +715,7 @@ impl Lit<'_> {
             return 0;
         };
         match chunk.get_block_local(pos.local()) {
-            tiamot_core::block::BlockView::Uniform(material) => self.lighting.dimming.of(material),
+            tiamat_core::block::BlockView::Uniform(material) => self.lighting.dimming.of(material),
             _ => 0,
         }
     }
@@ -756,7 +756,7 @@ impl Neighbourhood for Lit<'_> {
         // no obviously right answer and no caller, and §8.1 records that as a
         // limit rather than guessing.
         if self.lighting.see_through.any()
-            && let tiamot_core::block::BlockView::Uniform(material) =
+            && let tiamat_core::block::BlockView::Uniform(material) =
                 chunk.get_block_local(pos.local())
             && self.lighting.see_through.is(material)
         {
@@ -829,15 +829,15 @@ impl Neighbourhood for Lit<'_> {
 /// id for the reason the two tables beside it are — a world that has seen a
 /// different mod set numbers its materials differently.
 ///
-/// Only the materials that dim, so [`tiamot_core::light::Dimming::any`] is
+/// Only the materials that dim, so [`tiamat_core::light::Dimming::any`] is
 /// false for every world until a mod asks, and the lighting hot path skips the
 /// question with one bool.
 #[must_use]
 pub fn dimming_from_rules(
-    rules: &[tiamot_core::script::BlockRules],
+    rules: &[tiamat_core::script::BlockRules],
     id_of: impl Fn(&str) -> Option<MaterialId>,
-) -> tiamot_core::light::Dimming {
-    tiamot_core::light::Dimming::new(
+) -> tiamat_core::light::Dimming {
+    tiamat_core::light::Dimming::new(
         rules
             .iter()
             .filter(|rule| rule.light_falloff > 0)
@@ -847,10 +847,10 @@ pub fn dimming_from_rules(
 
 #[must_use]
 pub fn see_through_from_rules(
-    rules: &[tiamot_core::script::BlockRules],
+    rules: &[tiamat_core::script::BlockRules],
     id_of: impl Fn(&str) -> Option<MaterialId>,
-) -> tiamot_core::light::SeeThrough {
-    tiamot_core::light::SeeThrough::new(
+) -> tiamat_core::light::SeeThrough {
+    tiamat_core::light::SeeThrough::new(
         rules
             .iter()
             // Contract §8.2: foliage passes light the way glass does. Leaves
@@ -864,7 +864,7 @@ pub fn see_through_from_rules(
 /// Builds an emission table from what the mods registered.
 #[must_use]
 pub fn emissions_from_rules(
-    rules: &[tiamot_core::script::BlockRules],
+    rules: &[tiamat_core::script::BlockRules],
     id_of: impl Fn(&str) -> Option<MaterialId>,
 ) -> Emissions {
     Emissions::new(rules.iter().filter_map(|rule| {
@@ -879,9 +879,9 @@ pub fn emissions_from_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::block::BlockValue;
-    use tiamot_core::light::MAX_LEVEL;
-    use tiamot_core::persist::WorldDb;
+    use tiamat_core::block::BlockValue;
+    use tiamat_core::light::MAX_LEVEL;
+    use tiamat_core::persist::WorldDb;
 
     const STONE: MaterialId = MaterialId(2);
     const LAMP: MaterialId = MaterialId(3);
@@ -895,13 +895,13 @@ mod tests {
             _domain: &str,
             pos: ChunkPos,
             _seed: u64,
-        ) -> tiamot_core::chunk::Chunk {
-            tiamot_core::chunk::Chunk::air(pos)
+        ) -> tiamat_core::chunk::Chunk {
+            tiamat_core::chunk::Chunk::air(pos)
         }
     }
 
     fn world() -> World {
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         for name in ["test:stone", "test:lamp"] {
             registry.register(name).expect("register");
         }
@@ -910,18 +910,18 @@ mod tests {
     }
 
     fn lighting() -> Lighting {
-        lighting_with(tiamot_core::light::SeeThrough::default())
+        lighting_with(tiamat_core::light::SeeThrough::default())
     }
 
     /// The same, for a world that has some glass in it.
-    fn lighting_with(see_through: tiamot_core::light::SeeThrough) -> Lighting {
-        dimming_lighting(see_through, tiamot_core::light::Dimming::default())
+    fn lighting_with(see_through: tiamat_core::light::SeeThrough) -> Lighting {
+        dimming_lighting(see_through, tiamat_core::light::Dimming::default())
     }
 
     /// The same, for a world whose mods dim light: a canopy (ask 24).
     fn dimming_lighting(
-        see_through: tiamot_core::light::SeeThrough,
-        dimming: tiamot_core::light::Dimming,
+        see_through: tiamat_core::light::SeeThrough,
+        dimming: tiamat_core::light::Dimming,
     ) -> Lighting {
         Lighting::new(
             Emissions::new([(LAMP, Light::new(0, MAX_LEVEL, 0, 0))]),
@@ -933,7 +933,7 @@ mod tests {
     /// Loads a chunk so it is resident, without caring what is in it.
     fn resident(world: &mut World, pos: ChunkPos) {
         world
-            .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+            .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
             .expect("chunk");
     }
 
@@ -944,7 +944,7 @@ mod tests {
         let pos = ChunkPos::new(0, 0, 0);
         resident(&mut world, pos);
 
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
 
         assert_eq!(light.at(BlockPos::new(8, 15, 8)).sun(), MAX_LEVEL);
         assert_eq!(
@@ -970,16 +970,16 @@ mod tests {
             let mut world = world();
             let mut light = lighting();
             resident(&mut world, floor);
-            light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, floor);
+            light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, floor);
             assert_eq!(light.at(under).sun(), MAX_LEVEL, "no sky to lose");
 
             resident(&mut world, above);
             {
                 let chunk = world
-                    .chunk(tiamot_core::domain::OVERWORLD, above, &mut Empty)
+                    .chunk(tiamat_core::domain::OVERWORLD, above, &mut Empty)
                     .expect("chunk");
-                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
-                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                    let local = tiamat_core::coords::LocalBlock::from_index(index);
                     let hole = holed && (10..13).contains(&local.x) && (10..13).contains(&local.z);
                     if !hole {
                         chunk.set_block_local(local, BlockValue::Uniform(STONE));
@@ -987,7 +987,7 @@ mod tests {
                 }
             }
             let shortcuts = light.dark_shortcuts;
-            let touched = light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, above);
+            let touched = light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, above);
             assert_eq!(
                 light.dark_shortcuts > shortcuts,
                 !holed,
@@ -1024,7 +1024,7 @@ mod tests {
         // Measured three ways in one test, because the claim is the
         // DIFFERENCE: the same trees, and the only change is whether the
         // material dims.
-        const LEAF: tiamot_core::MaterialId = tiamot_core::MaterialId(9);
+        const LEAF: tiamat_core::MaterialId = tiamat_core::MaterialId(9);
 
         let forest = || {
             let mut world = world();
@@ -1032,11 +1032,11 @@ mod tests {
             resident(&mut world, pos);
             {
                 let chunk = world
-                    .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+                    .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
                     .expect("chunk");
                 // Ground at y = 0, and a canopy three blocks thick at y = 9.
-                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
-                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                    let local = tiamat_core::coords::LocalBlock::from_index(index);
                     if local.y == 0 {
                         chunk.set_block_local(local, BlockValue::Uniform(STONE));
                     } else if (9..12).contains(&local.y) {
@@ -1048,13 +1048,13 @@ mod tests {
         };
 
         let floor = BlockPos::new(8, 1, 8);
-        let see_through = || tiamot_core::light::SeeThrough::new([LEAF]);
+        let see_through = || tiamat_core::light::SeeThrough::new([LEAF]);
 
         // Leaves that pass light untouched: the floor is a meadow. This is
         // what the mod reported, and it is the control.
         let (world, pos) = forest();
         let mut light = lighting_with(see_through());
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         assert_eq!(
             light.at(floor).sun(),
             MAX_LEVEL,
@@ -1064,8 +1064,8 @@ mod tests {
         // The same canopy, dimming two levels a block: shade, not darkness.
         let (world, pos) = forest();
         let mut light =
-            dimming_lighting(see_through(), tiamot_core::light::Dimming::new([(LEAF, 2)]));
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+            dimming_lighting(see_through(), tiamat_core::light::Dimming::new([(LEAF, 2)]));
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         let shaded = light.at(floor).sun();
         assert!(
             shaded > 0 && shaded < MAX_LEVEL,
@@ -1076,8 +1076,8 @@ mod tests {
         // makes a rainforest read differently from a copse.
         let (world, pos) = forest();
         let mut heavy =
-            dimming_lighting(see_through(), tiamot_core::light::Dimming::new([(LEAF, 5)]));
-        heavy.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+            dimming_lighting(see_through(), tiamat_core::light::Dimming::new([(LEAF, 5)]));
+        heavy.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         assert!(
             heavy.at(floor).sun() < shaded,
             "five levels a block lit the floor at {} against two levels' {shaded}",
@@ -1101,19 +1101,19 @@ mod tests {
         // Measured both ways in one test, because the interesting claim is the
         // DIFFERENCE: the same room, the same roof, and the only change is
         // whether the roof's material is in the transparency table.
-        const GLASS: tiamot_core::MaterialId = tiamot_core::MaterialId(9);
+        const GLASS: tiamat_core::MaterialId = tiamat_core::MaterialId(9);
 
-        let room = |material: tiamot_core::MaterialId| {
+        let room = |material: tiamat_core::MaterialId| {
             let mut world = world();
             let pos = ChunkPos::new(0, 0, 0);
             resident(&mut world, pos);
             {
                 let chunk = world
-                    .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+                    .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
                     .expect("chunk");
                 // Solid up to y = 8, so nothing reaches the floor from the side.
-                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
-                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                    let local = tiamat_core::coords::LocalBlock::from_index(index);
                     if local.y <= 8 {
                         chunk.set_block_local(local, BlockValue::Uniform(STONE));
                     }
@@ -1123,12 +1123,12 @@ mod tests {
                     for z in 4..12 {
                         for y in 4..8 {
                             chunk.set_block_local(
-                                tiamot_core::coords::LocalBlock::new(x, y, z),
+                                tiamat_core::coords::LocalBlock::new(x, y, z),
                                 BlockValue::AIR,
                             );
                         }
                         chunk.set_block_local(
-                            tiamot_core::coords::LocalBlock::new(x, 8, z),
+                            tiamat_core::coords::LocalBlock::new(x, 8, z),
                             BlockValue::Uniform(material),
                         );
                     }
@@ -1139,8 +1139,8 @@ mod tests {
 
         // Roofed in stone, with glass registered but not used: dark.
         let (world, pos) = room(STONE);
-        let mut light = lighting_with(tiamot_core::light::SeeThrough::new([GLASS]));
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        let mut light = lighting_with(tiamat_core::light::SeeThrough::new([GLASS]));
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         assert_eq!(
             light.at(BlockPos::new(8, 7, 8)).sun(),
             0,
@@ -1149,8 +1149,8 @@ mod tests {
 
         // The same room roofed in glass: lit.
         let (world, pos) = room(GLASS);
-        let mut light = lighting_with(tiamot_core::light::SeeThrough::new([GLASS]));
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        let mut light = lighting_with(tiamat_core::light::SeeThrough::new([GLASS]));
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         assert!(
             light.at(BlockPos::new(8, 7, 8)).sun() > 0,
             "a glass roof made a dark room"
@@ -1162,7 +1162,7 @@ mod tests {
         // material as see-through.
         let (world, pos) = room(GLASS);
         let mut light = lighting();
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         assert_eq!(
             light.at(BlockPos::new(8, 7, 8)).sun(),
             0,
@@ -1179,11 +1179,11 @@ mod tests {
         // Fill it solid so sunlight cannot get in, then hollow out a room.
         {
             let chunk = world
-                .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+                .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
                 .expect("chunk");
-            for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+            for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
                 chunk.set_block_local(
-                    tiamot_core::coords::LocalBlock::from_index(index),
+                    tiamat_core::coords::LocalBlock::from_index(index),
                     BlockValue::Uniform(STONE),
                 );
             }
@@ -1191,19 +1191,19 @@ mod tests {
                 for y in 4..12 {
                     for z in 4..12 {
                         chunk.set_block_local(
-                            tiamot_core::coords::LocalBlock::new(x, y, z),
+                            tiamat_core::coords::LocalBlock::new(x, y, z),
                             BlockValue::AIR,
                         );
                     }
                 }
             }
             chunk.set_block_local(
-                tiamot_core::coords::LocalBlock::new(8, 8, 8),
+                tiamat_core::coords::LocalBlock::new(8, 8, 8),
                 BlockValue::Uniform(LAMP),
             );
         }
 
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
 
         assert_eq!(light.at(BlockPos::new(8, 8, 8)).red(), MAX_LEVEL);
         assert_eq!(light.at(BlockPos::new(9, 8, 8)).red(), MAX_LEVEL - 1);
@@ -1226,23 +1226,23 @@ mod tests {
         resident(&mut world, west);
         resident(&mut world, east);
 
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, west);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, east);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, west);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, east);
 
         // The block either side of the boundary is lit from the sky in both
         // chunks, so instead put a lamp at the very edge of the west chunk and
         // check it crosses.
         {
             let chunk = world
-                .chunk(tiamot_core::domain::OVERWORLD, west, &mut Empty)
+                .chunk(tiamat_core::domain::OVERWORLD, west, &mut Empty)
                 .expect("chunk");
             chunk.set_block_local(
-                tiamot_core::coords::LocalBlock::new(15, 8, 8),
+                tiamat_core::coords::LocalBlock::new(15, 8, 8),
                 BlockValue::Uniform(LAMP),
             );
         }
         let touched = light.edited(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             &world,
             BlockPos::new(-1, 8, 8),
         );
@@ -1268,7 +1268,7 @@ mod tests {
         resident(&mut world, pos);
         let before = world.cached();
 
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
 
         assert_eq!(
             world.cached(),
@@ -1289,17 +1289,17 @@ mod tests {
         let pos = ChunkPos::new(0, -4, 0);
         {
             let chunk = world
-                .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+                .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
                 .expect("chunk");
-            for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+            for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
                 chunk.set_block_local(
-                    tiamot_core::coords::LocalBlock::from_index(index),
+                    tiamat_core::coords::LocalBlock::from_index(index),
                     BlockValue::Uniform(STONE),
                 );
             }
         }
 
-        let touched = light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        let touched = light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
 
         assert!(
             touched.contains(&pos),
@@ -1308,7 +1308,7 @@ mod tests {
         assert!(
             light.layer(pos).is_some_and(|layer| layer
                 .is_uniform()
-                .is_some_and(tiamot_core::light::Light::is_dark)),
+                .is_some_and(tiamat_core::light::Light::is_dark)),
             "solid rock with no lamps should be uniformly dark"
         );
         // And it was answered from the palette, not relit: the whole point of
@@ -1333,15 +1333,15 @@ mod tests {
         // Glass has to BE glass to the table, and the sky has to reach it:
         // `resident` makes the chunks around it exist, since an unloaded
         // neighbour is opaque and would roof the glass in rock.
-        let mut light = lighting_with(tiamot_core::light::SeeThrough::new([GLASS]));
+        let mut light = lighting_with(tiamat_core::light::SeeThrough::new([GLASS]));
         let fill = |world: &mut World, at: ChunkPos, material: MaterialId| {
             resident(world, at);
             let chunk = world
-                .chunk(tiamot_core::domain::OVERWORLD, at, &mut Empty)
+                .chunk(tiamat_core::domain::OVERWORLD, at, &mut Empty)
                 .expect("chunk");
-            for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
+            for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
                 chunk.set_block_local(
-                    tiamot_core::coords::LocalBlock::from_index(index),
+                    tiamat_core::coords::LocalBlock::from_index(index),
                     BlockValue::Uniform(material),
                 );
             }
@@ -1350,14 +1350,14 @@ mod tests {
             light.layer(at).is_some_and(|layer| {
                 layer
                     .is_uniform()
-                    .is_some_and(tiamot_core::light::Light::is_dark)
+                    .is_some_and(tiamat_core::light::Light::is_dark)
             })
         };
 
         // Glass, under open sky: the whole chunk lights up through it.
         let glass_at = ChunkPos::new(2, 0, 0);
         fill(&mut world, glass_at, GLASS);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, glass_at);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, glass_at);
         assert!(
             !dark(&light, glass_at),
             "a chunk of glass under the sky was answered as dark"
@@ -1366,7 +1366,7 @@ mod tests {
         // Lamps, deep underground: lit from within, however buried.
         let lamps_at = ChunkPos::new(0, -6, 0);
         fill(&mut world, lamps_at, LAMP);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, lamps_at);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, lamps_at);
         assert!(
             !dark(&light, lamps_at),
             "a chunk of lamps was answered as dark"
@@ -1384,7 +1384,7 @@ mod tests {
         let mut light = lighting();
         let pos = ChunkPos::new(0, 0, 0);
         resident(&mut world, pos);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
         assert_eq!(light.len(), 1);
 
         light.forget(pos);
@@ -1401,7 +1401,7 @@ mod tests {
         let mut light = lighting();
         let pos = ChunkPos::new(0, 0, 0);
         resident(&mut world, pos);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, pos);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
 
         let layer = light.layer(pos).expect("lit");
         assert!(
@@ -1426,8 +1426,8 @@ mod tests {
         let next = ChunkPos::new(1, 0, 0);
         resident(&mut world, here);
         resident(&mut world, next);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, here);
-        light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, next);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, here);
+        light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, next);
 
         // A block just inside the first chunk's far edge, and one just over the
         // line in the second.
@@ -1437,14 +1437,14 @@ mod tests {
 
         {
             let chunk = world
-                .chunk(tiamot_core::domain::OVERWORLD, here, &mut Empty)
+                .chunk(tiamat_core::domain::OVERWORLD, here, &mut Empty)
                 .expect("chunk");
             chunk.set_block_local(
-                tiamot_core::coords::LocalBlock::new(15, 8, 8),
+                tiamat_core::coords::LocalBlock::new(15, 8, 8),
                 BlockValue::Uniform(LAMP),
             );
         }
-        let touched = light.edited(tiamot_core::domain::OVERWORLD, &world, lamp);
+        let touched = light.edited(tiamat_core::domain::OVERWORLD, &world, lamp);
 
         assert!(
             light.at(across).red() > 0,
@@ -1460,14 +1460,14 @@ mod tests {
         // And now take it away again.
         {
             let chunk = world
-                .chunk(tiamot_core::domain::OVERWORLD, here, &mut Empty)
+                .chunk(tiamat_core::domain::OVERWORLD, here, &mut Empty)
                 .expect("chunk");
             chunk.set_block_local(
-                tiamot_core::coords::LocalBlock::new(15, 8, 8),
+                tiamat_core::coords::LocalBlock::new(15, 8, 8),
                 BlockValue::AIR,
             );
         }
-        let touched = light.edited(tiamot_core::domain::OVERWORLD, &world, lamp);
+        let touched = light.edited(tiamat_core::domain::OVERWORLD, &world, lamp);
 
         assert_eq!(
             light.at(across).red(),
@@ -1511,14 +1511,14 @@ mod tests {
         let centre = ChunkPos::new(0, 0, 0);
         for _ in 0..20 {
             light.forget(centre);
-            light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, centre);
+            light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, centre);
         }
         let mut total = std::time::Duration::ZERO;
         const N: u32 = 200;
         for _ in 0..N {
             light.forget(centre);
             let t = std::time::Instant::now();
-            light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, centre);
+            light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, centre);
             total += t.elapsed();
         }
         println!("chunk_loaded (air, open sky): mean {:?}", total / N);
@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     #[ignore = "measures rather than asserts; run by hand"]
     fn measure_canopy_relight() {
-        const LEAF: tiamot_core::MaterialId = tiamot_core::MaterialId(9);
+        const LEAF: tiamat_core::MaterialId = tiamat_core::MaterialId(9);
 
         let scene = || {
             let mut world = world();
@@ -1547,15 +1547,15 @@ mod tests {
             {
                 let chunk = world
                     .chunk(
-                        tiamot_core::domain::OVERWORLD,
+                        tiamat_core::domain::OVERWORLD,
                         ChunkPos::new(0, 0, 0),
                         &mut Empty,
                     )
                     .expect("chunk");
                 // A canopy four blocks thick across the whole chunk: more
                 // foliage than any real forest puts over one column.
-                for index in 0..tiamot_core::BLOCKS_PER_CHUNK {
-                    let local = tiamot_core::coords::LocalBlock::from_index(index);
+                for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                    let local = tiamat_core::coords::LocalBlock::from_index(index);
                     if (10..14).contains(&local.y) {
                         chunk.set_block_local(local, BlockValue::Uniform(LEAF));
                     }
@@ -1569,27 +1569,27 @@ mod tests {
             let centre = ChunkPos::new(0, 0, 0);
             for _ in 0..20 {
                 light.forget(centre);
-                light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, centre);
+                light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, centre);
             }
             let mut total = std::time::Duration::ZERO;
             const N: u32 = 200;
             for _ in 0..N {
                 light.forget(centre);
                 let t = std::time::Instant::now();
-                light.chunk_loaded(tiamot_core::domain::OVERWORLD, &world, centre);
+                light.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, centre);
                 total += t.elapsed();
             }
             println!("chunk_loaded ({name}): mean {:?}", total / N);
         };
 
-        let see_through = tiamot_core::light::SeeThrough::new([LEAF]);
+        let see_through = tiamat_core::light::SeeThrough::new([LEAF]);
         measure(
             "canopy, dimming nothing",
-            dimming_lighting(see_through.clone(), tiamot_core::light::Dimming::default()),
+            dimming_lighting(see_through.clone(), tiamat_core::light::Dimming::default()),
         );
         measure(
             "canopy, dimming 2 levels a block",
-            dimming_lighting(see_through, tiamot_core::light::Dimming::new([(LEAF, 2)])),
+            dimming_lighting(see_through, tiamat_core::light::Dimming::new([(LEAF, 2)])),
         );
     }
 }

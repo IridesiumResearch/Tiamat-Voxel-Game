@@ -20,7 +20,7 @@
 //! about 3× slower. Asserting against them on CI compares hardware, not code,
 //! and that assertion failed on the first CI run for exactly that reason.
 //!
-//! So the tight check is opt-in: set `TIAMOT_STRICT_PERF=1` on a machine
+//! So the tight check is opt-in: set `TIAMAT_STRICT_PERF=1` on a machine
 //! comparable to the one in the verdict and it asserts within 3× of the
 //! recorded numbers. CI does not set it, and gates on the thresholds instead —
 //! because the thresholds are what the KEEP decision was actually granted on.
@@ -47,7 +47,7 @@
 //!
 //! # What the strict check says today, which is not nothing
 //!
-//! `TIAMOT_STRICT_PERF=1` on the reference machine currently **fails**:
+//! `TIAMAT_STRICT_PERF=1` on the reference machine currently **fails**:
 //!
 //! ```text
 //! scene (d) realistic:  270 us against the spike's 108  (2.5x)
@@ -85,13 +85,13 @@
 use std::time::{Duration, Instant};
 
 use client::mesher::{Absent, Neighbours, mesh_chunk};
-use tiamot_core::coords::SubNodePos;
-use tiamot_core::{Chunk, MaterialId};
+use tiamat_core::coords::SubNodePos;
+use tiamat_core::{Chunk, MaterialId};
 
 /// Full daylight. **The uniform case is the right one for a mesh timing**: it
 /// is what leaves greedy merging exactly as Task 02b measured it, so these
 /// numbers stay comparable with the baseline they are gated against.
-const DAY: client::shade::Uniform = client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: client::shade::Uniform = client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 const STONE: MaterialId = MaterialId(2);
 const DIRT: MaterialId = MaterialId(3);
@@ -108,7 +108,7 @@ const GRASS: MaterialId = MaterialId(4);
 /// verdict was granted on, which is where this should be.
 ///
 /// So the threshold is the verdict's again and this is only the runner's
-/// day-to-day variance on top. Applied when `TIAMOT_STRICT_PERF` is unset, so
+/// day-to-day variance on top. Applied when `TIAMAT_STRICT_PERF` is unset, so
 /// the verdict's own number is asserted exactly wherever it means something.
 const RUNNER_SLACK_PERCENT: u32 = 10;
 
@@ -121,7 +121,7 @@ const REMESH_GATE: Duration = Duration::from_micros(2000);
 
 /// What the spike actually measured, in microseconds.
 ///
-/// Only asserted when `TIAMOT_STRICT_PERF` is set — see the module docs.
+/// Only asserted when `TIAMAT_STRICT_PERF` is set — see the module docs.
 const MEASURED_REALISTIC_US: u64 = 108;
 const MEASURED_CHISELLED_US: u64 = 143;
 
@@ -130,7 +130,7 @@ const MEASURED_CHISELLED_US: u64 = 143;
 /// Off by default. A number measured on one machine says nothing about another,
 /// and a gate that fails on slower hardware is a gate that gets disabled.
 fn strict() -> bool {
-    std::env::var_os("TIAMOT_STRICT_PERF").is_some()
+    std::env::var_os("TIAMAT_STRICT_PERF").is_some()
 }
 
 /// Asserts a measurement is within 3× of the spike's, when strict mode is on.
@@ -150,7 +150,7 @@ fn gate(threshold: Duration) -> Duration {
 fn check_against_spike(label: &str, elapsed: Duration, measured_us: u64) {
     if !strict() {
         println!(
-            "  (not comparing against the spike's {measured_us} us: set TIAMOT_STRICT_PERF=1 \
+            "  (not comparing against the spike's {measured_us} us: set TIAMAT_STRICT_PERF=1 \
              on comparable hardware to enable that check)"
         );
         return;
@@ -193,9 +193,9 @@ impl Rng {
 /// these mirror `spikes/subnode/src/scenes.rs` line for line.
 mod scenes {
     use super::{DIRT, GRASS, Rng, STONE};
-    use tiamot_core::block::{Cells, SUBNODES_PER_BLOCK};
-    use tiamot_core::coords::LocalBlock;
-    use tiamot_core::{BlockValue, CHUNK_BLOCKS, Chunk, ChunkPos, MaterialId};
+    use tiamat_core::block::{Cells, SUBNODES_PER_BLOCK};
+    use tiamat_core::coords::LocalBlock;
+    use tiamat_core::{BlockValue, CHUNK_BLOCKS, Chunk, ChunkPos, MaterialId};
 
     /// Half-full is the shape with the most surface area, which is what meshing
     /// costs scale with.
@@ -498,9 +498,9 @@ fn what_mode_ones_move_to_real_light_costs_in_quads() {
     /// and chosen for that: it is the ceiling on what this change can cost.
     struct Gradient;
     impl BlockLight for Gradient {
-        fn at(&self, x: i32, y: i32, z: i32) -> tiamot_core::light::Light {
+        fn at(&self, x: i32, y: i32, z: i32) -> tiamat_core::light::Light {
             let distance = (x.abs() + y.abs() + z.abs()).clamp(0, 15) as u8;
-            tiamot_core::light::Light::new(15 - distance, 0, 0, 0)
+            tiamat_core::light::Light::new(15 - distance, 0, 0, 0)
         }
     }
 
@@ -509,7 +509,7 @@ fn what_mode_ones_move_to_real_light_costs_in_quads() {
         &chunk,
         &Neighbours::open(),
         Absent::Air,
-        &client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT),
+        &client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT),
         &client::mesher::NoFluid,
         &client::mesher::NoGlass,
     );

@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tiamot_core::storage::{Bag, Value};
+use tiamat_core::storage::{Bag, Value};
 
 /// Every mod's storage, and which of them need writing.
 #[derive(Debug, Default)]
@@ -105,7 +105,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::storage::Access for Shared {
+impl tiamat_core::storage::Access for Shared {
     fn get(&self, mod_id: &str, key: &str) -> Option<Value> {
         self.storage
             .read()

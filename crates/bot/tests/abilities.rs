@@ -17,13 +17,13 @@
 use std::path::PathBuf;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::actions;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::actions;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-abilities").join(name);
+    let dir = std::env::temp_dir().join("tiamat-abilities").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -108,7 +108,7 @@ async fn walked(bot: &mut Bot, ticks: u64) -> f32 {
         .walk([0.0, 0.0, 1.0], actions::SPRINT, ticks)
         .await
         .expect("walk");
-    let span = tiamot_core::CHUNK_SUBNODES as f32;
+    let span = tiamat_core::CHUNK_SUBNODES as f32;
     (after.chunk.z - before.chunk.z) as f32 * span + (after.local[2] - before.local[2])
 }
 
@@ -187,7 +187,7 @@ fn a_mod_can_grant_flight_to_somebody_who_is_not_an_operator() {
             .await
             .expect("walk");
 
-        let span = tiamot_core::CHUNK_SUBNODES as f32;
+        let span = tiamat_core::CHUNK_SUBNODES as f32;
         let risen =
             (after.chunk.y - before.chunk.y) as f32 * span + (after.local[1] - before.local[1]);
         assert!(

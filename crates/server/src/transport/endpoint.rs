@@ -14,7 +14,7 @@
 //! # What this layer is allowed to decide
 //!
 //! Nothing. Every rule about who may do what lives in
-//! [`tiamot_core::session`], which is a pure state machine and is tested as
+//! [`tiamat_core::session`], which is a pure state machine and is tested as
 //! one. This module moves bytes, calls [`Session::handle`], and sends whatever
 //! it is told to send. If a decision appears here it is in the wrong place —
 //! the test suite for it would need a socket, and it would not run on every
@@ -25,10 +25,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use quinn::{Endpoint, ServerConfig};
-use tiamot_core::identity::{Allowlist, PlayerUuid, SelfSovereign};
-use tiamot_core::proto::Edit;
-use tiamot_core::proto::{ClientMessage, ModEntry, ServerMessage};
-use tiamot_core::session::{Action, IdentityRegistry, JoinContext, Session};
+use tiamat_core::identity::{Allowlist, PlayerUuid, SelfSovereign};
+use tiamat_core::proto::Edit;
+use tiamat_core::proto::{ClientMessage, ModEntry, ServerMessage};
+use tiamat_core::session::{Action, IdentityRegistry, JoinContext, Session};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -40,10 +40,10 @@ use crate::sim::Control;
 /// The QUIC ALPN protocol identifier.
 ///
 /// Versioned separately from the wire protocol: this is negotiated during the
-/// TLS handshake, before a single Tiamot message is exchanged, so a client
+/// TLS handshake, before a single Tiamat message is exchanged, so a client
 /// built for a different engine is refused at the transport layer rather than
 /// getting far enough to send a `Hello`.
-const ALPN: &[u8] = b"tiamot/1";
+const ALPN: &[u8] = b"tiamat/1";
 
 /// Starting or running the listener failed.
 #[derive(Debug, thiserror::Error)]
@@ -115,45 +115,45 @@ pub struct Shared {
     ///
     /// Built once at startup and never changed: registries freeze before the
     /// world opens (charter rule 9), so there is nothing that could change it.
-    pub materials: Vec<tiamot_core::proto::MaterialDef>,
+    pub materials: Vec<tiamat_core::proto::MaterialDef>,
     /// The same tools, in the shape a client is sent on join.
     ///
     /// Separate from [`Shared::tools`], which is a lookup keyed by id for the
     /// simulation. This one is an ordered list of the wire type, because the
     /// order a client shows tools in should be a property of the mod set rather
     /// than of a map's iteration.
-    pub tool_table: Vec<tiamot_core::proto::ToolDef>,
+    pub tool_table: Vec<tiamat_core::proto::ToolDef>,
     /// Every fluid the mods registered, for the join tables.
-    pub fluid_table: Vec<tiamot_core::proto::FluidDef>,
+    pub fluid_table: Vec<tiamat_core::proto::FluidDef>,
     /// Every action the mods registered, for the join tables.
     ///
     /// Charter rule 11: the engine owns bindings and a mod owns only the name,
     /// so this is the whole of what a mod gets to say about controls.
-    pub action_table: Vec<tiamot_core::proto::ActionDef>,
+    pub action_table: Vec<tiamat_core::proto::ActionDef>,
     /// The options this world's mods offer the player, sent once on join.
-    pub setting_table: Vec<tiamot_core::proto::SettingDef>,
+    pub setting_table: Vec<tiamat_core::proto::SettingDef>,
     /// Every sound the mods registered, for the join tables.
-    pub sound_table: Vec<tiamot_core::proto::SoundDef>,
-    /// Every font a mod registered, sent on join. See `tiamot_core::font`.
-    pub font_table: Vec<tiamot_core::proto::FontDef>,
+    pub sound_table: Vec<tiamat_core::proto::SoundDef>,
+    /// Every font a mod registered, sent on join. See `tiamat_core::font`.
+    pub font_table: Vec<tiamat_core::proto::FontDef>,
     /// The pictures the mods registered, sent on join.
-    pub picture_table: Vec<tiamot_core::proto::PictureDef>,
-    /// Every model the loaded mods push. See [`tiamot_core::proto::ModelDef`].
-    pub model_table: Vec<tiamot_core::proto::ModelDef>,
+    pub picture_table: Vec<tiamat_core::proto::PictureDef>,
+    /// Every model the loaded mods push. See [`tiamat_core::proto::ModelDef`].
+    pub model_table: Vec<tiamat_core::proto::ModelDef>,
     /// How the loaded mods want the engine's own screens to look, or `None`.
-    pub theme: Option<tiamot_core::proto::ThemeDef>,
+    pub theme: Option<tiamat_core::proto::ThemeDef>,
     /// The cloud deck a mod registered, or `None` for a world with none.
-    pub cloud_layer: Option<tiamot_core::atmosphere::CloudLayer>,
+    pub cloud_layer: Option<tiamat_core::atmosphere::CloudLayer>,
     /// The HUD scripts the mods asked to push, in load order.
-    pub hud_scripts: Vec<tiamot_core::proto::HudScriptDef>,
+    pub hud_scripts: Vec<tiamat_core::proto::HudScriptDef>,
     /// Which sound each named event plays, in load order.
-    pub sound_bindings: Vec<tiamot_core::proto::SoundBinding>,
+    pub sound_bindings: Vec<tiamat_core::proto::SoundBinding>,
 
     /// Ticks in a full day, or 0 if no mod registered a sky.
     pub sky_day_length: u32,
 
     /// The sky's colour keyframes, sorted by time.
-    pub sky_keyframes: Vec<tiamot_core::proto::SkyFrame>,
+    pub sky_keyframes: Vec<tiamat_core::proto::SkyFrame>,
 
     /// Where the clock stands in the day, in ticks since midnight.
     ///
@@ -177,7 +177,7 @@ pub struct Shared {
     /// Maximum simultaneous players.
     pub max_players: u32,
     /// Where a new player starts.
-    pub spawn: tiamot_core::BlockPos,
+    pub spawn: tiamat_core::BlockPos,
     /// How many players are connected right now.
     ///
     /// Incremented only once a connection reaches the world, and decremented on
@@ -206,7 +206,7 @@ pub struct Shared {
     /// Uses of a block — the place control with nothing to place — waiting for
     /// the tick to ask the mods. Queued for the reason punches are: what the
     /// cell holds and whether it is in reach are the tick's to read.
-    pub uses: std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, tiamot_core::SubNodePos)>>,
+    pub uses: std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, tiamat_core::SubNodePos)>>,
     /// Mod-registered actions waiting to be handed to the mods.
     ///
     /// Queued on the connection thread and drained by the tick, like every
@@ -223,7 +223,7 @@ pub struct Shared {
     pub chat: std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, String)>>,
     /// Dialog events waiting for the tick to hand to the owning mods.
     pub dialog_events: std::sync::Mutex<
-        std::collections::VecDeque<(PlayerUuid, String, tiamot_core::proto::DialogEvent)>,
+        std::collections::VecDeque<(PlayerUuid, String, tiamat_core::proto::DialogEvent)>,
     >,
 
     /// World edits queued by the operator rather than by a player.
@@ -275,7 +275,7 @@ pub struct Shared {
     pub chunk_requests: std::sync::Mutex<std::collections::VecDeque<ChunkRequest>>,
 
     /// How far each player can see.
-    pub view_distance: tiamot_core::interest::ViewDistance,
+    pub view_distance: tiamat_core::interest::ViewDistance,
 
     /// What each player is carrying, in units (charter rule 5).
     ///
@@ -285,7 +285,7 @@ pub struct Shared {
     /// Digging credits it and placing debits it, so the 27-unit arithmetic of
     /// charter rule 5 is a round trip rather than a one-way accumulation.
     pub inventories:
-        std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, tiamot_core::inventory::Slots>>,
+        std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, tiamat_core::inventory::Slots>>,
 
     /// Players whose inventory changed and have not been told yet.
     pub inventory_dirty: std::sync::Mutex<std::collections::BTreeSet<PlayerUuid>>,
@@ -305,7 +305,7 @@ pub struct Shared {
     /// draw anything. Bounded by [`MAX_QUEUED_BURSTS`], past which new bursts
     /// are dropped.
     pub particles:
-        std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, Vec<tiamot_core::particle::Burst>>>,
+        std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, Vec<tiamat_core::particle::Burst>>>,
 
     /// Badges waiting for each player, keyed by the entity each hangs over.
     ///
@@ -318,7 +318,7 @@ pub struct Shared {
     pub badges: std::sync::Mutex<
         std::collections::BTreeMap<
             PlayerUuid,
-            std::collections::BTreeMap<u64, tiamot_core::particle::Badge>,
+            std::collections::BTreeMap<u64, tiamat_core::particle::Badge>,
         >,
     >,
 
@@ -366,7 +366,7 @@ pub struct Shared {
     /// Built once at startup and immutable thereafter. Rebuilding it while the
     /// server runs would mean a file edited mid-session is served under its old
     /// hash — the one thing content addressing exists to make impossible.
-    pub content: tiamot_core::content::ContentIndex,
+    pub content: tiamat_core::content::ContentIndex,
 
     /// Where every player's body is, and what they have asked to do next.
     ///
@@ -379,7 +379,7 @@ pub struct Shared {
     ///
     /// Built once at startup from the frozen registries (charter rule 9), so
     /// there is nothing that could change it while the server runs.
-    pub tools: std::collections::BTreeMap<String, tiamot_core::script::Tool>,
+    pub tools: std::collections::BTreeMap<String, tiamat_core::script::Tool>,
 
     /// The extra inventory views mods asked for, in id order.
     ///
@@ -387,7 +387,7 @@ pub struct Shared {
     /// the tools beside it — every player gets the same set, and a view
     /// appearing halfway through a session would be a place a client had never
     /// been told about.
-    pub views: Vec<tiamot_core::inventory::ViewDef>,
+    pub views: Vec<tiamat_core::inventory::ViewDef>,
 
     /// The tool a player digs with when they have selected nothing.
     ///
@@ -401,7 +401,7 @@ pub struct Shared {
     /// Keyed by WORLD material id, because that is what a chunk holds. A
     /// material with no entry gets the engine default rather than being
     /// unbreakable — see `BlockRules::DEFAULT_HARDNESS`.
-    pub hardness: std::collections::BTreeMap<tiamot_core::MaterialId, tiamot_core::dig::Resistance>,
+    pub hardness: std::collections::BTreeMap<tiamat_core::MaterialId, tiamat_core::dig::Resistance>,
 
     /// Which hotbar slot each player is holding.
     ///
@@ -418,7 +418,7 @@ pub struct Shared {
     /// carry shares one id space — see `register_item` — and this is the set
     /// that is a sword rather than a stone. Built once from the frozen
     /// registries, like the hardness beside it.
-    pub items: std::collections::BTreeSet<tiamot_core::MaterialId>,
+    pub items: std::collections::BTreeSet<tiamat_core::MaterialId>,
 
     /// Named `bodies` rather than `players` because `players` is already the
     /// connected *count* on this struct, and two fields whose names differ only
@@ -431,7 +431,7 @@ pub struct Shared {
 #[derive(Debug, Clone, Default)]
 pub struct PrecipitationSlot {
     /// The rain, or none.
-    pub precipitation: Option<tiamot_core::atmosphere::Precipitation>,
+    pub precipitation: Option<tiamat_core::atmosphere::Precipitation>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -440,7 +440,7 @@ pub struct PrecipitationSlot {
 #[derive(Debug, Clone, Default)]
 pub struct CloudSlot {
     /// The state, or none.
-    pub clouds: Option<tiamot_core::atmosphere::Clouds>,
+    pub clouds: Option<tiamat_core::atmosphere::Clouds>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -454,7 +454,7 @@ pub struct CloudSlot {
 #[derive(Debug, Clone, Default)]
 pub struct CloudMapSlot {
     /// The grid, or none.
-    pub map: Option<tiamot_core::atmosphere::CloudMap>,
+    pub map: Option<tiamat_core::atmosphere::CloudMap>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -463,7 +463,7 @@ pub struct CloudMapSlot {
 #[derive(Debug, Clone, Default)]
 pub struct SkySlot {
     /// The modifier, or none.
-    pub modifier: Option<tiamot_core::atmosphere::SkyModifier>,
+    pub modifier: Option<tiamat_core::atmosphere::SkyModifier>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -471,7 +471,7 @@ pub struct SkySlot {
 #[derive(Debug, Clone, Default)]
 pub struct HudSlot {
     /// What the mod last asked for.
-    pub values: tiamot_core::hud::Values,
+    pub values: tiamat_core::hud::Values,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -495,13 +495,13 @@ pub struct PlayerSim {
     /// deliberate handoff rather than a walk (`core::domain`).
     pub domain: String,
     /// The chunk the body's local coordinates are relative to (charter rule 7).
-    pub origin: tiamot_core::ChunkPos,
+    pub origin: tiamat_core::ChunkPos,
     /// Position, velocity and ground contact, in sub-node cells.
-    pub body: tiamot_core::phys::Body,
+    pub body: tiamat_core::phys::Body,
     /// Inputs filed under the tick that will apply them.
-    pub inputs: tiamot_core::phys::InputQueue,
+    pub inputs: tiamat_core::phys::InputQueue,
     /// What this player is breaking, if anything.
-    pub dig: Option<tiamot_core::dig::Dig>,
+    pub dig: Option<tiamat_core::dig::Dig>,
     /// The tool they say they are holding, or `None` for a bare hand.
     pub tool: Option<String>,
     /// Where they are looking, in turns, as the wire carries it.
@@ -518,7 +518,7 @@ pub struct PlayerSim {
     /// and advances its own time, which is what keeps skeletal animation out of
     /// the deterministic simulation entirely (charter rule 4 does not reach
     /// presentation, and interpolating a joint is transcendental work).
-    pub anim: tiamot_core::ent::AnimTag,
+    pub anim: tiamat_core::ent::AnimTag,
     /// The tick a swing was thrown on, or zero.
     ///
     /// A punch has no duration of its own — it is one message — so the body has
@@ -549,7 +549,7 @@ pub struct PlayerSim {
     /// nothing to tell a client beyond the operator answer it already has.
     ///
     /// Forgotten when the player leaves, because `PlayerSim` is.
-    pub granted: Option<tiamot_core::phys::Abilities>,
+    pub granted: Option<tiamat_core::phys::Abilities>,
     /// Whether the abilities above have been sent since they last changed.
     ///
     /// The same shape `HudSlot::sent` has, and for the same reason: a mod
@@ -574,12 +574,12 @@ impl PlayerSim {
     /// Sanitised here rather than at the setter, so a value that arrived from
     /// a mod cannot reach the step even if some later path forgets.
     #[must_use]
-    pub fn abilities(&self, operator: bool) -> tiamot_core::phys::Abilities {
+    pub fn abilities(&self, operator: bool) -> tiamat_core::phys::Abilities {
         let granted = self
             .granted
-            .unwrap_or(tiamot_core::phys::Abilities::DEFAULT)
+            .unwrap_or(tiamat_core::phys::Abilities::DEFAULT)
             .sanitised();
-        tiamot_core::phys::Abilities {
+        tiamat_core::phys::Abilities {
             fly: granted.fly || operator,
             ..granted
         }
@@ -587,10 +587,10 @@ impl PlayerSim {
 
     /// A body standing at a block position, at rest.
     #[must_use]
-    pub fn spawned_at(spawn: tiamot_core::BlockPos, tick: u64) -> Self {
+    pub fn spawned_at(spawn: tiamat_core::BlockPos, tick: u64) -> Self {
         let origin = spawn.chunk();
-        let corner = tiamot_core::BlockPos::from_chunk_corner(origin);
-        let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
+        let corner = tiamat_core::BlockPos::from_chunk_corner(origin);
+        let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
         // Centred on the spawn block rather than on its corner, so a player
         // does not start half inside the wall next to it.
         let local = [
@@ -602,13 +602,13 @@ impl PlayerSim {
             // A player joins the overworld. Which domain a spawn belongs to is
             // a mod's decision, made afterwards with a transfer — the engine
             // has no opinion about where anybody starts (charter rule 1).
-            domain: tiamot_core::domain::OVERWORLD.to_owned(),
+            domain: tiamat_core::domain::OVERWORLD.to_owned(),
             origin,
-            body: tiamot_core::phys::Body::at(local),
-            inputs: tiamot_core::phys::InputQueue::new(tick),
+            body: tiamat_core::phys::Body::at(local),
+            inputs: tiamat_core::phys::InputQueue::new(tick),
             dig: None,
             tool: None,
-            anim: tiamot_core::ent::AnimTag::IDLE,
+            anim: tiamat_core::ent::AnimTag::IDLE,
             swung_on: 0,
             falling: 0.0,
             fell: 0.0,
@@ -644,7 +644,7 @@ impl PlayerSim {
 /// cleared while flying rather than merely not added to — otherwise a body
 /// that fell ten blocks, switched flight on and drifted down would land with
 /// the ten still owing.
-pub fn measure_fall(player: &mut PlayerSim, before: &tiamot_core::phys::Body, flying: bool) {
+pub fn measure_fall(player: &mut PlayerSim, before: &tiamat_core::phys::Body, flying: bool) {
     // Cleared first, so the value is one tick wide whatever happens below.
     player.fell = 0.0;
     if flying {
@@ -662,7 +662,7 @@ pub fn measure_fall(player: &mut PlayerSim, before: &tiamot_core::phys::Body, fl
         // The tick of the landing. The last step's own descent is part of the
         // fall: without it a one-tick drop off a ledge measures zero.
         let total = player.falling + dropped.max(0.0);
-        player.fell = total / tiamot_core::SUBNODES_PER_AXIS as f32;
+        player.fell = total / tiamat_core::SUBNODES_PER_AXIS as f32;
     }
     player.falling = 0.0;
 }
@@ -685,12 +685,12 @@ pub const SWING_TICKS: u64 = 8;
 
 #[must_use]
 pub fn anim_from_motion(
-    intent: tiamot_core::phys::Intent,
-    body: &tiamot_core::phys::Body,
+    intent: tiamat_core::phys::Intent,
+    body: &tiamat_core::phys::Body,
     digging: bool,
-) -> tiamot_core::ent::AnimTag {
-    use tiamot_core::ent::AnimTag;
-    use tiamot_core::phys::Gait;
+) -> tiamat_core::ent::AnimTag {
+    use tiamat_core::ent::AnimTag;
+    use tiamat_core::phys::Gait;
 
     // Swinging beats everything, including standing still: the arm is the part
     // anyone is looking at. This is the only reason the server knows about a
@@ -709,14 +709,14 @@ pub fn anim_from_motion(
     let speed = vx * vx + vz * vz;
     // A tenth of a walk, which is slower than anything a player can hold and
     // faster than the tail of the friction curve.
-    let idle = tiamot_core::phys::Tuning::DEFAULT.walk_speed * 0.1;
+    let idle = tiamat_core::phys::Tuning::DEFAULT.walk_speed * 0.1;
     if speed < idle * idle {
         return AnimTag::IDLE;
     }
     // Faster than a walk can go means they are sprinting. Reading the gait
     // instead would show a run the moment the key went down, before the body
     // had accelerated into one.
-    let walk = tiamot_core::phys::Tuning::DEFAULT.walk_speed;
+    let walk = tiamat_core::phys::Tuning::DEFAULT.walk_speed;
     if speed > walk * walk {
         AnimTag::RUN
     } else {
@@ -734,9 +734,9 @@ pub fn intent_from_wire(
     movement: [f32; 3],
     actions: u32,
     may_fly: bool,
-) -> tiamot_core::phys::Intent {
-    use tiamot_core::phys::Gait;
-    use tiamot_core::proto::actions as bits;
+) -> tiamat_core::phys::Intent {
+    use tiamat_core::phys::Gait;
+    use tiamat_core::proto::actions as bits;
 
     // Sneak wins over sprint. A client asserting both is buggy rather than
     // expressing a preference, and the edge guard is the safer reading.
@@ -748,7 +748,7 @@ pub fn intent_from_wire(
         Gait::Walk
     };
 
-    tiamot_core::phys::Intent {
+    tiamat_core::phys::Intent {
         walk: [movement[0], movement[2]],
         jump: actions & bits::JUMP != 0,
         gait,
@@ -776,7 +776,7 @@ pub enum Seed {
     /// Add these cells to whatever the block holds, keeping the rest.
     Merge {
         /// Which block.
-        pos: tiamot_core::BlockPos,
+        pos: tiamat_core::BlockPos,
         /// The material going into the named cells.
         material: u16,
         /// Which cells, as a 27-bit mask.
@@ -797,7 +797,7 @@ pub struct Served {
     /// The chunk's biome colour, white when no mod gives one.
     pub tint: [u8; 3],
     /// The chunk's column's own fog, when a mod gives one.
-    pub fog: Option<tiamot_core::proto::ChunkFog>,
+    pub fog: Option<tiamat_core::proto::ChunkFog>,
     /// The chunk's fluid layer, encoded, sent as a `ChunkFluid` just before the
     /// chunk. `None` for a summary, which carries no fluid.
     ///
@@ -824,7 +824,7 @@ pub struct ChunkRequest {
     /// from somewhere else, in a place they are standing.
     pub domain: String,
     /// Which chunk.
-    pub pos: tiamot_core::ChunkPos,
+    pub pos: tiamat_core::ChunkPos,
     /// The summary level wanted, or `None` for the chunk itself.
     ///
     /// One request type for both, because they are the same question asked at
@@ -869,7 +869,7 @@ pub struct PlacementRequest {
     /// Who asked, and who pays for it.
     pub actor: PlayerUuid,
     /// The cell they want filled.
-    pub target: tiamot_core::SubNodePos,
+    pub target: tiamat_core::SubNodePos,
     /// The material they claim to be holding.
     pub material: u16,
     /// The cut they claim to be holding, or `0` for loose material.
@@ -1001,7 +1001,7 @@ pub const SUMMARIES_IN_FLIGHT_PER_CLIENT: usize = 2;
 pub const SUMMARIES_PER_TICK: usize = CHUNKS_PER_TICK / 4;
 
 /// Most chunk requests that may be queued before new ones are refused.
-use tiamot_core::inventory::{PLAYER_HOTBAR_SLOTS, PLAYER_MAIN};
+use tiamat_core::inventory::{PLAYER_HOTBAR_SLOTS, PLAYER_MAIN};
 
 pub const MAX_QUEUED_CHUNK_REQUESTS: usize = 512;
 
@@ -1059,7 +1059,7 @@ impl Shared {
     pub fn queue_placement(
         &self,
         actor: PlayerUuid,
-        target: tiamot_core::SubNodePos,
+        target: tiamat_core::SubNodePos,
         material: u16,
         shape: u32,
         face: [i8; 3],
@@ -1104,7 +1104,7 @@ impl Shared {
     pub fn queue_merge(
         &self,
         domain: &str,
-        pos: tiamot_core::BlockPos,
+        pos: tiamat_core::BlockPos,
         material: u16,
         occupancy: u32,
     ) -> bool {
@@ -1148,7 +1148,7 @@ impl Shared {
     /// The chunk origin and the eye offset within it (charter rule 7), which is
     /// the frame `place::within_reach` expects.
     #[must_use]
-    pub fn player_eye(&self, uuid: &PlayerUuid) -> Option<(tiamot_core::ChunkPos, [f32; 3])> {
+    pub fn player_eye(&self, uuid: &PlayerUuid) -> Option<(tiamat_core::ChunkPos, [f32; 3])> {
         let bodies = self.bodies.lock().ok()?;
         let player = bodies.get(uuid)?;
         Some((player.origin, player.body.eye()))
@@ -1160,7 +1160,7 @@ impl Shared {
     /// world between reading this and acting on it, and holding the lock across
     /// that puts a connection task's contention inside the tick.
     #[must_use]
-    pub fn body_boxes(&self) -> Vec<(tiamot_core::ChunkPos, tiamot_core::phys::Aabb)> {
+    pub fn body_boxes(&self) -> Vec<(tiamat_core::ChunkPos, tiamat_core::phys::Aabb)> {
         self.bodies
             .lock()
             .map(|bodies| {
@@ -1179,8 +1179,8 @@ impl Shared {
     pub fn debit(
         &self,
         uuid: &PlayerUuid,
-        material: tiamot_core::MaterialId,
-        shape: Option<tiamot_core::inventory::Shape>,
+        material: tiamat_core::MaterialId,
+        shape: Option<tiamat_core::inventory::Shape>,
         detail: Option<&str>,
         units: u32,
     ) -> u32 {
@@ -1213,7 +1213,7 @@ impl Shared {
     }
 
     /// Starts simulating a player, at spawn.
-    pub fn add_player(&self, uuid: PlayerUuid, spawn: tiamot_core::BlockPos) {
+    pub fn add_player(&self, uuid: PlayerUuid, spawn: tiamat_core::BlockPos) {
         if let Ok(mut bodies) = self.bodies.lock() {
             bodies.insert(uuid, PlayerSim::spawned_at(spawn, self.tick()));
         }
@@ -1272,13 +1272,13 @@ impl Shared {
 
     /// Files an input against the tick it belongs to.
     ///
-    /// Returns whether it was kept; see [`tiamot_core::phys::InputQueue::offer`]
+    /// Returns whether it was kept; see [`tiamat_core::phys::InputQueue::offer`]
     /// for why a refusal is ordinary traffic rather than an error.
     pub fn queue_input(
         &self,
         uuid: &PlayerUuid,
         tick: u64,
-        intent: tiamot_core::phys::Intent,
+        intent: tiamat_core::phys::Intent,
         look: [f32; 2],
     ) -> bool {
         let Ok(mut bodies) = self.bodies.lock() else {
@@ -1301,9 +1301,9 @@ impl Shared {
 
     /// Starts, re-aims, or stops a player's dig.
     ///
-    /// Re-aiming discards progress — see [`tiamot_core::dig::Dig::retarget`]
+    /// Re-aiming discards progress — see [`tiamat_core::dig::Dig::retarget`]
     /// for why it must not bank.
-    pub fn set_dig(&self, uuid: &PlayerUuid, target: Option<tiamot_core::SubNodePos>) {
+    pub fn set_dig(&self, uuid: &PlayerUuid, target: Option<tiamat_core::SubNodePos>) {
         let Ok(mut bodies) = self.bodies.lock() else {
             return;
         };
@@ -1326,7 +1326,7 @@ impl Shared {
                     Some(dig) => {
                         dig.retarget(target, brush);
                     }
-                    None => player.dig = Some(tiamot_core::dig::Dig::start(target, brush)),
+                    None => player.dig = Some(tiamat_core::dig::Dig::start(target, brush)),
                 }
             }
         }
@@ -1362,14 +1362,14 @@ impl Shared {
     /// hold, and there is no rule to be missing. Refusing it would mean a mod
     /// set could strand a player's inventory with no way to spend it.
     #[must_use]
-    pub fn place_brush(&self, uuid: &PlayerUuid) -> tiamot_core::dig::Brush {
+    pub fn place_brush(&self, uuid: &PlayerUuid) -> tiamat_core::dig::Brush {
         let Ok(bodies) = self.bodies.lock() else {
-            return tiamot_core::dig::Brush::Block;
+            return tiamat_core::dig::Brush::Block;
         };
         bodies
             .get(uuid)
             .and_then(|player| self.resolve_tool(player.tool.as_deref()))
-            .map_or(tiamot_core::dig::Brush::Block, |tool| tool.brush)
+            .map_or(tiamat_core::dig::Brush::Block, |tool| tool.brush)
     }
 
     /// Advances the clock by one tick and returns where the day now stands.
@@ -1434,7 +1434,7 @@ impl Shared {
     /// dig and nothing about what a player breaks things with, so it has no
     /// opinion of its own to fall back on (charter rule 1).
     #[must_use]
-    pub fn resolve_tool(&self, chosen: Option<&str>) -> Option<&tiamot_core::script::Tool> {
+    pub fn resolve_tool(&self, chosen: Option<&str>) -> Option<&tiamat_core::script::Tool> {
         chosen
             .and_then(|id| self.tools.get(id))
             .or_else(|| self.tools.get(self.default_tool.as_deref()?))
@@ -1442,15 +1442,15 @@ impl Shared {
 
     /// How a material resists a tool, defaulted for anything unregistered.
     #[must_use]
-    pub fn resistance_of(&self, material: tiamot_core::MaterialId) -> tiamot_core::dig::Resistance {
+    pub fn resistance_of(&self, material: tiamat_core::MaterialId) -> tiamat_core::dig::Resistance {
         self.hardness.get(&material).copied().unwrap_or_else(|| {
-            tiamot_core::dig::Resistance::new(tiamot_core::script::BlockRules::DEFAULT_HARDNESS)
+            tiamat_core::dig::Resistance::new(tiamat_core::script::BlockRules::DEFAULT_HARDNESS)
         })
     }
 
     /// How long a material takes to break with a bare hand, in seconds.
     #[must_use]
-    pub fn hardness_of(&self, material: tiamot_core::MaterialId) -> f32 {
+    pub fn hardness_of(&self, material: tiamat_core::MaterialId) -> f32 {
         self.resistance_of(material).hardness
     }
 
@@ -1458,10 +1458,10 @@ impl Shared {
     ///
     /// A thirteen-and-a-half-th of the whole-block figure, so chiselling a block
     /// out cell by cell costs twice what smashing it does. See
-    /// `tiamot_core::dig::hardness`.
+    /// `tiamat_core::dig::hardness`.
     #[must_use]
-    pub fn subnode_hardness_of(&self, material: tiamot_core::MaterialId) -> f32 {
-        tiamot_core::dig::subnode_hardness(material, |id| self.resistance_of(id))
+    pub fn subnode_hardness_of(&self, material: tiamat_core::MaterialId) -> f32 {
+        tiamat_core::dig::subnode_hardness(material, |id| self.resistance_of(id))
     }
 
     /// How long a whole block takes to break, blended over what it is made of.
@@ -1469,8 +1469,8 @@ impl Shared {
     /// The blend lives in core (`dig::hardness`) and the material table lives
     /// here, so this is the seam between them and the only place the two meet.
     #[must_use]
-    pub fn block_hardness_of(&self, view: &tiamot_core::block::BlockView<'_>) -> f32 {
-        tiamot_core::dig::block_hardness(view, |id| self.resistance_of(id))
+    pub fn block_hardness_of(&self, view: &tiamat_core::block::BlockView<'_>) -> f32 {
+        tiamat_core::dig::block_hardness(view, |id| self.resistance_of(id))
     }
 
     /// Every dig currently running, as `(player, target, brush)`.
@@ -1481,7 +1481,7 @@ impl Shared {
     #[must_use]
     pub fn digs_in_progress(
         &self,
-    ) -> Vec<(PlayerUuid, tiamot_core::SubNodePos, tiamot_core::dig::Brush)> {
+    ) -> Vec<(PlayerUuid, tiamat_core::SubNodePos, tiamat_core::dig::Brush)> {
         let Ok(bodies) = self.bodies.lock() else {
             return Vec::new();
         };
@@ -1548,7 +1548,7 @@ impl Shared {
 
     /// The chunk a player is standing in, for recentring their interest set.
     #[must_use]
-    pub fn player_chunk(&self, uuid: &PlayerUuid) -> Option<tiamot_core::ChunkPos> {
+    pub fn player_chunk(&self, uuid: &PlayerUuid) -> Option<tiamat_core::ChunkPos> {
         let bodies = self.bodies.lock().ok()?;
         bodies.get(uuid).map(|player| player.origin)
     }
@@ -1581,7 +1581,7 @@ impl Shared {
             .lock()
             .ok()
             .and_then(|bodies| bodies.get(uuid).map(|player| player.domain.clone()))
-            .unwrap_or_else(|| tiamot_core::domain::OVERWORLD.to_owned())
+            .unwrap_or_else(|| tiamat_core::domain::OVERWORLD.to_owned())
     }
 
     /// Which domain a player is in, and where they are in it.
@@ -1590,7 +1590,7 @@ impl Shared {
     /// domain read a moment before the position it is paired with would
     /// re-centre the new domain's stream on the old domain's chunk.
     #[must_use]
-    pub fn player_place(&self, uuid: &PlayerUuid) -> Option<(String, tiamot_core::ChunkPos)> {
+    pub fn player_place(&self, uuid: &PlayerUuid) -> Option<(String, tiamat_core::ChunkPos)> {
         let bodies = self.bodies.lock().ok()?;
         bodies
             .get(uuid)
@@ -1692,7 +1692,7 @@ impl Shared {
         &self,
         actor: PlayerUuid,
         form: String,
-        event: tiamot_core::proto::DialogEvent,
+        event: tiamat_core::proto::DialogEvent,
     ) -> bool {
         let Ok(mut queue) = self.dialog_events.lock() else {
             return false;
@@ -1707,7 +1707,7 @@ impl Shared {
     /// Takes the dialog events waiting to be handed to the mods.
     pub fn drain_dialog_events(
         &self,
-    ) -> Vec<(PlayerUuid, String, tiamot_core::proto::DialogEvent)> {
+    ) -> Vec<(PlayerUuid, String, tiamat_core::proto::DialogEvent)> {
         self.dialog_events
             .lock()
             .map(|mut queue| queue.drain(..).collect())
@@ -1733,7 +1733,7 @@ impl Shared {
     /// Records a use of a block for the next tick to hand to the mods.
     ///
     /// Bounded like every queue a client fills.
-    pub fn queue_use(&self, actor: PlayerUuid, target: tiamot_core::SubNodePos) -> bool {
+    pub fn queue_use(&self, actor: PlayerUuid, target: tiamat_core::SubNodePos) -> bool {
         let Ok(mut queue) = self.uses.lock() else {
             return false;
         };
@@ -1745,7 +1745,7 @@ impl Shared {
     }
 
     /// Takes the uses waiting for the mods.
-    pub fn drain_uses(&self) -> Vec<(PlayerUuid, tiamot_core::SubNodePos)> {
+    pub fn drain_uses(&self) -> Vec<(PlayerUuid, tiamat_core::SubNodePos)> {
         self.uses
             .lock()
             .map(|mut queue| queue.drain(..).collect())
@@ -1760,7 +1760,7 @@ impl Shared {
     pub fn request_chunk(
         &self,
         domain: &str,
-        pos: tiamot_core::ChunkPos,
+        pos: tiamat_core::ChunkPos,
     ) -> Option<tokio::sync::oneshot::Receiver<Option<Served>>> {
         self.request_chunk_at(domain, pos, None)
     }
@@ -1774,7 +1774,7 @@ impl Shared {
     pub fn request_chunk_at(
         &self,
         domain: &str,
-        pos: tiamot_core::ChunkPos,
+        pos: tiamat_core::ChunkPos,
         level: Option<u8>,
     ) -> Option<tokio::sync::oneshot::Receiver<Option<Served>>> {
         let domain = domain.to_owned();
@@ -1857,14 +1857,14 @@ impl Shared {
     }
 
     /// Credits stacks to a player and marks them for an update.
-    pub fn credit(&self, uuid: PlayerUuid, stacks: Vec<tiamot_core::inventory::Stack>) {
+    pub fn credit(&self, uuid: PlayerUuid, stacks: Vec<tiamat_core::inventory::Stack>) {
         if stacks.is_empty() {
             return;
         }
         if let Ok(mut inventories) = self.inventories.lock() {
             let held = inventories
                 .entry(uuid)
-                .or_insert_with(|| tiamot_core::inventory::Slots::for_player_with(&self.views));
+                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views));
             for stack in stacks {
                 held.insert(PLAYER_MAIN, stack);
             }
@@ -1879,7 +1879,7 @@ impl Shared {
     /// Consolidated, so a mod asking "how much stone" gets one number rather
     /// than a slot layout it did not ask about.
     #[must_use]
-    pub fn contents_of(&self, uuid: &PlayerUuid, view: &str) -> Vec<tiamot_core::inventory::Stack> {
+    pub fn contents_of(&self, uuid: &PlayerUuid, view: &str) -> Vec<tiamat_core::inventory::Stack> {
         self.inventories
             .lock()
             .map(|inventories| {
@@ -1900,7 +1900,7 @@ impl Shared {
         &self,
         uuid: &PlayerUuid,
         view: &str,
-        stack: tiamot_core::inventory::Stack,
+        stack: tiamat_core::inventory::Stack,
     ) -> bool {
         // **Connected is the test, not "has dug something".** An inventory
         // record is created the first time a player is credited, so somebody
@@ -1916,7 +1916,7 @@ impl Shared {
         let took = self.inventories.lock().is_ok_and(|mut inventories| {
             inventories
                 .entry(*uuid)
-                .or_insert_with(|| tiamot_core::inventory::Slots::for_player_with(&self.views))
+                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views))
                 .insert(view, stack)
         });
         if took && let Ok(mut dirty) = self.inventory_dirty.lock() {
@@ -1949,8 +1949,8 @@ impl Shared {
         &self,
         uuid: &PlayerUuid,
         view: &str,
-        material: tiamot_core::material::MaterialId,
-        shape: Option<tiamot_core::inventory::Shape>,
+        material: tiamat_core::material::MaterialId,
+        shape: Option<tiamat_core::inventory::Shape>,
         detail: Option<&str>,
         units: u32,
     ) -> u32 {
@@ -1982,7 +1982,7 @@ impl Shared {
     /// which is where a client starts and stays until somebody presses a
     /// hotbar key.
     #[must_use]
-    pub fn hands_of(&self, uuid: &PlayerUuid) -> tiamot_core::ent::Hands {
+    pub fn hands_of(&self, uuid: &PlayerUuid) -> tiamat_core::ent::Hands {
         let slot = self
             .held_slot
             .lock()
@@ -1990,19 +1990,19 @@ impl Shared {
             .and_then(|held| held.get(uuid).copied())
             .unwrap_or(0);
         let Ok(inventories) = self.inventories.lock() else {
-            return tiamot_core::ent::Hands::default();
+            return tiamat_core::ent::Hands::default();
         };
         let Some(slots) = inventories.get(uuid) else {
-            return tiamot_core::ent::Hands::default();
+            return tiamat_core::ent::Hands::default();
         };
         let Some(view) = slots.view(PLAYER_MAIN) else {
-            return tiamot_core::ent::Hands::default();
+            return tiamat_core::ent::Hands::default();
         };
-        tiamot_core::ent::Hands {
+        tiamat_core::ent::Hands {
             main: view.slots.get(slot).cloned().flatten(),
             off: view
                 .slots
-                .get(tiamot_core::inventory::PLAYER_OFFHAND_SLOT)
+                .get(tiamat_core::inventory::PLAYER_OFFHAND_SLOT)
                 .cloned()
                 .flatten(),
         }
@@ -2010,7 +2010,7 @@ impl Shared {
 
     /// What a player is carrying.
     #[must_use]
-    pub fn inventory_of(&self, uuid: &PlayerUuid) -> Vec<tiamot_core::inventory::Stack> {
+    pub fn inventory_of(&self, uuid: &PlayerUuid) -> Vec<tiamat_core::inventory::Stack> {
         self.inventories
             .lock()
             .map(|inventories| {
@@ -2031,12 +2031,12 @@ impl Shared {
         let Some(slots) = self.slots_of(uuid) else {
             return Vec::new();
         };
-        let wire = |stack: &tiamot_core::inventory::Stack| tiamot_core::proto::StackDef {
+        let wire = |stack: &tiamat_core::inventory::Stack| tiamat_core::proto::StackDef {
             material: stack.material.0,
             units: stack.units,
             shape: stack
                 .shape
-                .map_or(0, tiamot_core::inventory::Shape::occupancy),
+                .map_or(0, tiamat_core::inventory::Shape::occupancy),
             detail: stack.detail.clone(),
         };
         let held = slots.grab.held.as_ref().map(wire);
@@ -2093,7 +2093,7 @@ impl Shared {
         if let Ok(mut inventories) = self.inventories.lock() {
             inventories
                 .entry(uuid)
-                .or_insert_with(|| tiamot_core::inventory::Slots::for_player_with(&self.views));
+                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views));
         }
     }
 
@@ -2102,8 +2102,8 @@ impl Shared {
     /// The template a stored blob is laid over — this session's views, at the
     /// sizes this session's mods registered.
     #[must_use]
-    pub fn fresh_inventory(&self) -> tiamot_core::inventory::Slots {
-        tiamot_core::inventory::Slots::for_player_with(&self.views)
+    pub fn fresh_inventory(&self) -> tiamat_core::inventory::Slots {
+        tiamat_core::inventory::Slots::for_player_with(&self.views)
     }
 
     /// Replaces a player's whole inventory, and tells their client.
@@ -2112,7 +2112,7 @@ impl Shared {
     /// thread, which is where the world database is; this is the door into the
     /// endpoint's own copy. Marks the inventory dirty, because a client that
     /// joined a moment earlier has already been sent the empty one.
-    pub fn restore_inventory(&self, uuid: PlayerUuid, slots: tiamot_core::inventory::Slots) {
+    pub fn restore_inventory(&self, uuid: PlayerUuid, slots: tiamat_core::inventory::Slots) {
         if let Ok(mut inventories) = self.inventories.lock() {
             inventories.insert(uuid, slots);
         }
@@ -2127,7 +2127,7 @@ impl Shared {
     /// the tick thread and must not hold this lock while it writes to a
     /// database.
     #[must_use]
-    pub fn all_inventories(&self) -> Vec<(PlayerUuid, tiamot_core::inventory::Slots)> {
+    pub fn all_inventories(&self) -> Vec<(PlayerUuid, tiamat_core::inventory::Slots)> {
         self.inventories
             .lock()
             .map(|inventories| {
@@ -2148,7 +2148,7 @@ impl Shared {
 
     /// A player's slots, for a dialog to click on.
     #[must_use]
-    pub fn slots_of(&self, uuid: &PlayerUuid) -> Option<tiamot_core::inventory::Slots> {
+    pub fn slots_of(&self, uuid: &PlayerUuid) -> Option<tiamat_core::inventory::Slots> {
         self.inventories.lock().ok()?.get(uuid).cloned()
     }
 
@@ -2185,7 +2185,7 @@ impl Shared {
     pub fn with_slots<T>(
         &self,
         uuid: &PlayerUuid,
-        visit: impl FnOnce(&mut tiamot_core::inventory::Slots) -> T,
+        visit: impl FnOnce(&mut tiamat_core::inventory::Slots) -> T,
     ) -> Option<T> {
         let mut inventories = self.inventories.lock().ok()?;
         let slots = inventories.get_mut(uuid)?;
@@ -2204,7 +2204,7 @@ impl Shared {
         uuid: &PlayerUuid,
         view: &str,
         index: usize,
-        click: tiamot_core::proto::Click,
+        click: tiamat_core::proto::Click,
     ) -> bool {
         let Ok(mut inventories) = self.inventories.lock() else {
             return false;
@@ -2213,9 +2213,9 @@ impl Shared {
             return false;
         };
         let changed = match click {
-            tiamot_core::proto::Click::Left => slots.left_click(view, index),
-            tiamot_core::proto::Click::Right => slots.right_click(view, index),
-            tiamot_core::proto::Click::ShiftLeft => {
+            tiamat_core::proto::Click::Left => slots.left_click(view, index),
+            tiamat_core::proto::Click::Right => slots.right_click(view, index),
+            tiamat_core::proto::Click::ShiftLeft => {
                 // **Within the player's own view**, between the hotbar band and
                 // the rest of it — which is what the gesture means now that the
                 // hotbar is the first nine slots of one inventory rather than a
@@ -2291,7 +2291,7 @@ impl Shared {
         &self,
         uuid: &PlayerUuid,
         mod_id: &str,
-        values: tiamot_core::hud::Values,
+        values: tiamat_core::hud::Values,
     ) {
         let Ok(mut all) = self.hud_values.lock() else {
             return;
@@ -2343,7 +2343,7 @@ impl Shared {
     pub fn set_sky_modifier(
         &self,
         uuid: &PlayerUuid,
-        modifier: Option<tiamot_core::atmosphere::SkyModifier>,
+        modifier: Option<tiamat_core::atmosphere::SkyModifier>,
     ) {
         let Ok(mut all) = self.sky_modifiers.lock() else {
             return;
@@ -2377,7 +2377,7 @@ impl Shared {
     }
 
     /// Replaces one player's cloud state; unchanged and already sent is a no-op.
-    pub fn set_clouds(&self, uuid: &PlayerUuid, clouds: Option<tiamot_core::atmosphere::Clouds>) {
+    pub fn set_clouds(&self, uuid: &PlayerUuid, clouds: Option<tiamat_core::atmosphere::Clouds>) {
         let Ok(mut all) = self.clouds.lock() else {
             return;
         };
@@ -2417,7 +2417,7 @@ impl Shared {
     /// Weather ask W10. The comparison is the whole grid, which is 512 bytes
     /// against a wire message of the same — a mod that recomputes the same
     /// weather every tick costs a memcmp rather than a send.
-    pub fn set_cloud_map(&self, uuid: &PlayerUuid, map: Option<tiamot_core::atmosphere::CloudMap>) {
+    pub fn set_cloud_map(&self, uuid: &PlayerUuid, map: Option<tiamat_core::atmosphere::CloudMap>) {
         let Ok(mut all) = self.cloud_maps.lock() else {
             return;
         };
@@ -2446,7 +2446,7 @@ impl Shared {
     pub fn set_precipitation(
         &self,
         uuid: &PlayerUuid,
-        precipitation: Option<tiamot_core::atmosphere::Precipitation>,
+        precipitation: Option<tiamat_core::atmosphere::Precipitation>,
     ) {
         let Ok(mut all) = self.precipitation.lock() else {
             return;
@@ -2491,7 +2491,7 @@ impl Shared {
     /// Queues a particle burst for one player, dropping it past the cap.
     ///
     /// Returns whether it was queued.
-    pub fn queue_particles(&self, uuid: &PlayerUuid, burst: tiamot_core::particle::Burst) -> bool {
+    pub fn queue_particles(&self, uuid: &PlayerUuid, burst: tiamat_core::particle::Burst) -> bool {
         let Ok(mut queues) = self.particles.lock() else {
             return false;
         };
@@ -2509,7 +2509,7 @@ impl Shared {
     /// Returns whether it was kept. Bounded by [`MAX_BADGED_ENTITIES`] — and
     /// the bound is on how many DIFFERENT entities one player is shown at
     /// once, not on how often a mod asks, because asking again is free.
-    pub fn queue_badge(&self, uuid: &PlayerUuid, badge: tiamot_core::particle::Badge) -> bool {
+    pub fn queue_badge(&self, uuid: &PlayerUuid, badge: tiamat_core::particle::Badge) -> bool {
         let Ok(mut queues) = self.badges.lock() else {
             return false;
         };
@@ -2522,7 +2522,7 @@ impl Shared {
     }
 
     /// Takes the badges waiting for one player.
-    pub fn take_badges(&self, uuid: &PlayerUuid) -> Vec<tiamot_core::particle::Badge> {
+    pub fn take_badges(&self, uuid: &PlayerUuid) -> Vec<tiamat_core::particle::Badge> {
         self.badges
             .lock()
             .map(|mut queues| {
@@ -2535,7 +2535,7 @@ impl Shared {
     }
 
     /// Takes the bursts waiting for one player.
-    pub fn take_particles(&self, uuid: &PlayerUuid) -> Vec<tiamot_core::particle::Burst> {
+    pub fn take_particles(&self, uuid: &PlayerUuid) -> Vec<tiamat_core::particle::Burst> {
         self.particles
             .lock()
             .map(|mut queues| queues.remove(uuid).unwrap_or_default())
@@ -2674,7 +2674,7 @@ pub fn server_config(cert: ServerCert) -> Result<ServerConfig, TransportError> {
     .map_err(|err| TransportError::Tls(Box::new(err)))?;
 
     // Clients that do not speak this exact protocol are refused during the TLS
-    // handshake rather than after a round trip of Tiamot messages.
+    // handshake rather than after a round trip of Tiamat messages.
     tls.alpn_protocols = vec![ALPN.to_vec()];
 
     let tls = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
@@ -2806,7 +2806,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
     // An `interval` keeps its own schedule across cancellation, which is the
     // property this needs. `Delay` rather than `Burst` so that a connection
     // which stalls does not come back to a pile of instantly-ready ticks.
-    let mut beat = tokio::time::interval(tiamot_core::tick::TICK_DURATION);
+    let mut beat = tokio::time::interval(tiamat_core::tick::TICK_DURATION);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut transfers = crate::content::Transfers::new();
     // Chunk deliveries the simulation has answered, waiting to be written.
@@ -2836,10 +2836,10 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     let stacks = shared
                         .inventory_of(&uuid)
                         .into_iter()
-                        .map(|stack| tiamot_core::proto::StackDef {
+                        .map(|stack| tiamat_core::proto::StackDef {
                             material: stack.material.0,
                             units: stack.units,
-                            shape: stack.shape.map_or(0, tiamot_core::inventory::Shape::occupancy),
+                            shape: stack.shape.map_or(0, tiamat_core::inventory::Shape::occupancy),
                             detail: stack.detail,
                         })
                         .collect();
@@ -2947,7 +2947,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     }
                     // Sprays near them, batched to the protocol's cap.
                     let bursts = shared.take_particles(&uuid);
-                    for batch in bursts.chunks(tiamot_core::particle::MAX_BURSTS_PER_MESSAGE) {
+                    for batch in bursts.chunks(tiamat_core::particle::MAX_BURSTS_PER_MESSAGE) {
                         let message = ServerMessage::Particles {
                             bursts: batch.to_vec(),
                         };
@@ -2979,7 +2979,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                         let _ = frame::write(
                             &mut send,
                             &ServerMessage::Disconnect {
-                                reason: tiamot_core::proto::DisconnectReason::Kicked { reason },
+                                reason: tiamat_core::proto::DisconnectReason::Kicked { reason },
                             },
                         )
                         .await;
@@ -3007,7 +3007,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                                 .as_ref()
                                 .is_some_and(|streamer| streamer.domain() == domain)
                         });
-                        if mine && session.phase() == tiamot_core::session::Phase::InWorld {
+                        if mine && session.phase() == tiamat_core::session::Phase::InWorld {
                             // An edit out in the horizon is not something a
                             // client holding a summary can apply — it has
                             // nowhere to put one cell of twenty-seven. So the
@@ -3045,7 +3045,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
             }
         };
 
-        let was_in_world = session.phase() == tiamot_core::session::Phase::InWorld;
+        let was_in_world = session.phase() == tiamat_core::session::Phase::InWorld;
 
         let response = {
             let mut identities = shared.identities.lock().await;
@@ -3091,7 +3091,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
 
         // Claim the slot the moment the session reaches the world, so the
         // "server full" check counts players rather than connections.
-        if !was_in_world && session.phase() == tiamot_core::session::Phase::InWorld {
+        if !was_in_world && session.phase() == tiamat_core::session::Phase::InWorld {
             slot = session.uuid().map(|uuid| {
                 PlayerSlot::claim(
                     shared,
@@ -3103,7 +3103,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
             // `recentre` as the player moves; see `stream.rs` on why the
             // client is not asked where it is.
             streamer = Some(Streamer::new(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 shared.spawn.chunk(),
                 shared.view_distance,
             ));
@@ -3176,7 +3176,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
             // the engine's own bounds. Asking for LESS is always granted, which
             // is the direction that matters: a player on a modest machine needs
             // a way to make the world smaller, and before this there was none.
-            let granted = tiamot_core::interest::ViewDistance::clamped(
+            let granted = tiamat_core::interest::ViewDistance::clamped(
                 (*horizontal).min(shared.view_distance.horizontal),
                 (*vertical).min(shared.view_distance.vertical),
             );
@@ -3203,7 +3203,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
         if let ClientMessage::ContentRequest { hashes } = &message
             && matches!(
                 session.phase(),
-                tiamot_core::session::Phase::Authenticated | tiamot_core::session::Phase::InWorld
+                tiamat_core::session::Phase::Authenticated | tiamat_core::session::Phase::InWorld
             )
         {
             let accepted = transfers.request(hashes, &shared.content);
@@ -3361,7 +3361,7 @@ fn unix_now() -> i64 {
 /// The level is what was ASKED for, not what came back: the reply is a blob
 /// either way, and this is the only thing that says which message to put it in.
 type Awaiting = (
-    tiamot_core::ChunkPos,
+    tiamat_core::ChunkPos,
     Option<u8>,
     tokio::sync::oneshot::Receiver<Option<Served>>,
 );
@@ -3370,7 +3370,7 @@ type Awaiting = (
 ///
 /// An [`Edit`] names a block, a sub-node or a partial block, and all three are
 /// somewhere; the chunk is what the streaming cares about.
-fn chunk_of(edit: &Edit) -> tiamot_core::ChunkPos {
+fn chunk_of(edit: &Edit) -> tiamat_core::ChunkPos {
     match edit {
         Edit::Block { pos, .. } | Edit::Partial { pos, .. } => pos.chunk(),
         Edit::SubNode { pos, .. } => pos.chunk(),
@@ -3517,10 +3517,10 @@ async fn flush_and_close(send: &mut quinn::SendStream, connection: &quinn::Conne
     connection.close(0u32.into(), b"disconnected");
 }
 
-fn frame_error_reason(err: &frame::FrameError) -> tiamot_core::proto::DisconnectReason {
+fn frame_error_reason(err: &frame::FrameError) -> tiamat_core::proto::DisconnectReason {
     match err {
         frame::FrameError::Protocol(protocol) => protocol.to_disconnect(),
-        other => tiamot_core::proto::DisconnectReason::ProtocolError {
+        other => tiamat_core::proto::DisconnectReason::ProtocolError {
             detail: other.to_string(),
         },
     }
@@ -3539,7 +3539,7 @@ fn to_io(err: quinn::ConnectionError) -> frame::FrameError {
 #[cfg(test)]
 mod fly_permission_tests {
     use super::*;
-    use tiamot_core::proto::actions as bits;
+    use tiamat_core::proto::actions as bits;
 
     #[test]
     fn asking_to_fly_is_not_being_allowed_to() {
@@ -3634,7 +3634,7 @@ mod fall_tests {
 
     /// A body at a height, off the ground, with nothing else set.
     fn sim() -> PlayerSim {
-        PlayerSim::spawned_at(tiamot_core::BlockPos::new(0, 64, 0), 0)
+        PlayerSim::spawned_at(tiamat_core::BlockPos::new(0, 64, 0), 0)
     }
 
     /// One tick of falling, from `from` to `to` cells, landing or not.
@@ -3782,7 +3782,7 @@ mod tests {
             allowlist: std::sync::RwLock::new(Allowlist::open()),
             operators: std::collections::BTreeSet::new(),
             max_players: 2,
-            spawn: tiamot_core::BlockPos::new(0, 1, 0),
+            spawn: tiamat_core::BlockPos::new(0, 1, 0),
             players: AtomicU32::new(0),
             control: Control::new(),
             edits: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -3796,8 +3796,8 @@ mod tests {
             seeds: std::sync::Mutex::new(std::collections::VecDeque::new()),
             outbound: tokio::sync::broadcast::channel(16).0,
             chunk_requests: std::sync::Mutex::new(std::collections::VecDeque::new()),
-            view_distance: tiamot_core::interest::ViewDistance::MINIMUM,
-            content: tiamot_core::content::ContentIndex::new(),
+            view_distance: tiamat_core::interest::ViewDistance::MINIMUM,
+            content: tiamat_core::content::ContentIndex::new(),
             inventories: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             inventory_dirty: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -3872,15 +3872,15 @@ mod tests {
         // are the ones a player is standing on.
         for n in 0..64 {
             let _ = shared.request_chunk_at(
-                tiamot_core::domain::OVERWORLD,
-                tiamot_core::ChunkPos::new(n, 0, 0),
-                Some(tiamot_core::lod::FINEST),
+                tiamat_core::domain::OVERWORLD,
+                tiamat_core::ChunkPos::new(n, 0, 0),
+                Some(tiamat_core::lod::FINEST),
             );
         }
         for n in 0..4 {
             let _ = shared.request_chunk(
-                tiamot_core::domain::OVERWORLD,
-                tiamot_core::ChunkPos::new(0, n, 0),
+                tiamat_core::domain::OVERWORLD,
+                tiamat_core::ChunkPos::new(0, n, 0),
             );
         }
 
@@ -3913,8 +3913,8 @@ mod tests {
         let shared = shared();
         for n in 0..6 {
             let _ = shared.request_chunk(
-                tiamot_core::domain::OVERWORLD,
-                tiamot_core::ChunkPos::new(n, 0, 0),
+                tiamat_core::domain::OVERWORLD,
+                tiamat_core::ChunkPos::new(n, 0, 0),
             );
         }
 
@@ -3931,8 +3931,8 @@ mod tests {
         // waiting on the chunk under their feet does not go to the back of the
         // queue because the horizon asked for something while they waited.
         let _ = shared.request_chunk(
-            tiamot_core::domain::OVERWORLD,
-            tiamot_core::ChunkPos::new(99, 0, 0),
+            tiamat_core::domain::OVERWORLD,
+            tiamat_core::ChunkPos::new(99, 0, 0),
         );
 
         let next: Vec<i32> = shared

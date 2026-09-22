@@ -321,12 +321,12 @@ pub const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.75..=1.25;
 /// view distance capped at 32 is three indirections away from anything a player
 /// can see. A chunk is 16 blocks and the debug overlay already counts in them.
 ///
-/// The top is [`tiamot_core::lod::MAX_HORIZON`], because that is as far as the
+/// The top is [`tiamat_core::lod::MAX_HORIZON`], because that is as far as the
 /// world is ever drawn and fog that becomes total past the last chunk hides
 /// nothing. The bottom is two chunks — 32 blocks — which is weather thick
 /// enough to lose a building in and still leaves a player able to see their
 /// own feet.
-pub const FOG_CHUNKS_RANGE: std::ops::RangeInclusive<u8> = 2..=tiamot_core::lod::MAX_HORIZON;
+pub const FOG_CHUNKS_RANGE: std::ops::RangeInclusive<u8> = 2..=tiamat_core::lod::MAX_HORIZON;
 
 /// The smallest change the interface-scale slider makes.
 ///
@@ -460,7 +460,7 @@ pub struct Config {
     /// **One scale for the whole interface**, which is what a player means by
     /// the setting: the inventory, the menu, chat, and a mod's HUD all move
     /// together. A mod's virtual canvas is still
-    /// [`tiamot_core::hud::VIRTUAL_HEIGHT`] tall — this scales the canvas, not
+    /// [`tiamat_core::hud::VIRTUAL_HEIGHT`] tall — this scales the canvas, not
     /// the contract.
     ///
     /// Bounded by [`UI_SCALE_RANGE`]. Default `1.25` rather than `1.0`: the dialogs were reported from the
@@ -529,11 +529,11 @@ impl Config {
     }
 
     fn default_view_distance() -> u8 {
-        tiamot_core::interest::ViewDistance::DEFAULT.horizontal
+        tiamat_core::interest::ViewDistance::DEFAULT.horizontal
     }
 
     fn default_vertical_view_distance() -> u8 {
-        tiamot_core::interest::ViewDistance::DEFAULT.vertical
+        tiamat_core::interest::ViewDistance::DEFAULT.vertical
     }
 
     const fn default_vsync() -> bool {
@@ -643,12 +643,12 @@ impl Config {
         if self.display_name.trim().is_empty() {
             return Err(invalid("display_name must not be empty".to_owned()));
         }
-        if self.display_name.len() > tiamot_core::proto::MAX_NAME_BYTES {
+        if self.display_name.len() > tiamat_core::proto::MAX_NAME_BYTES {
             return Err(invalid(format!(
                 "display_name is {} bytes, over the protocol's {}-byte limit — the server would \
                  refuse the join",
                 self.display_name.len(),
-                tiamot_core::proto::MAX_NAME_BYTES
+                tiamat_core::proto::MAX_NAME_BYTES
             )));
         }
         // Non-finite values here are not a determinism concern (rendering is
@@ -698,8 +698,8 @@ impl Config {
 
     /// The view distance, clamped into the range the engine supports.
     #[must_use]
-    pub const fn view(&self) -> tiamot_core::interest::ViewDistance {
-        tiamot_core::interest::ViewDistance::clamped(
+    pub const fn view(&self) -> tiamat_core::interest::ViewDistance {
+        tiamat_core::interest::ViewDistance::clamped(
             self.view_distance,
             self.vertical_view_distance,
         )
@@ -746,7 +746,7 @@ impl Default for Config {
 /// conventions have not moved in a decade, and a dependency here would have to
 /// clear the licence gate for something the standard library nearly provides.
 ///
-/// Falls back to `./tiamot-data` if the environment has none of the usual
+/// Falls back to `./tiamat-data` if the environment has none of the usual
 /// variables, which happens in containers and on CI. A client that refused to
 /// start because `$HOME` was unset would be wrong.
 #[must_use]
@@ -763,7 +763,58 @@ pub fn data_dir() -> PathBuf {
             })
     };
 
-    base.map_or_else(|| PathBuf::from("tiamot-data"), |base| base.join("tiamot"))
+    base.map_or_else(|| PathBuf::from("tiamat-data"), |base| base.join("tiamat"))
+}
+
+/// The same directory under the name this project had before it was Tiamat.
+///
+/// Returns nothing for a path that is not one [`data_dir`] would produce, so a
+/// player who set `data_path` by hand is never second-guessed.
+#[must_use]
+fn former_data_dir(data: &Path) -> Option<PathBuf> {
+    let name = data.file_name()?.to_str()?;
+    let was = match name {
+        "tiamat" => "tiamot",
+        "tiamat-data" => "tiamot-data",
+        _ => return None,
+    };
+    Some(data.with_file_name(was))
+}
+
+/// Moves the old `tiamot` data directory across, once, if there is one.
+///
+/// **A rename is not a reason to lose somebody's worlds.** This directory
+/// holds the identity key (charter rule 13 — the thing a recovery phrase
+/// restores), the world library, the trust store and the content cache, and
+/// the project's rename moved the path out from under all of it.
+///
+/// It fires only when the new directory does not exist and the old one does,
+/// so it happens at most once and never after anything has been written under
+/// the new name. It is a rename rather than a copy, which is atomic within a
+/// filesystem and cannot half-finish. A failure is logged and ignored: a
+/// player whose old directory cannot be moved should get a fresh client, not
+/// a client that refuses to start.
+///
+/// Returns where it moved from, for the caller to tell the player about.
+pub fn adopt_former_data_dir(data: &Path) -> Option<PathBuf> {
+    if data.exists() {
+        return None;
+    }
+    let was = former_data_dir(data)?;
+    if !was.is_dir() {
+        return None;
+    }
+    if let Some(parent) = data.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(&was, data) {
+        Ok(()) => Some(was),
+        Err(err) => {
+            tracing::warn!(from = %was.display(), to = %data.display(), %err,
+                           "could not carry the old data directory across");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -772,7 +823,7 @@ mod tests {
     use std::io::Write as _;
 
     fn temp_config(name: &str, text: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("tiamot-client-test-{name}.toml"));
+        let path = std::env::temp_dir().join(format!("tiamat-client-test-{name}.toml"));
         let mut file = std::fs::File::create(&path).expect("create temp config");
         file.write_all(text.as_bytes()).expect("write temp config");
         path
@@ -880,7 +931,7 @@ mod tests {
         // The distinction that matters on first run: no file means "use the
         // defaults", a file with a typo in it means "you asked for something
         // and did not get it".
-        let absent = std::env::temp_dir().join("tiamot-client-definitely-absent.toml");
+        let absent = std::env::temp_dir().join("tiamat-client-definitely-absent.toml");
         let _ = std::fs::remove_file(&absent);
         assert_eq!(
             Config::load_or_default(&absent).expect("absent is fine"),
@@ -912,8 +963,8 @@ mod tests {
             ..Config::default()
         };
         let view = config.view();
-        assert!(view.horizontal <= tiamot_core::interest::ViewDistance::MAXIMUM.horizontal);
-        assert!(view.vertical <= tiamot_core::interest::ViewDistance::MAXIMUM.vertical);
+        assert!(view.horizontal <= tiamat_core::interest::ViewDistance::MAXIMUM.horizontal);
+        assert!(view.vertical <= tiamat_core::interest::ViewDistance::MAXIMUM.vertical);
     }
 
     #[test]
@@ -933,10 +984,91 @@ mod tests {
     fn a_display_name_the_server_would_refuse_is_refused_here_first() {
         // The protocol caps names, and a client that let one through would get
         // a disconnect at join time with no obvious cause.
-        let long = "x".repeat(tiamot_core::proto::MAX_NAME_BYTES + 1);
+        let long = "x".repeat(tiamat_core::proto::MAX_NAME_BYTES + 1);
         let path = temp_config("name", &format!("display_name = \"{long}\"\n"));
         let err = Config::load(&path).expect_err("an over-long name should be refused");
         assert!(err.to_string().contains("byte limit"), "got {err}");
+    }
+
+    #[test]
+    fn the_old_data_directory_is_carried_across_once_and_only_once() {
+        // The rename moved the path out from under somebody's identity key,
+        // worlds and trust store. This carries them over — and, far more
+        // importantly, REFUSES to in every case where doing so would clobber
+        // something: the three `is_none` arms below are the whole test.
+        let root = std::env::temp_dir().join("tiamat-adopt-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let new = root.join("tiamat");
+        let old = root.join("tiamot");
+
+        // Nothing to carry: a fresh machine.
+        std::fs::create_dir_all(&root).expect("root");
+        assert!(
+            adopt_former_data_dir(&new).is_none(),
+            "invented a migration"
+        );
+
+        // The ordinary case: an old directory, no new one.
+        std::fs::create_dir_all(&old).expect("old");
+        std::fs::write(old.join("identity.key"), b"a key").expect("key");
+        assert_eq!(adopt_former_data_dir(&new).as_deref(), Some(old.as_path()));
+        assert_eq!(
+            std::fs::read(new.join("identity.key")).expect("carried"),
+            b"a key",
+            "the identity key did not come across"
+        );
+        assert!(!old.exists(), "the old directory was copied, not moved");
+
+        // **Once.** An old directory that comes back must not overwrite what
+        // has been written under the new name since — that would swap a
+        // player's current identity for a stale one.
+        std::fs::create_dir_all(&old).expect("old again");
+        std::fs::write(old.join("identity.key"), b"a stale key").expect("stale");
+        assert!(
+            adopt_former_data_dir(&new).is_none(),
+            "a second migration ran over a directory already in use"
+        );
+        assert_eq!(
+            std::fs::read(new.join("identity.key")).expect("still there"),
+            b"a key",
+            "the current identity was replaced by the old one"
+        );
+
+        // **And an EMPTY new directory still counts as in use.** This is the
+        // case the guard exists for: POSIX `rename` refuses to replace a
+        // non-empty directory all by itself, so the arm above passes even
+        // with the guard deleted. An empty one it would replace happily —
+        // which is a client that made its data directory, then had it
+        // swapped for a year-old copy on the next run.
+        //
+        // Its own root, because the directory has to really be called
+        // `tiamat` for `former_data_dir` to look at it at all — named
+        // anything else this case passes without testing a thing.
+        let elsewhere = std::env::temp_dir().join("tiamat-adopt-empty");
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let empty = elsewhere.join("tiamat");
+        std::fs::create_dir_all(&empty).expect("empty");
+        let stale = elsewhere.join("tiamot");
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        std::fs::write(stale.join("identity.key"), b"a stale key").expect("stale key");
+        assert!(
+            adopt_former_data_dir(&empty).is_none(),
+            "an empty but existing data directory was replaced by the old one"
+        );
+        assert!(
+            !empty.join("identity.key").exists(),
+            "a stale identity was moved into a live data directory"
+        );
+
+        let _ = std::fs::remove_dir_all(&elsewhere);
+
+        // A path the player chose themselves is never second-guessed.
+        let chosen = root.join("my-games");
+        assert!(
+            adopt_former_data_dir(&chosen).is_none(),
+            "a hand-set `data_path` was rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

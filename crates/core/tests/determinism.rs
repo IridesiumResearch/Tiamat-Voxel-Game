@@ -22,12 +22,12 @@
 
 use proptest::prelude::*;
 
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::detgen::{
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::detgen::{
     self, ChunkBuffer, Fractal, FractalParams, Region2d, Region3d, StreamRng, fill_2d, fill_3d,
     fractal_2d,
 };
-use tiamot_core::{BLOCKS_PER_CHUNK, CHUNK_BLOCKS, ChunkPos, MaterialId, fingerprint};
+use tiamat_core::{BLOCKS_PER_CHUNK, CHUNK_BLOCKS, ChunkPos, MaterialId, fingerprint};
 
 /// A fixture material. Numbered, not named — `detgen` contains no terrain
 /// vocabulary and neither should its tests.
@@ -137,7 +137,15 @@ fn golden_fingerprints_match() {
 /// hash covers sprints on three ticks in eight, so those trajectories
 /// legitimately move. Pinned rather than assumed: with `sprint_acceleration`
 /// set equal to `ground_acceleration` the PREVIOUS constant passes exactly.
-const PHYSICS_GOLDEN: u64 = 11_098_149_173_410_595_960;
+///
+/// Regenerated a sixth time, 2026-09-22, for the Tiamot -> Tiamat rename and
+/// for NO other reason. The hash's domain tag is part of its input, so moving
+/// it moved the number while the simulation stood still. **That claim was not
+/// assumed**: the two goldens in this file that carry no tag — the worldgen
+/// fingerprints and `FLUID_GOLDEN` — kept passing across the rename, and the
+/// only edits to this hash's input were the tag literal and an import path.
+/// A future difference here is still the thing the message below says it is.
+const PHYSICS_GOLDEN: u64 = 15_301_112_553_514_878_560;
 
 /// Runs the fixed physics scenario and hashes every tick of it.
 ///
@@ -146,7 +154,7 @@ const PHYSICS_GOLDEN: u64 = 11_098_149_173_410_595_960;
 /// same place — would pass a final-state check while being a different
 /// simulation.
 fn physics_fingerprint() -> u64 {
-    use tiamot_core::phys::{Body, Gait, Intent, Solid, Tuning};
+    use tiamat_core::phys::{Body, Gait, Intent, Solid, Tuning};
 
     /// A staircase with a wall, so the log exercises step-up, collision and
     /// falling rather than open ground.
@@ -173,7 +181,7 @@ fn physics_fingerprint() -> u64 {
     ];
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:phys-golden:v1");
+    hasher.update(b"tiamat:phys-golden:v1");
     let mut body = Body::at([1.5, 3.0, 0.5]);
     for tick in 0..240u32 {
         let (x, z, jump, gait) = script[(tick as usize) % script.len()];
@@ -187,7 +195,7 @@ fn physics_fingerprint() -> u64 {
             },
             fly: false,
         };
-        body = tiamot_core::phys::step(&Scene, body, intent, &Tuning::DEFAULT);
+        body = tiamat_core::phys::step(&Scene, body, intent, &Tuning::DEFAULT);
 
         // Bit patterns, not values: two floats that compare equal can still be
         // different bits, and the whole point is that the bits agree.
@@ -249,7 +257,15 @@ fn the_physics_golden_is_stable_across_repeated_calls() {
 /// between platforms. A BFS whose queue order, face order, or container
 /// iteration differed would reach a different fixed point on one of the three
 /// CI targets and nowhere else.
-const LIGHT_GOLDEN: u64 = 7_215_387_918_458_500_778;
+///
+/// Regenerated a sixth time, 2026-09-22, for the Tiamot -> Tiamat rename and
+/// for NO other reason. The hash's domain tag is part of its input, so moving
+/// it moved the number while the simulation stood still. **That claim was not
+/// assumed**: the two goldens in this file that carry no tag — the worldgen
+/// fingerprints and `FLUID_GOLDEN` — kept passing across the rename, and the
+/// only edits to this hash's input were the tag literal and an import path.
+/// A future difference here is still the thing the message below says it is.
+const LIGHT_GOLDEN: u64 = 570_608_672_101_978_578;
 
 /// Lights a fixed scene and hashes every block of it.
 ///
@@ -259,9 +275,9 @@ const LIGHT_GOLDEN: u64 = 7_215_387_918_458_500_778;
 /// than one drowning the others.
 fn light_fingerprint() -> u64 {
     use std::collections::BTreeMap;
-    use tiamot_core::coords::BlockPos;
-    use tiamot_core::light::propagate::{Neighbourhood, Region};
-    use tiamot_core::light::{Faces, Light, MAX_LEVEL, relight};
+    use tiamat_core::coords::BlockPos;
+    use tiamat_core::light::propagate::{Neighbourhood, Region};
+    use tiamat_core::light::{Faces, Light, MAX_LEVEL, relight};
 
     struct Scene {
         region: Region,
@@ -346,7 +362,7 @@ fn light_fingerprint() -> u64 {
     relight(&mut scene, region);
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:light-golden:v1");
+    hasher.update(b"tiamat:light-golden:v1");
     // A fixed traversal rather than the map's own order: the hash has to
     // describe the light, not the container it happens to be in.
     for y in 0..=SIZE {
@@ -391,7 +407,7 @@ fn the_lit_scene_is_not_trivially_uniform() {
     // that did nothing at all. This pins that the fixture exercises the rules
     // it was built for.
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:light-golden:v1");
+    hasher.update(b"tiamat:light-golden:v1");
     for _ in 0..(25 * 25 * 25) {
         hasher.update(&0u16.to_le_bytes());
     }
@@ -553,13 +569,13 @@ proptest! {
         // The reference: decide each block independently, with no shared state
         // and nothing clever.
         let base_y = chunk_y * CHUNK_BLOCKS as i32;
-        let mut reference = tiamot_core::Chunk::air(pos);
+        let mut reference = tiamat_core::Chunk::air(pos);
         for index in 0..BLOCKS_PER_CHUNK {
             let local = LocalBlock::from_index(index);
             let world_y = base_y + local.y as i32;
             let column = (local.x + CHUNK_BLOCKS * local.z) as usize;
             if world_y < heights[column] {
-                reference.set_block_local(local, tiamot_core::BlockValue::Uniform(FIXTURE));
+                reference.set_block_local(local, tiamat_core::BlockValue::Uniform(FIXTURE));
             }
         }
 
@@ -727,8 +743,8 @@ const FLUID_GOLDEN: u64 = 10_233_241_359_803_942_171;
 /// run all three anyway.
 fn fluid_fingerprint() -> u64 {
     use std::collections::{BTreeMap, BTreeSet};
-    use tiamot_core::coords::BlockPos;
-    use tiamot_core::fluid::{Fluid, FluidId, MAX_VOLUME, Neighbourhood, Solver, Tuning};
+    use tiamat_core::coords::BlockPos;
+    use tiamat_core::fluid::{Fluid, FluidId, MAX_VOLUME, Neighbourhood, Solver, Tuning};
 
     const MILK: FluidId = FluidId(1);
 
@@ -746,7 +762,7 @@ fn fluid_fingerprint() -> u64 {
                 return None;
             }
             Some(if self.solid.contains(&(pos.x, pos.y, pos.z)) {
-                tiamot_core::UNITS_PER_BLOCK
+                tiamat_core::UNITS_PER_BLOCK
             } else {
                 0
             })
@@ -799,7 +815,7 @@ fn fluid_fingerprint() -> u64 {
         for tick in 0..ticks {
             solver.tick(
                 &mut scene,
-                &tiamot_core::fluid::Tunings::uniform(tuning),
+                &tiamat_core::fluid::Tunings::uniform(tuning),
                 usize::MAX,
                 SEED,
                 tick as u64,
@@ -872,7 +888,7 @@ fn fluid_fingerprint() -> u64 {
     for _ in 0..60 {
         solver.tick(
             &mut scene,
-            &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+            &tiamat_core::fluid::Tunings::uniform(Tuning::DEFAULT),
             usize::MAX,
             SEED,
             0,
@@ -905,7 +921,7 @@ fn fluid_fingerprint() -> u64 {
     for tick in 0..30u64 {
         solver.tick(
             &mut scene,
-            &tiamot_core::fluid::Tunings::uniform(EVAPORATING),
+            &tiamat_core::fluid::Tunings::uniform(EVAPORATING),
             usize::MAX,
             SEED,
             tick,
@@ -950,8 +966,8 @@ fn the_fluid_scenarios_actually_hold_milk() {
     // repeating here: a fingerprint over three empty scenes is perfectly stable
     // and perfectly meaningless. This asserts the scenarios did something.
     use std::collections::{BTreeMap, BTreeSet};
-    use tiamot_core::coords::BlockPos;
-    use tiamot_core::fluid::{Fluid, FluidId, MAX_VOLUME, Neighbourhood, Solver, Tuning};
+    use tiamat_core::coords::BlockPos;
+    use tiamat_core::fluid::{Fluid, FluidId, MAX_VOLUME, Neighbourhood, Solver, Tuning};
 
     #[derive(Default)]
     struct Basin {
@@ -964,7 +980,7 @@ fn the_fluid_scenarios_actually_hold_milk() {
                 return None;
             }
             Some(if self.solid.contains(&(pos.x, pos.y, pos.z)) {
-                tiamot_core::UNITS_PER_BLOCK
+                tiamat_core::UNITS_PER_BLOCK
             } else {
                 0
             })
@@ -1006,7 +1022,7 @@ fn the_fluid_scenarios_actually_hold_milk() {
     for tick in 0..120u64 {
         solver.tick(
             &mut scene,
-            &tiamot_core::fluid::Tunings::uniform(Tuning::DEFAULT),
+            &tiamat_core::fluid::Tunings::uniform(Tuning::DEFAULT),
             usize::MAX,
             SEED,
             tick,
@@ -1053,7 +1069,15 @@ fn the_fluid_scenarios_actually_hold_milk() {
 /// third of its cells and a coarser cell at half its children, where both were
 /// a majority with ties to air. Setting the two thresholds back to 14 and 5
 /// reproduced the previous constant exactly, so the rule is the whole change.
-const LOD_GOLDEN: u64 = 16_478_387_116_901_781_655;
+///
+/// Regenerated a sixth time, 2026-09-22, for the Tiamot -> Tiamat rename and
+/// for NO other reason. The hash's domain tag is part of its input, so moving
+/// it moved the number while the simulation stood still. **That claim was not
+/// assumed**: the two goldens in this file that carry no tag — the worldgen
+/// fingerprints and `FLUID_GOLDEN` — kept passing across the rename, and the
+/// only edits to this hash's input were the tag literal and an import path.
+/// A future difference here is still the thing the message below says it is.
+const LOD_GOLDEN: u64 = 13_529_650_896_470_517_215;
 
 /// A chunk with enough shape in it that a summary has something to lose.
 ///
@@ -1061,13 +1085,13 @@ const LOD_GOLDEN: u64 = 16_478_387_116_901_781_655;
 /// implementation that did nothing at all. This has a slope, a mixed layer and
 /// a scatter of single sub-nodes, so every rule the downsample has — the
 /// per-block majority, the 2×2×2 majority, and the tie-break — is exercised.
-fn lod_scene() -> tiamot_core::Chunk {
-    use tiamot_core::coords::LocalBlock;
-    use tiamot_core::{BlockValue, CHUNK_BLOCKS, MaterialId};
+fn lod_scene() -> tiamat_core::Chunk {
+    use tiamat_core::coords::LocalBlock;
+    use tiamat_core::{BlockValue, CHUNK_BLOCKS, MaterialId};
 
     let stone = MaterialId(1);
     let dirt = MaterialId(2);
-    let mut chunk = tiamot_core::Chunk::air(ChunkPos::new(0, 0, 0));
+    let mut chunk = tiamat_core::Chunk::air(ChunkPos::new(0, 0, 0));
     for z in 0..CHUNK_BLOCKS {
         for x in 0..CHUNK_BLOCKS {
             // A slope, so the summary has a skyline rather than a plane.
@@ -1093,8 +1117,8 @@ fn lod_scene() -> tiamot_core::Chunk {
 
 fn lod_fingerprint() -> u64 {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamot:lod-golden:v1");
-    for summary in tiamot_core::lod::Summary::chain(&lod_scene()) {
+    hasher.update(b"tiamat:lod-golden:v1");
+    for summary in tiamat_core::lod::Summary::chain(&lod_scene()) {
         hasher.update(&[summary.level()]);
         for cell in summary.cells() {
             hasher.update(&cell.0.to_le_bytes());
@@ -1135,9 +1159,9 @@ fn the_lod_scene_is_not_trivially_uniform() {
     // A golden over a solid chunk would pass against an implementation that
     // returned its input, and one over empty sky against an implementation that
     // returned nothing. This pins that the fixture has shape in it.
-    use tiamot_core::MaterialId;
+    use tiamat_core::MaterialId;
 
-    let chain = tiamot_core::lod::Summary::chain(&lod_scene());
+    let chain = tiamat_core::lod::Summary::chain(&lod_scene());
     let finest = chain.first().expect("a chain");
     assert!(
         finest.cells().iter().any(|cell| cell.is_air()),

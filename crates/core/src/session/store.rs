@@ -249,7 +249,7 @@ mod tests {
     /// WAL leaves `-wal` and `-shm` sidecars; a stale one from a previous run
     /// would let a test read data it never wrote.
     fn world_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("tiamot-store-tests");
+        let dir = std::env::temp_dir().join("tiamat-store-tests");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join(format!("{name}.sqlite"));
         for suffix in ["", "-wal", "-shm"] {

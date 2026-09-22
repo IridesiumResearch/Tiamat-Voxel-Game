@@ -117,7 +117,7 @@ later is slow, that is where to look — not here.
 
 ### What Task 10 measured (light)
 
-Same machine, `cargo bench -p tiamot-core --bench light`, against the real
+Same machine, `cargo bench -p tiamat-core --bench light`, against the real
 implementation rather than 02b's spike.
 
 | Operation | Cost | Share of a 50 ms tick |

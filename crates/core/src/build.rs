@@ -18,14 +18,14 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// `None` in a working copy, which is how "a build somebody made themselves"
 /// is told from "a build that came from a release" without asking anybody.
-pub const COMMIT: Option<&str> = option_env!("TIAMOT_COMMIT");
+pub const COMMIT: Option<&str> = option_env!("TIAMAT_COMMIT");
 
 /// Which update channel this build follows.
 ///
 /// **Compiled in, and there is no switching at runtime.** A build that could
 /// move itself between channels could be talked into moving; a channel is a
 /// separate manifest URL and therefore a separate build.
-pub const CHANNEL: &str = match option_env!("TIAMOT_CHANNEL") {
+pub const CHANNEL: &str = match option_env!("TIAMAT_CHANNEL") {
     Some(channel) => channel,
     None => "dev",
 };
@@ -34,7 +34,7 @@ pub const CHANNEL: &str = match option_env!("TIAMOT_CHANNEL") {
 ///
 /// `None` for a working copy, which is what stops a developer's build from
 /// asking a website about itself on every run.
-pub const MANIFEST_URL: Option<&str> = option_env!("TIAMOT_MANIFEST_URL");
+pub const MANIFEST_URL: Option<&str> = option_env!("TIAMAT_MANIFEST_URL");
 
 /// A one-line description of this build, for a log line or a corner of a
 /// screen: `0.2.0 (test, 8929ca1)`, or `0.1.0 (dev)`.

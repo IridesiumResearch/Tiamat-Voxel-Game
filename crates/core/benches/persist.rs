@@ -21,13 +21,13 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use tiamot_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::material::MaterialRegistry;
-use tiamot_core::persist::codec::{decode_chunk, encode_chunk};
-use tiamot_core::persist::idmap::MaterialMap;
-use tiamot_core::{BLOCKS_PER_CHUNK, BlockValue, ChunkPos, MaterialId, Registry, WorldDb};
+use tiamat_core::block::{EMPTY_CELLS, SUBNODES_PER_BLOCK};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::material::MaterialRegistry;
+use tiamat_core::persist::codec::{decode_chunk, encode_chunk};
+use tiamat_core::persist::idmap::MaterialMap;
+use tiamat_core::{BLOCKS_PER_CHUNK, BlockValue, ChunkPos, MaterialId, Registry, WorldDb};
 
 fn origin() -> ChunkPos {
     ChunkPos::new(0, 0, 0)
@@ -85,7 +85,7 @@ fn scene(name: &str, registry: &Registry) -> Chunk {
                         LocalBlock::new(x, 7, z),
                         BlockValue::Partial {
                             material: grass,
-                            occupancy: (x * 31 + z * 17 + 1) & tiamot_core::block::OCCUPANCY_FULL,
+                            occupancy: (x * 31 + z * 17 + 1) & tiamat_core::block::OCCUPANCY_FULL,
                         },
                     );
                 }

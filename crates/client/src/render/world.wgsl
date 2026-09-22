@@ -1074,7 +1074,7 @@ fn generic_shadow(input: VertexOut) -> f32 {
 // Fine units per cell in a fluid vertex's drop. Must match `mesher::FINE`.
 const FLUID_FINE: f32 = 16.0;
 
-// Cells per block. Must match `tiamot_core::SUBNODES_PER_AXIS`.
+// Cells per block. Must match `tiamat_core::SUBNODES_PER_AXIS`.
 const CELLS_PER_BLOCK: f32 = 3.0;
 
 // How much of what is behind it a fluid surface lets through.

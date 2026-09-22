@@ -17,12 +17,12 @@
 use std::path::PathBuf;
 
 use ed25519_dalek::{Signer, SigningKey};
-use tiamot_core::release::{Artifact, Manifest, SCHEMA, to_hex};
+use tiamat_core::release::{Artifact, Manifest, SCHEMA, to_hex};
 
 use super::*;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-client-update").join(name);
+    let dir = std::env::temp_dir().join("tiamat-client-update").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
     dir
@@ -46,10 +46,10 @@ fn signed(
         notes: None,
         artifacts: vec![Artifact {
             target: TARGET.to_owned(),
-            name: format!("tiamot-99.0.0-{TARGET}.tar.gz"),
+            name: format!("tiamat-99.0.0-{TARGET}.tar.gz"),
             size: archive.len() as u64,
             hash: blake3::hash(archive).to_hex().to_string(),
-            urls: vec!["https://example.invalid/tiamot.tar.gz".to_owned()],
+            urls: vec!["https://example.invalid/tiamat.tar.gz".to_owned()],
         }],
     };
     edit(&mut manifest);

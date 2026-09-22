@@ -20,7 +20,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tiamot_core::fluid::codec::{decode, encode};
+use tiamat_core::fluid::codec::{decode, encode};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(layer) = decode(data) else {

@@ -30,8 +30,8 @@
 
 use std::collections::BTreeSet;
 
-use tiamot_core::content::ContentIndex;
-use tiamot_core::proto::{ContentHash, MAX_CONTENT_CHUNK_BYTES, ServerMessage};
+use tiamat_core::content::ContentIndex;
+use tiamat_core::proto::{ContentHash, MAX_CONTENT_CHUNK_BYTES, ServerMessage};
 
 /// Uncompressed bytes per slice.
 ///
@@ -52,7 +52,7 @@ pub const COMPRESSION_LEVEL: i32 = 3;
 ///
 /// Generous next to any real mod pack, and a hard stop on a client looping
 /// requests to burn server CPU. A client that legitimately needs more than this
-/// is downloading more than [`tiamot_core::content::MAX_MOD_BYTES`] allows a
+/// is downloading more than [`tiamat_core::content::MAX_MOD_BYTES`] allows a
 /// server to hold.
 pub const QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -198,11 +198,11 @@ impl Transfers {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use tiamot_core::content::hash_bytes;
+    use tiamat_core::content::hash_bytes;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join("tiamot-content-serve-tests")
+            .join("tiamat-content-serve-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");

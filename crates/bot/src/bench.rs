@@ -108,7 +108,7 @@ impl TickReport {
     /// microseconds did.
     #[must_use]
     pub fn budget_share_tenths(micros: u64) -> u64 {
-        let budget_us = tiamot_core::tick::TICK_DURATION.as_micros() as u64;
+        let budget_us = tiamat_core::tick::TICK_DURATION.as_micros() as u64;
         micros.saturating_mul(1000) / budget_us.max(1)
     }
 
@@ -187,7 +187,7 @@ impl TickReport {
     /// Renders the human-readable table.
     #[must_use]
     pub fn to_table(&self) -> String {
-        let budget = tiamot_core::tick::TICK_DURATION;
+        let budget = tiamat_core::tick::TICK_DURATION;
         let mut out = format!("tick time over {} ticks (budget {budget:?}):\n", self.ticks);
         for (label, value) in [
             ("mean", self.mean_us),
@@ -390,9 +390,9 @@ pub const GROUND: i32 = -1;
 /// A message naming what went wrong, including a dig that credited nothing —
 /// which means the mod set has no drops and the workload cannot run at all.
 pub async fn probe_material(addr: std::net::SocketAddr) -> Result<u16, String> {
-    use tiamot_core::BlockPos;
+    use tiamat_core::BlockPos;
 
-    let identity = tiamot_core::identity::Identity::generate().map_err(|err| err.to_string())?;
+    let identity = tiamat_core::identity::Identity::generate().map_err(|err| err.to_string())?;
     let mut bot = crate::Bot::connect_trusting(addr, identity)
         .await
         .map_err(|err| err.to_string())?;
@@ -487,7 +487,7 @@ pub fn standard_session(
     material: u16,
 ) -> Vec<crate::replay::Recorded> {
     use crate::script::Command;
-    use tiamot_core::{BlockPos, SubNodePos};
+    use tiamat_core::{BlockPos, SubNodePos};
 
     let (home_x, home_z) = home(index, bots);
     let mut out = vec![crate::replay::Recorded {

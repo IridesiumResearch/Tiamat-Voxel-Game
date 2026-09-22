@@ -18,7 +18,7 @@ mod ever written against the old one.
 |---|---|
 | **Measured on** | AMD Ryzen 7 7800X3D, `--release`, single-threaded |
 | **Binding** | `mlua` 0.11, vendored |
-| **Reproduce** | `cargo run --release -p tiamot-core --example vm_bench --no-default-features --features vm-lua54` (and `vm-luajit`, `vm-luau`) |
+| **Reproduce** | `cargo run --release -p tiamat-core --example vm_bench --no-default-features --features vm-lua54` (and `vm-luajit`, `vm-luau`) |
 
 ---
 

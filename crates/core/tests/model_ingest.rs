@@ -9,7 +9,7 @@
 //! or the reader shows up as a mismatch rather than as a mob with its arm on
 //! backwards.
 
-use tiamot_core::model::{Limits, Model, ModelError, build, humanoid, ingest};
+use tiamat_core::model::{Limits, Model, ModelError, build, humanoid, ingest};
 
 fn tiny() -> Limits {
     Limits::default()
@@ -113,9 +113,9 @@ fn the_rig_is_the_size_the_physics_collides() {
         .map(|vertex| vertex.position[1])
         .fold(f32::MAX, f32::min);
     assert!(
-        (top - tiamot_core::phys::PLAYER_HEIGHT).abs() < 0.01,
+        (top - tiamat_core::phys::PLAYER_HEIGHT).abs() < 0.01,
         "the rig is {top} cells tall and the collider is {}",
-        tiamot_core::phys::PLAYER_HEIGHT
+        tiamat_core::phys::PLAYER_HEIGHT
     );
     assert!(
         bottom.abs() < 0.01,

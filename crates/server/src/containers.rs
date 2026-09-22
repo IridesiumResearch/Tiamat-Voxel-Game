@@ -30,8 +30,8 @@
 
 use std::collections::BTreeMap;
 
-use tiamot_core::PlayerUuid;
-use tiamot_core::inventory::{Slots, View};
+use tiamat_core::PlayerUuid;
+use tiamat_core::inventory::{Slots, View};
 
 /// One container, and who has it open.
 #[derive(Debug, Clone)]
@@ -104,7 +104,7 @@ impl Containers {
     /// Returns what did not fit, so a mod can drop it on the floor rather than
     /// have the engine destroy it. Refused — and everything returned — while
     /// somebody has it open.
-    pub fn resize(&mut self, name: &str, slots: usize) -> Vec<tiamot_core::inventory::Stack> {
+    pub fn resize(&mut self, name: &str, slots: usize) -> Vec<tiamat_core::inventory::Stack> {
         let Some(container) = self.by_name.get_mut(name) else {
             return Vec::new();
         };
@@ -229,7 +229,7 @@ impl Containers {
     ///
     /// Refuses while somebody has it open, because those items are in another
     /// player's screen and taking them would be taking them out of their hands.
-    pub fn remove(&mut self, name: &str) -> Option<Vec<tiamot_core::inventory::Stack>> {
+    pub fn remove(&mut self, name: &str) -> Option<Vec<tiamat_core::inventory::Stack>> {
         if self.by_name.get(name)?.holder.is_some() {
             return None;
         }
@@ -323,7 +323,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::inventory::Containers for Shared {
+impl tiamat_core::inventory::Containers for Shared {
     fn ensure(&self, name: &str, slots: usize) -> bool {
         self.store
             .lock()
@@ -363,7 +363,7 @@ impl tiamot_core::inventory::Containers for Shared {
         closed
     }
 
-    fn slots(&self, name: &str) -> Vec<Option<tiamot_core::inventory::Stack>> {
+    fn slots(&self, name: &str) -> Vec<Option<tiamat_core::inventory::Stack>> {
         // A read, but through the same "wherever it lives" path a write uses:
         // answering empty for an open container is what used to make a machine
         // blind exactly while its owner watched it.
@@ -371,7 +371,7 @@ impl tiamot_core::inventory::Containers for Shared {
             .unwrap_or_default()
     }
 
-    fn give(&self, name: &str, slot: Option<usize>, stack: tiamot_core::inventory::Stack) -> u32 {
+    fn give(&self, name: &str, slot: Option<usize>, stack: tiamat_core::inventory::Stack) -> u32 {
         let offered = stack.units;
         let left = self
             .with_view(name, |view| view.fill(slot, stack))
@@ -385,8 +385,8 @@ impl tiamot_core::inventory::Containers for Shared {
         &self,
         name: &str,
         slot: Option<usize>,
-        material: tiamot_core::MaterialId,
-        shape: Option<tiamot_core::inventory::Shape>,
+        material: tiamat_core::MaterialId,
+        shape: Option<tiamat_core::inventory::Shape>,
         detail: Option<&str>,
         units: u32,
     ) -> u32 {
@@ -394,7 +394,7 @@ impl tiamot_core::inventory::Containers for Shared {
             .unwrap_or(0)
     }
 
-    fn remove(&self, name: &str) -> Vec<tiamot_core::inventory::Stack> {
+    fn remove(&self, name: &str) -> Vec<tiamat_core::inventory::Stack> {
         self.store
             .lock()
             .ok()
@@ -406,8 +406,8 @@ impl tiamot_core::inventory::Containers for Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::MaterialId;
-    use tiamot_core::inventory::{Grab, Stack};
+    use tiamat_core::MaterialId;
+    use tiamat_core::inventory::{Grab, Stack};
 
     fn player(byte: u8) -> PlayerUuid {
         PlayerUuid::from_bytes([byte; 32])

@@ -6,15 +6,15 @@
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_server::{ServerHandle, Settings};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 
 const TOKEN: &str = "a-sufficiently-long-test-token";
 
 fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
-    let dir = std::env::temp_dir().join("tiamot-rcon-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-rcon-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -33,7 +33,7 @@ fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: Some((rcon_addr, TOKEN.to_owned())),
-        view_distance: tiamot_core::interest::ViewDistance::MINIMUM,
+        view_distance: tiamat_core::interest::ViewDistance::MINIMUM,
         mods_path: None,
         enabled_mods: None,
         seed: Some(1),
@@ -238,7 +238,7 @@ fn kick_disconnects_the_named_player_with_a_reason() {
                 let message = alice.recv().await.expect("a message, not an error");
                 if matches!(
                     message,
-                    tiamot_core::proto::ServerMessage::Disconnect { .. }
+                    tiamat_core::proto::ServerMessage::Disconnect { .. }
                 ) {
                     return message;
                 }
@@ -249,8 +249,8 @@ fn kick_disconnects_the_named_player_with_a_reason() {
         assert!(
             matches!(
                 message,
-                tiamot_core::proto::ServerMessage::Disconnect {
-                    reason: tiamot_core::proto::DisconnectReason::Kicked { ref reason }
+                tiamat_core::proto::ServerMessage::Disconnect {
+                    reason: tiamat_core::proto::DisconnectReason::Kicked { ref reason }
                 } if reason == "being tiresome"
             ),
             "expected a Kicked disconnect carrying the reason, got {message:?}"
@@ -372,7 +372,7 @@ fn an_enforced_allowlist_takes_effect_without_a_restart() {
             matches!(
                 err,
                 bot::BotError::Refused {
-                    reason: tiamot_core::proto::DisconnectReason::NotAllowlisted
+                    reason: tiamat_core::proto::DisconnectReason::NotAllowlisted
                 }
             ),
             "got {err}"
@@ -468,7 +468,7 @@ fn rebind_replaces_a_root_key_and_refuses_nonsense() {
         assert_eq!(
             heir.received()
                 .iter()
-                .filter(|m| matches!(m, tiamot_core::proto::ServerMessage::JoinWorld { .. }))
+                .filter(|m| matches!(m, tiamat_core::proto::ServerMessage::JoinWorld { .. }))
                 .count(),
             1
         );

@@ -38,8 +38,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use tiamot_core::ChunkPos;
-use tiamot_core::proto::{EntityDef, EntityDelta};
+use tiamat_core::ChunkPos;
+use tiamat_core::proto::{EntityDef, EntityDelta};
 
 /// How far behind the newest update the client draws.
 ///
@@ -70,13 +70,13 @@ pub struct Entity {
     /// The label above it, already the current display name.
     pub nametag: Option<String>,
     /// The stack it looks like, for an item lying on the ground.
-    pub item: Option<tiamot_core::proto::StackDef>,
+    pub item: Option<tiamat_core::proto::StackDef>,
     /// What it is holding: main hand, then off hand.
     ///
     /// A different question from `item`, which is the stack an entity IS. Kept
     /// out of the sample history on purpose: a hand is not interpolated, it
     /// simply is what it last was.
-    pub hands: [Option<tiamot_core::proto::StackDef>; 2],
+    pub hands: [Option<tiamat_core::proto::StackDef>; 2],
     /// Recent positions, oldest first.
     samples: Vec<Sample>,
 }
@@ -219,7 +219,7 @@ impl Sample {
         // their `local` parts directly would fling the entity a chunk sideways
         // for one frame — the same class of bug as comparing two entity
         // positions without `Transform::offset_to`.
-        let span = tiamot_core::CHUNK_SUBNODES as f32;
+        let span = tiamat_core::CHUNK_SUBNODES as f32;
         let mut local = [0.0; 3];
         for (axis, slot) in local.iter_mut().enumerate() {
             let chunk_offset = match axis {
@@ -342,7 +342,7 @@ impl Entities {
     /// the same reason a delta for one is: the spawn is still in flight or was
     /// lost, and an entity invented from a pair of hands would have no model,
     /// no collider and no name.
-    pub fn rearmed(&mut self, entities: &[tiamot_core::proto::EntityHands]) {
+    pub fn rearmed(&mut self, entities: &[tiamat_core::proto::EntityHands]) {
         for armed in entities {
             if let Some(known) = self.held.get_mut(&armed.id) {
                 known.hands.clone_from(&armed.hands);
@@ -474,7 +474,7 @@ mod tests {
         // their `local` parts directly sends the entity a chunk sideways for
         // one frame — the same class of bug as comparing two entity positions
         // without `offset_to`.
-        let span = tiamot_core::CHUNK_SUBNODES as f32;
+        let span = tiamat_core::CHUNK_SUBNODES as f32;
         let mut world = Entities::new();
         world.spawned(&[def(1, span - 1.0)], ms(0));
         world.moved(

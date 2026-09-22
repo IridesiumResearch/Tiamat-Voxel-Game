@@ -20,9 +20,9 @@
 //! what is streamed, and one chunk layer disagreeing with the one above it is
 //! visible here in milliseconds.
 
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::detgen::{Axis, ChunkBuffer, Density, FractalParams, Op, Terraces, UNSTRETCHED};
-use tiamot_core::{CHUNK_BLOCKS, ChunkPos, MaterialId};
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::detgen::{Axis, ChunkBuffer, Density, FractalParams, Op, Terraces, UNSTRETCHED};
+use tiamat_core::{CHUNK_BLOCKS, ChunkPos, MaterialId};
 
 const SEED: u64 = 7;
 
@@ -63,7 +63,7 @@ fn layer(field: &Density, pos: ChunkPos) -> ChunkBuffer {
             &Terraces {
                 level: field,
                 within: None,
-                fluid: tiamot_core::fluid::FluidId(1),
+                fluid: tiamat_core::fluid::FluidId(1),
                 lip: None,
             },
         )

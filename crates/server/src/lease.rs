@@ -44,8 +44,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use tiamot_core::path;
-use tiamot_core::sight::{self, Sighting};
+use tiamat_core::path;
+use tiamat_core::sight::{self, Sighting};
 
 use crate::world::World;
 
@@ -232,7 +232,7 @@ impl sight::Access for Shared {
         }
     }
 
-    fn block_at(&self, domain: &str, pos: tiamot_core::BlockPos) -> sight::Reading {
+    fn block_at(&self, domain: &str, pos: tiamat_core::BlockPos) -> sight::Reading {
         let Ok(slot) = self.slot.lock() else {
             return sight::Reading::Unavailable;
         };
@@ -264,24 +264,24 @@ impl sight::Access for Shared {
         // moment a mod is removed: a brick read back as a filler nobody has
         // loaded. `a_block_read_back_is_in_the_id_space_a_mod_speaks` is the
         // test, and it passed for a day on a stored answer from the run before.
-        let runtime = |material: tiamot_core::MaterialId| material;
+        let runtime = |material: tiamat_core::MaterialId| material;
         match view {
-            tiamot_core::BlockView::Uniform(material) => sight::Reading::Single {
+            tiamat_core::BlockView::Uniform(material) => sight::Reading::Single {
                 material: runtime(material),
                 occupancy: if material.is_air() {
                     0
                 } else {
-                    tiamot_core::block::OCCUPANCY_FULL
+                    tiamat_core::block::OCCUPANCY_FULL
                 },
             },
-            tiamot_core::BlockView::Partial {
+            tiamat_core::BlockView::Partial {
                 material,
                 occupancy,
             } => sight::Reading::Single {
                 material: runtime(material),
-                occupancy: occupancy & tiamot_core::block::OCCUPANCY_FULL,
+                occupancy: occupancy & tiamat_core::block::OCCUPANCY_FULL,
             },
-            tiamot_core::BlockView::Mixed(cells) => {
+            tiamat_core::BlockView::Mixed(cells) => {
                 sight::Reading::Mixed(Box::new(std::array::from_fn(|index| runtime(cells[index]))))
             }
         }
@@ -308,16 +308,16 @@ impl sight::Access for Shared {
         let fluidics = ponds.as_ref().and_then(|ponds| ponds.get(domain));
         let depth = i32::try_from(depth.min(sight::MAX_SURFACE_DEPTH)).unwrap_or(i32::MAX);
         let passable =
-            |material: tiamot_core::MaterialId| self.passable.binary_search(&material.0).is_ok();
+            |material: tiamat_core::MaterialId| self.passable.binary_search(&material.0).is_ok();
 
         // **One chunk resolved per sixteen rows.** `resident` hands back a
         // reference tied to the world, not to the borrow, so a column is
         // walked with a lookup per chunk and not per block — the pattern
         // lighting uses. An unloaded chunk ends the walk with no answer:
         // never generated to find out, as `block_at` has it.
-        let mut held: Option<(tiamot_core::ChunkPos, &tiamot_core::Chunk)> = None;
+        let mut held: Option<(tiamat_core::ChunkPos, &tiamat_core::Chunk)> = None;
         for y in (from.saturating_sub(depth - 1)..=from).rev() {
-            let pos = tiamot_core::BlockPos::new(column[0], y, column[1]);
+            let pos = tiamat_core::BlockPos::new(column[0], y, column[1]);
             let chunk = match held {
                 Some((at, chunk)) if at == pos.chunk() => chunk,
                 _ => {
@@ -327,17 +327,17 @@ impl sight::Access for Shared {
                 }
             };
             let (material, occupancy) = match chunk.get_block_local(pos.local()) {
-                tiamot_core::BlockView::Uniform(material) if material.is_air() => {
-                    (tiamot_core::MaterialId::AIR, 0)
+                tiamat_core::BlockView::Uniform(material) if material.is_air() => {
+                    (tiamat_core::MaterialId::AIR, 0)
                 }
-                tiamot_core::BlockView::Uniform(material) => {
-                    (material, tiamot_core::block::OCCUPANCY_FULL)
+                tiamat_core::BlockView::Uniform(material) => {
+                    (material, tiamat_core::block::OCCUPANCY_FULL)
                 }
-                tiamot_core::BlockView::Partial {
+                tiamat_core::BlockView::Partial {
                     material,
                     occupancy,
-                } => (material, occupancy & tiamot_core::block::OCCUPANCY_FULL),
-                tiamot_core::BlockView::Mixed(cells) => {
+                } => (material, occupancy & tiamat_core::block::OCCUPANCY_FULL),
+                tiamat_core::BlockView::Mixed(cells) => {
                     // The first cell that would stop the fall names the block;
                     // failing one, the first that is there at all.
                     let mut occupancy = 0u32;
@@ -354,7 +354,7 @@ impl sight::Access for Shared {
                         }
                     }
                     (
-                        solid.or(named).unwrap_or(tiamot_core::MaterialId::AIR),
+                        solid.or(named).unwrap_or(tiamat_core::MaterialId::AIR),
                         occupancy,
                     )
                 }
@@ -375,7 +375,7 @@ impl sight::Access for Shared {
                 if !fluid.is_empty() {
                     return Some(sight::Surface {
                         y,
-                        material: tiamot_core::MaterialId::AIR,
+                        material: tiamat_core::MaterialId::AIR,
                         occupancy: 0,
                         fluid: Some(fluid),
                     });
@@ -392,7 +392,7 @@ impl sight::Access for Shared {
         // way round would be the one ordering that can deadlock.
         let (domain, origin, eye, direction) = {
             let bodies = bodies.lock().ok()?;
-            let player = bodies.get(&tiamot_core::PlayerUuid::from_bytes(uuid))?;
+            let player = bodies.get(&tiamat_core::PlayerUuid::from_bytes(uuid))?;
             (
                 player.domain.clone(),
                 player.origin,
@@ -407,16 +407,16 @@ impl sight::Access for Shared {
         // is still something you can point at and dig, so targeting reads the
         // terrain as it is rather than as a walk through it does.
         let terrain = world.solid(&domain);
-        let voxels = tiamot_core::phys::Voxels::new(&terrain, origin);
+        let voxels = tiamat_core::phys::Voxels::new(&terrain, origin);
         let hit =
-            tiamot_core::phys::ray::cast(&voxels, eye, direction, tiamot_core::phys::ray::REACH)?;
+            tiamat_core::phys::ray::cast(&voxels, eye, direction, tiamat_core::phys::ray::REACH)?;
 
         // The hit is in the body's own chunk frame (charter rule 7); everything
         // a mod speaks is absolute. Getting this conversion wrong is how a mod
         // acts on a block a chunk away, so it is one named step.
-        let corner = tiamot_core::BlockPos::from_chunk_corner(origin);
-        let per = tiamot_core::SUBNODES_PER_AXIS as i32;
-        let cell = tiamot_core::SubNodePos::new(
+        let corner = tiamat_core::BlockPos::from_chunk_corner(origin);
+        let per = tiamat_core::SUBNODES_PER_AXIS as i32;
+        let cell = tiamat_core::SubNodePos::new(
             corner.x * per + hit.cell[0],
             corner.y * per + hit.cell[1],
             corner.z * per + hit.cell[2],
@@ -448,7 +448,7 @@ impl sight::Access for Shared {
 /// becomes world state, and charter rule 4 does not exempt it the way it
 /// exempts the client's own camera.
 fn look_direction(look: [f32; 2]) -> [f32; 3] {
-    use tiamot_core::detgen::trig;
+    use tiamat_core::detgen::trig;
     let turn = std::f32::consts::TAU;
     let yaw = look[0] * turn;
     let pitch = look[1] * turn;
@@ -544,30 +544,30 @@ impl path::Access for Shared {
 /// it reaches an entity patch. Refused rather than floored, because
 /// `NaN as i32` is zero and a search starting at the world origin because a mod
 /// divided by zero is the kind of answer that looks like a pathfinding bug.
-fn block_of(point: [f64; 3]) -> Option<tiamot_core::BlockPos> {
+fn block_of(point: [f64; 3]) -> Option<tiamat_core::BlockPos> {
     if !point.iter().all(|value| value.is_finite()) {
         return None;
     }
-    let transform = tiamot_core::ent::Transform::from_world(point[0], point[1], point[2]);
+    let transform = tiamat_core::ent::Transform::from_world(point[0], point[1], point[2]);
     Some(transform.block())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::MaterialId;
-    use tiamot_core::chunk::Chunk;
-    use tiamot_core::coords::ChunkPos;
-    use tiamot_core::path::{self, Access as _};
-    use tiamot_core::sight::Access as _;
+    use tiamat_core::MaterialId;
+    use tiamat_core::chunk::Chunk;
+    use tiamat_core::coords::ChunkPos;
+    use tiamat_core::path::{self, Access as _};
+    use tiamat_core::sight::Access as _;
 
     fn world() -> World {
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         registry.register("test:stone").expect("register");
         // A second material, so a test can tell east from west by what it hit
         // rather than only by whether it hit anything.
         registry.register("test:chalk").expect("register");
-        let db = tiamot_core::persist::WorldDb::open_in_memory(&mut registry).expect("open");
+        let db = tiamat_core::persist::WorldDb::open_in_memory(&mut registry).expect("open");
         World::open(db, 1).expect("world")
     }
 
@@ -586,7 +586,7 @@ mod tests {
         let lease = Lease::new();
         let handle = lease.handle();
         assert_eq!(
-            handle.line_of_sight(tiamot_core::domain::OVERWORLD, [0.0; 3], [1.0, 0.0, 0.0]),
+            handle.line_of_sight(tiamat_core::domain::OVERWORLD, [0.0; 3], [1.0, 0.0, 0.0]),
             Sighting::Unavailable
         );
     }
@@ -599,7 +599,7 @@ mod tests {
         let mut world = world();
         world
             .chunk(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 ChunkPos::new(0, 0, 0),
                 &mut Empty,
             )
@@ -607,7 +607,7 @@ mod tests {
 
         let (world, seen) = lease.lending(world, || {
             handle.line_of_sight(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 [0.5, 0.5, 0.5],
                 [2.5, 0.5, 0.5],
             )
@@ -619,7 +619,7 @@ mod tests {
         // And the slot is empty again, so the next mod call outside a lend is
         // told so rather than reading a world the tick has moved on from.
         assert_eq!(
-            handle.line_of_sight(tiamot_core::domain::OVERWORLD, [0.0; 3], [1.0, 0.0, 0.0]),
+            handle.line_of_sight(tiamat_core::domain::OVERWORLD, [0.0; 3], [1.0, 0.0, 0.0]),
             Sighting::Unavailable
         );
     }
@@ -629,7 +629,7 @@ mod tests {
         let mut world = world();
         world
             .chunk(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 ChunkPos::new(0, 0, 0),
                 &mut Empty,
             )
@@ -638,7 +638,7 @@ mod tests {
             for y in 0..16 {
                 place(
                     &mut world,
-                    tiamot_core::BlockPos::new(x, y, 10),
+                    tiamat_core::BlockPos::new(x, y, 10),
                     MaterialId(1),
                 );
             }
@@ -648,10 +648,10 @@ mod tests {
 
     /// One player, standing at cell (24, 24, 24) — block (8, 8, 8) — looking
     /// where `look` points.
-    fn watcher(look: [f32; 2]) -> (tiamot_core::PlayerUuid, Arc<crate::transport::PlayerBodies>) {
-        let uuid = tiamot_core::PlayerUuid::from_bytes([9; 32]);
+    fn watcher(look: [f32; 2]) -> (tiamat_core::PlayerUuid, Arc<crate::transport::PlayerBodies>) {
+        let uuid = tiamat_core::PlayerUuid::from_bytes([9; 32]);
         let mut sim = crate::transport::endpoint::PlayerSim::spawned_at(
-            tiamot_core::BlockPos::new(8, 8, 8),
+            tiamat_core::BlockPos::new(8, 8, 8),
             0,
         );
         sim.body.position = [24.0, 24.0, 24.0];
@@ -680,7 +680,7 @@ mod tests {
             [0, 0, -1],
             "the face points back out of the wall, so a placement goes in front of it"
         );
-        assert_eq!(looked.domain, tiamot_core::domain::OVERWORLD);
+        assert_eq!(looked.domain, tiamat_core::domain::OVERWORLD);
     }
 
     #[test]
@@ -711,12 +711,12 @@ mod tests {
         let mut world = wall();
         place(
             &mut world,
-            tiamot_core::BlockPos::new(6, 9, 8),
+            tiamat_core::BlockPos::new(6, 9, 8),
             MaterialId(1),
         );
         place(
             &mut world,
-            tiamot_core::BlockPos::new(10, 9, 8),
+            tiamat_core::BlockPos::new(10, 9, 8),
             MaterialId(2),
         );
 
@@ -765,27 +765,27 @@ mod tests {
         let stone = MaterialId(1);
         world
             .chunk(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 ChunkPos::new(0, 0, 0),
                 &mut Empty,
             )
             .expect("the chunk loads");
         for x in 0..16 {
             for z in 0..16 {
-                place(&mut world, tiamot_core::BlockPos::new(x, 0, z), stone);
+                place(&mut world, tiamat_core::BlockPos::new(x, 0, z), stone);
             }
         }
         for y in 1..=3 {
-            place(&mut world, tiamot_core::BlockPos::new(8, y, 8), stone);
+            place(&mut world, tiamat_core::BlockPos::new(8, y, 8), stone);
         }
         world
     }
 
-    fn place(world: &mut World, pos: tiamot_core::BlockPos, material: MaterialId) {
+    fn place(world: &mut World, pos: tiamat_core::BlockPos, material: MaterialId) {
         world
             .apply(
-                tiamot_core::domain::OVERWORLD,
-                &tiamot_core::proto::Edit::Block {
+                tiamat_core::domain::OVERWORLD,
+                &tiamat_core::proto::Edit::Block {
                     pos,
                     material: material.get(),
                 },
@@ -813,7 +813,7 @@ mod tests {
         // not an early refusal.
         let (returned, first) = lease.lending(world, || {
             handle.find_path(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 FLOOR,
                 PILLAR_TOP,
                 path::Options::default(),
@@ -830,7 +830,7 @@ mod tests {
         let (returned, ()) = lease.lending(world, || {
             for _ in 0..path::TICK_BUDGET.div_ceil(64) {
                 let _ = handle.find_path(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     FLOOR,
                     PILLAR_TOP,
                     path::Options::default(),
@@ -841,7 +841,7 @@ mod tests {
 
         let (returned, drained) = lease.lending(world, || {
             handle.find_path(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 FLOOR,
                 PILLAR_TOP,
                 path::Options::default(),
@@ -858,7 +858,7 @@ mod tests {
         lease.open_tick();
         let (_world, refilled) = lease.lending(world, || {
             handle.find_path(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 FLOOR,
                 PILLAR_TOP,
                 path::Options::default(),
@@ -882,7 +882,7 @@ mod tests {
 
         let (_world, seen) = lease.lending(world(), || {
             handle.line_of_sight(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 [0.5, 0.5, 0.5],
                 [2.5, 0.5, 0.5],
             )
@@ -900,22 +900,22 @@ mod tests {
         let stone = MaterialId(1);
         let grass = MaterialId(2);
         let mut world = room();
-        place(&mut world, tiamot_core::BlockPos::new(1, 1, 1), grass);
+        place(&mut world, tiamat_core::BlockPos::new(1, 1, 1), grass);
 
         let fluid = std::sync::Arc::new(std::sync::RwLock::new(crate::fluid::Ponds::new(
-            tiamot_core::fluid::Fluids::new(),
-            tiamot_core::fluid::Absorbency::default(),
+            tiamat_core::fluid::Fluids::new(),
+            tiamat_core::fluid::Absorbency::default(),
         )));
-        let milk = tiamot_core::fluid::Fluid::new(tiamot_core::fluid::FluidId(1), 27);
+        let milk = tiamat_core::fluid::Fluid::new(tiamat_core::fluid::FluidId(1), 27);
         fluid
             .write()
             .expect("fluid")
-            .of(tiamot_core::domain::OVERWORLD)
-            .set(tiamot_core::BlockPos::new(3, 1, 3), milk);
+            .of(tiamat_core::domain::OVERWORLD)
+            .set(tiamat_core::BlockPos::new(3, 1, 3), milk);
 
         let lease = Lease::new().with_terrain(vec![grass.0], fluid);
         let handle = lease.handle();
-        let domain = tiamot_core::domain::OVERWORLD;
+        let domain = tiamat_core::domain::OVERWORLD;
         let look = |handle: &Shared, x: i32, z: i32, from: i32, depth: u32, skip: sight::Skip| {
             handle.surface_at(domain, [x, z], from, depth, skip)
         };
@@ -946,7 +946,7 @@ mod tests {
                 look(&handle, 40, 5, 15, 16, nothing),
             )
         });
-        let full = tiamot_core::block::OCCUPANCY_FULL;
+        let full = tiamat_core::block::OCCUPANCY_FULL;
         assert_eq!(
             seen.0.map(|s| (s.y, s.material, s.occupancy)),
             Some((3, stone, full)),

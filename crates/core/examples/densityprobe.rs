@@ -3,7 +3,7 @@
 
 //! What `Density::bounds` saves a generator, measured on a real-shaped field.
 //!
-//! Run with `cargo run --release --example densityprobe -p tiamot-core`. Debug
+//! Run with `cargo run --release --example densityprobe -p tiamat-core`. Debug
 //! numbers are meaningless here — the field evaluation is the whole cost and it
 //! is several times slower unoptimised.
 //!
@@ -13,10 +13,10 @@
 
 use std::time::Instant;
 
-use tiamot_core::detgen::{
+use tiamat_core::detgen::{
     Axis, ChunkBuffer, Density, Detail, Fractal, FractalParams, Op, Region3d,
 };
-use tiamot_core::{CHUNK_BLOCKS, ChunkPos, MaterialId};
+use tiamat_core::{CHUNK_BLOCKS, ChunkPos, MaterialId};
 
 fn noise(stream: u64, frequency: f32, octaves: u32, amplitude: f32) -> Op {
     Op::Noise {
@@ -29,7 +29,7 @@ fn noise(stream: u64, frequency: f32, octaves: u32, amplitude: f32) -> Op {
         },
         amplitude,
         stream,
-        stretch: tiamot_core::detgen::UNSTRETCHED,
+        stretch: tiamat_core::detgen::UNSTRETCHED,
     }
 }
 
@@ -92,7 +92,7 @@ fn main() {
 /// and a generator that builds its density INSIDE `on_generate` pays them once
 /// per chunk — which is the shape the obvious code has.
 fn snapshot_cost() {
-    use tiamot_core::detgen::Map;
+    use tiamat_core::detgen::Map;
 
     println!("\ncompiling a map node:");
     for side in [256u32, 1024] {

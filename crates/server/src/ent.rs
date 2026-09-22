@@ -3,20 +3,20 @@
 
 //! The server's entities: stepping them, freezing them, and thawing them.
 //!
-//! [`tiamot_core::ent`] is the data model and knows nothing about the world,
+//! [`tiamat_core::ent`] is the data model and knows nothing about the world,
 //! the clock, or the database. This is where it meets all three.
 //!
 //! # Entities move through the player's physics, not beside it
 //!
 //! Charter rule 2 allows exactly one simulation. A mob falls, collides with
 //! sub-node geometry, steps up a lip and floats in milk because it runs
-//! [`tiamot_core::phys::step`] — the same function, with the same
-//! [`Tuning`](tiamot_core::phys::Tuning), that the player has been running since
+//! [`tiamat_core::phys::step`] — the same function, with the same
+//! [`Tuning`](tiamat_core::phys::Tuning), that the player has been running since
 //! Task 09. The only thing an entity brings of its own is the size of its box,
-//! which is why [`tiamot_core::phys::Aabb::sized_at`] exists.
+//! which is why [`tiamat_core::phys::Aabb::sized_at`] exists.
 //!
 //! What a mob *decides* is not the engine's business (charter rule 1). The
-//! engine reads [`Entity::drive`](tiamot_core::ent::Entity::drive) — a walk
+//! engine reads [`Entity::drive`](tiamat_core::ent::Entity::drive) — a walk
 //! direction, a jump, a gait — and a mod writes it. That is the same shape as a
 //! player's input queue, deliberately: the engine moves bodies, and something
 //! else says where they are trying to go.
@@ -31,9 +31,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tiamot_core::coords::ChunkPos;
-use tiamot_core::ent::{Entities, Entity, EntityId, Transform, Velocity};
-use tiamot_core::phys::{self, Body};
+use tiamat_core::coords::ChunkPos;
+use tiamat_core::ent::{Entities, Entity, EntityId, Transform, Velocity};
+use tiamat_core::phys::{self, Body};
 
 use crate::world::World;
 
@@ -103,7 +103,7 @@ pub struct Population {
     ///   would apply gravity to a body that has already fallen this tick.
     transient: BTreeSet<EntityId>,
     /// Which entity mirrors which player.
-    players: BTreeMap<tiamot_core::PlayerUuid, EntityId>,
+    players: BTreeMap<tiamat_core::PlayerUuid, EntityId>,
     /// Which domain each entity is in, for everything but the overworld.
     ///
     /// **Absent means the overworld**, which is what makes this cost nothing in
@@ -136,7 +136,7 @@ impl Population {
     pub fn domain_of(&self, id: EntityId) -> &str {
         self.domains
             .get(&id)
-            .map_or(tiamot_core::domain::OVERWORLD, String::as_str)
+            .map_or(tiamat_core::domain::OVERWORLD, String::as_str)
     }
 
     /// Records which domain an entity is in.
@@ -149,7 +149,7 @@ impl Population {
         if was == domain {
             return;
         }
-        if domain == tiamot_core::domain::OVERWORLD {
+        if domain == tiamat_core::domain::OVERWORLD {
             self.domains.remove(&id);
         } else {
             self.domains.insert(id, domain.to_owned());
@@ -172,7 +172,7 @@ impl Population {
     /// second index: there are at most fifty of them (the performance targets),
     /// and a second map is a second thing to keep in step.
     #[must_use]
-    pub fn player_of(&self, id: EntityId) -> Option<tiamot_core::PlayerUuid> {
+    pub fn player_of(&self, id: EntityId) -> Option<tiamat_core::PlayerUuid> {
         self.players
             .iter()
             .find(|(_, mirror)| **mirror == id)
@@ -185,7 +185,7 @@ impl Population {
     #[must_use]
     pub fn occupied_domains(&self) -> Vec<&str> {
         let mut all: Vec<&str> = self.domains.values().map(String::as_str).collect();
-        all.push(tiamot_core::domain::OVERWORLD);
+        all.push(tiamat_core::domain::OVERWORLD);
         all.sort_unstable();
         all.dedup();
         all
@@ -222,7 +222,7 @@ impl Population {
     /// are by the machine they are telling, and a client drawing its own body
     /// through its own eyes sees the inside of its own head.
     #[must_use]
-    pub fn player_entity(&self, uuid: &tiamot_core::PlayerUuid) -> Option<EntityId> {
+    pub fn player_entity(&self, uuid: &tiamat_core::PlayerUuid) -> Option<EntityId> {
         self.players.get(uuid).copied()
     }
 
@@ -233,11 +233,11 @@ impl Population {
     /// [`Population::transient`].
     pub fn sync_player(
         &mut self,
-        uuid: tiamot_core::PlayerUuid,
+        uuid: tiamat_core::PlayerUuid,
         transform: Transform,
         motion: Motion,
-        anim: tiamot_core::ent::AnimTag,
-        hands: tiamot_core::ent::Hands,
+        anim: tiamat_core::ent::AnimTag,
+        hands: tiamat_core::ent::Hands,
     ) -> EntityId {
         if let Some(&id) = self.players.get(&uuid)
             && let Some(entity) = self.entities.get_mut(id)
@@ -261,14 +261,14 @@ impl Population {
         entity.fell = motion.fell;
         entity.anim = anim;
         entity.hands = hands;
-        entity.model = Some(tiamot_core::ent::HUMANOID_MODEL.to_owned());
+        entity.model = Some(tiamat_core::ent::HUMANOID_MODEL.to_owned());
         // The player's own box, so a client culls the drawn body against the
         // same shape the server collided it with (charter rule 2).
         entity.collider = Some(phys::Shape::HUMANOID);
-        entity.owner = Some(tiamot_core::ent::Owner(uuid));
+        entity.owner = Some(tiamat_core::ent::Owner(uuid));
         // The UUID and not the name (charter rule 13): the current display name
         // is resolved when the spawn is sent, so a rebinding follows.
-        entity.nametag = Some(tiamot_core::ent::Nametag::Player(uuid));
+        entity.nametag = Some(tiamat_core::ent::Nametag::Player(uuid));
         let id = self.entities.spawn(entity);
         self.transient.insert(id);
         self.players.insert(uuid, id);
@@ -280,7 +280,7 @@ impl Population {
     /// The index the mirror already keeps, not a scan: a body goes in the
     /// moment a player connects and comes out when they go.
     #[must_use]
-    pub fn player_body(&self, uuid: &tiamot_core::PlayerUuid) -> Option<EntityId> {
+    pub fn player_body(&self, uuid: &tiamat_core::PlayerUuid) -> Option<EntityId> {
         self.players.get(uuid).copied()
     }
 
@@ -289,8 +289,8 @@ impl Population {
     /// Takes the set that IS here rather than the one that left, because a
     /// disconnect the tick never saw would otherwise leave a body standing in
     /// the world for ever — and the roster is the thing the server is sure of.
-    pub fn retain_players(&mut self, present: &BTreeSet<tiamot_core::PlayerUuid>) {
-        let gone: Vec<tiamot_core::PlayerUuid> = self
+    pub fn retain_players(&mut self, present: &BTreeSet<tiamat_core::PlayerUuid>) {
+        let gone: Vec<tiamat_core::PlayerUuid> = self
             .players
             .keys()
             .filter(|uuid| !present.contains(*uuid))
@@ -318,7 +318,7 @@ impl Population {
     pub fn spawn(&mut self, entity: Entity) -> EntityId {
         // Into the overworld. A caller wanting it elsewhere follows with
         // `set_domain`, which dirties both sides of the move.
-        self.dirty_chunk(tiamot_core::domain::OVERWORLD, entity.chunk());
+        self.dirty_chunk(tiamat_core::domain::OVERWORLD, entity.chunk());
         self.entities.spawn(entity)
     }
 
@@ -379,7 +379,7 @@ impl Population {
     ///
     /// The chunk stops being "known", so it will be read again if it comes
     /// back. Returns them in slot order, which is the order they must be
-    /// written in — see [`tiamot_core::persist::WorldDb::load_chunk_entities`].
+    /// written in — see [`tiamat_core::persist::WorldDb::load_chunk_entities`].
     pub fn freeze(&mut self, domain: &str, pos: ChunkPos) -> Vec<Entity> {
         // A chunk somebody is standing in is not a chunk to unload, and the
         // mirror in it is not something to write to disk. Refusing is the whole
@@ -503,7 +503,7 @@ impl Population {
     ///
     /// Slot order, which is the order charter rule 4 requires be a property of
     /// the data rather than of a hash.
-    pub fn crowd(&self) -> impl Iterator<Item = (EntityId, tiamot_core::phys::Occupant)> + '_ {
+    pub fn crowd(&self) -> impl Iterator<Item = (EntityId, tiamat_core::phys::Occupant)> + '_ {
         self.entities.ids().into_iter().filter_map(move |id| {
             if self.transient.contains(&id) {
                 return None;
@@ -512,7 +512,7 @@ impl Population {
             let collider = entity.collider?;
             Some((
                 id,
-                tiamot_core::phys::Occupant {
+                tiamat_core::phys::Occupant {
                     origin: entity.transform.chunk,
                     position: entity.transform.local,
                     height: collider.height,
@@ -702,7 +702,7 @@ pub struct Shared {
     transfers: std::sync::Mutex<Vec<TransferRequest>>,
     /// Every domain this world has, so a move into one that does not exist is
     /// refused where the mod can see it rather than dropped by the tick.
-    domains: std::sync::Arc<std::sync::RwLock<tiamot_core::domain::Registry>>,
+    domains: std::sync::Arc<std::sync::RwLock<tiamat_core::domain::Registry>>,
     /// The players' authoritative bodies.
     ///
     /// **Not the mirrors in `population`.** A mod moving a player has to write
@@ -717,7 +717,7 @@ pub struct Shared {
     /// which already holds things reached from here. Pointing the two at each
     /// other to send one `u16` would be a cycle bought for nothing. The tick
     /// drains this where it can see both.
-    selections: std::sync::Mutex<Vec<(tiamot_core::PlayerUuid, u16)>>,
+    selections: std::sync::Mutex<Vec<(tiamat_core::PlayerUuid, u16)>>,
 }
 
 impl Shared {
@@ -726,7 +726,7 @@ impl Shared {
     pub fn new(
         population: std::sync::Arc<std::sync::RwLock<Population>>,
         bodies: std::sync::Arc<crate::transport::PlayerBodies>,
-        domains: std::sync::Arc<std::sync::RwLock<tiamot_core::domain::Registry>>,
+        domains: std::sync::Arc<std::sync::RwLock<tiamat_core::domain::Registry>>,
     ) -> Self {
         Self {
             population,
@@ -741,7 +741,7 @@ impl Shared {
     ///
     /// Drained by the tick, which sends each one to the player it names.
     #[must_use]
-    pub fn take_selections(&self) -> Vec<(tiamot_core::PlayerUuid, u16)> {
+    pub fn take_selections(&self) -> Vec<(tiamat_core::PlayerUuid, u16)> {
         self.selections
             .lock()
             .map(|mut queued| std::mem::take(&mut *queued))
@@ -758,7 +758,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::ent::Access for Shared {
+impl tiamat_core::ent::Access for Shared {
     fn spawn(&self, entity: Entity) -> Option<EntityId> {
         // A poisoned lock means the simulation thread panicked, in which case
         // there is no world to spawn into. `None` is the honest answer, and
@@ -782,7 +782,7 @@ impl tiamot_core::ent::Access for Shared {
             .and_then(|population| population.get(id).cloned())
     }
 
-    fn patch(&self, id: EntityId, patch: &tiamot_core::ent::Patch) -> bool {
+    fn patch(&self, id: EntityId, patch: &tiamat_core::ent::Patch) -> bool {
         let Ok(mut population) = self.population.write() else {
             return false;
         };
@@ -792,19 +792,19 @@ impl tiamot_core::ent::Access for Shared {
     }
 
     fn player(&self, uuid: [u8; 32]) -> Option<EntityId> {
-        let uuid = tiamot_core::PlayerUuid::from_bytes(uuid);
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
         // The mirror index the tick already keeps, not a scan: a body is put
         // there the moment a player connects and taken out when they go.
         self.population.read().ok()?.player_body(&uuid)
     }
 
     fn move_player(&self, uuid: [u8; 32], to: [f64; 3]) -> bool {
-        let uuid = tiamot_core::PlayerUuid::from_bytes(uuid);
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
         // A world position, split back into the (chunk, local) pair charter
         // rule 7 requires — the same conversion an entity's `pos` patch makes,
         // and for the same reason: a world-space `f32` loses precision long
         // before the world runs out.
-        let at = tiamot_core::ent::Transform::from_world(to[0], to[1], to[2]);
+        let at = tiamat_core::ent::Transform::from_world(to[0], to[1], to[2]);
         if !at.chunk.in_world() {
             return false;
         }
@@ -824,7 +824,7 @@ impl tiamot_core::ent::Access for Shared {
     }
 
     fn select_slot(&self, uuid: [u8; 32], slot: u16) -> bool {
-        let uuid = tiamot_core::PlayerUuid::from_bytes(uuid);
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
         // Connected, checked here rather than at the far end: a mod naming
         // somebody who left should hear `false` now, not have a message queued
         // for nobody.
@@ -878,7 +878,7 @@ impl tiamot_core::ent::Access for Shared {
     }
 
     fn shove_player(&self, uuid: [u8; 32], impulse: [f32; 3]) -> bool {
-        let uuid = tiamot_core::PlayerUuid::from_bytes(uuid);
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
         let Ok(mut bodies) = self.bodies.lock() else {
             return false;
         };
@@ -899,19 +899,19 @@ impl tiamot_core::ent::Access for Shared {
     fn set_abilities(
         &self,
         uuid: [u8; 32],
-        abilities: Option<tiamot_core::phys::Abilities>,
+        abilities: Option<tiamat_core::phys::Abilities>,
     ) -> bool {
         // **The authoritative body, not the mirror** — the same reason
         // `move_player` writes here: the mirror is a copy the tick overwrites,
         // so a grant written to it would do nothing, silently.
-        let uuid = tiamot_core::PlayerUuid::from_bytes(uuid);
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
         let Ok(mut bodies) = self.bodies.lock() else {
             return false;
         };
         let Some(player) = bodies.get_mut(&uuid) else {
             return false;
         };
-        let granted = abilities.map(tiamot_core::phys::Abilities::sanitised);
+        let granted = abilities.map(tiamat_core::phys::Abilities::sanitised);
         if player.granted != granted {
             player.granted = granted;
             // Unsent, so the tick puts it on the wire: a client that predicts
@@ -925,10 +925,10 @@ impl tiamot_core::ent::Access for Shared {
         let Ok(population) = self.population.read() else {
             return Vec::new();
         };
-        let centre = tiamot_core::ent::Transform::from_world(centre[0], centre[1], centre[2]);
+        let centre = tiamat_core::ent::Transform::from_world(centre[0], centre[1], centre[2]);
         // Blocks in, cells inside: a mod says "within 32 yards" and the engine
         // knows that is 96 cells (charter rule 5).
-        let cells = radius * f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let cells = radius * f64::from(tiamat_core::SUBNODES_PER_AXIS);
         population
             .entities()
             .within(&centre, cells as f32)
@@ -958,15 +958,15 @@ mod tests {
         let mut population = Population::new();
         let real = population.spawn(mob(ChunkPos::new(0, 0, 0), [8.0, 0.0, 8.0]));
         population.sync_player(
-            tiamot_core::PlayerUuid::from_bytes([7; 32]),
+            tiamat_core::PlayerUuid::from_bytes([7; 32]),
             Transform::at(ChunkPos::new(0, 0, 0), [8.5, 0.0, 8.0]),
             Motion {
-                velocity: tiamot_core::ent::Velocity([0.0; 3]),
+                velocity: tiamat_core::ent::Velocity([0.0; 3]),
                 on_ground: true,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::IDLE,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::IDLE,
+            tiamat_core::ent::Hands::default(),
         );
 
         let crowd: Vec<EntityId> = population.crowd().map(|(id, _)| id).collect();
@@ -987,16 +987,16 @@ mod tests {
         let standing = mob(ChunkPos::new(0, 0, 0), [8.0, 0.0, 8.0]);
         let id = population.spawn(standing);
 
-        let player = tiamot_core::phys::Occupant {
+        let player = tiamat_core::phys::Occupant {
             origin: ChunkPos::new(0, 0, 0),
             position: [8.2, 0.0, 8.0],
-            height: tiamot_core::phys::PLAYER_HEIGHT,
-            width: tiamot_core::phys::PLAYER_WIDTH,
+            height: tiamat_core::phys::PLAYER_HEIGHT,
+            width: tiamat_core::phys::PLAYER_WIDTH,
             movable: true,
         };
         let mut occupants = vec![player];
         occupants.extend(population.crowd().map(|(_, occupant)| occupant));
-        let pushes = tiamot_core::phys::separate(&occupants);
+        let pushes = tiamat_core::phys::separate(&occupants);
         population.nudge(id, pushes[1]);
 
         let velocity = population.get(id).expect("the mob").velocity.0;
@@ -1011,8 +1011,8 @@ mod tests {
         );
     }
 
-    use tiamot_core::MaterialId;
-    use tiamot_core::ent::{Collider, Transform};
+    use tiamat_core::MaterialId;
+    use tiamat_core::ent::{Collider, Transform};
 
     const STONE: MaterialId = MaterialId(2);
 
@@ -1032,24 +1032,24 @@ mod tests {
             _domain: &str,
             pos: ChunkPos,
             _seed: u64,
-        ) -> tiamot_core::chunk::Chunk {
-            tiamot_core::chunk::Chunk::air(pos)
+        ) -> tiamat_core::chunk::Chunk {
+            tiamat_core::chunk::Chunk::air(pos)
         }
     }
 
     fn world() -> World {
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         registry.register("test:stone").expect("register");
-        let db = tiamot_core::persist::WorldDb::open_in_memory(&mut registry).expect("open");
+        let db = tiamat_core::persist::WorldDb::open_in_memory(&mut registry).expect("open");
         World::open(db, 1).expect("world")
     }
 
     /// A chunk with a solid floor in its bottom block layer.
     fn floor(world: &mut World, pos: ChunkPos) {
         world
-            .chunk(tiamot_core::domain::OVERWORLD, pos, &mut Empty)
+            .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
             .expect("chunk");
-        let corner = tiamot_core::BlockPos::from_chunk_corner(pos);
+        let corner = tiamat_core::BlockPos::from_chunk_corner(pos);
         fill(world, corner.y, STONE);
     }
 
@@ -1059,9 +1059,9 @@ mod tests {
             for z in 0..16 {
                 world
                     .apply(
-                        tiamot_core::domain::OVERWORLD,
-                        &tiamot_core::proto::Edit::Block {
-                            pos: tiamot_core::BlockPos::new(x, y, z),
+                        tiamat_core::domain::OVERWORLD,
+                        &tiamat_core::proto::Edit::Block {
+                            pos: tiamat_core::BlockPos::new(x, y, z),
                             material: material.get(),
                         },
                         &mut Empty,
@@ -1071,8 +1071,8 @@ mod tests {
         }
     }
 
-    fn player() -> tiamot_core::PlayerUuid {
-        tiamot_core::identity::Identity::generate()
+    fn player() -> tiamat_core::PlayerUuid {
+        tiamat_core::identity::Identity::generate()
             .expect("identity")
             .uuid_as_root()
     }
@@ -1098,7 +1098,7 @@ mod tests {
         let written = population.take_dirty();
         let overworld: Vec<_> = written
             .iter()
-            .filter(|(domain, pos, _)| domain == tiamot_core::domain::OVERWORLD && *pos == home)
+            .filter(|(domain, pos, _)| domain == tiamat_core::domain::OVERWORLD && *pos == home)
             .flat_map(|(_, _, held)| held.iter())
             .collect();
         let ship: Vec<_> = written
@@ -1143,7 +1143,7 @@ mod tests {
         let away = population.spawn(mob(home, [9.0, 0.0, 8.0]));
         population.set_domain(away, "mod:ship/17");
 
-        let frozen = population.freeze(tiamot_core::domain::OVERWORLD, home);
+        let frozen = population.freeze(tiamat_core::domain::OVERWORLD, home);
         assert_eq!(
             frozen.len(),
             1,
@@ -1172,9 +1172,9 @@ mod tests {
         // never be fetched at all.
         let mut population = Population::new();
         let home = ChunkPos::new(2, 0, 2);
-        population.chunk_loaded(tiamot_core::domain::OVERWORLD, home, Vec::new());
+        population.chunk_loaded(tiamat_core::domain::OVERWORLD, home, Vec::new());
 
-        assert!(population.knows(tiamot_core::domain::OVERWORLD, home));
+        assert!(population.knows(tiamat_core::domain::OVERWORLD, home));
         assert!(
             !population.knows("mod:ship/17", home),
             "loading one domain's chunk marked another's as read, so its \
@@ -1201,13 +1201,13 @@ mod tests {
     fn access(population: &std::sync::Arc<std::sync::RwLock<Population>>) -> Shared {
         // A registry with the ship template in it, so a transfer into one is
         // not refused for naming a domain that does not exist.
-        let mut registry = tiamot_core::domain::Registry::new();
+        let mut registry = tiamat_core::domain::Registry::new();
         registry
             .register(
                 "mod:ship",
-                tiamot_core::domain::Spec {
+                tiamat_core::domain::Spec {
                     instanced: true,
-                    ..tiamot_core::domain::Spec::default()
+                    ..tiamat_core::domain::Spec::default()
                 },
             )
             .expect("register");
@@ -1226,7 +1226,7 @@ mod tests {
         // inside a mod's callback inside the tick, and the move runs two hooks
         // — so doing it there would run one mod's hook underneath another
         // mod's call, in a VM already executing.
-        use tiamot_core::ent::Access as _;
+        use tiamat_core::ent::Access as _;
 
         let population = std::sync::Arc::new(std::sync::RwLock::new(Population::new()));
         let id = population
@@ -1238,7 +1238,7 @@ mod tests {
         assert!(shared.transfer(id, "mod:ship/17", [1.0, 2.0, 3.0]));
         assert_eq!(
             population.read().expect("lock").domain_of(id),
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             "the body moved where it was asked for, before any hook could refuse"
         );
 
@@ -1260,7 +1260,7 @@ mod tests {
         // player is nowhere. **Found by a test whose own mod had the typo** —
         // it named `generators:loft` for a domain registered as `places:loft`,
         // and the transfer was accepted and carried out.
-        use tiamot_core::ent::Access as _;
+        use tiamat_core::ent::Access as _;
 
         let population = std::sync::Arc::new(std::sync::RwLock::new(Population::new()));
         let id = population
@@ -1284,7 +1284,7 @@ mod tests {
     fn transferring_something_that_is_not_there_is_refused_at_the_call() {
         // The mistakes a mod can fix are the ones worth reporting synchronously.
         // Whether a hook refuses is not one of them: nothing can know that yet.
-        use tiamot_core::ent::Access as _;
+        use tiamat_core::ent::Access as _;
 
         let population = std::sync::Arc::new(std::sync::RwLock::new(Population::new()));
         let shared = access(&population);
@@ -1304,26 +1304,26 @@ mod tests {
         // this at all.
         let mut population = Population::new();
         let id = population.spawn(mob(ChunkPos::new(0, 0, 0), [8.0, 0.0, 8.0]));
-        assert_eq!(population.domain_of(id), tiamot_core::domain::OVERWORLD);
+        assert_eq!(population.domain_of(id), tiamat_core::domain::OVERWORLD);
         assert_eq!(
             population.occupied_domains(),
-            vec![tiamot_core::domain::OVERWORLD]
+            vec![tiamat_core::domain::OVERWORLD]
         );
 
         population.set_domain(id, "mod:ship/17");
         assert_eq!(population.domain_of(id), "mod:ship/17");
         assert_eq!(
             population.occupied_domains(),
-            vec!["mod:ship/17", tiamot_core::domain::OVERWORLD],
+            vec!["mod:ship/17", tiamat_core::domain::OVERWORLD],
             "the overworld is always a domain the tick visits, occupied or not"
         );
 
         // And moving one back stores nothing rather than storing the default.
-        population.set_domain(id, tiamot_core::domain::OVERWORLD);
-        assert_eq!(population.domain_of(id), tiamot_core::domain::OVERWORLD);
+        population.set_domain(id, tiamat_core::domain::OVERWORLD);
+        assert_eq!(population.domain_of(id), tiamat_core::domain::OVERWORLD);
         assert_eq!(
             population.occupied_domains(),
-            vec![tiamot_core::domain::OVERWORLD]
+            vec![tiamat_core::domain::OVERWORLD]
         );
     }
 
@@ -1353,7 +1353,7 @@ mod tests {
         population.set_domain(away, "mod:elsewhere");
 
         for _ in 0..30 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
             population.tick("mod:elsewhere", &world, &fluid, &[], &[]);
         }
 
@@ -1386,10 +1386,10 @@ mod tests {
         floor(&mut world, ChunkPos::new(0, 0, 0));
         let fluid = crate::fluid::Fluidics::default();
 
-        let walking = tiamot_core::phys::Intent {
+        let walking = tiamat_core::phys::Intent {
             walk: [0.0, 1.0],
             jump: false,
-            gait: tiamot_core::phys::Gait::Walk,
+            gait: tiamat_core::phys::Gait::Walk,
             fly: false,
         };
         let mut population = Population::new();
@@ -1404,7 +1404,7 @@ mod tests {
         });
 
         for _ in 0..60 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
 
         let walked = |id| population.get(id).expect("still there").transform.local[2] - 2.0;
@@ -1426,7 +1426,7 @@ mod tests {
             ..mob(ChunkPos::new(0, 0, 0), [4.0, 3.0, 2.0])
         });
         for _ in 0..60 {
-            plain.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            plain.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
         let untouched = plain.get(ordinary).expect("still there").transform.local[2] - 2.0;
         assert_eq!(
@@ -1451,7 +1451,7 @@ mod tests {
         let before = population.get(away).expect("there").transform.local[1];
 
         for _ in 0..10 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
 
         let after = population.get(away).expect("there").transform.local[1];
@@ -1472,12 +1472,12 @@ mod tests {
         population.set_domain(b, "mod:ship/17");
 
         assert_eq!(population.occupants("mod:ship/17"), 2);
-        assert_eq!(population.occupants(tiamot_core::domain::OVERWORLD), 0);
+        assert_eq!(population.occupants(tiamat_core::domain::OVERWORLD), 0);
         assert_eq!(population.occupants("mod:ship/18"), 0);
 
-        population.set_domain(b, tiamot_core::domain::OVERWORLD);
+        population.set_domain(b, tiamat_core::domain::OVERWORLD);
         assert_eq!(population.occupants("mod:ship/17"), 1);
-        assert_eq!(population.occupants(tiamot_core::domain::OVERWORLD), 1);
+        assert_eq!(population.occupants(tiamat_core::domain::OVERWORLD), 1);
     }
 
     #[test]
@@ -1497,8 +1497,8 @@ mod tests {
                 on_ground: true,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::IDLE,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::IDLE,
+            tiamat_core::ent::Hands::default(),
         );
         // A real mob in the same chunk, so the chunk genuinely needs saving and
         // the test is about what goes IN the row rather than whether one exists.
@@ -1529,8 +1529,8 @@ mod tests {
                 on_ground: true,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::IDLE,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::IDLE,
+            tiamat_core::ent::Hands::default(),
         );
         assert!(
             population.take_dirty().is_empty(),
@@ -1546,8 +1546,8 @@ mod tests {
                     on_ground: true,
                     ..Motion::default()
                 },
-                tiamot_core::ent::AnimTag::WALK,
-                tiamot_core::ent::Hands::default(),
+                tiamat_core::ent::AnimTag::WALK,
+                tiamat_core::ent::Hands::default(),
             );
         }
         assert!(
@@ -1571,8 +1571,8 @@ mod tests {
                 on_ground: true,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::IDLE,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::IDLE,
+            tiamat_core::ent::Hands::default(),
         );
         let again = population.sync_player(
             uuid,
@@ -1582,15 +1582,15 @@ mod tests {
                 on_ground: false,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::WALK,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::WALK,
+            tiamat_core::ent::Hands::default(),
         );
         assert_eq!(first, again);
         assert_eq!(population.len(), 1);
 
         let entity = population.get(first).expect("the mirror is there");
         assert_eq!(entity.transform.chunk, ChunkPos::new(3, 0, 0));
-        assert_eq!(entity.anim, tiamot_core::ent::AnimTag::WALK);
+        assert_eq!(entity.anim, tiamat_core::ent::AnimTag::WALK);
         assert!(!entity.on_ground);
         assert_eq!(entity.owner.map(|owner| owner.0), Some(uuid));
         assert_eq!(entity.source, PLAYER_SOURCE);
@@ -1610,8 +1610,8 @@ mod tests {
                     on_ground: true,
                     ..Motion::default()
                 },
-                tiamot_core::ent::AnimTag::IDLE,
-                tiamot_core::ent::Hands::default(),
+                tiamat_core::ent::AnimTag::IDLE,
+                tiamat_core::ent::Hands::default(),
             );
         }
         assert_eq!(population.len(), 2);
@@ -1634,7 +1634,7 @@ mod tests {
         let mut world = world();
         let home = ChunkPos::new(0, 0, 0);
         world
-            .chunk(tiamot_core::domain::OVERWORLD, home, &mut Empty)
+            .chunk(tiamat_core::domain::OVERWORLD, home, &mut Empty)
             .expect("chunk");
 
         let mut population = Population::new();
@@ -1647,14 +1647,14 @@ mod tests {
                 on_ground: true,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::IDLE,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::IDLE,
+            tiamat_core::ent::Hands::default(),
         );
         let before = population.get(id).expect("mirror").transform;
 
         let fluid = crate::fluid::Fluidics::default();
         for _ in 0..10 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
 
         let after = population.get(id).expect("mirror").transform;
@@ -1676,14 +1676,14 @@ mod tests {
                 on_ground: true,
                 ..Motion::default()
             },
-            tiamot_core::ent::AnimTag::IDLE,
-            tiamot_core::ent::Hands::default(),
+            tiamat_core::ent::AnimTag::IDLE,
+            tiamat_core::ent::Hands::default(),
         );
         population.spawn(Entity::at(somewhere(home), "test:mob"));
 
         assert!(
             population
-                .freeze(tiamot_core::domain::OVERWORLD, home)
+                .freeze(tiamat_core::domain::OVERWORLD, home)
                 .is_empty(),
             "a chunk with a player in it was unloaded, taking their body with it"
         );
@@ -1707,7 +1707,7 @@ mod tests {
         let written = population.take_dirty();
         assert_eq!(
             written,
-            vec![(tiamot_core::domain::OVERWORLD.to_owned(), home, Vec::new())],
+            vec![(tiamat_core::domain::OVERWORLD.to_owned(), home, Vec::new())],
             "the chunk a mob left must be written EMPTY, and into its own \
              domain's row, or the mob comes back the next time the chunk loads"
         );
@@ -1721,17 +1721,17 @@ mod tests {
         let mut population = Population::new();
         let home = ChunkPos::new(0, 0, 0);
         population.chunk_loaded(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             home,
             vec![mob(home, [1.0; 3])],
         );
         population.chunk_loaded(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             home,
             vec![mob(home, [1.0; 3])],
         );
         assert_eq!(population.len(), 1);
-        assert!(population.knows(tiamot_core::domain::OVERWORLD, home));
+        assert!(population.knows(tiamat_core::domain::OVERWORLD, home));
     }
 
     #[test]
@@ -1740,25 +1740,25 @@ mod tests {
         let home = ChunkPos::new(5, 0, 0);
         let away = ChunkPos::new(6, 0, 0);
         population.chunk_loaded(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             home,
             vec![mob(home, [1.0; 3]), mob(home, [2.0; 3])],
         );
         population.chunk_loaded(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             away,
             vec![mob(away, [3.0; 3])],
         );
 
-        let frozen = population.freeze(tiamot_core::domain::OVERWORLD, home);
+        let frozen = population.freeze(tiamat_core::domain::OVERWORLD, home);
         assert_eq!(frozen.len(), 2);
         assert_eq!(population.len(), 1, "the other chunk's mob stayed");
         assert!(
-            !population.knows(tiamot_core::domain::OVERWORLD, home),
+            !population.knows(tiamat_core::domain::OVERWORLD, home),
             "a frozen chunk must be re-read when it comes back, or its entities \
              are gone for the rest of the session"
         );
-        assert!(population.knows(tiamot_core::domain::OVERWORLD, away));
+        assert!(population.knows(tiamat_core::domain::OVERWORLD, away));
     }
 
     #[test]
@@ -1777,7 +1777,7 @@ mod tests {
         let fluid = crate::fluid::Fluidics::default();
 
         for _ in 0..200 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
 
         let entity = population.get(id).expect("live");
@@ -1806,9 +1806,9 @@ mod tests {
             for z in 0..16 {
                 world
                     .apply(
-                        tiamot_core::domain::OVERWORLD,
-                        &tiamot_core::proto::Edit::Block {
-                            pos: tiamot_core::BlockPos::new(4, y, z),
+                        tiamat_core::domain::OVERWORLD,
+                        &tiamat_core::proto::Edit::Block {
+                            pos: tiamat_core::BlockPos::new(4, y, z),
                             material: STONE.get(),
                         },
                         &mut Empty,
@@ -1817,11 +1817,11 @@ mod tests {
             }
         }
 
-        let east = tiamot_core::phys::Intent {
+        let east = tiamat_core::phys::Intent {
             fly: false,
             walk: [1.0, 0.0],
             jump: false,
-            gait: tiamot_core::phys::Gait::Walk,
+            gait: tiamat_core::phys::Gait::Walk,
         };
         let squat = Collider {
             width: 1.0,
@@ -1841,7 +1841,7 @@ mod tests {
 
         let fluid = crate::fluid::Fluidics::default();
         for _ in 0..120 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
 
         let travelled = |id| population.get(id).expect("live").transform.local[0] - start;
@@ -1873,7 +1873,7 @@ mod tests {
         let world = world();
         let fluid = crate::fluid::Fluidics::default();
         for _ in 0..10 {
-            population.tick(tiamot_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
+            population.tick(tiamat_core::domain::OVERWORLD, &world, &fluid, &[], &[]);
         }
 
         let entity = population.get(marker).expect("live");

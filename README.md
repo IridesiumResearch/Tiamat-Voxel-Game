@@ -1,12 +1,12 @@
 <!-- SPDX-FileCopyrightText: Iridesium -->
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 
-# Tiamot
+# Tiamat
 
 An experimental multiplayer voxel **engine** built around subdivided voxels, for
 a more detailed voxel world than block-resolution allows.
 
-Tiamot is an engine, not a game. Its entire purpose is to be a platform for
+Tiamat is an engine, not a game. Its entire purpose is to be a platform for
 mods: the engine ships mechanisms, and all content is Lua. The mod API is the
 only API — if something cannot be built through it, that is an engine bug to
 fix rather than a reason to special-case the core. The headless server is the
@@ -38,7 +38,7 @@ job is only to make it expressible.
 
 | Crate | Role | May depend on |
 |---|---|---|
-| [`crates/core`](crates/core) (`tiamot-core`) | Voxel data, simulation, Lua runtime, physics, persistence, protocol types. The whole simulation lives here. | **Never** wgpu, winit, kira, or egui |
+| [`crates/core`](crates/core) (`tiamat-core`) | Voxel data, simulation, Lua runtime, physics, persistence, protocol types. The whole simulation lives here. | **Never** wgpu, winit, kira, or egui |
 | [`crates/server`](crates/server) | Thin headless binary over core. Runs with no display server. | **Never** wgpu, winit, kira, or egui |
 | [`crates/client`](crates/client) | Viewer: rendering, windowing, audio, UI. | core + wgpu/winit/kira/egui |
 | [`crates/bot`](crates/bot) | Scripted headless client for tests, benchmarks, and load. | core |
@@ -81,7 +81,7 @@ sudo pacman -S pkgconf alsa-lib                    # Arch
 ```
 
 Without them the build fails in `alsa-sys`'s build script with *"The pkg-config
-command could not be found"* or a missing `alsa.pc`, long before any Tiamot code
+command could not be found"* or a missing `alsa.pc`, long before any Tiamat code
 compiles.
 
 This is **not** an exception to charter rule 14's pure-Rust decoder policy. That

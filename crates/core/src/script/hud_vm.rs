@@ -158,7 +158,7 @@ struct Script {
 /// In the environment rather than a shared registry, because unlike a mod hook
 /// there is nobody to enumerate: a HUD callback belongs to exactly one script
 /// and is called by exactly one loop.
-const CALLBACK: &str = "__tiamot_on_draw";
+const CALLBACK: &str = "__tiamat_on_draw";
 
 /// The runtime that runs pushed client scripts and collects what they draw.
 pub struct HudVm {

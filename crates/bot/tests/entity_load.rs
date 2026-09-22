@@ -36,10 +36,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::tick::TICK_DURATION;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::tick::TICK_DURATION;
+use tiamat_server::{ServerHandle, Settings};
 
 /// The task's number.
 const MOBS: u32 = 200;
@@ -48,7 +48,7 @@ const MOBS: u32 = 200;
 const SECONDS: u64 = 30;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-entity-load").join(name);
+    let dir = std::env::temp_dir().join("tiamat-entity-load").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir

@@ -72,7 +72,7 @@ use super::noise::{
 /// and tidal gutters had to come out of the world to fit. World ask 30.)
 ///
 /// **The cap is not the budget, and the numbers say why.** Measured over a 16³
-/// region (`cargo run --release -p tiamot-core --example density_cap`, on the
+/// region (`cargo run --release -p tiamat-core --example density_cap`, on the
 /// machine this was written on):
 ///
 /// | program | ms a chunk | of a 50 ms tick |

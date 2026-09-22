@@ -9,9 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::script::{EngineHost, ModHost, Phase, ScriptVm, VmLimits};
-use tiamot_core::{BLOCKS_PER_CHUNK, ChunkPos, MaterialId};
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::script::{EngineHost, ModHost, Phase, ScriptVm, VmLimits};
+use tiamat_core::{BLOCKS_PER_CHUNK, ChunkPos, MaterialId};
 
 /// The repository's `game/` directory.
 fn game_dir() -> PathBuf {
@@ -49,7 +49,7 @@ fn known_fixtures() -> Vec<String> {
 
 /// A scratch directory holding hand-written mods for one test.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-mods-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-mods-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -147,7 +147,7 @@ fn the_reference_generator_produces_the_half_white_world() {
     // so it is NOT uniform any more: the top layer of it is the ground.
     let below = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             0,
             ChunkPos::new(0, -1, 0),
             MaterialId::AIR,
@@ -160,7 +160,7 @@ fn the_reference_generator_produces_the_half_white_world() {
     );
     assert_eq!(
         below
-            .get_block(tiamot_core::BlockPos::new(0, -1, 0))
+            .get_block(tiamat_core::BlockPos::new(0, -1, 0))
             .expect("in chunk")
             .subnode(0),
         ground,
@@ -168,7 +168,7 @@ fn the_reference_generator_produces_the_half_white_world() {
     );
     assert_eq!(
         below
-            .get_block(tiamot_core::BlockPos::new(0, -2, 0))
+            .get_block(tiamat_core::BlockPos::new(0, -2, 0))
             .expect("in chunk")
             .subnode(0),
         white,
@@ -178,7 +178,7 @@ fn the_reference_generator_produces_the_half_white_world() {
     // Chunk (0, 0, 0) covers world y in 0..16 — entirely above it.
     let above = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             0,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,
@@ -198,10 +198,10 @@ fn generation_is_reproducible_through_the_script_path() {
 
     let pos = ChunkPos::new(3, -1, -7);
     let first = host
-        .generate_chunk(tiamot_core::domain::OVERWORLD, 42, pos, MaterialId::AIR)
+        .generate_chunk(tiamat_core::domain::OVERWORLD, 42, pos, MaterialId::AIR)
         .expect("generate");
     let second = host
-        .generate_chunk(tiamot_core::domain::OVERWORLD, 42, pos, MaterialId::AIR)
+        .generate_chunk(tiamat_core::domain::OVERWORLD, 42, pos, MaterialId::AIR)
         .expect("generate");
     assert_eq!(
         first, second,
@@ -253,7 +253,7 @@ fn the_reference_generator_matches_its_golden_hashes() {
         (u64::MAX, 12, -2, -12, DEEP),
     ];
 
-    tiamot_core::detgen::assert_ieee_mode();
+    tiamat_core::detgen::assert_ieee_mode();
     let mut host = host_for(&game_dir());
     host.freeze().expect("freeze");
 
@@ -281,7 +281,7 @@ fn script_driven_noise_worldgen_matches_its_golden_hashes() {
         (u64::MAX, 100, 0, -100, 0xc821_b836_42f0_9877),
     ];
 
-    tiamot_core::detgen::assert_ieee_mode();
+    tiamat_core::detgen::assert_ieee_mode();
 
     let root = scratch("noise-gate");
     write_mod(
@@ -325,7 +325,7 @@ fn assert_golden(host: &mut EngineHost, golden: &[(u64, i32, i32, i32, u64)], wh
     for &(seed, x, y, z, expected) in golden {
         let chunk = host
             .generate_chunk(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 seed,
                 ChunkPos::new(x, y, z),
                 MaterialId::AIR,
@@ -351,7 +351,7 @@ fn assert_golden(host: &mut EngineHost, golden: &[(u64, i32, i32, i32, u64)], wh
 
 /// FNV-1a over a chunk's materials. Same construction as `detgen::fingerprint`,
 /// so the two gates are comparable.
-fn hash_chunk(chunk: &tiamot_core::Chunk) -> u64 {
+fn hash_chunk(chunk: &tiamat_core::Chunk) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for index in 0..BLOCKS_PER_CHUNK {
         for cell in chunk.block_cells(LocalBlock::from_index(index)) {
@@ -428,7 +428,7 @@ end)
 
     // First generation hits the fault.
     let first = host.generate_chunk(
-        tiamot_core::domain::OVERWORLD,
+        tiamat_core::domain::OVERWORLD,
         1,
         ChunkPos::new(0, 0, 0),
         MaterialId::AIR,
@@ -451,7 +451,7 @@ end)
     // Second generation skips it and the healthy generator still runs.
     let second = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,
@@ -497,7 +497,7 @@ end)
     // Without the budget this never returns and the test suite hangs.
     let err = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,
@@ -718,7 +718,7 @@ end)
         for cz in -2..=2 {
             let chunk = host
                 .generate_chunk(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     4242,
                     ChunkPos::new(cx, -1, cz),
                     MaterialId::AIR,
@@ -808,7 +808,7 @@ fn a_mod_may_not_push_more_fonts_than_a_client_will_hold() {
     // hear about its ninth font at the line that registers it.
     let root = scratch("too-many-fonts");
     let mut source = String::new();
-    for index in 0..=tiamot_core::font::MAX_FONTS {
+    for index in 0..=tiamat_core::font::MAX_FONTS {
         source.push_str(&format!(
             "game.register_font{{ id = \"f{index}\", file = \"fonts/f{index}.ttf\" }}\n"
         ));
@@ -820,7 +820,7 @@ fn a_mod_may_not_push_more_fonts_than_a_client_will_hold() {
     assert!(
         failure.contains("at most"),
         "a mod registering {} fonts should be refused: {failure}",
-        tiamot_core::font::MAX_FONTS + 1
+        tiamat_core::font::MAX_FONTS + 1
     );
 }
 
@@ -921,7 +921,7 @@ end)
     for cy in -2..=0 {
         let chunk = host
             .generate_chunk(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 99,
                 ChunkPos::new(0, cy, 0),
                 MaterialId::AIR,
@@ -986,11 +986,11 @@ end)
     // The ids the server would have assigned. Generation cannot resolve a name
     // without them, which is the seam this test also covers.
     host.vm_mut()
-        .set_fluid_ids(&[("ocean:water".to_owned(), tiamot_core::fluid::FluidId(1))]);
+        .set_fluid_ids(&[("ocean:water".to_owned(), tiamat_core::fluid::FluidId(1))]);
 
     let (chunk, fluid) = host
         .generate_chunk_with_fluid(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             9,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,
@@ -999,7 +999,7 @@ end)
     assert!(!chunk.is_uniform().is_some_and(|m| m == MaterialId::AIR));
 
     // Under the ground: solid, and no room for water.
-    let below = fluid.get(tiamot_core::coords::LocalBlock::new(8, 2, 8));
+    let below = fluid.get(tiamat_core::coords::LocalBlock::new(8, 2, 8));
     assert_eq!(
         below.volume(),
         0,
@@ -1007,15 +1007,15 @@ end)
     );
 
     // Between the ground and the sea level: a full block of it.
-    let sea = fluid.get(tiamot_core::coords::LocalBlock::new(8, 8, 8));
+    let sea = fluid.get(tiamat_core::coords::LocalBlock::new(8, 8, 8));
     assert_eq!(
         sea.volume(),
-        tiamot_core::fluid::MAX_VOLUME,
+        tiamat_core::fluid::MAX_VOLUME,
         "the sea did not fill the empty space below its level"
     );
 
     // Above the sea level: dry.
-    let air = fluid.get(tiamot_core::coords::LocalBlock::new(8, 14, 8));
+    let air = fluid.get(tiamat_core::coords::LocalBlock::new(8, 14, 8));
     assert_eq!(air.volume(), 0, "water above the level it was filled to");
 }
 
@@ -1056,7 +1056,7 @@ end)
 
     let below = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, -1, 0),
             MaterialId::AIR,
@@ -1064,7 +1064,7 @@ end)
         .expect("generate");
     let name_at = |y: i32| -> Option<MaterialId> {
         below
-            .get_block(tiamot_core::BlockPos::new(3, y, 3))
+            .get_block(tiamat_core::BlockPos::new(3, y, 3))
             .map(|block| block.subnode(0))
     };
     let grass = name_at(-1).expect("in chunk");
@@ -1095,7 +1095,7 @@ end)
     // And nothing above the surface.
     let above = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,
@@ -1152,7 +1152,7 @@ end)
     host.freeze().expect("freeze");
 
     let mut tint = |x: i32| {
-        host.chunk_tint(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+        host.chunk_tint(tiamat_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
             .expect("tint")
     };
 
@@ -1232,7 +1232,7 @@ game.register_chunk_tint(function(pos) return "not a colour" end)
     host.freeze().expect("freeze");
 
     let mut fog = |x: i32| {
-        host.chunk_fog(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+        host.chunk_fog(tiamat_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
             .expect("asked")
     };
     let calm = fog(-3).expect("the world's mist");
@@ -1247,7 +1247,7 @@ game.register_chunk_tint(function(pos) return "not a colour" end)
     );
 
     let mut tint = |x: i32| {
-        host.chunk_tint(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+        host.chunk_tint(tiamat_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
             .expect("asked")
     };
     let calm = tint(-3);
@@ -1258,7 +1258,7 @@ game.register_chunk_tint(function(pos) return "not a colour" end)
     );
     assert_eq!(
         calm[1],
-        tiamot_core::proto::Tint::quantise(1.0),
+        tiamat_core::proto::Tint::quantise(1.0),
         "west of the storm the world's tint stands"
     );
 
@@ -1300,10 +1300,10 @@ end)
     host.freeze().expect("freeze");
 
     let mut tint = |x: i32| {
-        host.chunk_tint(tiamot_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
+        host.chunk_tint(tiamat_core::domain::OVERWORLD, 7, ChunkPos::new(x, 0, 0))
             .expect("tint")
     };
-    let neutral = tiamot_core::proto::Tint::NEUTRAL[0];
+    let neutral = tiamat_core::proto::Tint::NEUTRAL[0];
 
     let gold = tint(4);
     assert!(
@@ -1376,7 +1376,7 @@ game.register_block{ id = "unknown_" .. tostring(game.world_option("biomes:nothi
         ("biomes:biome".to_owned(), "savanna".to_owned()),
         ("biomes:rivers".to_owned(), "false".to_owned()),
     ];
-    let host = ModHost::<tiamot_core::script::MluaVm>::load_selected_with_options(
+    let host = ModHost::<tiamat_core::script::MluaVm>::load_selected_with_options(
         &root,
         VmLimits::default(),
         None,
@@ -1429,7 +1429,7 @@ game.register_block{ id = "unknown_" .. tostring(game.world_option("biomes:nothi
     // A stored value the mod no longer offers — an option it renamed — is the
     // default, not a refusal to start the world.
     let stale = vec![("biomes:biome".to_owned(), "tundra".to_owned())];
-    let host = ModHost::<tiamot_core::script::MluaVm>::load_selected_with_options(
+    let host = ModHost::<tiamat_core::script::MluaVm>::load_selected_with_options(
         &root,
         VmLimits::default(),
         None,
@@ -1809,7 +1809,7 @@ end)
 "#,
     );
 
-    let made = |order: &[ChunkPos]| -> Vec<tiamot_core::Chunk> {
+    let made = |order: &[ChunkPos]| -> Vec<tiamat_core::Chunk> {
         let mut host = host_for(&root);
         assert!(
             host.failed().is_empty(),
@@ -1823,7 +1823,7 @@ end)
                 (
                     *pos,
                     host.generate_chunk(
-                        tiamot_core::domain::OVERWORLD,
+                        tiamat_core::domain::OVERWORLD,
                         4242,
                         *pos,
                         MaterialId::AIR,
@@ -1848,9 +1848,9 @@ end)
 
     // Non-vacuous in two ways, because two chunks of identical air would pass
     // the comparison above and prove nothing. Something was built at all...
-    let material = |chunk: &tiamot_core::Chunk, x: i32, y: i32, z: i32| {
+    let material = |chunk: &tiamat_core::Chunk, x: i32, y: i32, z: i32| {
         chunk
-            .get_block(tiamot_core::BlockPos::new(x, y, z))
+            .get_block(tiamat_core::BlockPos::new(x, y, z))
             .map(|block| block.subnode(0))
     };
     let built = (0..16).any(|x| {
@@ -1942,7 +1942,7 @@ end
         for chunk_z in -6..6 {
             let chunk = host
                 .generate_chunk(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     1,
                     ChunkPos::new(chunk_x, 0, chunk_z),
                     MaterialId::AIR,
@@ -2116,7 +2116,7 @@ end)
     // one at y = 64 is over all of it.
     let deep = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, -4, 0),
             MaterialId::AIR,
@@ -2124,7 +2124,7 @@ end)
         .expect("generate");
     let sky = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, 4, 0),
             MaterialId::AIR,
@@ -2198,7 +2198,7 @@ end)
     // terrain could not tell the pre-pass from the noise.
     let flat = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,
@@ -2210,7 +2210,7 @@ end)
 
     let shaped = host
         .generate_chunk(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             1,
             ChunkPos::new(0, 0, 0),
             MaterialId::AIR,

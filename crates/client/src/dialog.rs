@@ -23,14 +23,14 @@
 //!
 //! The server stays authoritative over everything that matters: a text field's
 //! contents are the player's until they submit, and a slot move is a REQUEST
-//! (see [`tiamot_core::proto::DialogEvent`]).
+//! (see [`tiamat_core::proto::DialogEvent`]).
 
 use std::collections::BTreeMap;
 
 use crate::icons::Icons;
 
-use tiamot_core::proto::{Click, DialogEvent};
-use tiamot_core::ui::{Laid, Measure, Node, Rect, Style, Tree, Widget, layout};
+use tiamat_core::proto::{Click, DialogEvent};
+use tiamat_core::ui::{Laid, Measure, Node, Rect, Style, Tree, Widget, layout};
 
 /// What the player has done to a dialog that the server has not been told yet.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,9 +49,9 @@ pub struct Raised {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ViewContents {
     /// What each slot holds, or `None` where it is empty.
-    pub slots: Vec<Option<tiamot_core::proto::StackDef>>,
+    pub slots: Vec<Option<tiamat_core::proto::StackDef>>,
     /// What is on the cursor.
-    pub held: Option<tiamot_core::proto::StackDef>,
+    pub held: Option<tiamat_core::proto::StackDef>,
 }
 
 /// Per-widget state the tree itself cannot carry.
@@ -436,13 +436,13 @@ pub fn prompt_size(wanted: (i32, i32), area: (f32, f32), reserve: f32) -> (i32, 
 /// in blocks and `1+13` is what forty units actually is. A CUT is counted:
 /// thirteen units cut to a thirteen-cell shape is one stair, and labelling it
 /// `+13` told a player they had thirteen of something. Reported from the
-/// window. See [`tiamot_core::inventory::items`], which decides which it is.
+/// window. See [`tiamat_core::inventory::items`], which decides which it is.
 #[must_use]
 pub fn stack_label(units: u32, shape: u32) -> String {
-    if let Some(count) = tiamot_core::inventory::items(units, shape) {
+    if let Some(count) = tiamat_core::inventory::items(units, shape) {
         return count.to_string();
     }
-    let (blocks, nodes) = tiamot_core::inventory::display(units);
+    let (blocks, nodes) = tiamat_core::inventory::display(units);
     if nodes == 0 {
         blocks.to_string()
     } else if blocks == 0 {
@@ -524,7 +524,7 @@ fn draw_form(
     if screen.compact {
         // A prompt: measured, capped by the sheet, and draggable. Centred is
         // only a DEFAULT, so a player who moves one keeps it where they put it.
-        let (width, height) = prompt_size(tiamot_core::ui::natural(tree, &ruler), area, reserve);
+        let (width, height) = prompt_size(tiamat_core::ui::natural(tree, &ruler), area, reserve);
         egui::Window::new(form)
             .collapsible(false)
             .resizable(false)
@@ -1495,7 +1495,7 @@ fn paint_grid(
 ///
 /// **What it reports is a gesture.** Which stack moves where is the server's
 /// decision, taken against its own inventory — see
-/// [`tiamot_core::proto::DialogEvent::Clicked`]. What it DRAWS is likewise the
+/// [`tiamat_core::proto::DialogEvent::Clicked`]. What it DRAWS is likewise the
 /// server's last word: this never edits a slot locally, so a client that lied
 /// about a click still sees the truth a moment later.
 #[expect(
@@ -1547,7 +1547,7 @@ fn paint_slot(
         // Only when the name table has arrived: a tooltip reading `#7` is worse
         // than no tooltip at all, because it looks like the name.
         if let Some(name) = paint.icons.name_of(material) {
-            let (blocks, spares) = tiamot_core::inventory::display(units);
+            let (blocks, spares) = tiamat_core::inventory::display(units);
             response = response.on_hover_text(format!("{name}\n{blocks} blocks + {spares} nodes"));
         }
     }
@@ -1574,7 +1574,7 @@ fn paint_slot(
 
 #[cfg(test)]
 mod tests {
-    use tiamot_core::ui::{Align, Build, Direction};
+    use tiamat_core::ui::{Align, Build, Direction};
 
     use super::*;
 
@@ -1926,12 +1926,12 @@ mod tests {
         let full = |labels: usize| {
             let children: Vec<_> = (0..labels)
                 .map(|index| {
-                    tiamot_core::ui::Build::leaf(Widget::Label {
+                    tiamat_core::ui::Build::leaf(Widget::Label {
                         text: format!("line {index} of a screen with a great deal in it"),
                     })
                 })
                 .collect();
-            tiamot_core::ui::Build::of(
+            tiamat_core::ui::Build::of(
                 Node::new(Widget::Container {
                     direction: Direction::Column,
                     gap: 4,
@@ -2028,7 +2028,7 @@ mod tests {
                 (10, 10)
             }
         }
-        let tree = tiamot_core::ui::Build::of(
+        let tree = tiamat_core::ui::Build::of(
             Node::new(Widget::Container {
                 direction: Direction::Row,
                 gap: 0,
@@ -2036,8 +2036,8 @@ mod tests {
                 align: Align::Start,
             }),
             vec![
-                tiamot_core::ui::Build::leaf(Widget::Spacer),
-                tiamot_core::ui::Build::leaf(Widget::Spacer),
+                tiamat_core::ui::Build::leaf(Widget::Spacer),
+                tiamat_core::ui::Build::leaf(Widget::Spacer),
             ],
         )
         .flatten();

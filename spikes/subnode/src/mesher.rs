@@ -30,10 +30,10 @@
 //! Bit layout of a column: bit 0 is the neighbour at −1, bits 1..=48 are the
 //! chunk's own cells, bit 49 is the neighbour at +48.
 
-use tiamot_core::block::subnode_index;
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BLOCKS_PER_CHUNK, CHUNK_SUBNODES, SUBNODES_PER_AXIS};
+use tiamat_core::block::subnode_index;
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BLOCKS_PER_CHUNK, CHUNK_SUBNODES, SUBNODES_PER_AXIS};
 
 /// Sub-node cells per axis in a chunk.
 pub const N: usize = CHUNK_SUBNODES as usize;
@@ -384,8 +384,8 @@ fn greedy_merge(
 mod tests {
     use super::*;
     use crate::scenes::{STONE, Scene};
-    use tiamot_core::coords::SubNodePos;
-    use tiamot_core::{BlockValue, ChunkPos};
+    use tiamat_core::coords::SubNodePos;
+    use tiamat_core::{BlockValue, ChunkPos};
 
     /// Every quad, expanded back to the individual faces it covers.
     pub(super) fn faces(mesh: &Mesh) -> Vec<(u8, bool, usize, usize, usize, u16)> {
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn a_single_cell_produces_six_faces() {
-        let mut chunk = tiamot_core::Chunk::air(ChunkPos::new(0, 0, 0));
+        let mut chunk = tiamat_core::Chunk::air(ChunkPos::new(0, 0, 0));
         chunk
             .set_subnode(SubNodePos::new(5, 5, 5), STONE)
             .expect("in chunk");
@@ -459,7 +459,7 @@ mod tests {
         // The greedy merge should collapse each 48x48 face into one quad. If it
         // does not, merging is broken and every vertex count in the spike is
         // wrong.
-        let chunk = tiamot_core::Chunk::new(ChunkPos::new(0, 0, 0), STONE);
+        let chunk = tiamat_core::Chunk::new(ChunkPos::new(0, 0, 0), STONE);
         let mesh = mesh(&SubNodeGrid::from_chunk(&chunk));
         assert_eq!(mesh.quads.len(), 6, "got {} quads", mesh.quads.len());
         for quad in &mesh.quads {
@@ -469,13 +469,13 @@ mod tests {
 
     #[test]
     fn an_empty_chunk_meshes_to_nothing() {
-        let chunk = tiamot_core::Chunk::air(ChunkPos::new(0, 0, 0));
+        let chunk = tiamat_core::Chunk::air(ChunkPos::new(0, 0, 0));
         assert_eq!(mesh(&SubNodeGrid::from_chunk(&chunk)).quads.len(), 0);
     }
 
     #[test]
     fn merging_never_crosses_a_material_boundary() {
-        let mut chunk = tiamot_core::Chunk::new(ChunkPos::new(0, 0, 0), STONE);
+        let mut chunk = tiamat_core::Chunk::new(ChunkPos::new(0, 0, 0), STONE);
         chunk.set_block_local(
             LocalBlock::new(0, 15, 0),
             BlockValue::Uniform(crate::scenes::DIRT),

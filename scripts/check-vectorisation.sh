@@ -20,13 +20,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "Emitting assembly for tiamot-core (release)..."
+echo "Emitting assembly for tiamat-core (release)..."
 rm -rf target/vectorisation-check
 RUSTFLAGS="--emit asm" \
     CARGO_TARGET_DIR=target/vectorisation-check \
-    cargo build --release -p tiamot-core --quiet
+    cargo build --release -p tiamat-core --quiet
 
-asm=$(find target/vectorisation-check/release/deps -name 'tiamot_core-*.s' | head -1)
+asm=$(find target/vectorisation-check/release/deps -name 'tiamat_core-*.s' | head -1)
 if [ -z "$asm" ]; then
     echo "could not find emitted assembly" >&2
     exit 1

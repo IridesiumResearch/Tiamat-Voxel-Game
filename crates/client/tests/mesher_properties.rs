@@ -17,13 +17,13 @@ use std::collections::BTreeSet;
 
 use client::mesher::{Absent, Neighbours, Quad, mesh_chunk, reference};
 use proptest::prelude::*;
-use tiamot_core::coords::SubNodePos;
-use tiamot_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
+use tiamat_core::coords::SubNodePos;
+use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
 /// Full daylight, so these properties are about geometry. Light is its own
 /// merge key (see `client::shade`), and a varying field would be testing that
 /// instead of the greedy mesher against its oracle.
-const DAY: client::shade::Uniform = client::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: client::shade::Uniform = client::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 /// Every quad expanded back into the cell faces it covers.
 ///

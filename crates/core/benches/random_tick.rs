@@ -22,8 +22,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use tiamot_core::ChunkPos;
-use tiamot_core::tick::random;
+use tiamat_core::ChunkPos;
+use tiamat_core::tick::random;
 
 /// What the server samples in one tick at its own cap.
 const CHUNKS: i32 = 512;

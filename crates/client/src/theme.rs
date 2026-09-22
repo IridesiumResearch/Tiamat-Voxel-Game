@@ -13,7 +13,7 @@
 //! putting content in the engine, which is the same rule from the other side.
 //!
 //! A theme is therefore DATA a mod ships — `[theme]` in its `mod.toml`, see
-//! [`tiamot_core::modload::Theme`] — and this is the half that wears it.
+//! [`tiamat_core::modload::Theme`] — and this is the half that wears it.
 //!
 //! # Nothing here decodes anything
 //!
@@ -32,8 +32,8 @@
 //! guarantee that is for every part of it to be an override with a default
 //! underneath rather than a replacement.
 
-use tiamot_core::proto::{ContentHash, ThemeDef};
-use tiamot_core::ui::Colour;
+use tiamat_core::proto::{ContentHash, ThemeDef};
+use tiamat_core::ui::Colour;
 
 /// What the engine's screens look like right now.
 ///
@@ -419,7 +419,7 @@ impl Local {
             // so the two together are the whole of the path rule.
             let full = listing.dir.join(path);
             let size = std::fs::metadata(&full).ok()?.len();
-            if size > tiamot_core::content::MAX_FILE_BYTES {
+            if size > tiamat_core::content::MAX_FILE_BYTES {
                 return None;
             }
             std::fs::read(&full).ok()
@@ -434,7 +434,7 @@ impl Local {
             if failure.is_some() {
                 return None;
             }
-            let hash = tiamot_core::content::hash_bytes(&bytes);
+            let hash = tiamat_core::content::hash_bytes(&bytes);
             self.pictures.insert(hash, image);
             Some(hash)
         };
@@ -455,7 +455,7 @@ impl Local {
 
         let colour = |text: &Option<String>| {
             text.as_deref()
-                .and_then(tiamot_core::modload::parse_colour)
+                .and_then(tiamat_core::modload::parse_colour)
                 .map(|[r, g, b, a]| egui::Color32::from_rgba_unmultiplied(r, g, b, a))
         };
         self.theme = Theme {
@@ -492,7 +492,7 @@ mod tests {
             text_font: None,
             sheet: Some([7; 32]),
             button: None,
-            colours: tiamot_core::proto::ThemePalette {
+            colours: tiamat_core::proto::ThemePalette {
                 text: Some([0xE8, 0xDC, 0xC0, 0xFF]),
                 heading: Some([0xF0, 0xD8, 0x90, 0xFF]),
                 background: None,
@@ -504,7 +504,7 @@ mod tests {
 
     /// A scratch directory, the way `crate::launcher`'s tests make one.
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tiamot-theme-{name}"));
+        let dir = std::env::temp_dir().join(format!("tiamat-theme-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
         dir
@@ -531,7 +531,7 @@ mod tests {
         std::fs::write(mod_dir.join("init.lua"), "").expect("entry");
         std::fs::write(mod_dir.join("art/frame.png"), png()).expect("frame");
         let manifest = format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\n{body}");
-        let parsed: tiamot_core::modload::ModManifest =
+        let parsed: tiamat_core::modload::ModManifest =
             toml::from_str(&manifest).expect("a manifest");
         crate::launcher::Listing {
             id: id.to_owned(),

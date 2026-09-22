@@ -70,7 +70,7 @@ impl Transform {
 
     /// Squared distance to a point in the same chunk frame, in blocks.
     fn distance_squared(&self, chunk: [i32; 3], local: [f32; 3]) -> f32 {
-        let blocks = tiamot_core::CHUNK_BLOCKS as f32;
+        let blocks = tiamat_core::CHUNK_BLOCKS as f32;
         let mut total = 0.0;
         for axis in 0..3 {
             let offset =

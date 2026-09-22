@@ -141,7 +141,7 @@ impl<'a> Icons<'a> {
             self.paint_flat(painter, rect, material);
             return;
         }
-        if shape == 0 || shape == tiamot_core::inventory::Shape::ALL {
+        if shape == 0 || shape == tiamat_core::inventory::Shape::ALL {
             self.paint_block(painter, rect, material);
             return;
         }

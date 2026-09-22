@@ -6,9 +6,9 @@
 //! Run once per backend and compare:
 //!
 //! ```sh
-//! cargo run --release -p tiamot-core --example vm_bench --no-default-features --features vm-lua54
-//! cargo run --release -p tiamot-core --example vm_bench --no-default-features --features vm-luajit
-//! cargo run --release -p tiamot-core --example vm_bench --no-default-features --features vm-luau
+//! cargo run --release -p tiamat-core --example vm_bench --no-default-features --features vm-lua54
+//! cargo run --release -p tiamat-core --example vm_bench --no-default-features --features vm-luajit
+//! cargo run --release -p tiamat-core --example vm_bench --no-default-features --features vm-luau
 //! ```
 //!
 //! A plain harness rather than criterion, deliberately: the numbers have to be
@@ -35,8 +35,8 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use tiamot_core::ChunkPos;
-use tiamot_core::script::{EngineVm, ScriptVm, VmLimits};
+use tiamat_core::ChunkPos;
+use tiamat_core::script::{EngineVm, ScriptVm, VmLimits};
 
 /// Best of N. Same reasoning as the Task 04 harness: the question is what the
 /// design can do, and the minimum is the closest estimate with scheduler noise
@@ -106,10 +106,10 @@ fn main() {
     let worldgen = best_of(200, || {
         let chunk = vm
             .generate_chunk(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 42,
                 ChunkPos::new(0, 0, 0),
-                tiamot_core::MaterialId::AIR,
+                tiamat_core::MaterialId::AIR,
             )
             .expect("generate");
         black_box(chunk);
@@ -154,7 +154,7 @@ fn main() {
     // runs, in Rust, in this same binary — which is what makes the overhead
     // number mean what it claims.
     let native = best_of(200, || {
-        use tiamot_core::detgen::{ChunkBuffer, Fractal, FractalParams, Region2d, fill_2d};
+        use tiamat_core::detgen::{ChunkBuffer, Fractal, FractalParams, Region2d, fill_2d};
         let params = FractalParams {
             fractal: Fractal::Fbm,
             octaves: 4,
@@ -167,8 +167,8 @@ fn main() {
             origin_y: 0.0,
             step_x: 1.0,
             step_y: 1.0,
-            width: tiamot_core::CHUNK_BLOCKS as usize,
-            height: tiamot_core::CHUNK_BLOCKS as usize,
+            width: tiamat_core::CHUNK_BLOCKS as usize,
+            height: tiamat_core::CHUNK_BLOCKS as usize,
         };
         let mut samples = vec![0.0f32; region.len()];
         fill_2d(42, &region, &params, &mut samples).expect("fill");
@@ -176,9 +176,9 @@ fn main() {
             .iter()
             .map(|sample| 8 + (sample * 6.0) as i32)
             .collect();
-        let mut buffer = ChunkBuffer::new(ChunkPos::new(0, 0, 0), tiamot_core::MaterialId::AIR);
+        let mut buffer = ChunkBuffer::new(ChunkPos::new(0, 0, 0), tiamat_core::MaterialId::AIR);
         buffer
-            .fill_below_heightmap(&heights, tiamot_core::MaterialId(2))
+            .fill_below_heightmap(&heights, tiamat_core::MaterialId(2))
             .expect("fill");
         black_box(buffer.to_chunk());
     });

@@ -40,11 +40,11 @@
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::proto::{ClientMessage, Edit};
-use tiamot_core::tick::TICK_DURATION;
-use tiamot_core::{BlockPos, MaterialId};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::proto::{ClientMessage, Edit};
+use tiamat_core::tick::TICK_DURATION;
+use tiamat_core::{BlockPos, MaterialId};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 const BOTS: usize = 4;
@@ -67,7 +67,7 @@ const HARD_LIMIT: u32 = if cfg!(debug_assertions) { 15 } else { 5 };
 const CATASTROPHE: u32 = 60;
 
 fn stone_id() -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for (index, name) in MATERIALS.iter().enumerate() {
         let assigned = registry.register(name).expect("register");
@@ -80,7 +80,7 @@ fn stone_id() -> u16 {
 
 #[test]
 fn two_hundred_ticks_under_four_bots_stays_within_budget() {
-    let dir = std::env::temp_dir().join("tiamot-tick-stability");
+    let dir = std::env::temp_dir().join("tiamat-tick-stability");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -93,7 +93,7 @@ fn two_hundred_ticks_under_four_bots_stays_within_budget() {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: None,
-        view_distance: tiamot_core::interest::ViewDistance::MINIMUM,
+        view_distance: tiamat_core::interest::ViewDistance::MINIMUM,
         mods_path: None,
         enabled_mods: None,
         seed: Some(1),
@@ -247,7 +247,7 @@ fn worldgen_under_a_joining_player_stays_inside_the_tick_budget() {
     //
     // Reports the numbers as a share of the 50 ms budget, per charter rule 18:
     // "0.4 ms" says nothing, "0.4 ms, 0.8% of a tick" says something.
-    let dir = std::env::temp_dir().join("tiamot-worldgen-load");
+    let dir = std::env::temp_dir().join("tiamat-worldgen-load");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let repo_mods = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -255,7 +255,7 @@ fn worldgen_under_a_joining_player_stays_inside_the_tick_budget() {
         .canonicalize()
         .expect("game/ should exist");
 
-    let view = tiamot_core::interest::ViewDistance::DEFAULT;
+    let view = tiamat_core::interest::ViewDistance::DEFAULT;
     let server = ServerHandle::start(&Settings {
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: dir,
@@ -277,7 +277,7 @@ fn worldgen_under_a_joining_player_stays_inside_the_tick_budget() {
     let addr = server.local_addr();
     let fingerprint = server.cert_fingerprint();
     let wanted =
-        tiamot_core::interest::chunks_around(tiamot_core::BlockPos::new(0, 1, 0).chunk(), view)
+        tiamat_core::interest::chunks_around(tiamat_core::BlockPos::new(0, 1, 0).chunk(), view)
             .len();
 
     tokio::runtime::Builder::new_current_thread()
@@ -370,7 +370,7 @@ fn worldgen_under_a_joining_player_stays_inside_the_tick_budget() {
 fn four_bots_all_see_a_fourth_bots_edit() {
     // Broadcast fan-out, rather than the two-party case. A per-connection
     // subscription bug would show up here and not in the two-bot test.
-    let dir = std::env::temp_dir().join("tiamot-fanout");
+    let dir = std::env::temp_dir().join("tiamat-fanout");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -383,7 +383,7 @@ fn four_bots_all_see_a_fourth_bots_edit() {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: None,
-        view_distance: tiamot_core::interest::ViewDistance::MINIMUM,
+        view_distance: tiamat_core::interest::ViewDistance::MINIMUM,
         mods_path: None,
         enabled_mods: None,
         seed: Some(1),

@@ -31,9 +31,9 @@ use client::config::{Config, LightingMode, RenderMode};
 use client::net::Connection;
 use client::render::offscreen::perceptual_hash;
 use client::render::{Gpu, Offscreen, Renderer};
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
@@ -43,7 +43,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("tiamot-client-session")
+        .join("tiamat-client-session")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -63,8 +63,8 @@ fn gpu() -> Option<Gpu> {
         Ok(gpu) => Some(gpu),
         Err(err) => {
             assert!(
-                std::env::var("TIAMOT_REQUIRE_GPU").is_err(),
-                "TIAMOT_REQUIRE_GPU is set and no adapter was available: {err}"
+                std::env::var("TIAMAT_REQUIRE_GPU").is_err(),
+                "TIAMAT_REQUIRE_GPU is set and no adapter was available: {err}"
             );
             println!("SKIPPING: no graphics adapter on this machine ({err})");
             None
@@ -636,7 +636,7 @@ fn a_player_can_dig_and_then_build_with_what_they_dug() {
         dug = app
             .carried()
             .first()
-            .is_some_and(|stack| stack.units >= tiamot_core::UNITS_PER_BLOCK);
+            .is_some_and(|stack| stack.units >= tiamat_core::UNITS_PER_BLOCK);
         std::thread::sleep(Duration::from_millis(16));
     }
     assert!(
@@ -648,7 +648,7 @@ fn a_player_can_dig_and_then_build_with_what_they_dug() {
 
     let carried = app.carried()[0].clone();
     assert!(
-        carried.units >= tiamot_core::UNITS_PER_BLOCK,
+        carried.units >= tiamat_core::UNITS_PER_BLOCK,
         "short: {carried:?}"
     );
 
@@ -987,7 +987,7 @@ fn the_selection_outlines_the_real_shape_of_a_chiselled_block() {
             .store()
             .get(removed.chunk())
             .and_then(|chunk| chunk.get_subnode(removed))
-            .is_some_and(tiamot_core::MaterialId::is_air);
+            .is_some_and(tiamat_core::MaterialId::is_air);
         std::thread::sleep(Duration::from_millis(16));
     }
     assert!(gone, "the chisel never removed {removed:?}");
@@ -1370,11 +1370,11 @@ fn the_debug_row_offers_one_of_every_material_and_nothing_when_aimed_at_sky() {
     ids.dedup();
     assert_eq!(ids.len(), unique, "the row repeats a material");
     assert!(
-        !ids.contains(&tiamot_core::MaterialId::AIR.0),
+        !ids.contains(&tiamat_core::MaterialId::AIR.0),
         "the row includes air, which is a hole rather than a block"
     );
     assert!(
-        !ids.contains(&tiamot_core::MaterialId::UNKNOWN.0),
+        !ids.contains(&tiamat_core::MaterialId::UNKNOWN.0),
         "the row includes the unknown-block placeholder, which is nothing a player wants a \
          sample of"
     );
@@ -1897,7 +1897,7 @@ fn the_divergence_measure_and_its_trace_report_a_real_session() {
     let diverged = app.pacing().worst_divergence_cells();
     println!("worst per-tick divergence: {diverged} cells");
     assert!(
-        diverged < tiamot_core::SUBNODES_PER_AXIS as f32,
+        diverged < tiamat_core::SUBNODES_PER_AXIS as f32,
         "the two answers for one tick are {diverged} cells apart — more than a block, which is \
          an instrument comparing different frames rather than a simulation disagreeing"
     );
@@ -2557,13 +2557,13 @@ fn a_held_dig_finishes_its_block_before_looking_through_the_hole() {
     // of the intended behaviour — which is exactly what a first version of this
     // did, over a window slightly longer than one block takes to break.
     let cells_left = |app: &App| {
-        let base = tiamot_core::SubNodePos::new(first.x * 3, first.y * 3, first.z * 3);
+        let base = tiamat_core::SubNodePos::new(first.x * 3, first.y * 3, first.z * 3);
         app.store().get(first.chunk()).map_or(0, |chunk| {
             (0..3)
                 .flat_map(|y| (0..3).flat_map(move |z| (0..3).map(move |x| (x, y, z))))
                 .filter(|(x, y, z)| {
                     chunk
-                        .get_subnode(tiamot_core::SubNodePos::new(
+                        .get_subnode(tiamat_core::SubNodePos::new(
                             base.x + x,
                             base.y + y,
                             base.z + z,

@@ -91,7 +91,7 @@ pub type Turn = u32;
 /// The mask as it appears after `turn` quarter turns.
 #[must_use]
 pub fn as_seen(mask: u32, turn: Turn) -> u32 {
-    tiamot_core::inventory::turned(mask, turn)
+    tiamat_core::inventory::turned(mask, turn)
 }
 
 /// Where a cell the player clicked on is in the authored block.

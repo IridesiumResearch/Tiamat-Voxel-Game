@@ -27,7 +27,7 @@ use crate::mesher::Mesh;
 /// Any I/O failure writing the file.
 pub fn write_mesh_obj(path: &Path, mesh: &Mesh, label: &str) -> io::Result<()> {
     let mut out = String::with_capacity(mesh.quads.len() * 96);
-    let _ = writeln!(out, "# Tiamot sub-node spike — {label}");
+    let _ = writeln!(out, "# Tiamat sub-node spike — {label}");
     let _ = writeln!(
         out,
         "# {} quads. Units are sub-nodes: 3 per block, 1 block = 1 yard.",
@@ -66,7 +66,7 @@ pub fn write_mesh_obj(path: &Path, mesh: &Mesh, label: &str) -> io::Result<()> {
 /// Any I/O failure writing the file.
 pub fn write_path_obj(path: &Path, points: &[[f32; 3]], label: &str) -> io::Result<()> {
     let mut out = String::with_capacity(points.len() * 48);
-    let _ = writeln!(out, "# Tiamot sub-node spike — {label}");
+    let _ = writeln!(out, "# Tiamat sub-node spike — {label}");
     let _ = writeln!(out, "# {} ticks at 20 tps. Units are yards.", points.len());
 
     for point in points {
@@ -100,7 +100,7 @@ mod tests {
     fn mesh_export_has_one_face_per_quad_and_four_vertices_each() {
         let chunk = Scene::Realistic.build(1);
         let meshed = mesh(&SubNodeGrid::from_chunk(&chunk));
-        let dir = std::env::temp_dir().join("tiamot-spike-export-test");
+        let dir = std::env::temp_dir().join("tiamat-spike-export-test");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("mesh.obj");
 
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn path_export_writes_a_single_polyline() {
-        let dir = std::env::temp_dir().join("tiamot-spike-export-test");
+        let dir = std::env::temp_dir().join("tiamat-spike-export-test");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("path.obj");
         let points = vec![[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0]];

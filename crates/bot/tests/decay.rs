@@ -16,20 +16,20 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::{ClientMessage, ServerMessage};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::{ClientMessage, ServerMessage};
+use tiamat_server::{ServerHandle, Settings};
 
 const PATIENCE: Duration = Duration::from_secs(15);
 
 /// The block dug in every test here. `y = -1` is the surface under
 /// `fill_below_heightmap(0)`, which is the trap every test in this repo hits
 /// once.
-const TARGET: tiamot_core::BlockPos = tiamot_core::BlockPos::new(0, -1, 0);
+const TARGET: tiamat_core::BlockPos = tiamat_core::BlockPos::new(0, -1, 0);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiamot-decay-{name}"));
+    let dir = std::env::temp_dir().join(format!("tiamat-decay-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -100,13 +100,13 @@ async fn join(server: &ServerHandle, name: &str) -> Bot {
 }
 
 /// How many distinct sub-nodes of `at` the server has removed.
-fn cells_gone(bot: &Bot, at: tiamot_core::BlockPos) -> usize {
+fn cells_gone(bot: &Bot, at: tiamat_core::BlockPos) -> usize {
     let mut gone = std::collections::BTreeSet::new();
     for message in bot.received() {
         if let ServerMessage::BlockDelta { edit, .. } = message
-            && let tiamot_core::proto::Edit::SubNode { pos, material } = edit
+            && let tiamat_core::proto::Edit::SubNode { pos, material } = edit
             && pos.block() == at
-            && material == tiamot_core::MaterialId::AIR.0
+            && material == tiamat_core::MaterialId::AIR.0
         {
             gone.insert((pos.x, pos.y, pos.z));
         }
@@ -134,7 +134,7 @@ fn stopping_halfway_leaves_half_a_block_and_keeps_half_its_material() {
     block_on(async {
         let mut bot = join(&server, "miner").await;
         let centre =
-            tiamot_core::SubNodePos::new(TARGET.x * 3 + 1, TARGET.y * 3 + 1, TARGET.z * 3 + 1);
+            tiamat_core::SubNodePos::new(TARGET.x * 3 + 1, TARGET.y * 3 + 1, TARGET.z * 3 + 1);
 
         // Dig until some of the block is gone but not all of it.
         let deadline = tokio::time::Instant::now() + PATIENCE;
@@ -218,10 +218,10 @@ fn a_whole_dig_still_yields_exactly_one_block() {
         }
         assert_eq!(
             carried(&bot),
-            tiamot_core::UNITS_PER_BLOCK,
+            tiamat_core::UNITS_PER_BLOCK,
             "a whole block came apart into {} units, not {}",
             carried(&bot),
-            tiamot_core::UNITS_PER_BLOCK
+            tiamat_core::UNITS_PER_BLOCK
         );
     });
     assert!(server.stop());
@@ -296,7 +296,7 @@ end)
 
         // The first mark says the hook fired at all. Without it the rest of
         // this proves nothing.
-        bot.expect_block(tiamot_core::BlockPos::new(0, 11, 0), mark, PATIENCE)
+        bot.expect_block(tiamat_core::BlockPos::new(0, 11, 0), mark, PATIENCE)
             .await
             .expect("the mod never heard the dig complete");
 
@@ -306,7 +306,7 @@ end)
             let _ = tokio::time::timeout(Duration::from_millis(20), bot.recv()).await;
         }
         assert!(
-            !bot.saw_block(tiamot_core::BlockPos::new(0, 12, 0), mark),
+            !bot.saw_block(tiamat_core::BlockPos::new(0, 12, 0), mark),
             "the mod was told twice about one block — a break sound would have \
              played twenty-seven times"
         );

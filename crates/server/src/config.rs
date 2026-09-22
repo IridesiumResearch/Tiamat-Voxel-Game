@@ -171,11 +171,11 @@ impl Config {
     }
 
     fn default_view_distance() -> u8 {
-        tiamot_core::interest::ViewDistance::DEFAULT.horizontal
+        tiamat_core::interest::ViewDistance::DEFAULT.horizontal
     }
 
     fn default_vertical_view_distance() -> u8 {
-        tiamot_core::interest::ViewDistance::DEFAULT.vertical
+        tiamat_core::interest::ViewDistance::DEFAULT.vertical
     }
 
     fn default_max_players() -> u32 {
@@ -271,7 +271,7 @@ mod tests {
     ///
     /// Named after the test so parallel test threads cannot collide.
     fn temp_config(name: &str, text: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("tiamot-test-{name}.toml"));
+        let path = std::env::temp_dir().join(format!("tiamat-test-{name}.toml"));
         let mut file = std::fs::File::create(&path).expect("create temp config");
         file.write_all(text.as_bytes()).expect("write temp config");
         path
@@ -330,7 +330,7 @@ max_players = 64
 
     #[test]
     fn reports_a_missing_file_as_a_read_error() {
-        let path = std::env::temp_dir().join("tiamot-test-definitely-absent.toml");
+        let path = std::env::temp_dir().join("tiamat-test-definitely-absent.toml");
         let _ = std::fs::remove_file(&path);
 
         let err = Config::load(&path).expect_err("missing file should be an error");

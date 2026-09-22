@@ -17,12 +17,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-show-over").join(name);
+    let dir = std::env::temp_dir().join("tiamat-show-over").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -148,7 +148,7 @@ fn a_badge_hangs_over_a_mob_and_the_newest_one_is_the_only_one_sent() {
             let first = badges[0];
             assert_eq!(
                 first.picture,
-                tiamot_core::content::hash_bytes(PICTURE),
+                tiamat_core::content::hash_bytes(PICTURE),
                 "the picture's hash did not survive the wire"
             );
             assert_eq!(first.colour, [255, 51, 51, 255]);
@@ -176,13 +176,13 @@ fn a_badge_hangs_over_a_mob_and_the_newest_one_is_the_only_one_sent() {
             // at y = 40 says so.
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             while tokio::time::Instant::now() < deadline
-                && !bot.saw_block(tiamot_core::BlockPos::new(0, 40, 20), marker)
-                && !bot.saw_block(tiamot_core::BlockPos::new(0, 41, 20), marker)
+                && !bot.saw_block(tiamat_core::BlockPos::new(0, 40, 20), marker)
+                && !bot.saw_block(tiamat_core::BlockPos::new(0, 41, 20), marker)
             {
                 let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
             }
             assert!(
-                bot.saw_block(tiamot_core::BlockPos::new(0, 40, 20), marker),
+                bot.saw_block(tiamat_core::BlockPos::new(0, 40, 20), marker),
                 "a badge over an entity that does not exist was sent to somebody"
             );
             bot.disconnect().await;

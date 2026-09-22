@@ -35,11 +35,11 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
-use tiamot_core::block::OCCUPANCY_FULL;
-use tiamot_core::coords::BlockPos;
-use tiamot_core::light::propagate::{Neighbourhood, Region};
-use tiamot_core::light::{Faces, Light, LightLayer, MAX_LEVEL, edited, permeability, relight};
-use tiamot_core::{BlockValue, CHUNK_BLOCKS, MaterialId};
+use tiamat_core::block::OCCUPANCY_FULL;
+use tiamat_core::coords::BlockPos;
+use tiamat_core::light::propagate::{Neighbourhood, Region};
+use tiamat_core::light::{Faces, Light, LightLayer, MAX_LEVEL, edited, permeability, relight};
+use tiamat_core::{BlockValue, CHUNK_BLOCKS, MaterialId};
 
 const STONE: MaterialId = MaterialId(2);
 
@@ -113,8 +113,8 @@ impl Neighbourhood for Scene {
 }
 
 /// The chunk-local block address of a position inside the scene.
-fn local(pos: BlockPos) -> tiamot_core::coords::LocalBlock {
-    tiamot_core::coords::LocalBlock::new(pos.x as u32, pos.y as u32, pos.z as u32)
+fn local(pos: BlockPos) -> tiamat_core::coords::LocalBlock {
+    tiamat_core::coords::LocalBlock::new(pos.x as u32, pos.y as u32, pos.z as u32)
 }
 
 fn open_sky() -> Scene {

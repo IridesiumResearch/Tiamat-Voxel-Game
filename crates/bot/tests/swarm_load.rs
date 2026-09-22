@@ -23,10 +23,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tiamot_core::identity::Allowlist;
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::tick::TICK_DURATION;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::Allowlist;
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::tick::TICK_DURATION;
+use tiamat_server::{ServerHandle, Settings};
 
 /// Resident set size in kibibytes, on Linux.
 ///
@@ -63,7 +63,7 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     const BOTS: u32 = 20;
     const SECONDS: u64 = 60;
 
-    let dir = std::env::temp_dir().join("tiamot-swarm-load");
+    let dir = std::env::temp_dir().join("tiamat-swarm-load");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 

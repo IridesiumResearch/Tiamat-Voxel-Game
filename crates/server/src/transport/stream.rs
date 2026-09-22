@@ -28,9 +28,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tiamot_core::ChunkPos;
-use tiamot_core::interest::{self, ViewDistance};
-use tiamot_core::lod::{Level, Rings, horizon_for};
+use tiamat_core::ChunkPos;
+use tiamat_core::interest::{self, ViewDistance};
+use tiamat_core::lod::{Level, Rings, horizon_for};
 
 /// What one connection has been sent, and what it still needs.
 pub struct Streamer {
@@ -546,7 +546,7 @@ impl Streamer {
     /// level keeps it until the player is a whole margin past the ring edge, so
     /// somebody pacing across a boundary does not re-send — and the client does
     /// not rebuild — a band of the horizon every step. See
-    /// [`tiamot_core::lod::Rings::stable_level`].
+    /// [`tiamat_core::lod::Rings::stable_level`].
     ///
     /// Does not mark anything sent, for the same reason [`Streamer::next_needed`]
     /// does not.
@@ -603,7 +603,7 @@ impl Streamer {
         // annulus is 75,300 positions where it was 27,108, and the difference
         // is sky and buried rock. See `lod::MAX_HORIZON_VERTICAL`.
         let (centre, view) = (self.centre, self.view);
-        let layers = i32::from(tiamot_core::lod::MAX_HORIZON_VERTICAL);
+        let layers = i32::from(tiamat_core::lod::MAX_HORIZON_VERTICAL);
         self.horizon_order = interest::chunks_around(centre, self.horizon)
             .into_iter()
             .filter(|pos| !interest::contains(centre, view, *pos))
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn the_horizon_leaves_no_ring_uncovered() {
         let view = ViewDistance::clamped(24, 12);
-        let mut streamer = Streamer::new(tiamot_core::domain::OVERWORLD, ORIGIN, view);
+        let mut streamer = Streamer::new(tiamat_core::domain::OVERWORLD, ORIGIN, view);
         let covered: BTreeSet<ChunkPos> = drain_horizon(&mut streamer)
             .into_iter()
             .map(|(pos, _)| pos)
@@ -734,7 +734,7 @@ mod tests {
         // not summarised — sky and buried rock, three quarters of the extent at
         // the default vertical. What this test is about is that nothing INSIDE
         // the band is skipped, which is the shape-mismatch bug it caught.
-        let layers = i32::from(tiamot_core::lod::MAX_HORIZON_VERTICAL);
+        let layers = i32::from(tiamat_core::lod::MAX_HORIZON_VERTICAL);
         let wanted: Vec<ChunkPos> = interest::chunks_around(ORIGIN, horizon_for(view))
             .into_iter()
             .filter(|pos| !interest::contains(ORIGIN, view, *pos))
@@ -763,7 +763,7 @@ mod tests {
     fn a_chunk_is_detail_exactly_when_the_interest_set_holds_it() {
         for horizontal in [2u8, 4, 8, 16, 24] {
             let view = ViewDistance::clamped(horizontal, 12);
-            let streamer = Streamer::new(tiamot_core::domain::OVERWORLD, ORIGIN, view);
+            let streamer = Streamer::new(tiamat_core::domain::OVERWORLD, ORIGIN, view);
             let rings = Rings::new(u32::from(view.horizontal), Rings::MARGIN);
             for pos in interest::chunks_around(ORIGIN, horizon_for(view)) {
                 assert_eq!(
@@ -777,7 +777,7 @@ mod tests {
 
     fn streamer() -> Streamer {
         Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::MINIMUM,
         )
@@ -793,7 +793,7 @@ mod tests {
     /// A streamer with room below the centre for rock, caves and what lies
     /// under them: three chunks out, five up and down.
     fn tall_streamer() -> Streamer {
-        Streamer::new(tiamot_core::domain::OVERWORLD, ORIGIN, TALL)
+        Streamer::new(tiamat_core::domain::OVERWORLD, ORIGIN, TALL)
     }
 
     /// Delivers everything needed, round after round, until nothing is —
@@ -1014,7 +1014,7 @@ mod tests {
         streamer.requested(pos);
         streamer.delivered(pos);
 
-        let dropped = streamer.switch_to(tiamot_core::domain::OVERWORLD, ORIGIN);
+        let dropped = streamer.switch_to(tiamat_core::domain::OVERWORLD, ORIGIN);
         assert!(dropped.is_empty(), "a no-op switch threw the world away");
         assert_eq!(streamer.sent_count(), 1);
     }
@@ -1030,7 +1030,7 @@ mod tests {
         // of the detail radius has not left the client's world; it becomes a
         // summary. Only the horizon unloads.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1076,7 +1076,7 @@ mod tests {
         // No chunk leaves range when the range gets bigger, and the new ones
         // arrive through the ordinary pump rather than through a special path.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::MINIMUM,
         );
@@ -1109,7 +1109,7 @@ mod tests {
         // A client re-sending its preference — on a reconnect, or every time a
         // settings screen closes — must not churn its whole interest set.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1243,7 +1243,7 @@ mod tests {
         // A player taking one step must not be re-sent their whole
         // neighbourhood. If this failed, walking would saturate the link.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1370,7 +1370,7 @@ mod tests {
         // coarse one would poke through the fine one. The two sets are disjoint
         // by construction, and this is the assertion that keeps them so.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1380,7 +1380,7 @@ mod tests {
                 !streamer.holds(pos),
                 "{pos:?} was to be summarised while the client held it in full"
             );
-            assert!(level >= tiamot_core::lod::FINEST);
+            assert!(level >= tiamat_core::lod::FINEST);
         }
         assert!(streamer.summary_count() > 0, "no horizon was produced");
         assert!(
@@ -1396,7 +1396,7 @@ mod tests {
         // summary, are both one message about one position. Unloading first
         // would blink a chunk-sized hole in the world.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1453,7 +1453,7 @@ mod tests {
         // frames.** The client's rebuild count is downstream of this: a
         // summary it is not sent is one it cannot rebuild.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1495,7 +1495,7 @@ mod tests {
         // to put one cell out of twenty-seven. The horizon is re-sent instead,
         // and this is what makes a distant explosion eventually show up.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1533,7 +1533,7 @@ mod tests {
         // scenery — so this asserts only that the horizon is not starved to
         // zero, not that it competes.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
@@ -1557,7 +1557,7 @@ mod tests {
         // saves. The cursor rotates instead, so everything gets a turn without
         // any single pass paying for all of it.
         let mut streamer = Streamer::new(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );

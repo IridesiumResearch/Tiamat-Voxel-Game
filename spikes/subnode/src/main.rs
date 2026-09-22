@@ -173,8 +173,8 @@ fn probe_mesh(seed: u64) {
         let mut edited = chunk.clone();
         edited
             .set_subnode(
-                tiamot_core::coords::SubNodePos::new(24, 23, 24),
-                tiamot_core::MaterialId::AIR,
+                tiamat_core::coords::SubNodePos::new(24, 23, 24),
+                tiamat_core::MaterialId::AIR,
             )
             .expect("in chunk");
         let remesh = best_of(ITERATIONS, || {
@@ -312,10 +312,10 @@ fn probe_collision(seed: u64, out: &std::path::Path) {
 }
 
 /// A flat floor with rising steps of 1, 2 and 3 sub-nodes, for the step-up gate.
-fn build_staircase() -> tiamot_core::Chunk {
-    use tiamot_core::coords::SubNodePos;
+fn build_staircase() -> tiamat_core::Chunk {
+    use tiamat_core::coords::SubNodePos;
 
-    let mut chunk = tiamot_core::Chunk::air(tiamot_core::ChunkPos::new(0, 0, 0));
+    let mut chunk = tiamat_core::Chunk::air(tiamat_core::ChunkPos::new(0, 0, 0));
     let n = mesher::N as i32;
     for z in 0..n {
         for x in 0..n {

@@ -33,11 +33,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::BlockPos;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::tick::TICK_DURATION;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::BlockPos;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::tick::TICK_DURATION;
+use tiamat_server::{ServerHandle, Settings};
 
 /// Bots, each with its own lamp.
 const BOTS: u32 = 20;
@@ -81,7 +81,7 @@ async fn lamp_id(bot: &Bot) -> u16 {
 #[test]
 #[ignore = "takes half a minute; nightly runs it explicitly"]
 fn twenty_bots_churning_lamps_keep_the_tick_inside_its_budget() {
-    let dir = std::env::temp_dir().join("tiamot-lamp-load");
+    let dir = std::env::temp_dir().join("tiamat-lamp-load");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -293,7 +293,7 @@ async fn churn(addr: std::net::SocketAddr, index: u32, lamp: u16) -> Result<u64,
             .filter(|stack| stack.material == lamp)
             .map(|stack| stack.units)
             .sum::<u32>();
-        if held >= tiamot_core::UNITS_PER_BLOCK {
+        if held >= tiamat_core::UNITS_PER_BLOCK {
             bot.place(pos, lamp).await.map_err(|err| err.to_string())?;
             edits += 1;
         }

@@ -13,7 +13,7 @@ use mlua::Lua;
 
 /// Marker text used to recognise a budget stop coming back through `mlua`'s
 /// error type, which has no dedicated variant for it.
-pub const MARKER: &str = "tiamot: instruction budget exceeded";
+pub const MARKER: &str = "tiamat: instruction budget exceeded";
 
 /// How often the budget hook fires. Checking every instruction would dominate
 /// the runtime; a few thousand keeps the overhead negligible while still

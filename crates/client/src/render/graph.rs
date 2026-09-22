@@ -123,7 +123,7 @@ pub struct Frame {
     pub fog_up: f32,
     /// How the finished frame is graded, already interpolated and sanitised by
     /// `crate::sky`.
-    pub grade: tiamot_core::proto::SkyGrade,
+    pub grade: tiamat_core::proto::SkyGrade,
     /// Where the camera stands among the places' fogs. Mode 3 applies them
     /// here, from depth, so they reach the sky; see `super::place_fog`.
     pub place_fog: super::place_fog::Uniforms,
@@ -674,7 +674,7 @@ impl Post {
     ///
     /// Returns whether anything was uploaded, for the test that a still sky
     /// bakes once rather than every frame.
-    pub fn bake_grade(&mut self, gpu: &Gpu, grade: &tiamot_core::proto::SkyGrade) -> bool {
+    pub fn bake_grade(&mut self, gpu: &Gpu, grade: &tiamat_core::proto::SkyGrade) -> bool {
         self.grading.bake(gpu, grade)
     }
 
@@ -770,7 +770,7 @@ impl Post {
                 // The identity is skipped rather than looked up. See
                 // [`super::grade`] for why "nearly unchanged" is not good
                 // enough for an ungraded world.
-                graded: f32::from(u8::from(frame.grade != tiamot_core::proto::SkyGrade::NONE)),
+                graded: f32::from(u8::from(frame.grade != tiamat_core::proto::SkyGrade::NONE)),
                 fog_up: frame.fog_up,
                 place_fog: frame.place_fog,
             }),

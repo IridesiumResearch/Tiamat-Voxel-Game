@@ -9,7 +9,7 @@
 # profile, and pulling it into the workspace would make every ordinary
 # `cargo build` depend on a nightly toolchain.
 [package]
-name = "tiamot-fuzz"
+name = "tiamat-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -19,7 +19,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-tiamot-core = { path = "../crates/core", default-features = false }
+tiamat-core = { path = "../crates/core", default-features = false }
 client = { path = "../crates/client" }
 # The release archive extractor: bytes that become files that get executed.
 updater = { path = "../crates/updater" }

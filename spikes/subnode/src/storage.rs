@@ -19,11 +19,11 @@
 //! the compressed sizes are meaningful. It is deliberately not clever: an
 //! over-tuned spike encoding would flatter the design.
 
-use tiamot_core::bitpack::BitArray;
-use tiamot_core::block::{BlockValue, Cells, SUBNODES_PER_BLOCK};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BLOCKS_PER_CHUNK, MaterialId};
+use tiamat_core::bitpack::BitArray;
+use tiamat_core::block::{BlockValue, Cells, SUBNODES_PER_BLOCK};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BLOCKS_PER_CHUNK, MaterialId};
 
 /// zstd level. 3 is the library default and what a server would realistically
 /// afford on a chunk save; higher levels cost tick time for a few percent.
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_uniform_chunk_compresses_to_almost_nothing() {
-        let chunk = Chunk::new(tiamot_core::ChunkPos::new(0, 0, 0), crate::scenes::STONE);
+        let chunk = Chunk::new(tiamat_core::ChunkPos::new(0, 0, 0), crate::scenes::STONE);
         let compressed = compress(&serialize(&chunk)).len();
         assert!(
             compressed < 100,

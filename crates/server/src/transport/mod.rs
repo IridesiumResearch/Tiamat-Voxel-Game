@@ -4,7 +4,7 @@
 //! QUIC transport.
 //!
 //! Moves bytes and nothing else. Every rule about who may do what lives in
-//! [`tiamot_core::session`]; see [`endpoint`]'s module docs for why.
+//! [`tiamat_core::session`]; see [`endpoint`]'s module docs for why.
 
 pub mod endpoint;
 pub mod frame;

@@ -38,7 +38,7 @@ fi
 
 version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
 commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
-name="tiamot-${version}-${target}"
+name="tiamat-${version}-${target}"
 stage="${out}/${name}"
 
 echo "==> building ${name} (channel ${channel})"
@@ -46,12 +46,12 @@ echo "==> building ${name} (channel ${channel})"
 # **The stamp is an environment variable read at compile time**, which is what
 # `core::build` reads back. A build with no commit says so rather than guessing
 # one, so a developer's copy can never claim to be a release.
-# `TIAMOT_RELEASE_KEY` and `TIAMOT_MANIFEST_URL` are inherited from the
+# `TIAMAT_RELEASE_KEY` and `TIAMAT_MANIFEST_URL` are inherited from the
 # environment when the release workflow sets them. A build made without them
 # trusts no key and asks nobody for updates, which is what a working copy
 # should do — see `core::build` and the launcher's `RELEASE_KEY`.
-export TIAMOT_CHANNEL="$channel"
-[ -n "$commit" ] && export TIAMOT_COMMIT="$commit"
+export TIAMAT_CHANNEL="$channel"
+[ -n "$commit" ] && export TIAMAT_COMMIT="$commit"
 
 # The updater is built when it exists, so this script works before and after it
 # lands rather than having to be rewritten the day it does.
@@ -72,11 +72,11 @@ echo "==> assembling"
 for binary in client server; do
     cp "${built}/${binary}${suffix}" "$stage/current/"
 done
-# The launcher's binary is called `tiamot` — it is what the player clicks.
-if [ -f "${built}/tiamot${suffix}" ]; then
+# The launcher's binary is called `tiamat` — it is what the player clicks.
+if [ -f "${built}/tiamat${suffix}" ]; then
     # The launcher sits ABOVE `current/`, because it is the one thing an update
     # does not replace — see `docs/distribution.md` §1.
-    cp "${built}/tiamot${suffix}" "${stage}/tiamot${suffix}"
+    cp "${built}/tiamat${suffix}" "${stage}/tiamat${suffix}"
 fi
 
 # --- mods ------------------------------------------------------------------
@@ -132,13 +132,13 @@ echo "==> third-party notices"
 {
     echo "# Third-party licences"
     echo
-    echo "Tiamot ${version} is GPL-3.0-only; see LICENSE. It is built with the"
+    echo "Tiamat ${version} is GPL-3.0-only; see LICENSE. It is built with the"
     echo "crates below, under the licences named. Where a crate offers a choice,"
     echo "every option it offers is listed and we take one compatible with"
     echo "GPL-3.0-only."
     echo
     echo "Source for any MPL-2.0 crate is available from its own repository, and"
-    echo "the corresponding source for Tiamot itself is at"
+    echo "the corresponding source for Tiamat itself is at"
     echo "https://github.com/IridesiumResearch/Tiamot-Voxel-Game"
     [ -n "$commit" ] && echo "at commit ${commit}."
     echo
@@ -160,24 +160,24 @@ echo "==> third-party notices"
 
 # --- how to run it ---------------------------------------------------------
 cat > "$stage/README.txt" <<EOF
-Tiamot ${version} (${channel}${commit:+, ${commit:0:7}})
+Tiamat ${version} (${channel}${commit:+, ${commit:0:7}})
 
 This is a test build. It is not signed, so your operating system will say so.
 
 macOS
   The first time only, clear the quarantine flag:
       xattr -dr com.apple.quarantine .
-  then run ./tiamot${suffix} (or double-click it).
+  then run ./tiamat${suffix} (or double-click it).
   Without that, macOS refuses to open it and says it is damaged. It is not.
 
 Windows
   SmartScreen will warn about an unrecognised app. More info -> Run anyway.
 
 Linux
-  ./tiamot${suffix}
+  ./tiamat${suffix}
 
 What is in here
-  tiamot${suffix}    the launcher: it applies updates and starts the game
+  tiamat${suffix}    the launcher: it applies updates and starts the game
   current/           the game itself
   current/game/      the mods it loads in singleplayer
 

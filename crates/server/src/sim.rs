@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tiamot_core::tick::{Accumulator, TICK_DURATION};
+use tiamat_core::tick::{Accumulator, TICK_DURATION};
 use tracing::{info, warn};
 
 /// A source of elapsed time and a way to wait.
@@ -428,7 +428,7 @@ pub fn run<C: Clock, F: FnMut(u64)>(clock: &mut C, control: &Control, mut step: 
     // rounding mode — from a driver, an audio library, or a mod's native
     // code — would silently produce a different world. Fail here, loudly, at
     // startup, rather than at the first cross-platform hash mismatch.
-    tiamot_core::assert_ieee_mode();
+    tiamat_core::assert_ieee_mode();
 
     let mut accumulator = Accumulator::new();
     let mut ran = 0u64;

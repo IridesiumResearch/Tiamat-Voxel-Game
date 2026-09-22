@@ -42,8 +42,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use tiamot_core::coords::{BlockPos, ChunkPos};
-use tiamot_core::fluid::{
+use tiamat_core::coords::{BlockPos, ChunkPos};
+use tiamat_core::fluid::{
     Absorbency, Absorbs, Flow, Fluid, FluidLayer, Fluids, Neighbourhood, Sinks, Solver, Tuning,
 };
 
@@ -59,7 +59,7 @@ pub const TICKS_PER_FLUID_TICK: u64 = 2;
 ///
 /// **Set from a measurement, and the first guess was four times too high.**
 /// Charter rule 18 gives all of simulation 50 ms shared by fifty players.
-/// `cargo bench -p tiamot-core --bench fluid` measured the hundred-spring field
+/// `cargo bench -p tiamat-core --bench fluid` measured the hundred-spring field
 /// at **15.5 ms for one capped tick at 4,096 visits — 31% of a whole tick, for
 /// one system, while nobody is even looking at it**. At 512 the same tick
 /// measures **2.4 ms, 4.8%**, which is a share fluid can defend.
@@ -82,9 +82,9 @@ pub const VISITS_PER_TICK: usize = 512;
 /// the last link of its own chain should get.
 #[must_use]
 pub fn absorbency_from_rules(
-    rules: &[tiamot_core::script::BlockRules],
-    id_of: impl Fn(&str) -> Option<tiamot_core::MaterialId>,
-    fluid_of: impl Fn(&str) -> Option<tiamot_core::fluid::FluidId>,
+    rules: &[tiamat_core::script::BlockRules],
+    id_of: impl Fn(&str) -> Option<tiamat_core::MaterialId>,
+    fluid_of: impl Fn(&str) -> Option<tiamat_core::fluid::FluidId>,
 ) -> Absorbency {
     Absorbency::new(rules.iter().filter_map(|rule| {
         let absorbs = &rule.absorbs;
@@ -100,7 +100,7 @@ pub fn absorbency_from_rules(
         let fluid = absorbs
             .fluid
             .as_deref()
-            .map(|name| fluid_of(name).unwrap_or(tiamot_core::fluid::FluidId::NONE));
+            .map(|name| fluid_of(name).unwrap_or(tiamat_core::fluid::FluidId::NONE));
         Some((
             id_of(&rule.block)?,
             Absorbs {
@@ -215,7 +215,7 @@ impl Ponds {
 
     /// What a fluid is called. The same answer for every domain.
     #[must_use]
-    pub fn name_of(&self, id: tiamot_core::fluid::FluidId) -> Option<&str> {
+    pub fn name_of(&self, id: tiamat_core::fluid::FluidId) -> Option<&str> {
         self.fluids
             .iter_registered()
             .find(|(registered, _)| *registered == id)
@@ -252,7 +252,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::fluid::Access for Shared {
+impl tiamat_core::fluid::Access for Shared {
     fn fluid_at(&self, domain: &str, pos: BlockPos) -> Fluid {
         // A poisoned lock means the simulation thread panicked, in which case
         // there is no world to have milk in. Empty is the honest answer, and
@@ -271,7 +271,7 @@ impl tiamot_core::fluid::Access for Shared {
             .is_ok_and(|mut ponds| ponds.of(domain).set(pos, value))
     }
 
-    fn fluid_id(&self, name: &str) -> Option<tiamot_core::fluid::FluidId> {
+    fn fluid_id(&self, name: &str) -> Option<tiamat_core::fluid::FluidId> {
         self.fluidics
             .read()
             .ok()
@@ -306,14 +306,14 @@ impl Edits {
     }
 }
 
-impl tiamot_core::script::WorldEdit for Edits {
+impl tiamat_core::script::WorldEdit for Edits {
     fn set_block(&self, domain: &str, pos: BlockPos, block: &str) -> bool {
         let Some(&material) = self.by_name.get(block) else {
             tracing::debug!(block, "a mod asked to place a block nothing registered");
             return false;
         };
         self.shared
-            .queue_seed(domain, tiamot_core::proto::Edit::Block { pos, material })
+            .queue_seed(domain, tiamat_core::proto::Edit::Block { pos, material })
     }
 
     fn set_partial(&self, domain: &str, pos: BlockPos, block: &str, occupancy: u32) -> bool {
@@ -323,7 +323,7 @@ impl tiamot_core::script::WorldEdit for Edits {
         };
         self.shared.queue_seed(
             domain,
-            tiamot_core::proto::Edit::Partial {
+            tiamat_core::proto::Edit::Partial {
                 pos,
                 material,
                 occupancy,
@@ -369,7 +369,7 @@ pub struct Fluidics {
     loaded: std::collections::BTreeSet<ChunkPos>,
     fluids: Fluids,
     /// Each registered fluid's own settings, built once from `fluids`.
-    tunings: tiamot_core::fluid::Tunings,
+    tunings: tiamat_core::fluid::Tunings,
     /// Whether any registered fluid dims the light passing through it.
     ///
     /// Built once from `fluids`, like the tunings, because the lighting pass
@@ -422,8 +422,8 @@ impl Fluidics {
     /// standing in for a fluid whose mod is gone — are not registered and get
     /// the default, which treats everything as floor and never evaporates:
     /// their rules left with the mod that knew them.
-    fn tunings_of(fluids: &Fluids) -> tiamot_core::fluid::Tunings {
-        tiamot_core::fluid::Tunings::from_pairs(fluids.iter_registered().map(|(id, f)| {
+    fn tunings_of(fluids: &Fluids) -> tiamat_core::fluid::Tunings {
+        tiamat_core::fluid::Tunings::from_pairs(fluids.iter_registered().map(|(id, f)| {
             (
                 id,
                 Tuning {
@@ -506,19 +506,19 @@ impl Fluidics {
     /// Positions only: clearing one is a terrain edit, and the world belongs to
     /// the tick thread rather than to this lock — the same division
     /// [`Fluidics::take_sinks`] describes.
-    pub fn take_washed(&mut self) -> Vec<tiamot_core::BlockPos> {
+    pub fn take_washed(&mut self) -> Vec<tiamat_core::BlockPos> {
         self.solver.take_washed()
     }
 
     /// What one material does to fluid touching it.
     #[must_use]
-    pub fn absorbs(&self, material: tiamot_core::MaterialId) -> Option<Absorbs> {
+    pub fn absorbs(&self, material: tiamat_core::MaterialId) -> Option<Absorbs> {
         self.absorbency.get(material)
     }
 
     /// The same for a whole block, which is what the tick actually holds.
     #[must_use]
-    pub fn absorbs_block(&self, block: &tiamot_core::block::BlockView<'_>) -> Option<Absorbs> {
+    pub fn absorbs_block(&self, block: &tiamat_core::block::BlockView<'_>) -> Option<Absorbs> {
         self.absorbency.block(block)
     }
 
@@ -662,8 +662,8 @@ impl Fluidics {
         let settled = layer.uniformly_full().is_some()
             && terrain
                 .resident(pos)
-                .and_then(tiamot_core::Chunk::is_uniform)
-                .is_some_and(|material| material == tiamot_core::MaterialId::AIR);
+                .and_then(tiamat_core::Chunk::is_uniform)
+                .is_some_and(|material| material == tiamat_core::MaterialId::AIR);
         let filled: Vec<BlockPos> = if settled {
             Vec::new()
         } else {
@@ -690,7 +690,7 @@ impl Fluidics {
             washes_away: &self.washes_away,
         };
         for block in filled {
-            if !tiamot_core::fluid::in_a_body(&view, tunings, block) {
+            if !tiamat_core::fluid::in_a_body(&view, tunings, block) {
                 solver.touch(block);
             }
         }
@@ -785,7 +785,7 @@ impl Fluidics {
     /// Drained rather than returned from [`Fluidics::tick`] for the reason
     /// `Solver::take_blocked` gives: it is an observation channel, and a server
     /// with no mods listening never asks.
-    pub fn take_blocked(&mut self) -> Vec<tiamot_core::fluid::Blocked> {
+    pub fn take_blocked(&mut self) -> Vec<tiamat_core::fluid::Blocked> {
         self.solver.take_blocked()
     }
 
@@ -795,7 +795,7 @@ impl Fluidics {
     /// could act on, and inventing one would put a stand-in's id into a
     /// comparison that will never match (charter rule 8).
     #[must_use]
-    pub fn name_of(&self, id: tiamot_core::fluid::FluidId) -> Option<&str> {
+    pub fn name_of(&self, id: tiamat_core::fluid::FluidId) -> Option<&str> {
         self.fluids
             .iter_registered()
             .find(|(registered, _)| *registered == id)
@@ -841,7 +841,7 @@ impl Fluidics {
 /// the two are separately owned here: geometry is the tick thread's, fluid is
 /// behind [`Shared`]'s lock. `phys::Voxels::with_fluid` puts them back together
 /// for the length of one step.
-impl tiamot_core::phys::FluidLookup for Fluidics {
+impl tiamat_core::phys::FluidLookup for Fluidics {
     fn fluid_layer(&self, pos: ChunkPos) -> Option<&FluidLayer> {
         self.layer(pos)
     }
@@ -883,7 +883,7 @@ impl Neighbourhood for Wet<'_> {
     /// The material's own rate, and nothing about what it becomes — the solver
     /// has no registry, so it reports that a block absorbed and whoever holds
     /// one decides that dirt is now damp dirt.
-    fn absorbency(&self, pos: BlockPos, fluid: tiamot_core::fluid::FluidId) -> u32 {
+    fn absorbency(&self, pos: BlockPos, fluid: tiamat_core::fluid::FluidId) -> u32 {
         if self.absorbency.is_empty() {
             return 0;
         }
@@ -955,11 +955,11 @@ impl crate::light::Glowing for Fluidics {
         Self::layer(self, pos)
     }
 
-    fn material(&self, fluid: tiamot_core::fluid::FluidId) -> Option<tiamot_core::MaterialId> {
+    fn material(&self, fluid: tiamat_core::fluid::FluidId) -> Option<tiamat_core::MaterialId> {
         self.fluids().get(fluid).map(|entry| entry.material)
     }
 
-    fn falloff(&self, fluid: tiamot_core::fluid::FluidId) -> u8 {
+    fn falloff(&self, fluid: tiamat_core::fluid::FluidId) -> u8 {
         self.fluids()
             .get(fluid)
             .map_or(0, |entry| entry.light_falloff)
@@ -984,8 +984,8 @@ impl crate::light::Glowing for Fluidics {
 /// problem than a world nobody can join.
 #[must_use]
 pub fn fluids_from_rules(
-    rules: &[tiamot_core::script::FluidRules],
-    id_of: impl Fn(&str) -> Option<tiamot_core::MaterialId>,
+    rules: &[tiamat_core::script::FluidRules],
+    id_of: impl Fn(&str) -> Option<tiamat_core::MaterialId>,
 ) -> Fluids {
     let mut fluids = Fluids::new();
     for rule in rules {
@@ -997,7 +997,7 @@ pub fn fluids_from_rules(
             );
             continue;
         };
-        if let Err(err) = fluids.register(tiamot_core::fluid::Registered {
+        if let Err(err) = fluids.register(tiamat_core::fluid::Registered {
             name: rule.fluid.clone(),
             waterlogs_at: rule.waterlogs_at,
             tick_rate: rule.tick_rate,
@@ -1016,20 +1016,20 @@ pub fn fluids_from_rules(
 
 /// The block at a flat index within a chunk.
 fn block_at(chunk: ChunkPos, index: usize) -> BlockPos {
-    let span = tiamot_core::CHUNK_BLOCKS as usize;
+    let span = tiamat_core::CHUNK_BLOCKS as usize;
     let x = index % span;
     let y = (index / span) % span;
     let z = index / (span * span);
     BlockPos::new(
-        chunk.x * tiamot_core::CHUNK_BLOCKS as i32 + x as i32,
-        chunk.y * tiamot_core::CHUNK_BLOCKS as i32 + y as i32,
-        chunk.z * tiamot_core::CHUNK_BLOCKS as i32 + z as i32,
+        chunk.x * tiamat_core::CHUNK_BLOCKS as i32 + x as i32,
+        chunk.y * tiamat_core::CHUNK_BLOCKS as i32 + y as i32,
+        chunk.z * tiamat_core::CHUNK_BLOCKS as i32 + z as i32,
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use tiamot_core::fluid::{FluidId, MAX_VOLUME};
+    use tiamat_core::fluid::{FluidId, MAX_VOLUME};
 
     use super::*;
 
@@ -1045,15 +1045,15 @@ mod tests {
         // so there was always something for the next tick to report.
         let mut fluids = Fluids::new();
         let milk = fluids
-            .register(tiamot_core::fluid::Registered {
+            .register(tiamat_core::fluid::Registered {
                 name: "test:milk".into(),
                 waterlogs_at: 14,
                 tick_rate: 1,
                 washes: true,
                 evaporates: 0,
                 color: [255, 255, 255],
-                material: tiamot_core::MaterialId(4),
-                opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+                material: tiamat_core::MaterialId(4),
+                opacity: tiamat_core::script::FluidRules::DEFAULT_OPACITY,
                 light_falloff: 0,
             })
             .expect("register");
@@ -1062,16 +1062,16 @@ mod tests {
         let block = BlockPos::new(1, 2, 3);
         assert!(fluidics.set(block, Fluid::new(milk, MAX_VOLUME)));
 
-        let dir = std::env::temp_dir().join("tiamot-fluid-write-report");
+        let dir = std::env::temp_dir().join("tiamat-fluid-write-report");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("world.sqlite");
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
-        let mut registry = tiamot_core::Registry::new();
-        let db = tiamot_core::persist::WorldDb::open(&path, &mut registry).expect("open");
+        let mut registry = tiamat_core::Registry::new();
+        let db = tiamat_core::persist::WorldDb::open(&path, &mut registry).expect("open");
         let world = crate::world::World::open(db, 1).expect("world");
-        let changes = fluidics.tick(tiamot_core::domain::OVERWORLD, &world, 0, 0);
+        let changes = fluidics.tick(tiamat_core::domain::OVERWORLD, &world, 0, 0);
 
         assert!(
             changes.iter().any(|flow| flow.pos == block),
@@ -1079,7 +1079,7 @@ mod tests {
         );
         // And exactly once: a write reported again on the next tick would
         // re-broadcast a chunk for ever.
-        let again = fluidics.tick(tiamot_core::domain::OVERWORLD, &world, 1, 0);
+        let again = fluidics.tick(tiamat_core::domain::OVERWORLD, &world, 1, 0);
         assert!(
             !again
                 .iter()
@@ -1104,23 +1104,23 @@ mod tests {
         // corner. So it is skipped outright.
         let mut fluids = Fluids::new();
         let milk = fluids
-            .register(tiamot_core::fluid::Registered {
+            .register(tiamat_core::fluid::Registered {
                 name: "test:sea".into(),
                 waterlogs_at: 14,
                 tick_rate: 1,
                 washes: true,
                 evaporates: 0,
                 color: [255, 255, 255],
-                material: tiamot_core::MaterialId(4),
-                opacity: tiamot_core::script::FluidRules::DEFAULT_OPACITY,
+                material: tiamat_core::MaterialId(4),
+                opacity: tiamat_core::script::FluidRules::DEFAULT_OPACITY,
                 light_falloff: 0,
             })
             .expect("register");
 
         let full = Fluid::new(milk, MAX_VOLUME);
-        let sea = tiamot_core::fluid::FluidLayer::from_blocks(std::iter::repeat_n(
+        let sea = tiamat_core::fluid::FluidLayer::from_blocks(std::iter::repeat_n(
             full,
-            tiamot_core::BLOCKS_PER_CHUNK,
+            tiamat_core::BLOCKS_PER_CHUNK,
         ));
         assert!(
             sea.uniformly_full().is_some(),
@@ -1130,25 +1130,25 @@ mod tests {
         // A real world, because the fast path is only sound when the TERRAIN
         // is known to be empty: what cannot be read cannot be counted on, and
         // an unloaded chunk is solid by Sub-Node Contract §4.2.
-        let dir = std::env::temp_dir().join("tiamot-fluid-open-sea");
+        let dir = std::env::temp_dir().join("tiamat-fluid-open-sea");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("world.sqlite");
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
-        let mut registry = tiamot_core::Registry::new();
-        let db = tiamot_core::persist::WorldDb::open(&path, &mut registry).expect("open");
+        let mut registry = tiamat_core::Registry::new();
+        let db = tiamat_core::persist::WorldDb::open(&path, &mut registry).expect("open");
         let mut world = crate::world::World::open(db, 1).expect("world");
         let pos = ChunkPos::new(0, 0, 0);
         world
-            .chunk(tiamot_core::domain::OVERWORLD, pos, &mut crate::world::Air)
+            .chunk(tiamat_core::domain::OVERWORLD, pos, &mut crate::world::Air)
             .expect("an empty chunk of terrain");
 
         let mut fluidics = Fluidics::new(fluids);
         fluidics.chunk_loaded(
             pos,
             sea.clone(),
-            &world.solid(tiamot_core::domain::OVERWORLD),
+            &world.solid(tiamat_core::domain::OVERWORLD),
         );
         assert_eq!(
             fluidics.active(),
@@ -1162,7 +1162,7 @@ mod tests {
         // that skipped it would drain nothing and freeze a waterfall.
         let mut falling = sea;
         falling.set(
-            tiamot_core::coords::LocalBlock::new(3, 4, 5),
+            tiamat_core::coords::LocalBlock::new(3, 4, 5),
             Fluid::new(milk, MAX_VOLUME - 1),
         );
         assert!(
@@ -1211,7 +1211,7 @@ mod tests {
         // a player walks past.
         let mut saved = FluidLayer::empty();
         saved.set(
-            tiamot_core::coords::LocalBlock::new(0, 0, 0),
+            tiamat_core::coords::LocalBlock::new(0, 0, 0),
             Fluid::new(milk, MAX_VOLUME),
         );
         fluidics.chunk_loaded(pos, saved, &crate::world::Solid::empty());
@@ -1296,7 +1296,7 @@ mod tests {
         // the origin and wrong everywhere else — which is exactly the bug that
         // cost this project a session once already (the chunk-frame bug), so it
         // gets tested at a negative, non-zero origin rather than at 0,0,0.
-        use tiamot_core::phys::{Body, Solid, Voxels};
+        use tiamat_core::phys::{Body, Solid, Voxels};
 
         let milk = FluidId(1);
         let mut fluidics = Fluidics::new(Fluids::new());
@@ -1304,9 +1304,9 @@ mod tests {
         // Four blocks of milk in a column, in a chunk a long way from spawn.
         let origin = ChunkPos::new(-3, 5, 7);
         let corner = BlockPos::new(
-            origin.x * tiamot_core::CHUNK_BLOCKS as i32,
-            origin.y * tiamot_core::CHUNK_BLOCKS as i32,
-            origin.z * tiamot_core::CHUNK_BLOCKS as i32,
+            origin.x * tiamat_core::CHUNK_BLOCKS as i32,
+            origin.y * tiamat_core::CHUNK_BLOCKS as i32,
+            origin.z * tiamat_core::CHUNK_BLOCKS as i32,
         );
         for y in 0..4 {
             fluidics.set(
@@ -1320,8 +1320,8 @@ mod tests {
         // milk says.
         struct NoChunks;
 
-        impl tiamot_core::phys::ChunkLookup for NoChunks {
-            fn chunk(&self, _pos: ChunkPos) -> Option<&tiamot_core::Chunk> {
+        impl tiamat_core::phys::ChunkLookup for NoChunks {
+            fn chunk(&self, _pos: ChunkPos) -> Option<&tiamat_core::Chunk> {
                 None
             }
         }
@@ -1342,7 +1342,7 @@ mod tests {
         assert!(voxels.fluid(3, 0, 2).is_empty(), "found milk beside it");
 
         // And a body standing in it floats. Frame block 2 spans cells 6..9.
-        let wet = tiamot_core::phys::submersion(&voxels, &Body::at([7.0, 0.0, 7.0]).aabb());
+        let wet = tiamat_core::phys::submersion(&voxels, &Body::at([7.0, 0.0, 7.0]).aabb());
         assert_eq!(wet.fluid, milk);
         assert!(
             wet.fraction > 0.9,
@@ -1393,7 +1393,7 @@ mod tests {
         let milk = FluidId(1);
         let mut layer = FluidLayer::empty();
         layer.set(
-            tiamot_core::coords::LocalBlock::new(1, 2, 3),
+            tiamat_core::coords::LocalBlock::new(1, 2, 3),
             Fluid::new(milk, 4),
         );
 
@@ -1437,16 +1437,16 @@ mod tests {
         /// fall — which makes "it is still there" an honest assertion rather
         /// than a container doing the work.
         fn air_world(name: &str) -> crate::world::World {
-            let dir = std::env::temp_dir().join("tiamot-fluid-bodies").join(name);
+            let dir = std::env::temp_dir().join("tiamat-fluid-bodies").join(name);
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("scratch dir");
-            let mut registry = tiamot_core::Registry::new();
-            let db = tiamot_core::persist::WorldDb::open(dir.join("world.sqlite"), &mut registry)
+            let mut registry = tiamat_core::Registry::new();
+            let db = tiamat_core::persist::WorldDb::open(dir.join("world.sqlite"), &mut registry)
                 .expect("open");
             let mut world = crate::world::World::open(db, 7).expect("world");
             world
                 .chunk(
-                    tiamot_core::domain::OVERWORLD,
+                    tiamat_core::domain::OVERWORLD,
                     ChunkPos::new(0, 0, 0),
                     &mut crate::world::Air,
                 )
@@ -1459,7 +1459,7 @@ mod tests {
             let mut layer = FluidLayer::empty();
             for (x, y, z) in blocks {
                 layer.set(
-                    tiamot_core::coords::LocalBlock::new(*x, *y, *z),
+                    tiamat_core::coords::LocalBlock::new(*x, *y, *z),
                     Fluid::new(FluidId(1), MAX_VOLUME),
                 );
             }
@@ -1468,7 +1468,7 @@ mod tests {
 
         fn settle(fluidics: &mut Fluidics, world: &crate::world::World, ticks: u64) {
             for tick in 0..ticks {
-                fluidics.tick(tiamot_core::domain::OVERWORLD, world, tick, 0);
+                fluidics.tick(tiamat_core::domain::OVERWORLD, world, tick, 0);
             }
         }
 
@@ -1483,7 +1483,7 @@ mod tests {
             // Ten cycles, because the symptom was cumulative: a body that gives
             // up a little on each load is gone by the time anybody flies back.
             let world = air_world("over-and-over");
-            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let terrain = world.solid(tiamat_core::domain::OVERWORLD);
             let pos = ChunkPos::new(0, 0, 0);
             let saved = layer_of(&[(1, 8, 1), (2, 8, 1), (3, 8, 1)]);
             let mut fluidics = Fluidics::new(Fluids::new());
@@ -1517,7 +1517,7 @@ mod tests {
             // anything": two blocks is a spilled bucket, and a bucket saved
             // mid-air has to carry on falling when it comes back.
             let world = air_world("not-a-body");
-            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let terrain = world.solid(tiamat_core::domain::OVERWORLD);
             let mut fluidics = Fluidics::new(Fluids::new());
             fluidics.chunk_loaded(
                 ChunkPos::new(0, 0, 0),
@@ -1558,15 +1558,15 @@ mod tests {
             // used to put 4,096 blocks into a queue the solver walks 512 at a
             // time.
             let world = air_world("measure");
-            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let terrain = world.solid(tiamat_core::domain::OVERWORLD);
             let pos = ChunkPos::new(0, 0, 0);
-            let side = tiamot_core::CHUNK_BLOCKS;
+            let side = tiamat_core::CHUNK_BLOCKS;
             let mut layer = FluidLayer::empty();
             for x in 0..side {
                 for y in 0..side {
                     for z in 0..side {
                         layer.set(
-                            tiamot_core::coords::LocalBlock::new(x, y, z),
+                            tiamat_core::coords::LocalBlock::new(x, y, z),
                             Fluid::new(FluidId(1), MAX_VOLUME),
                         );
                     }
@@ -1593,7 +1593,7 @@ mod tests {
             // in the first place. Here the "edit" is milk poured against the
             // body, which touches it exactly as a block change does.
             let world = air_world("edit-wakes");
-            let terrain = world.solid(tiamot_core::domain::OVERWORLD);
+            let terrain = world.solid(tiamat_core::domain::OVERWORLD);
             let mut fluidics = Fluidics::new(Fluids::new());
             fluidics.chunk_loaded(
                 ChunkPos::new(0, 0, 0),

@@ -20,14 +20,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::ServerMessage;
-use tiamot_core::{ChunkPos, MaterialId};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::ServerMessage;
+use tiamat_core::{ChunkPos, MaterialId};
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-sea").join(name);
+    let dir = std::env::temp_dir().join("tiamat-sea").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -119,7 +119,7 @@ fn every_chunk_of_a_sea_arrives_after_its_own_water() {
                     .rev()
                     .find_map(|earlier| match earlier {
                         ServerMessage::ChunkFluid { pos: at, fluid } if at == pos => {
-                            tiamot_core::fluid::codec::decode(fluid).ok()
+                            tiamat_core::fluid::codec::decode(fluid).ok()
                         }
                         _ => None,
                     });
@@ -208,7 +208,7 @@ fn the_sea_is_drawn_at_the_horizon_and_not_as_a_hole_the_shape_of_it() {
                             continue;
                         }
                         summaries += 1;
-                        let summary = tiamot_core::lod::codec::decode(&blob)
+                        let summary = tiamat_core::lod::codec::decode(&blob)
                             .expect("the server sent a horizon that would not decode");
                         if summary.cells().contains(&MaterialId(water)) {
                             wet_summaries += 1;

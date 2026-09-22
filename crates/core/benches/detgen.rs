@@ -25,12 +25,12 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::detgen::{
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::detgen::{
     ChunkBuffer, Fractal, FractalParams, Region2d, Region3d, StreamRng, fill_2d, fill_3d,
     fractal_2d,
 };
-use tiamot_core::{CHUNK_BLOCKS, CHUNK_SUBNODES, ChunkPos, MaterialId, fingerprint};
+use tiamat_core::{CHUNK_BLOCKS, CHUNK_SUBNODES, ChunkPos, MaterialId, fingerprint};
 
 /// Fixture material. Numbered, not named.
 const FIXTURE: MaterialId = MaterialId(2);
@@ -167,9 +167,9 @@ fn bench_subnode_path(c: &mut Criterion) {
 /// density program is evaluated once per chunk generated, on the tick, beside
 /// everything else `CHUNKS_PER_TICK` chunks have to pay for.
 fn bench_density(c: &mut Criterion) {
-    use tiamot_core::detgen::{Axis, Density, Op, default_params};
+    use tiamat_core::detgen::{Axis, Density, Op, default_params};
 
-    let region = tiamot_core::detgen::Region3d {
+    let region = tiamat_core::detgen::Region3d {
         origin_x: 0.0,
         origin_y: 0.0,
         origin_z: 0.0,
@@ -187,7 +187,7 @@ fn bench_density(c: &mut Criterion) {
             params: default_params(),
             amplitude: 1.0,
             stream: 1,
-            stretch: tiamot_core::detgen::UNSTRETCHED,
+            stretch: tiamat_core::detgen::UNSTRETCHED,
         },
         Op::Coordinate(Axis::Y),
         Op::Constant(0.05),
@@ -198,7 +198,7 @@ fn bench_density(c: &mut Criterion) {
             params: default_params(),
             amplitude: 1.0,
             stream: 2,
-            stretch: tiamot_core::detgen::UNSTRETCHED,
+            stretch: tiamat_core::detgen::UNSTRETCHED,
         },
         Op::Absolute,
         Op::Subtract,
@@ -213,7 +213,7 @@ fn bench_density(c: &mut Criterion) {
                 params: default_params(),
                 amplitude: 1.0,
                 stream: 1,
-                stretch: tiamot_core::detgen::UNSTRETCHED,
+                stretch: tiamat_core::detgen::UNSTRETCHED,
             }],
         ),
         ("terrain_with_caves", program),
@@ -238,9 +238,9 @@ fn bench_density(c: &mut Criterion) {
 /// `fill_density_detail` samples only the blocks the surface crosses. This says
 /// what that shell actually costs on the terrain it exists for.
 fn bench_density_detail(c: &mut Criterion) {
-    use tiamot_core::ChunkPos;
-    use tiamot_core::detgen::{Axis, ChunkBuffer, Density, Detail, Op, default_params};
-    use tiamot_core::material::MaterialId;
+    use tiamat_core::ChunkPos;
+    use tiamat_core::detgen::{Axis, ChunkBuffer, Density, Detail, Op, default_params};
+    use tiamat_core::material::MaterialId;
 
     // The same terrain-with-caves the block-resolution bench uses, so the two
     // numbers can be read against each other.
@@ -249,7 +249,7 @@ fn bench_density_detail(c: &mut Criterion) {
             params: default_params(),
             amplitude: 1.0,
             stream: 1,
-            stretch: tiamot_core::detgen::UNSTRETCHED,
+            stretch: tiamat_core::detgen::UNSTRETCHED,
         },
         Op::Coordinate(Axis::Y),
         Op::Constant(0.05),
@@ -260,7 +260,7 @@ fn bench_density_detail(c: &mut Criterion) {
             params: default_params(),
             amplitude: 1.0,
             stream: 2,
-            stretch: tiamot_core::detgen::UNSTRETCHED,
+            stretch: tiamat_core::detgen::UNSTRETCHED,
         },
         Op::Absolute,
         Op::Subtract,

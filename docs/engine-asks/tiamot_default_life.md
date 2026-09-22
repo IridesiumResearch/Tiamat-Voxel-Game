@@ -1,4 +1,4 @@
-# Engine asks from Tiamot Default Life
+# Engine asks from Tiamat Default Life
 
 From the `tiamot_default_life` mod (vitals, the HUD, creatures, world modes;
 repo `Tiamot_Default_Life`, beside the engine). Kept here rather than in

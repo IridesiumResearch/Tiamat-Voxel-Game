@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::BlockPos;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::BlockPos;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -25,7 +25,7 @@ fn repo() -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-pouring").join(name);
+    let dir = std::env::temp_dir().join("tiamat-pouring").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -116,7 +116,7 @@ async fn stock_up(server: &ServerHandle, bot: &mut Bot, milk: u16, blocks: i32) 
         bot.dig_block(at).await.expect("dig the seeded milk");
     }
     assert!(
-        bot.units_of(milk) >= tiamot_core::UNITS_PER_BLOCK,
+        bot.units_of(milk) >= tiamat_core::UNITS_PER_BLOCK,
         "digging seeded milk credited none of it, so there is nothing to pour"
     );
 }
@@ -173,7 +173,7 @@ async fn floor_id(bot: &Bot) -> u16 {
 /// So no block ever appears and `place` waits out its patience for one. This
 /// sends the click and lets the assertions watch the fluid layer instead.
 async fn pour_at(bot: &mut Bot, pos: BlockPos, milk: u16) {
-    let centre = tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+    let centre = tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
     bot.place_from_inventory(centre, milk)
         .await
         .expect("the pour should reach the server");
@@ -224,7 +224,7 @@ fn a_pour_and_a_scoop_give_back_exactly_what_was_carried() {
         let carried = bot.units_of(milk);
         assert_eq!(
             carried,
-            2 * tiamot_core::UNITS_PER_BLOCK,
+            2 * tiamat_core::UNITS_PER_BLOCK,
             "the fixture should start with exactly two blocks' worth"
         );
 
@@ -233,7 +233,7 @@ fn a_pour_and_a_scoop_give_back_exactly_what_was_carried() {
 
         assert!(
             until(&mut bot, Duration::from_secs(15), |bot| {
-                bot.fluid_at(ground).volume() == tiamot_core::UNITS_PER_BLOCK
+                bot.fluid_at(ground).volume() == tiamat_core::UNITS_PER_BLOCK
             })
             .await,
             "a whole bucket poured into a walled block should hold all of it; it holds {}",
@@ -245,7 +245,7 @@ fn a_pour_and_a_scoop_give_back_exactly_what_was_carried() {
         // before it was told.
         assert!(
             until(&mut bot, Duration::from_secs(15), |bot| bot.units_of(milk)
-                == carried - tiamot_core::UNITS_PER_BLOCK)
+                == carried - tiamat_core::UNITS_PER_BLOCK)
             .await,
             "the pour was not charged a bucket: {} units left of {carried}",
             bot.units_of(milk)
@@ -289,8 +289,8 @@ fn became(bot: &Bot, pos: BlockPos, material: u16) -> bool {
     bot.received().iter().any(|message| {
         matches!(
             message,
-            tiamot_core::proto::ServerMessage::BlockDelta {
-                edit: tiamot_core::proto::Edit::Block { pos: got, material: got_material },
+            tiamat_core::proto::ServerMessage::BlockDelta {
+                edit: tiamat_core::proto::Edit::Block { pos: got, material: got_material },
                 ..
             } if *got == pos && *got_material == material
         )
@@ -352,7 +352,7 @@ fn scooping_a_shallow_puddle_gives_back_a_partial_bucket() {
             until(&mut bot, Duration::from_secs(20), |bot| {
                 let here = bot.fluid_at(ground).volume();
                 let there = bot.fluid_at(neighbour).volume();
-                here + there == tiamot_core::UNITS_PER_BLOCK && here.abs_diff(there) <= 1
+                here + there == tiamat_core::UNITS_PER_BLOCK && here.abs_diff(there) <= 1
             })
             .await,
             "the bucket never levelled across the trough: {} and {}",
@@ -361,7 +361,7 @@ fn scooping_a_shallow_puddle_gives_back_a_partial_bucket() {
         );
         let there = bot.fluid_at(ground).volume();
         assert!(
-            there > 0 && there < tiamot_core::UNITS_PER_BLOCK,
+            there > 0 && there < tiamat_core::UNITS_PER_BLOCK,
             "the block holds {there} cells, which is not a partial bucket"
         );
 
@@ -372,10 +372,10 @@ fn scooping_a_shallow_puddle_gives_back_a_partial_bucket() {
         // and the total expected below was then a bucket too high. Red on the
         // slowest CI runner and nowhere else, which is what that always looks
         // like.
-        let carried = 2 * tiamot_core::UNITS_PER_BLOCK;
+        let carried = 2 * tiamat_core::UNITS_PER_BLOCK;
         assert!(
             until(&mut bot, Duration::from_secs(20), |bot| {
-                bot.units_of(milk) == carried - tiamot_core::UNITS_PER_BLOCK
+                bot.units_of(milk) == carried - tiamat_core::UNITS_PER_BLOCK
             })
             .await,
             "the first pour was never charged: {} units of {carried}",
@@ -450,7 +450,7 @@ fn ground_that_drinks_gets_darker_and_the_milk_it_took_is_accounted_for() {
         // standing on top of ground that has drunk it.
         assert!(
             until(&mut bot, Duration::from_secs(20), |bot| {
-                bot.fluid_at(at).volume() < tiamot_core::UNITS_PER_BLOCK
+                bot.fluid_at(at).volume() < tiamat_core::UNITS_PER_BLOCK
             })
             .await,
             "the ground turned damp without the puddle losing anything, so absorption \
@@ -726,7 +726,7 @@ fn a_generated_river_with_no_banks_stays_where_worldgen_put_it() {
             for pos in inside {
                 assert_eq!(
                     bot.fluid_at(pos).volume(),
-                    tiamot_core::fluid::MAX_VOLUME,
+                    tiamat_core::fluid::MAX_VOLUME,
                     "{when}: the river is missing at {pos:?}"
                 );
             }

@@ -40,7 +40,7 @@ pub mod viewmodel;
 
 use std::collections::BTreeMap;
 
-use tiamot_core::ChunkPos;
+use tiamat_core::ChunkPos;
 
 use crate::camera::Camera;
 use crate::config::RenderMode;
@@ -376,8 +376,8 @@ impl MaterialTint {
     }
 
     /// What a mod declared, unpacked from the bytes the wire carries.
-    fn from_def(tint: &tiamot_core::proto::Tint) -> Self {
-        use tiamot_core::proto::Tint;
+    fn from_def(tint: &tiamat_core::proto::Tint) -> Self {
+        use tiamat_core::proto::Tint;
         let colour = |rgb: [u8; 3]| {
             [
                 Tint::channel(rgb[0]),
@@ -781,7 +781,7 @@ impl Gpu {
             .contains(wgpu::Features::POLYGON_MODE_LINE);
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("tiamot-client"),
+            label: Some("tiamat-client"),
             required_features: if wireframe {
                 wgpu::Features::POLYGON_MODE_LINE
             } else {
@@ -970,7 +970,7 @@ pub struct Renderer {
     /// Mode 3 only — grading lives in the post chain, and the other two modes
     /// have no post chain to put it in. [`grade::Grading`] holds the baked table;
     /// this is the six numbers it was baked from.
-    grade: tiamot_core::proto::SkyGrade,
+    grade: tiamat_core::proto::SkyGrade,
     /// Where fog begins and where it is total, in blocks.
     fog_curve: f32,
     fog_end: f32,
@@ -1108,7 +1108,7 @@ impl Renderer {
         // The engine's own rig, built in Rust and uploaded once. A mod-supplied
         // model goes through the same constructor — see `core::model`.
         let hands = viewmodel::Viewmodel::new(&gpu, &view, &sampler, target);
-        let skinned = skinned::Skinned::new(&gpu, tiamot_core::model::humanoid());
+        let skinned = skinned::Skinned::new(&gpu, tiamat_core::model::humanoid());
         let skinned_pipeline = skinned::colour_pipeline(&gpu, &skinned, &bind_layout, mode, target);
 
         Ok(Self {
@@ -1172,7 +1172,7 @@ impl Renderer {
             sky_colour: sky_colour(),
             // Ungraded until a sky says otherwise, which keeps a world with no
             // sky mod exactly what it was before grading existed.
-            grade: tiamot_core::proto::SkyGrade::NONE,
+            grade: tiamat_core::proto::SkyGrade::NONE,
             // Far enough that nothing fogs until a view distance is set. A
             // client that fogged by default would hide geometry the Task 08
             // scenes assert on.
@@ -1238,7 +1238,7 @@ impl Renderer {
     /// Takes effect in mode 3 only. Nothing is baked here — [`Renderer::render`]
     /// re-bakes the table when this has moved far enough to reach a pixel, so a
     /// caller may set it every frame at no cost.
-    pub const fn set_grade(&mut self, grade: tiamot_core::proto::SkyGrade) {
+    pub const fn set_grade(&mut self, grade: tiamat_core::proto::SkyGrade) {
         self.grade = grade;
     }
 
@@ -1309,7 +1309,7 @@ impl Renderer {
     ///
     /// Replacing a model that is already loaded drops the old one's buffers,
     /// which is what a mod reloading its own art should do.
-    pub fn add_model(&mut self, id: &str, mut model: tiamot_core::model::Model, scale: f32) {
+    pub fn add_model(&mut self, id: &str, mut model: tiamat_core::model::Model, scale: f32) {
         if (scale - 1.0).abs() > f32::EPSILON {
             for vertex in &mut model.vertices {
                 for axis in &mut vertex.position {
@@ -1457,7 +1457,7 @@ impl Renderer {
     /// Taken from the material table, so it arrives with the atlas and changes
     /// only when that does. The bind group is rebuilt because a storage buffer
     /// is bound by identity rather than by contents, and this is a new one.
-    pub fn set_tints(&mut self, table: &[tiamot_core::proto::MaterialDef]) {
+    pub fn set_tints(&mut self, table: &[tiamat_core::proto::MaterialDef]) {
         // Indexed by atlas slot, which is the material's own id — so the table
         // is as long as the highest id and holes in it are materials that do
         // not vary. A `BTreeMap`-shaped answer would cost the shader a search.
@@ -1594,7 +1594,7 @@ impl Renderer {
     /// chunk served for a column speaks for it. Costs nothing per frame until
     /// the camera changes chunk or a fog changes, when the grid the shaders
     /// read is rebuilt.
-    pub fn set_chunk_fog(&mut self, pos: ChunkPos, fog: Option<tiamot_core::proto::ChunkFog>) {
+    pub fn set_chunk_fog(&mut self, pos: ChunkPos, fog: Option<tiamat_core::proto::ChunkFog>) {
         self.place_fog.set((pos.x, pos.z), fog);
     }
 
@@ -1622,7 +1622,7 @@ impl Renderer {
     /// were, and they start wearing it the moment it is here.
     pub fn set_particle_picture(
         &mut self,
-        hash: tiamot_core::proto::ContentHash,
+        hash: tiamat_core::proto::ContentHash,
         image: &crate::texture::Image,
     ) {
         self.particles.set_picture(&self.gpu, hash, image);
@@ -1658,7 +1658,7 @@ impl Renderer {
     /// frame.
     pub fn set_cloud_map(
         &mut self,
-        map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>,
+        map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
     ) {
         self.clouds.set_map(map);
     }
@@ -1770,12 +1770,12 @@ impl Renderer {
                 .biome_tints
                 .get(&(x + dx, z + dz))
                 .copied()
-                .unwrap_or(tiamot_core::proto::Tint::NEUTRAL);
+                .unwrap_or(tiamat_core::proto::Tint::NEUTRAL);
             for (sum, channel) in total.iter_mut().zip(held) {
                 // `128` is 1.0, the same scale a material's own tint uses, so a
                 // biome can ask for more than the texture's brightness as well
                 // as less. See `proto::Tint::NEUTRAL`.
-                *sum += tiamot_core::proto::Tint::channel(channel);
+                *sum += tiamat_core::proto::Tint::channel(channel);
             }
         }
         total.map(|sum| sum / 4.0)
@@ -2074,9 +2074,9 @@ impl Renderer {
             return;
         }
 
-        let side = f32::from(u16::try_from(tiamot_core::CHUNK_SUBNODES).unwrap_or(48));
+        let side = f32::from(u16::try_from(tiamat_core::CHUNK_SUBNODES).unwrap_or(48));
         let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(visible.len() * 24);
-        let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
+        let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
 
         for (pos, _) in visible {
             let offset = camera.position.chunk_offset(*pos);
@@ -2353,7 +2353,7 @@ impl Renderer {
             let instance = instances.len() as u32;
             if seen {
                 culled.visible.push((*pos, instance));
-                let centre = offset + glam::Vec3::splat(tiamot_core::CHUNK_BLOCKS as f32 * 0.5);
+                let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
                 let distance2 = centre.length_squared();
                 if distance2 < SPRITE_DRAW_BLOCKS * SPRITE_DRAW_BLOCKS {
                     culled.sprites.push((*pos, instance));
@@ -2367,7 +2367,7 @@ impl Renderer {
             if casts {
                 culled.casters.push((*pos, instance));
             }
-            let side = tiamot_core::CHUNK_BLOCKS as i32;
+            let side = tiamat_core::CHUNK_BLOCKS as i32;
             let corner = |dx: i32, dz: i32| {
                 let colour = self.corner_tint(pos.x + dx, pos.z + dz);
                 [colour[0], colour[1], colour[2], 0.0]
@@ -2613,8 +2613,8 @@ impl Renderer {
         if mesh.billboards.is_empty() {
             return (None, 0);
         }
-        let corner = tiamot_core::BlockPos::from_chunk_corner(pos);
-        let per_axis = tiamot_core::SUBNODES_PER_AXIS as f32;
+        let corner = tiamat_core::BlockPos::from_chunk_corner(pos);
+        let per_axis = tiamat_core::SUBNODES_PER_AXIS as f32;
         let mut instances: Vec<SpriteInstance> = Vec::with_capacity(mesh.billboards.len());
         for sprite in &mesh.billboards {
             let size = f32::from(sprite.height) / per_axis;
@@ -3263,7 +3263,7 @@ fn boxes_of(placed: &glam::Mat4, half: f32, shape: u32, uv: [f32; 4], item: bool
         }];
     }
 
-    if shape == 0 || shape == tiamot_core::inventory::Shape::ALL {
+    if shape == 0 || shape == tiamat_core::inventory::Shape::ALL {
         return vec![Prop {
             model: (*placed * Mat4::from_scale(glam::Vec3::splat(half))).to_cols_array(),
             uv,
@@ -4867,7 +4867,7 @@ mod tests {
 
     /// A joint sitting three cells to the figure's own right, at rest.
     fn joint(at: [f32; 3]) -> [f32; 16] {
-        let mut matrix = tiamot_core::model::Matrix::from([
+        let mut matrix = tiamat_core::model::Matrix::from([
             1.0, 0.0, 0.0, 0.0, //
             0.0, 1.0, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0, //
@@ -5026,7 +5026,7 @@ mod tests {
         let all = held_boxes(
             &figure,
             &joint([0.0; 3]),
-            tiamot_core::inventory::Shape::ALL,
+            tiamat_core::inventory::Shape::ALL,
             [0.0; 4],
             false,
         );

@@ -16,16 +16,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 /// How far the mod's sound carries. Comfortably inside a chunk, so the two
 /// bots below differ by earshot rather than by whether they are loaded.
 const RADIUS: f32 = 8.0;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-sound").join(name);
+    let dir = std::env::temp_dir().join("tiamat-sound").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -232,7 +232,7 @@ fn breaking_a_block_makes_a_noise_where_the_block_was() {
             .find(|entry| entry.name.ends_with(":white"))
             .map(|entry| entry.id)
             .expect("the reference mods should register a solid block");
-        let at = tiamot_core::BlockPos::new(2, 5, 2);
+        let at = tiamat_core::BlockPos::new(2, 5, 2);
         assert!(server.seed_block(at, solid), "the world should seed");
         bot.move_to(2.0, 0.0, 4.0).await.expect("walk into reach");
         bot.sleep_ticks(4).await;

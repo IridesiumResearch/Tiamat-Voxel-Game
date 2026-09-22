@@ -37,10 +37,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 use client::mesher::{self, Absent, Neighbours, NoFluid, NoGlass};
 use client::shade::Uniform;
-use tiamot_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
+use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
 /// Full daylight everywhere, so the bench measures geometry rather than light.
-const DAY: Uniform = Uniform(tiamot_core::light::Light::DAYLIGHT);
+const DAY: Uniform = Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 /// Light that varies from block to block, the way propagated light does.
 ///
@@ -57,12 +57,12 @@ const DAY: Uniform = Uniform(tiamot_core::light::Light::DAYLIGHT);
 struct Dappled;
 
 impl client::shade::BlockLight for Dappled {
-    fn at(&self, x: i32, y: i32, z: i32) -> tiamot_core::light::Light {
+    fn at(&self, x: i32, y: i32, z: i32) -> tiamat_core::light::Light {
         // A coarse checker rather than noise: deterministic, no allocation, and
         // it changes often enough to break merges without being so busy that
         // every single face becomes its own quad.
         let step = u8::try_from((x.abs() / 2 + y.abs() / 2 + z.abs() / 2) % 4).unwrap_or(0);
-        tiamot_core::light::Light::new(tiamot_core::light::MAX_LEVEL - step, 0, 0, 0)
+        tiamat_core::light::Light::new(tiamat_core::light::MAX_LEVEL - step, 0, 0, 0)
     }
 }
 

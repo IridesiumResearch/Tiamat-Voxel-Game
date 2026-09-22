@@ -19,8 +19,8 @@
 //! doing the presenting. What the server owns is the *clock*, because two
 //! players standing together must see the same sky.
 
-use tiamot_core::atmosphere::{Flash, SkyModifier};
-use tiamot_core::proto::{SkyFrame, SkyGrade};
+use tiamat_core::atmosphere::{Flash, SkyModifier};
+use tiamat_core::proto::{SkyFrame, SkyGrade};
 
 /// Everything a mod's weather does to this player's sky: the standing
 /// modifier on its way to where the mod put it, and the flashes lighting it
@@ -78,7 +78,7 @@ impl Eased {
         self.from = self.current();
         self.to = target.unwrap_or(SkyModifier::NONE);
         self.elapsed = 0.0;
-        self.duration = tiamot_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
+        self.duration = tiamat_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
     }
 
     /// Advances by a frame.
@@ -130,7 +130,7 @@ impl Flashes {
 
     /// Advances by a frame and forgets what has died away.
     pub fn advance(&mut self, dt: f32) {
-        let tick = tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        let tick = tiamat_core::tick::TICK_DURATION.as_secs_f32();
         for (_, age) in &mut self.active {
             *age += dt.max(0.0);
         }
@@ -142,7 +142,7 @@ impl Flashes {
     /// envelope, and the colour of the brightest.
     #[must_use]
     pub fn light(&self) -> (f32, [f32; 3]) {
-        let tick = tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        let tick = tiamat_core::tick::TICK_DURATION.as_secs_f32();
         let mut total = 0.0_f32;
         let mut brightest = (0.0_f32, [1.0; 3]);
         for (flash, age) in &self.active {
@@ -310,7 +310,7 @@ impl Sky {
         if !self.has_day() {
             return;
         }
-        let ticks_per_second = 1.0 / tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        let ticks_per_second = 1.0 / tiamat_core::tick::TICK_DURATION.as_secs_f32();
         let day_seconds = self.day_length_ticks as f32 / ticks_per_second;
         self.time = (self.time + seconds / day_seconds).rem_euclid(1.0);
     }
@@ -848,7 +848,7 @@ mod tests {
         // half way up, at the peak it is all there, two ticks into the decay
         // it is half gone, and after five ticks nothing is left and the
         // moment is the moment it was.
-        let tick = tiamot_core::tick::TICK_DURATION.as_secs_f32();
+        let tick = tiamat_core::tick::TICK_DURATION.as_secs_f32();
         let mut flashes = Flashes::default();
         flashes.strike(Flash {
             intensity: 2.0,

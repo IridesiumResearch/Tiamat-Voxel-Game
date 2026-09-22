@@ -1,6 +1,6 @@
 [package]
 name = "server"
-description = "Headless Tiamot server. The server is the game; the client is a viewer."
+description = "Headless Tiamat server. The server is the game; the client is a viewer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ publish.workspace = true
 # no X11, no audio. This binary must build and run on a machine with no display
 # server. Enforced by scripts/check-dep-firewall.sh in CI.
 [dependencies]
-tiamot-core.workspace = true
+tiamat-core.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 quinn.workspace = true
@@ -39,7 +39,7 @@ getrandom.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time", "io-util"] }
 
 [lib]
-name = "tiamot_server"
+name = "tiamat_server"
 path = "src/lib.rs"
 
 [[bin]]

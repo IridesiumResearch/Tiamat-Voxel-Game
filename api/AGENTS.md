@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: Iridesium -->
 <!-- SPDX-License-Identifier: MIT -->
 
-# Writing a Tiamot mod — a brief for AI assistants
+# Writing a Tiamat mod — a brief for AI assistants
 
 **Audience: an AI coding assistant that has been asked to write a mod, and the
 person supervising it.** Copy this file to the root of the mod project as

@@ -19,16 +19,16 @@
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::light::MAX_LEVEL;
-use tiamot_core::{BlockPos, MaterialId};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::light::MAX_LEVEL;
+use tiamat_core::{BlockPos, MaterialId};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 
 fn stone() -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for (index, name) in MATERIALS.iter().enumerate() {
         let assigned = registry.register(name).expect("register");
@@ -47,7 +47,7 @@ fn reference_mods() -> std::path::PathBuf {
 }
 
 fn start(name: &str) -> ServerHandle {
-    let dir = std::env::temp_dir().join(format!("tiamot-light-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tiamat-light-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("world dir");
 
@@ -260,7 +260,7 @@ fn a_chunk_is_lit_once_however_many_players_ask_for_it() {
 /// perfectly ordinary game rule. What makes it a good test is that the answer
 /// is observable from outside: the block either goes or it does not.
 fn write_light_reader(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join("tiamot-light-reader").join(name);
+    let root = std::env::temp_dir().join("tiamat-light-reader").join(name);
     let _ = std::fs::remove_dir_all(&root);
     let dir = root.join("watcher");
     std::fs::create_dir_all(&dir).expect("mod dir");
@@ -305,7 +305,7 @@ fn a_mod_can_read_the_light_where_something_happened() {
     // and goes. Both directions, because a `get_light` that returned darkness
     // for everything would pass a test that only dug underground.
     let mods = write_light_reader("dig");
-    let dir = std::env::temp_dir().join("tiamot-light-reader-world");
+    let dir = std::env::temp_dir().join("tiamat-light-reader-world");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("world dir");
 
@@ -407,7 +407,7 @@ fn a_lamp_at_a_chunk_boundary_lights_the_next_chunk_and_stops_when_it_goes() {
 
         // And away again.
         assert!(
-            server.seed_block(lamp_at, tiamot_core::MaterialId::AIR.0),
+            server.seed_block(lamp_at, tiamat_core::MaterialId::AIR.0),
             "remove the lamp"
         );
         bot.expect_light(across, |light| light.red() == 0, Duration::from_secs(20))
@@ -438,12 +438,12 @@ fn a_fresh_world_opens_in_daylight_rather_than_at_midnight() {
 
         let time = bot
             .recv_until(|message| {
-                matches!(message, tiamot_core::proto::ServerMessage::TimeOfDay { .. })
+                matches!(message, tiamat_core::proto::ServerMessage::TimeOfDay { .. })
             })
             .await
             .expect("the server should send the time of day");
 
-        let tiamot_core::proto::ServerMessage::TimeOfDay { time } = time else {
+        let tiamat_core::proto::ServerMessage::TimeOfDay { time } = time else {
             panic!("expected a time");
         };
 
@@ -479,7 +479,7 @@ fn the_reference_skys_grade_arrives_over_the_wire() {
         let keyframes = received
             .iter()
             .find_map(|message| match message {
-                tiamot_core::proto::ServerMessage::SkyTable { keyframes, .. } => Some(keyframes),
+                tiamat_core::proto::ServerMessage::SkyTable { keyframes, .. } => Some(keyframes),
                 _ => None,
             })
             .expect("the join flow includes a sky table");
@@ -489,7 +489,7 @@ fn the_reference_skys_grade_arrives_over_the_wire() {
         // arrive as all-identity, and one that mangled it would not have a noon.
         let graded = keyframes
             .iter()
-            .filter(|frame| frame.grade != tiamot_core::proto::SkyGrade::NONE)
+            .filter(|frame| frame.grade != tiamat_core::proto::SkyGrade::NONE)
             .count();
         assert!(
             graded > 0,
@@ -498,7 +498,7 @@ fn the_reference_skys_grade_arrives_over_the_wire() {
         assert!(
             keyframes
                 .iter()
-                .any(|frame| frame.grade == tiamot_core::proto::SkyGrade::NONE),
+                .any(|frame| frame.grade == tiamat_core::proto::SkyGrade::NONE),
             "the reference sky leaves noon ungraded on purpose; nothing here is: {keyframes:?}"
         );
 

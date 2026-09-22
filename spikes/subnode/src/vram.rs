@@ -23,10 +23,10 @@
 
 use crate::mesher::{Mesh, SubNodeGrid, mesh};
 use crate::scenes::{GRASS, Rng, STONE};
-use tiamot_core::block::SUBNODES_PER_BLOCK;
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::{BlockValue, CHUNK_BLOCKS, ChunkPos, MaterialId};
+use tiamat_core::block::SUBNODES_PER_BLOCK;
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::{BlockValue, CHUNK_BLOCKS, ChunkPos, MaterialId};
 
 /// View distance in chunks, as the KEEP gate specifies.
 pub const VIEW_DISTANCE: i32 = 12;

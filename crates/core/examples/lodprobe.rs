@@ -3,7 +3,7 @@
 
 //! What a horizon summary makes of round things, printed.
 //!
-//! Run with `cargo run --example lodprobe -p tiamot-core`.
+//! Run with `cargo run --example lodprobe -p tiamat-core`.
 //!
 //! Reported from the world mod: past the view distance a woodland's trunks came
 //! out as "+" shapes floating at canopy height, and small leaf clumps as lone
@@ -14,8 +14,8 @@
 //! about. The rule the engine uses is `lod::SOLID_CELLS_PER_BLOCK` and
 //! `lod::SOLID_CHILDREN`.
 
-use tiamot_core::lod::Summary;
-use tiamot_core::{Chunk, ChunkPos, MaterialId, SubNodePos};
+use tiamat_core::lod::Summary;
+use tiamat_core::{Chunk, ChunkPos, MaterialId, SubNodePos};
 
 const WOOD: MaterialId = MaterialId(3);
 const LEAVES: MaterialId = MaterialId(4);
@@ -58,7 +58,7 @@ fn with_rule(chunk: &Chunk, fine: usize, coarse: usize) -> Vec<Vec<MaterialId>> 
     for z in 0..16 {
         for y in 0..16 {
             for x in 0..16 {
-                let view = chunk.get_block_local(tiamot_core::coords::LocalBlock::new(x, y, z));
+                let view = chunk.get_block_local(tiamat_core::coords::LocalBlock::new(x, y, z));
                 let materials: Vec<MaterialId> = (0..27).map(|i| view.subnode(i)).collect();
                 cells.push(pick(&materials, fine));
             }

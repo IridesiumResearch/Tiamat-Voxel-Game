@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::BlockPos;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::BlockPos;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 /// How long to wait for something the server has to tick before it is true.
 ///
@@ -41,7 +41,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 const PLACED: BlockPos = BlockPos::new(2, 9, 2);
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-mod-edits").join(name);
+    let dir = std::env::temp_dir().join("tiamat-mod-edits").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -368,7 +368,7 @@ fn a_merge_write_embeds_in_the_ground_instead_of_standing_in_a_footprint() {
     // material to a block without erasing the first — and a replace is one
     // `Partial`. The replacing case is here for contrast, so a run where
     // nothing happened at all cannot pass.
-    use tiamot_core::proto::Edit;
+    use tiamat_core::proto::Edit;
 
     let server = start("embed", write_embedder("embed"));
     block_on(async {
@@ -653,7 +653,7 @@ fn a_mod_can_move_a_player_and_the_client_is_told() {
             if bot.received().into_iter().skip(already).any(|message| {
                 matches!(
                     message,
-                    tiamot_core::proto::ServerMessage::PlayerState { velocity, .. }
+                    tiamat_core::proto::ServerMessage::PlayerState { velocity, .. }
                         if velocity[1] > 0.5
                 )
             }) {
@@ -677,8 +677,8 @@ fn a_mod_can_move_a_player_and_the_client_is_told() {
 /// three times too far away.
 fn world_x(at: &bot::client::PlayerPosition) -> f64 {
     let cells =
-        f64::from(at.chunk.x) * f64::from(tiamot_core::CHUNK_SUBNODES) + f64::from(at.local[0]);
-    cells / f64::from(tiamot_core::SUBNODES_PER_AXIS)
+        f64::from(at.chunk.x) * f64::from(tiamat_core::CHUNK_SUBNODES) + f64::from(at.local[0]);
+    cells / f64::from(tiamat_core::SUBNODES_PER_AXIS)
 }
 
 /// A mod that hands out two of the same thing, told apart by a detail.
@@ -1146,8 +1146,8 @@ fn a_mod_is_offered_blocks_to_grow_and_only_the_ones_it_asked_for() {
             if bot.received().into_iter().any(|message| {
                 matches!(
                     message,
-                    tiamot_core::proto::ServerMessage::BlockDelta {
-                        edit: tiamot_core::proto::Edit::Block { material, .. },
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::Block { material, .. },
                         ..
                     } if material == id("farm:grown")
                 )

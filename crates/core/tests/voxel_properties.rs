@@ -17,11 +17,11 @@
 
 use proptest::prelude::*;
 
-use tiamot_core::block::{self, Cells, EMPTY_CELLS, SUBNODES_PER_BLOCK};
-use tiamot_core::chunk::Chunk;
-use tiamot_core::coords::LocalBlock;
-use tiamot_core::inventory::{break_block, total_units};
-use tiamot_core::{BLOCKS_PER_CHUNK, BlockValue, ChunkPos, MaterialId};
+use tiamat_core::block::{self, Cells, EMPTY_CELLS, SUBNODES_PER_BLOCK};
+use tiamat_core::chunk::Chunk;
+use tiamat_core::coords::LocalBlock;
+use tiamat_core::inventory::{break_block, total_units};
+use tiamat_core::{BLOCKS_PER_CHUNK, BlockValue, ChunkPos, MaterialId};
 
 /// An uncompressed chunk: one 27-cell array per block, no palette, no
 /// interning, no canonicalisation.
@@ -191,7 +191,7 @@ fn apply(chunk: &mut Chunk, reference: &mut ReferenceChunk, op: &Op) {
         } => {
             let local = LocalBlock::from_index(*block);
             let (x, y, z) = block::subnode_offset(*cell);
-            let world = tiamot_core::BlockPos::new(local.x as i32, local.y as i32, local.z as i32)
+            let world = tiamat_core::BlockPos::new(local.x as i32, local.y as i32, local.z as i32)
                 .subnode(x as i32, y as i32, z as i32);
             chunk.set_subnode(world, *material).expect("inside chunk");
             reference.set_subnode(local, *cell, *material);
@@ -400,7 +400,7 @@ proptest! {
                 continue;
             }
             let (x, y, z) = block::subnode_offset(index);
-            let world = tiamot_core::BlockPos::new(1, 0, 0).subnode(x as i32, y as i32, z as i32);
+            let world = tiamat_core::BlockPos::new(1, 0, 0).subnode(x as i32, y as i32, z as i32);
             chunk.set_subnode(world, material).expect("inside chunk");
         }
 

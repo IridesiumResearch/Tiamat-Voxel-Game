@@ -11,17 +11,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::proto::{DisconnectReason, Edit, ServerMessage};
-use tiamot_core::{BlockPos, MaterialId, SubNodePos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::proto::{DisconnectReason, Edit, ServerMessage};
+use tiamat_core::{BlockPos, MaterialId, SubNodePos};
+use tiamat_server::{ServerHandle, Settings};
 
 /// Materials the test server registers. The first real id is the one after the
 /// engine's reserved set, so tests resolve ids rather than hard-coding them.
 const MATERIALS: [&str; 3] = ["test:stone", "test:dirt", "test:glass"];
 
 fn world_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-edit-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-edit-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -37,7 +37,7 @@ fn settings(dir: &std::path::Path) -> Settings {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: None,
-        view_distance: tiamot_core::interest::ViewDistance::MINIMUM,
+        view_distance: tiamat_core::interest::ViewDistance::MINIMUM,
         mods_path: None,
         enabled_mods: None,
         seed: Some(1),
@@ -104,7 +104,7 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 /// material upstream cannot silently make these tests edit the wrong block.
 fn material_id(server: &ServerHandle, name: &str) -> u16 {
     let _ = server;
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for material in MATERIALS {
         let assigned = registry.register(material).expect("register");
@@ -300,11 +300,11 @@ fn an_edit_survives_a_server_restart() {
     assert!(server.stop(), "clean shutdown");
 
     // Reopen the world directly and check the block is there.
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     for material in MATERIALS {
         registry.register(material).expect("register");
     }
-    let db = tiamot_core::WorldDb::open(dir.join("world.sqlite"), &mut registry).expect("reopen");
+    let db = tiamat_core::WorldDb::open(dir.join("world.sqlite"), &mut registry).expect("reopen");
     let chunk = db
         .load_chunk(pos.chunk())
         .expect("load")
@@ -362,11 +362,11 @@ fn an_edit_reaches_the_database_without_waiting_for_shutdown() {
 
 /// Reads a block straight from the world file, alongside the running server.
 fn block_is_present(dir: &std::path::Path, pos: BlockPos, material: u16) -> bool {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     for name in MATERIALS {
         let _ = registry.register(name);
     }
-    let Ok(db) = tiamot_core::WorldDb::open(dir.join("world.sqlite"), &mut registry) else {
+    let Ok(db) = tiamat_core::WorldDb::open(dir.join("world.sqlite"), &mut registry) else {
         return false;
     };
     let present = matches!(

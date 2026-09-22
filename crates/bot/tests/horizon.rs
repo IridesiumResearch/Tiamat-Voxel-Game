@@ -12,16 +12,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::ServerMessage;
-use tiamot_core::{BlockPos, ChunkPos};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::ServerMessage;
+use tiamat_core::{BlockPos, ChunkPos};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 
 fn world_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-horizon-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-horizon-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -103,7 +103,7 @@ async fn watch(bot: &mut Bot, patience: Duration, enough: usize) -> Seen {
         match tokio::time::timeout(remaining, bot.recv()).await {
             Ok(Ok(ServerMessage::ChunkData { pos, .. })) => seen.chunks.push(pos),
             Ok(Ok(ServerMessage::ChunkSummary { pos, blob })) => {
-                let summary = tiamot_core::lod::codec::decode(&blob)
+                let summary = tiamat_core::lod::codec::decode(&blob)
                     .expect("the server sent a horizon that would not decode");
                 seen.summaries.push((pos, summary.level()));
             }
@@ -145,11 +145,11 @@ fn land_past_the_detail_radius_arrives_as_a_summary() {
             // a box, this measured a box, and the 41% of the horizon that fell
             // between the box and the cylinder was invisible to both.
             assert!(
-                !tiamot_core::interest::contains(spawn, view, *pos),
+                !tiamat_core::interest::contains(spawn, view, *pos),
                 "{pos:?} was summarised but is inside the detail radius"
             );
             assert!(
-                (tiamot_core::lod::FINEST..=tiamot_core::lod::COARSEST).contains(level),
+                (tiamat_core::lod::FINEST..=tiamat_core::lod::COARSEST).contains(level),
                 "{pos:?} came at level {level}, which is not a level"
             );
             assert!(

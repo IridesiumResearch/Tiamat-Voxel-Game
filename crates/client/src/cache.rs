@@ -27,13 +27,13 @@
 
 use std::path::{Path, PathBuf};
 
-use tiamot_core::proto::ContentHash;
+use tiamat_core::proto::ContentHash;
 
 /// Largest cached item, in bytes.
 ///
 /// Matches the engine's per-file push limit, so anything a legitimate server
 /// can send fits and anything larger is a file this cache did not put there.
-pub const MAX_ITEM_BYTES: u64 = tiamot_core::content::MAX_FILE_BYTES;
+pub const MAX_ITEM_BYTES: u64 = tiamat_core::content::MAX_FILE_BYTES;
 
 /// Something went wrong reading or writing the cache.
 #[derive(Debug, thiserror::Error)]
@@ -117,7 +117,7 @@ impl ContentCache {
         }
         let bytes = std::fs::read(&path).ok()?;
 
-        if tiamot_core::content::hash_bytes(&bytes) == *hash {
+        if tiamat_core::content::hash_bytes(&bytes) == *hash {
             Some(bytes)
         } else {
             // Something wrote into the cache that was not this client storing a
@@ -151,7 +151,7 @@ impl ContentCache {
                 len: bytes.len() as u64,
             });
         }
-        if tiamot_core::content::hash_bytes(bytes) != *hash {
+        if tiamat_core::content::hash_bytes(bytes) != *hash {
             return Err(CacheError::HashMismatch);
         }
 
@@ -199,7 +199,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("tiamot-cache-tests").join(name);
+        let dir = std::env::temp_dir().join("tiamat-cache-tests").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -212,7 +212,7 @@ mod tests {
     fn an_item_round_trips() {
         let cache = cache("round-trip");
         let bytes = b"a texture, more or less".to_vec();
-        let hash = tiamot_core::content::hash_bytes(&bytes);
+        let hash = tiamat_core::content::hash_bytes(&bytes);
 
         assert!(!cache.contains(&hash));
         cache.put(&hash, &bytes).expect("store");
@@ -224,7 +224,7 @@ mod tests {
         // The hash is the only part of a server's claim a client can check. A
         // cache that stored whatever it was handed would make it worthless.
         let cache = cache("mismatch");
-        let hash = tiamot_core::content::hash_bytes(b"what was asked for");
+        let hash = tiamat_core::content::hash_bytes(b"what was asked for");
 
         let err = cache
             .put(&hash, b"something else entirely")
@@ -240,7 +240,7 @@ mod tests {
         // feed a client bytes no server ever sent.
         let cache = cache("tampered");
         let bytes = b"the real thing".to_vec();
-        let hash = tiamot_core::content::hash_bytes(&bytes);
+        let hash = tiamat_core::content::hash_bytes(&bytes);
         cache.put(&hash, &bytes).expect("store");
 
         std::fs::write(cache.path_of(&hash), b"not the real thing").expect("tamper");
@@ -259,7 +259,7 @@ mod tests {
     fn an_oversized_entry_is_refused_from_its_length() {
         let cache = cache("oversized");
         let bytes = vec![0u8; MAX_ITEM_BYTES as usize + 1];
-        let hash = tiamot_core::content::hash_bytes(&bytes);
+        let hash = tiamat_core::content::hash_bytes(&bytes);
 
         let err = cache.put(&hash, &bytes).expect_err("must refuse");
         assert!(matches!(err, CacheError::TooLarge { .. }), "got {err}");
@@ -272,7 +272,7 @@ mod tests {
         // for some other content. Write-then-rename is what prevents it.
         let cache = cache("atomic");
         let bytes = b"content".to_vec();
-        let hash = tiamot_core::content::hash_bytes(&bytes);
+        let hash = tiamat_core::content::hash_bytes(&bytes);
         cache.put(&hash, &bytes).expect("store");
 
         let leftovers: Vec<_> = std::fs::read_dir(cache.root())
@@ -287,9 +287,9 @@ mod tests {
     fn missing_reports_only_what_is_absent_and_says_it_once() {
         let cache = cache("missing");
         let held = b"already have this".to_vec();
-        let held_hash = tiamot_core::content::hash_bytes(&held);
+        let held_hash = tiamat_core::content::hash_bytes(&held);
         cache.put(&held_hash, &held).expect("store");
-        let wanted_hash = tiamot_core::content::hash_bytes(b"do not have this");
+        let wanted_hash = tiamat_core::content::hash_bytes(b"do not have this");
 
         let missing = cache.missing(&[held_hash, wanted_hash, wanted_hash, held_hash]);
         assert_eq!(missing, vec![wanted_hash]);

@@ -60,14 +60,14 @@ use std::path::PathBuf;
 
 use bot::Bot;
 use clap::Parser;
-use tiamot_core::identity::Identity;
-use tiamot_core::proto::ServerMessage;
+use tiamat_core::identity::Identity;
+use tiamat_core::proto::ServerMessage;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
 #[command(
     name = "watcher",
-    about = "Connect a program to a Tiamot server: sees the world as JSON lines, acts on JSON lines",
+    about = "Connect a program to a Tiamat server: sees the world as JSON lines, acts on JSON lines",
     version
 )]
 struct Cli {
@@ -218,7 +218,7 @@ async fn run(cli: &Cli, acting: bool) -> Result<(), String> {
     let path = cli
         .identity
         .clone()
-        .unwrap_or_else(|| PathBuf::from(".tiamot-watcher").join(format!("{}.key", cli.name)));
+        .unwrap_or_else(|| PathBuf::from(".tiamat-watcher").join(format!("{}.key", cli.name)));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("could not create `{}`: {err}", parent.display()))?;
@@ -308,9 +308,9 @@ fn report(message: &ServerMessage) {
                 .iter()
                 .map(|entity| {
                     let block = |axis: usize, chunk: i32| {
-                        f64::from(chunk) * f64::from(tiamot_core::CHUNK_BLOCKS)
+                        f64::from(chunk) * f64::from(tiamat_core::CHUNK_BLOCKS)
                             + f64::from(entity.local[axis])
-                                / f64::from(tiamot_core::SUBNODES_PER_AXIS)
+                                / f64::from(tiamat_core::SUBNODES_PER_AXIS)
                     };
                     serde_json::json!({
                         "id": entity.id,
@@ -354,11 +354,11 @@ async fn obey(bot: &mut Bot, line: &str, acting: bool) -> bool {
         Instruction::Say { text } => bot.chat(&text).await.err(),
         Instruction::Walk { x, y, z, ticks } => bot.walk([x, y, z], 0, ticks).await.err(),
         Instruction::Dig { x, y, z } => bot
-            .dig_block(tiamot_core::BlockPos::new(x, y, z))
+            .dig_block(tiamat_core::BlockPos::new(x, y, z))
             .await
             .err(),
         Instruction::Place { x, y, z, material } => bot
-            .place(tiamot_core::BlockPos::new(x, y, z), material)
+            .place(tiamat_core::BlockPos::new(x, y, z), material)
             .await
             .err(),
     };

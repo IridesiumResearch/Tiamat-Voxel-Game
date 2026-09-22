@@ -22,8 +22,8 @@
 
 use std::collections::BTreeMap;
 
-use tiamot_core::phys::{self, Intent, Tuning};
-use tiamot_core::{ChunkPos, MaterialId};
+use tiamat_core::phys::{self, Intent, Tuning};
+use tiamat_core::{ChunkPos, MaterialId};
 
 use crate::camera::{Camera, Position};
 use crate::config::Config;
@@ -61,9 +61,9 @@ const PARTICLE_FLOOR: f32 = 0.12;
     reason = "charter rule 4 exempts rendering; which cell a particle is in decides only whether \
               this client stops drawing it"
 )]
-fn particle_cell(at: [f64; 3]) -> tiamot_core::SubNodePos {
+fn particle_cell(at: [f64; 3]) -> tiamat_core::SubNodePos {
     let cell = |value: f64| (value * 3.0).floor() as i32;
-    tiamot_core::SubNodePos::new(cell(at[0]), cell(at[1]), cell(at[2]))
+    tiamat_core::SubNodePos::new(cell(at[0]), cell(at[1]), cell(at[2]))
 }
 
 /// Installs any font a server's mods have pushed, once per batch.
@@ -197,14 +197,14 @@ const BADGE_CLEARANCE: f32 = 0.75;
 ///
 /// A person: the engine's own rig. An entity with no collider is a marker and
 /// is usually invisible, so this is the rare case rather than the common one.
-const DEFAULT_BADGE_HEIGHT: f32 = 1.8 * tiamot_core::SUBNODES_PER_AXIS as f32;
+const DEFAULT_BADGE_HEIGHT: f32 = 1.8 * tiamat_core::SUBNODES_PER_AXIS as f32;
 
 /// The longest a badge may stay up, in seconds.
 ///
 /// The same bound the protocol checks, restated here because a client does not
 /// trust the server it is talking to (charter rule 14): a badge asking to hang
 /// for a year is a hostile message and this is where it stops being one.
-const MAX_BADGE_SECONDS: f32 = tiamot_core::particle::MAX_LIFETIME;
+const MAX_BADGE_SECONDS: f32 = tiamat_core::particle::MAX_LIFETIME;
 
 /// One badge's icons, laid out over an entity.
 ///
@@ -217,13 +217,13 @@ const MAX_BADGE_SECONDS: f32 = tiamot_core::particle::MAX_LIFETIME;
 /// position for an entity is between its feet. `height` is its collider
 /// height in CELLS, which is the unit the entity stream carries.
 fn badge_row(
-    badge: &tiamot_core::particle::Badge,
+    badge: &tiamat_core::particle::Badge,
     feet: [f32; 3],
     height: f32,
     right: glam::Vec3,
     fade: f32,
 ) -> Vec<crate::render::particle::Sprite> {
-    let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
+    let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
     // **Over its head, not over its feet**, plus a little air: a badge sunk
     // into a cow is worse than no badge.
     let over = [
@@ -263,7 +263,7 @@ fn badge_row(
 /// A badge on this client, and when it comes down.
 struct LiveBadge {
     /// What the server hung there.
-    badge: tiamot_core::particle::Badge,
+    badge: tiamat_core::particle::Badge,
     /// When it expires, on this client's own clock.
     until: std::time::Duration,
 }
@@ -284,7 +284,7 @@ struct LiveBadge {
 /// greedy merging is unaffected by light. Mode 1 is Task 08's world, and Task
 /// 08's world had no propagated light to split a quad on.
 const FLAT_DAYLIGHT: crate::shade::Uniform =
-    crate::shade::Uniform(tiamot_core::light::Light::DAYLIGHT);
+    crate::shade::Uniform(tiamat_core::light::Light::DAYLIGHT);
 
 /// How far behind the player the third-person camera sits, in blocks.
 const THIRD_PERSON_DISTANCE: f64 = 4.0;
@@ -318,7 +318,7 @@ const HOTBAR_SLOTS: usize = 9;
 /// you turn: at yaw zero both point north and agree exactly. Reported from the
 /// window as not facing the way you are walking.
 const fn figure_yaw(camera_yaw: f32) -> f32 {
-    tiamot_core::ent::figure_yaw(camera_yaw)
+    tiamat_core::ent::figure_yaw(camera_yaw)
 }
 
 /// Below this the player's figure stands still, in cells per tick.
@@ -481,7 +481,7 @@ pub fn intent_at_yaw(yaw: f32, input: Input) -> Intent {
 /// was never sent.
 #[must_use]
 pub fn action_bits(intent: Intent) -> u32 {
-    use tiamot_core::proto::actions;
+    use tiamat_core::proto::actions;
 
     let mut held = 0;
     if intent.jump {
@@ -969,7 +969,7 @@ fn ray_box(origin: [f32; 3], direction: [f32; 3], min: [f32; 3], max: [f32; 3]) 
 struct ModSettings {
     /// As declared. Empty until the table arrives on join, and empty for ever
     /// on a server whose mods offer none, which is most of them.
-    declared: Vec<tiamot_core::proto::SettingDef>,
+    declared: Vec<tiamat_core::proto::SettingDef>,
     /// The player's answers, by qualified id, for the world they are in.
     ///
     /// Seeded from the world's own record before the connection opens, so the
@@ -996,7 +996,7 @@ pub struct App {
     /// What each action is bound to.
     bindings: crate::input::Bindings,
     /// Every sound the server's mods registered.
-    sounds: Vec<tiamot_core::proto::SoundDef>,
+    sounds: Vec<tiamat_core::proto::SoundDef>,
     /// Dialog events the player has raised and the server has not been told.
     ///
     /// Queued rather than sent immediately for the reason every other client
@@ -1060,7 +1060,7 @@ pub struct App {
     /// Cleared by releasing the button, and by the block running out. A chisel
     /// does not lock: taking one named cell is the whole point of it, and
     /// pointing through a hole to reach the cell behind is what it is for.
-    dig_lock: Option<tiamot_core::SubNodePos>,
+    dig_lock: Option<tiamat_core::SubNodePos>,
     /// When digging may start again after a block came apart.
     ///
     /// **Asked for from the window**: "add an extremely minute pause after
@@ -1080,9 +1080,9 @@ pub struct App {
     /// fault rather than a mod one — the client goes on drawing its own HUD and
     /// says so once, because a client that refused to run without a scripting
     /// VM would be a client nobody could play on.
-    hud_vm: Option<tiamot_core::script::HudVm>,
+    hud_vm: Option<tiamat_core::script::HudVm>,
     /// How much of the bottom of the canvas the loaded HUDs want kept clear,
-    /// in virtual pixels — see [`tiamot_core::hud::MAX_RESERVE`].
+    /// in virtual pixels — see [`tiamat_core::hud::MAX_RESERVE`].
     hud_reserve: u16,
     /// How this server's mods want the engine's own screens to look.
     ///
@@ -1093,21 +1093,21 @@ pub struct App {
     ///
     /// Registration state, so it arrives once and does not change. `None` is
     /// a world with no clouds, which is most of them.
-    cloud_layer: Option<tiamot_core::atmosphere::CloudLayer>,
+    cloud_layer: Option<tiamat_core::atmosphere::CloudLayer>,
     /// How much cloud this player is under, as the weather last said.
-    clouds: Option<tiamot_core::atmosphere::Clouds>,
+    clouds: Option<tiamat_core::atmosphere::Clouds>,
     /// The coarse cover map a mod sent, if any — weather ask W10.
     ///
     /// Behind an `Arc` so the once-a-frame handover to the renderer copies a
     /// pointer rather than half a kilobyte of grid.
-    cloud_map: Option<std::sync::Arc<tiamot_core::atmosphere::CloudMap>>,
+    cloud_map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
 
     /// What each mod wants this player's HUD to show, by mod id.
     ///
     /// Held here rather than inside the VM because it arrives on the network
     /// and the VM is rebuilt when a script is replaced; a value that vanished
     /// because a mod reloaded its own script would be a bar that blinked.
-    hud_values: std::collections::BTreeMap<String, tiamot_core::hud::Values>,
+    hud_values: std::collections::BTreeMap<String, tiamat_core::hud::Values>,
     /// Sounds this client has been told about and not yet played.
     ///
     /// A queue rather than an immediate call, because playing one belongs to
@@ -1144,7 +1144,7 @@ pub struct App {
     quit_requested: bool,
     /// Materials that may not be put in the world: the items.
     ///
-    /// See [`tiamot_core::proto::MaterialDef::placeable`]. Empty until a server
+    /// See [`tiamat_core::proto::MaterialDef::placeable`]. Empty until a server
     /// sends its table, which is correct: a client with no table has nothing to
     /// place either.
     items: std::collections::BTreeSet<u16>,
@@ -1221,7 +1221,7 @@ pub struct App {
     ///
     /// The fog is drawn from this one, so the world ends in haze rather than in
     /// clear air.
-    granted_view: tiamot_core::interest::ViewDistance,
+    granted_view: tiamat_core::interest::ViewDistance,
     /// The most recent warnings, newest last.
     warnings: Vec<String>,
     /// A smoothed frame rate, for the HUD.
@@ -1274,7 +1274,7 @@ pub struct App {
     /// See [`App::adopt_abilities`]. The engine's defaults until a server says
     /// otherwise, which is also what a server with no mod that sets them
     /// leaves it at.
-    abilities: tiamot_core::phys::Abilities,
+    abilities: tiamat_core::phys::Abilities,
     /// Whether flight is on.
     flying: bool,
     /// What the connection reported about the server's certificate.
@@ -1337,7 +1337,7 @@ pub struct App {
     /// Presentation only — the crack overlay is drawn from it. Not predicted:
     /// the server decides when a block goes (charter rule 2), and a client that
     /// guessed would show a block breaking that then came back.
-    dig: Option<(tiamot_core::SubNodePos, f32)>,
+    dig: Option<(tiamat_core::SubNodePos, f32)>,
     /// Seconds carried over toward the next simulation tick.
     ///
     /// The simulation is a fixed 20 Hz (charter rule 4) and rendering is not,
@@ -1359,7 +1359,7 @@ pub struct App {
     /// maximum over a second; this writes one line per tick, so the exact tick
     /// two simulations part company on can be read off afterwards rather than
     /// guessed at from a sampled number. Opened once, from
-    /// `TIAMOT_TRACE_PHYSICS`, and silently absent otherwise — a diagnostic that
+    /// `TIAMAT_TRACE_PHYSICS`, and silently absent otherwise — a diagnostic that
     /// could refuse to start a session would be a poor one.
     trace: Option<std::cell::RefCell<std::io::BufWriter<std::fs::File>>>,
     /// The present mode the swapchain is actually using, once the window has
@@ -1388,18 +1388,18 @@ pub struct App {
     ///
     /// Server-authoritative and never edited here: the client is told what it
     /// has. An inventory a client could change is not an inventory.
-    carried: Vec<tiamot_core::proto::StackDef>,
+    carried: Vec<tiamat_core::proto::StackDef>,
     /// The hotbar: the first [`HOTBAR_SLOTS`] slots of `player:main`.
     ///
     /// Derived from the view rather than sent separately, so what the number
     /// keys reach and what the inventory screen's top row shows cannot drift.
-    hotbar: Vec<Option<tiamot_core::proto::StackDef>>,
+    hotbar: Vec<Option<tiamat_core::proto::StackDef>>,
     /// Every tool the server's mods registered, in ascending id order.
     ///
     /// Empty until the server says. Charter rule 1: the engine has no tools of
     /// its own, so a client with an empty list is a client connected to a world
     /// nobody can dig in — which is correct rather than broken.
-    tools: Vec<tiamot_core::proto::ToolDef>,
+    tools: Vec<tiamat_core::proto::ToolDef>,
     /// Which of them is in hand.
     held_tool: usize,
     /// Which entry of [`App::carried`] the hotbar is on.
@@ -1427,8 +1427,8 @@ pub struct App {
 /// `None` is an engine fault rather than a mod one, so it warns once and the
 /// client goes on drawing its own HUD — a client that refused to run without a
 /// scripting VM would be a client nobody could play on.
-fn start_hud_vm() -> Option<tiamot_core::script::HudVm> {
-    match tiamot_core::script::HudVm::new(tiamot_core::script::HudLimits::default()) {
+fn start_hud_vm() -> Option<tiamat_core::script::HudVm> {
+    match tiamat_core::script::HudVm::new(tiamat_core::script::HudLimits::default()) {
         Ok(vm) => Some(vm),
         Err(err) => {
             tracing::warn!(%err, "no HUD script runtime; pushed HUDs will not run");
@@ -1517,7 +1517,7 @@ impl App {
             fonts: crate::fonts::Fonts::new(),
             meshing: None,
             may_fly: false,
-            abilities: tiamot_core::phys::Abilities::DEFAULT,
+            abilities: tiamat_core::phys::Abilities::DEFAULT,
             flying: false,
             world_paused: false,
             stride: 0.0,
@@ -1787,8 +1787,8 @@ impl App {
         let Some(spawn) = self.spawn else {
             return 0.0;
         };
-        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
-        let corner = tiamot_core::BlockPos::from_chunk_corner(origin);
+        let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
+        let corner = tiamat_core::BlockPos::from_chunk_corner(origin);
         let (sx, _, sz) = spawn.to_world();
         let x = f64::from(corner.x) + f64::from(local[0]) / cells;
         let z = f64::from(corner.z) + f64::from(local[2]) / cells;
@@ -2040,7 +2040,7 @@ impl App {
     ///
     /// Returns whether the file could be opened. **Asked for explicitly rather
     /// than read from the environment here**: the binary reads
-    /// `TIAMOT_TRACE_PHYSICS` and calls this, so a test can turn tracing on for
+    /// `TIAMAT_TRACE_PHYSICS` and calls this, so a test can turn tracing on for
     /// its own client without touching process-global state. Doing it the other
     /// way round cost a red CI run — the test binary runs its cases on parallel
     /// threads, so one test's `set_var` and another's `remove_var` raced, and the
@@ -2192,11 +2192,11 @@ impl App {
     /// `looking_at` reports cells relative to the predicted body's chunk origin
     /// (charter rule 7 again), and everything on the wire is absolute. Getting
     /// this conversion wrong digs a hole somewhere else entirely.
-    fn target_of(&self, cell: [i32; 3]) -> Option<tiamot_core::SubNodePos> {
+    fn target_of(&self, cell: [i32; 3]) -> Option<tiamat_core::SubNodePos> {
         let predictor = self.predictor.as_ref()?;
         let origin = predictor.origin();
-        let span = tiamot_core::CHUNK_SUBNODES as i32;
-        Some(tiamot_core::SubNodePos::new(
+        let span = tiamat_core::CHUNK_SUBNODES as i32;
+        Some(tiamat_core::SubNodePos::new(
             origin.x * span + cell[0],
             origin.y * span + cell[1],
             origin.z * span + cell[2],
@@ -2205,13 +2205,13 @@ impl App {
 
     /// The cell under the crosshair, for digging.
     #[must_use]
-    pub fn dig_target(&self) -> Option<tiamot_core::SubNodePos> {
+    pub fn dig_target(&self) -> Option<tiamat_core::SubNodePos> {
         self.target_of(self.looking_at()?.cell)
     }
 
     /// The cell a placement would fill: one step out of the surface.
     #[must_use]
-    pub fn place_target(&self) -> Option<tiamot_core::SubNodePos> {
+    pub fn place_target(&self) -> Option<tiamat_core::SubNodePos> {
         self.place_aim().map(|(target, _)| target)
     }
 
@@ -2222,7 +2222,7 @@ impl App {
     /// this side knows what the crosshair is on; what it MEANS is the server's
     /// (charter rule 2, and `place::oriented`).
     #[must_use]
-    pub fn place_aim(&self) -> Option<(tiamot_core::SubNodePos, [i8; 3])> {
+    pub fn place_aim(&self) -> Option<(tiamat_core::SubNodePos, [i8; 3])> {
         let hit = self.looking_at()?;
         let target = self.target_of([
             hit.cell[0] + hit.normal[0],
@@ -2257,7 +2257,7 @@ impl App {
     ///
     /// Returns the blocks to write, or nothing if the crosshair is on the sky.
     #[must_use]
-    pub fn debug_material_row(&self) -> Vec<(tiamot_core::BlockPos, u16)> {
+    pub fn debug_material_row(&self) -> Vec<(tiamat_core::BlockPos, u16)> {
         let Some(target) = self.place_target() else {
             return Vec::new();
         };
@@ -2269,12 +2269,12 @@ impl App {
             // no longer loaded (charter rule 8). Neither is a sample of
             // anything.
             .filter(|id| {
-                **id != tiamot_core::MaterialId::AIR.0 && **id != tiamot_core::MaterialId::UNKNOWN.0
+                **id != tiamat_core::MaterialId::AIR.0 && **id != tiamat_core::MaterialId::UNKNOWN.0
             })
             .enumerate()
             .map(|(index, id)| {
                 (
-                    tiamot_core::BlockPos::new(
+                    tiamat_core::BlockPos::new(
                         start.x + i32::try_from(index).unwrap_or(0),
                         start.y,
                         start.z,
@@ -2305,7 +2305,7 @@ impl App {
         let forward = self.camera.forward();
         let direction = [forward.x, forward.y, forward.z];
         let now = self.since_start.elapsed();
-        let span = tiamot_core::CHUNK_SUBNODES as f32;
+        let span = tiamat_core::CHUNK_SUBNODES as f32;
 
         // How far the terrain is, so a mob behind a wall cannot be hit through
         // it. The cell's own corner rather than its centre: a half-cell either
@@ -2425,7 +2425,7 @@ impl App {
     /// still has something in it — once it is empty the crosshair chooses
     /// again, so holding the button walks along a wall one whole block at a
     /// time instead of boring a tunnel through several at once.
-    fn held_dig_target(&self) -> Option<tiamot_core::SubNodePos> {
+    fn held_dig_target(&self) -> Option<tiamat_core::SubNodePos> {
         if self.locks_onto_a_block()
             && let Some(locked) = self.dig_lock
             && let Some(to_block) = self.toward(locked)
@@ -2443,10 +2443,10 @@ impl App {
     /// From the eye to the centre of a cell's block, in cells.
     ///
     /// `None` before there is a body to look from.
-    fn toward(&self, cell: tiamot_core::SubNodePos) -> Option<[f32; 3]> {
+    fn toward(&self, cell: tiamat_core::SubNodePos) -> Option<[f32; 3]> {
         let predictor = self.predictor.as_ref()?;
         let origin = predictor.origin();
-        let span = tiamot_core::CHUNK_SUBNODES as i32;
+        let span = tiamat_core::CHUNK_SUBNODES as i32;
         let eye = predictor.body().eye();
         let block = cell.block();
         // The block's middle, in the predictor's own chunk frame — the same
@@ -2456,7 +2456,7 @@ impl App {
                 clippy::cast_precision_loss,
                 reason = "a cell offset within a few chunks of the player"
             )]
-            let corner = (world * tiamot_core::SUBNODES_PER_AXIS as i32 - chunk * span) as f32;
+            let corner = (world * tiamat_core::SUBNODES_PER_AXIS as i32 - chunk * span) as f32;
             corner + 1.5
         };
         Some([
@@ -2469,24 +2469,24 @@ impl App {
     /// Whether the tool in hand takes whole blocks.
     fn locks_onto_a_block(&self) -> bool {
         self.held_tool()
-            .is_none_or(|tool| tool.brush != tiamot_core::dig::Brush::SubNode.name())
+            .is_none_or(|tool| tool.brush != tiamat_core::dig::Brush::SubNode.name())
     }
 
     /// Whether the block containing this cell still has any material in it.
-    fn block_has_material(&self, cell: tiamot_core::SubNodePos) -> bool {
+    fn block_has_material(&self, cell: tiamat_core::SubNodePos) -> bool {
         let Some(predictor) = self.predictor.as_ref() else {
             return false;
         };
         let origin = predictor.origin();
-        let span = tiamot_core::CHUNK_SUBNODES as i32;
+        let span = tiamat_core::CHUNK_SUBNODES as i32;
         let block = cell.block();
         let voxels = phys::Voxels::new(&self.store, origin);
         let base = [
-            block.x * tiamot_core::SUBNODES_PER_AXIS as i32 - origin.x * span,
-            block.y * tiamot_core::SUBNODES_PER_AXIS as i32 - origin.y * span,
-            block.z * tiamot_core::SUBNODES_PER_AXIS as i32 - origin.z * span,
+            block.x * tiamat_core::SUBNODES_PER_AXIS as i32 - origin.x * span,
+            block.y * tiamat_core::SUBNODES_PER_AXIS as i32 - origin.y * span,
+            block.z * tiamat_core::SUBNODES_PER_AXIS as i32 - origin.z * span,
         ];
-        let span = i32::from(u8::try_from(tiamot_core::SUBNODES_PER_AXIS).unwrap_or(3));
+        let span = i32::from(u8::try_from(tiamat_core::SUBNODES_PER_AXIS).unwrap_or(3));
         (0..span).any(|z| {
             (0..span).any(|y| {
                 (0..span).any(|x| {
@@ -2573,7 +2573,7 @@ impl App {
     ///
     /// Empty when nothing is in reach, which includes the sky.
     #[must_use]
-    pub fn selection(&self) -> Vec<tiamot_core::SubNodePos> {
+    pub fn selection(&self) -> Vec<tiamat_core::SubNodePos> {
         // **The outline follows the dig, not the crosshair.** While a block
         // brush is locked onto a block, that block stays highlighted even
         // though the ray now passes through the hole being made — the outline
@@ -2594,13 +2594,13 @@ impl App {
         // a cube, and an outline that drew one anyway would be a lie exactly
         // where the player is looking.
         let block = cell.block();
-        let base = tiamot_core::SubNodePos::new(block.x * 3, block.y * 3, block.z * 3);
+        let base = tiamat_core::SubNodePos::new(block.x * 3, block.y * 3, block.z * 3);
         let Some(chunk) = self.store.get(block.chunk()) else {
             return vec![cell];
         };
-        let occupied: Vec<tiamot_core::SubNodePos> = (0..3)
+        let occupied: Vec<tiamat_core::SubNodePos> = (0..3)
             .flat_map(|y| (0..3).flat_map(move |z| (0..3).map(move |x| (x, y, z))))
-            .map(|(x, y, z)| tiamot_core::SubNodePos::new(base.x + x, base.y + y, base.z + z))
+            .map(|(x, y, z)| tiamat_core::SubNodePos::new(base.x + x, base.y + y, base.z + z))
             .filter(|at| {
                 chunk
                     .get_subnode(*at)
@@ -2628,11 +2628,11 @@ impl App {
         let cells = self.selection();
         let mut corners: Vec<[f32; 3]> = Vec::with_capacity(cells.len());
         let (camera_x, camera_y, camera_z) = self.camera.position.to_world();
-        let per_block = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let per_block = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         let shift = [
-            f64::from(self.displacement[0]) * f64::from(tiamot_core::CHUNK_BLOCKS),
-            f64::from(self.displacement[1]) * f64::from(tiamot_core::CHUNK_BLOCKS),
-            f64::from(self.displacement[2]) * f64::from(tiamot_core::CHUNK_BLOCKS),
+            f64::from(self.displacement[0]) * f64::from(tiamat_core::CHUNK_BLOCKS),
+            f64::from(self.displacement[1]) * f64::from(tiamat_core::CHUNK_BLOCKS),
+            f64::from(self.displacement[2]) * f64::from(tiamat_core::CHUNK_BLOCKS),
         ];
         for cell in cells {
             // Cells to blocks, displaced the way the drawn world is, then made
@@ -2651,7 +2651,7 @@ impl App {
     /// sounds live in their own map rather than being looked up through the
     /// table: a footstep is decided every couple of blocks walked, and a scan
     /// each time would be work for nothing.
-    fn adopt_materials(&mut self, table: &[tiamot_core::proto::MaterialDef]) {
+    fn adopt_materials(&mut self, table: &[tiamat_core::proto::MaterialDef]) {
         self.materials = table
             .iter()
             .map(|entry| (entry.id, entry.name.clone()))
@@ -2742,7 +2742,7 @@ impl App {
     /// dropped: the player may be visiting a server running an older version of
     /// a mod, and forgetting their preference because it is momentarily
     /// unrecognised is how a preference quietly resets.
-    fn adopt_mod_settings(&mut self, settings: Vec<tiamot_core::proto::SettingDef>) {
+    fn adopt_mod_settings(&mut self, settings: Vec<tiamat_core::proto::SettingDef>) {
         self.mod_settings.declared = settings;
         let answered: Vec<(String, u32)> = self
             .mod_settings
@@ -2763,13 +2763,13 @@ impl App {
 
     /// The options this server's mods offer, for the settings screen.
     #[must_use]
-    pub fn mod_settings(&self) -> &[tiamot_core::proto::SettingDef] {
+    pub fn mod_settings(&self) -> &[tiamat_core::proto::SettingDef] {
         &self.mod_settings.declared
     }
 
     /// What the player has answered for one setting, or the mod's default.
     #[must_use]
-    pub fn mod_setting(&self, def: &tiamot_core::proto::SettingDef) -> u32 {
+    pub fn mod_setting(&self, def: &tiamat_core::proto::SettingDef) -> u32 {
         self.mod_settings
             .answers
             .get(&def.id)
@@ -2804,7 +2804,7 @@ impl App {
     ///
     /// Its own method because `pump_network` is at clippy's line limit, and
     /// because the two ways this can go wrong both want explaining.
-    fn adopt_actions(&mut self, actions: Vec<tiamot_core::proto::ActionDef>) {
+    fn adopt_actions(&mut self, actions: Vec<tiamat_core::proto::ActionDef>) {
         // A fresh server, a fresh set. `clear_mods` keeps the
         // engine's own: those are the client's and outlive any
         // connection.
@@ -2866,7 +2866,7 @@ impl App {
 
     /// Every sound the server's mods registered.
     #[must_use]
-    pub fn sounds(&self) -> &[tiamot_core::proto::SoundDef] {
+    pub fn sounds(&self) -> &[tiamat_core::proto::SoundDef] {
         &self.sounds
     }
 
@@ -2897,7 +2897,7 @@ impl App {
     /// and the server would refuse it anyway.
     pub fn flush_dialog_events(&mut self) {
         for raised in std::mem::take(&mut self.dialog_events) {
-            let closing = matches!(raised.event, tiamot_core::proto::DialogEvent::Closed);
+            let closing = matches!(raised.event, tiamat_core::proto::DialogEvent::Closed);
             if !closing && !self.dialogs.contains_key(&raised.form) {
                 continue;
             }
@@ -2929,7 +2929,7 @@ impl App {
         };
         self.raise_dialog_events(vec![crate::dialog::Raised {
             form,
-            event: tiamot_core::proto::DialogEvent::Closed,
+            event: tiamat_core::proto::DialogEvent::Closed,
         }]);
         true
     }
@@ -2962,10 +2962,10 @@ impl App {
     fn adopt_view(
         &mut self,
         view: String,
-        slots: Vec<Option<tiamot_core::proto::StackDef>>,
-        held: Option<tiamot_core::proto::StackDef>,
+        slots: Vec<Option<tiamat_core::proto::StackDef>>,
+        held: Option<tiamat_core::proto::StackDef>,
     ) {
-        let hotbar = view == tiamot_core::inventory::PLAYER_MAIN;
+        let hotbar = view == tiamat_core::inventory::PLAYER_MAIN;
         self.views
             .insert(view, crate::dialog::ViewContents { slots, held });
         if hotbar {
@@ -3011,7 +3011,7 @@ impl App {
             let swing = self.swing_phase();
             // The tile AND the cut: what the hand holds is a stack, and two
             // stacks of one stone differ only by their shape.
-            let held = |stack: Option<tiamot_core::proto::StackDef>| {
+            let held = |stack: Option<tiamat_core::proto::StackDef>| {
                 let Some(stack) = stack else {
                     return crate::render::viewmodel::Held {
                         tile: None,
@@ -3083,18 +3083,18 @@ impl App {
     /// said. `EntityDef::hands` and `ServerMessage::EntityArmed` are what say.
     fn other_hand_props(&self) -> Vec<crate::render::Prop> {
         let now = self.since_start.elapsed();
-        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         let mut props = Vec::new();
         for (id, entity) in self.entities.iter() {
             if entity.hands.iter().all(Option::is_none)
-                || entity.model.as_deref() != Some(tiamot_core::ent::HUMANOID_MODEL)
+                || entity.model.as_deref() != Some(tiamat_core::ent::HUMANOID_MODEL)
             {
                 continue;
             }
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
-            let corner = tiamot_core::BlockPos::from_chunk_corner(pose.chunk);
+            let corner = tiamat_core::BlockPos::from_chunk_corner(pose.chunk);
             let feet = [
                 f64::from(corner.x) + f64::from(pose.local[0]) / cells,
                 f64::from(corner.y) + f64::from(pose.local[1]) / cells,
@@ -3120,7 +3120,7 @@ impl App {
     fn hand_props(
         &self,
         figure: &crate::render::skinned::Figure,
-        held: &[Option<tiamot_core::proto::StackDef>; 2],
+        held: &[Option<tiamat_core::proto::StackDef>; 2],
     ) -> Vec<crate::render::Prop> {
         let mut props = Vec::new();
         for (joint, stack) in [("hand.r", &held[0]), ("hand.l", &held[1])] {
@@ -3154,7 +3154,7 @@ impl App {
     /// this is where that becomes a picture.
     fn dropped_props(&self) -> Vec<crate::render::Prop> {
         let now = self.since_start.elapsed();
-        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         let mut props = Vec::new();
         for (id, entity) in self.entities.iter() {
             let Some(stack) = entity.item.as_ref() else {
@@ -3163,7 +3163,7 @@ impl App {
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
-            let corner = tiamot_core::BlockPos::from_chunk_corner(pose.chunk);
+            let corner = tiamat_core::BlockPos::from_chunk_corner(pose.chunk);
             let at = self.camera.position.offset_to([
                 f64::from(corner.x) + f64::from(pose.local[0]) / cells,
                 f64::from(corner.y) + f64::from(pose.local[1]) / cells,
@@ -3191,7 +3191,7 @@ impl App {
     fn adopt_hotbar(&mut self) {
         let slots = self
             .views
-            .get(tiamot_core::inventory::PLAYER_MAIN)
+            .get(tiamat_core::inventory::PLAYER_MAIN)
             .map(|contents| contents.slots.as_slice())
             .unwrap_or_default();
         self.hotbar = (0..HOTBAR_SLOTS)
@@ -3288,11 +3288,11 @@ impl App {
         }
         // Bounded before it goes out, because the protocol bounds it on arrival
         // and a silently truncated message is worse than one refused here.
-        if text.len() > tiamot_core::proto::MAX_CHAT_BYTES {
+        if text.len() > tiamat_core::proto::MAX_CHAT_BYTES {
             self.warn(format!(
                 "that message is {} bytes, over the {} the protocol allows",
                 text.len(),
-                tiamot_core::proto::MAX_CHAT_BYTES
+                tiamat_core::proto::MAX_CHAT_BYTES
             ));
             return;
         }
@@ -3321,7 +3321,7 @@ impl App {
 
     /// A mod's fade, in ticks, as the mixer's time.
     fn fade_of(ticks: u32) -> std::time::Duration {
-        tiamot_core::tick::TICK_DURATION * ticks
+        tiamat_core::tick::TICK_DURATION * ticks
     }
 
     /// Plays everything the server has said is within earshot.
@@ -3419,7 +3419,7 @@ impl App {
                 .and_then(|id| self.entities.get(id))
                 .and_then(crate::entities::Entity::latest)
                 .map_or(pos, |pose| {
-                    tiamot_core::ent::Transform::at(pose.chunk, pose.local).to_world()
+                    tiamat_core::ent::Transform::at(pose.chunk, pose.local).to_world()
                 });
             let placement = crate::audio::place(at, listener, forward, right, radius, gain);
             // Everything a mod plays is an effect for now. Ambient, music and
@@ -3437,7 +3437,7 @@ impl App {
     /// stack is spent, and a selection left pointing past the end would build
     /// with whatever slid into that position — the sort of bug a player reports
     /// as "it placed the wrong thing" and nobody can reproduce.
-    fn adopt_inventory(&mut self, stacks: Vec<tiamot_core::proto::StackDef>) {
+    fn adopt_inventory(&mut self, stacks: Vec<tiamat_core::proto::StackDef>) {
         self.carried = stacks;
     }
 
@@ -3446,7 +3446,7 @@ impl App {
     /// **Load order decides a conflict**, so inserting in order leaves the last
     /// binding for each cue holding it — the same rule the rest of the mod
     /// system resolves a clash by.
-    fn adopt_bindings(&mut self, bindings: Vec<tiamot_core::proto::SoundBinding>) {
+    fn adopt_bindings(&mut self, bindings: Vec<tiamat_core::proto::SoundBinding>) {
         self.cues = bindings
             .into_iter()
             .map(|binding| (binding.cue, binding.sound))
@@ -3592,11 +3592,11 @@ impl App {
         let origin = predictor.origin();
         // A quarter of a block below the feet: inside the block being stood on
         // rather than in the air above it.
-        let world = tiamot_core::ent::Transform::at(origin, body.position).to_world();
-        let block = tiamot_core::BlockPos::new(
-            tiamot_core::detgen::floor_to_i32(world[0] as f32),
-            tiamot_core::detgen::floor_to_i32(world[1] as f32 - 0.25),
-            tiamot_core::detgen::floor_to_i32(world[2] as f32),
+        let world = tiamat_core::ent::Transform::at(origin, body.position).to_world();
+        let block = tiamat_core::BlockPos::new(
+            tiamat_core::detgen::floor_to_i32(world[0] as f32),
+            tiamat_core::detgen::floor_to_i32(world[1] as f32 - 0.25),
+            tiamat_core::detgen::floor_to_i32(world[2] as f32),
         );
         let chunk = self.store.get(block.chunk())?;
         // The CELL under the foot, not the block: a chiselled block is mostly
@@ -3694,7 +3694,7 @@ impl App {
     /// that is several megabytes for a large mod set.
     fn adopt_atlas(
         &mut self,
-        table: &[tiamot_core::proto::MaterialDef],
+        table: &[tiamat_core::proto::MaterialDef],
         images: &BTreeMap<u16, Image>,
     ) {
         self.adopt_materials(table);
@@ -3782,13 +3782,13 @@ impl App {
     /// because naming needs the frame borrowed and uploading needs the store
     /// mutable, and they are the same `App`. See [`App::dialog_art`].
     pub fn hud_art(&mut self, ctx: &egui::Context) -> crate::pictures::Resolved {
-        let wanted: Vec<tiamot_core::proto::ContentHash> = self
+        let wanted: Vec<tiamat_core::proto::ContentHash> = self
             .hud_frame(|frame| {
                 frame
                     .commands()
                     .iter()
                     .filter_map(|command| match command {
-                        tiamot_core::hud::Command::Image { hash, .. } => Some(*hash),
+                        tiamat_core::hud::Command::Image { hash, .. } => Some(*hash),
                         _ => None,
                     })
                     .collect()
@@ -3997,7 +3997,7 @@ impl App {
     /// wire test and the drawing test each cover one end, and the seam
     /// between them is where a feature goes quietly missing.
     #[must_use]
-    pub fn cloud_map(&self) -> Option<&tiamot_core::atmosphere::CloudMap> {
+    pub fn cloud_map(&self) -> Option<&tiamat_core::atmosphere::CloudMap> {
         self.cloud_map.as_deref()
     }
 
@@ -4009,8 +4009,8 @@ impl App {
     pub const fn clouds(
         &self,
     ) -> (
-        Option<tiamot_core::atmosphere::CloudLayer>,
-        Option<tiamot_core::atmosphere::Clouds>,
+        Option<tiamat_core::atmosphere::CloudLayer>,
+        Option<tiamat_core::atmosphere::Clouds>,
     ) {
         (self.cloud_layer, self.clouds)
     }
@@ -4379,12 +4379,12 @@ impl App {
     /// has no opinion about what a chisel is called (charter rule 1), so a test
     /// that named one would be asserting about `game/` rather than the engine.
     pub fn select_subnode_tool(&mut self) {
-        self.select_brush(tiamot_core::dig::Brush::SubNode.name());
+        self.select_brush(tiamat_core::dig::Brush::SubNode.name());
     }
 
     /// Selects the first tool with a whole-block brush.
     pub fn select_block_tool(&mut self) {
-        self.select_brush(tiamot_core::dig::Brush::Block.name());
+        self.select_brush(tiamat_core::dig::Brush::Block.name());
     }
 
     fn select_brush(&mut self, brush: &str) {
@@ -4405,7 +4405,7 @@ impl App {
 
     /// The tool in hand, if the server has sent its table.
     #[must_use]
-    pub fn held_tool(&self) -> Option<&tiamot_core::proto::ToolDef> {
+    pub fn held_tool(&self) -> Option<&tiamat_core::proto::ToolDef> {
         self.tools.get(self.held_tool)
     }
 
@@ -4474,13 +4474,13 @@ impl App {
 
     /// What is in the off-hand, if anything.
     #[must_use]
-    pub fn offhand(&self) -> Option<tiamot_core::proto::StackDef> {
+    pub fn offhand(&self) -> Option<tiamat_core::proto::StackDef> {
         self.views
-            .get(tiamot_core::inventory::PLAYER_MAIN)
+            .get(tiamat_core::inventory::PLAYER_MAIN)
             .and_then(|contents| {
                 contents
                     .slots
-                    .get(tiamot_core::inventory::PLAYER_OFFHAND_SLOT)
+                    .get(tiamat_core::inventory::PLAYER_OFFHAND_SLOT)
                     .cloned()
                     .flatten()
             })
@@ -4488,13 +4488,13 @@ impl App {
 
     /// The hotbar's slots, holes included.
     #[must_use]
-    pub fn hotbar(&self) -> &[Option<tiamot_core::proto::StackDef>] {
+    pub fn hotbar(&self) -> &[Option<tiamat_core::proto::StackDef>] {
         &self.hotbar
     }
 
     /// What the player is carrying, as `(material, units)` in id order.
     #[must_use]
-    pub fn carried(&self) -> &[tiamot_core::proto::StackDef] {
+    pub fn carried(&self) -> &[tiamat_core::proto::StackDef] {
         &self.carried
     }
 
@@ -4510,7 +4510,7 @@ impl App {
     /// after the join rather than at connect time.
     ///
     /// Returns whether the connection is still up.
-    pub fn impair(&self, impairment: tiamot_server::transport::Impairment) -> bool {
+    pub fn impair(&self, impairment: tiamat_server::transport::Impairment) -> bool {
         self.connection.send(Command::Impair(impairment))
     }
 
@@ -4580,7 +4580,7 @@ impl App {
     /// floats them at and the mesher draws — a tint arriving a fraction of a
     /// cell early or late is the kind of mismatch nobody can debug from a
     /// screenshot.
-    fn submerged_in(&self) -> Option<tiamot_core::fluid::FluidId> {
+    fn submerged_in(&self) -> Option<tiamat_core::fluid::FluidId> {
         let predictor = self.predictor.as_ref()?;
         let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
             .passing(&self.passable);
@@ -4596,7 +4596,7 @@ impl App {
     /// chose, ratcheting the world smaller every time they joined a strict
     /// server.
     fn accept_view_distance(&mut self, horizontal: u8, vertical: u8) {
-        self.granted_view = tiamot_core::interest::ViewDistance::clamped(horizontal, vertical);
+        self.granted_view = tiamat_core::interest::ViewDistance::clamped(horizontal, vertical);
         if horizontal != self.config.view_distance {
             // Worth saying out loud: a player who set 16 and is being sent 8
             // should be able to find out why the world is smaller than they
@@ -4632,7 +4632,7 @@ impl App {
     /// Lifted out of [`App::pump_network`] because that match is at clippy's
     /// line ceiling, and because the horizon clearing the loading screen is a
     /// claim worth stating once rather than a line in a list.
-    fn adopt_summary(&mut self, pos: tiamot_core::ChunkPos, summary: tiamot_core::lod::Summary) {
+    fn adopt_summary(&mut self, pos: tiamat_core::ChunkPos, summary: tiamat_core::lod::Summary) {
         // The horizon counts as terrain arriving: a player who switched domains
         // and is looking at a mountain range a mile off is not waiting any more.
         self.entering = None;
@@ -4757,7 +4757,7 @@ impl App {
             // server's sounds ARE without being able to make one.
             Event::Sounds { sounds } => self.sounds = sounds,
 
-            Event::HudReserve(r) => self.hud_reserve = r.min(tiamot_core::hud::MAX_RESERVE),
+            Event::HudReserve(r) => self.hud_reserve = r.min(tiamat_core::hud::MAX_RESERVE),
             Event::Theme(theme) => self.theme = crate::theme::Theme::of(theme.as_ref()),
 
             Event::HudScript { mod_id, source } => self.adopt_hud_script(&mod_id, &source),
@@ -5028,7 +5028,7 @@ impl App {
         format!(
             "view {} chunks, horizon {}: {} held, {} queued",
             self.granted_view.horizontal,
-            tiamot_core::lod::horizon_for(self.granted_view).horizontal,
+            tiamat_core::lod::horizon_for(self.granted_view).horizontal,
             self.store.summary_len(),
             self.store.stale_len()
         )
@@ -5174,7 +5174,7 @@ impl App {
                 // share of the horizon, which made the number three
                 // indirections away from anything a player could see.
                 f32::from(self.config.fog_chunks)
-                    * tiamot_core::CHUNK_BLOCKS as f32
+                    * tiamat_core::CHUNK_BLOCKS as f32
                     * modifier.fog_distance,
                 // **And straight up or down, the GRANTED vertical view
                 // distance.** The loaded world is a box: chunks reach the
@@ -5184,7 +5184,7 @@ impl App {
                 // edge. There is no horizon of summaries above the box to
                 // leave room for, so this is the box itself.
                 f32::from(self.granted_view.vertical)
-                    * tiamot_core::CHUNK_BLOCKS as f32
+                    * tiamat_core::CHUNK_BLOCKS as f32
                     * modifier.fog_distance,
             ),
         };
@@ -5361,14 +5361,14 @@ impl App {
             return;
         };
         let local = predictor.render_local_at(alpha);
-        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         // Displaced by the debug teleport, or this drags the camera straight
         // back to the body's real position while the world stays 50,000 blocks
         // out — an empty sky, one frame after the jump. `drawn_at` displaces
         // the chunks, so the camera has to be displaced by the same amount or
         // the two are drawn in different coordinate systems. Free-fly never hit
         // this because nothing was writing the camera position every frame.
-        let corner = tiamot_core::BlockPos::from_chunk_corner(self.drawn_at(predictor.origin()));
+        let corner = tiamat_core::BlockPos::from_chunk_corner(self.drawn_at(predictor.origin()));
 
         // Cells to blocks, and the eye offset on top. Presentation arithmetic:
         // the division by three is exact enough for a camera and never feeds
@@ -5483,9 +5483,9 @@ impl App {
     /// Takes a chunk into the store, with its biome colour and its place's fog.
     fn adopt_chunk(
         &mut self,
-        chunk: tiamot_core::Chunk,
+        chunk: tiamat_core::Chunk,
         tint: [u8; 3],
-        fog: Option<tiamot_core::proto::ChunkFog>,
+        fog: Option<tiamat_core::proto::ChunkFog>,
     ) {
         // The new space has started arriving, so there is something to look at.
         // Cleared here rather than on a timer: what the player is waiting for is
@@ -5515,7 +5515,7 @@ impl App {
     /// else.** How much of the world a fluid hides belongs to the material it
     /// is drawn as, because that is what a fluid vertex carries — see
     /// `Renderer::set_fluid_opacity`.
-    fn adopt_fluids(&mut self, fluids: &[tiamot_core::proto::FluidDef]) {
+    fn adopt_fluids(&mut self, fluids: &[tiamat_core::proto::FluidDef]) {
         let opacity: Vec<(u16, f32)> = fluids
             .iter()
             .map(|def| (def.material, def.opacity))
@@ -5525,7 +5525,7 @@ impl App {
     }
 
     /// Makes the particles of bursts a server sent, each lit where it starts.
-    fn adopt_particles(&mut self, bursts: &[tiamot_core::particle::Burst]) {
+    fn adopt_particles(&mut self, bursts: &[tiamat_core::particle::Burst]) {
         for burst in bursts {
             let light = self.particle_light(burst.pos);
             self.particles.spawn(burst, light);
@@ -5537,7 +5537,7 @@ impl App {
     /// A count of zero is how a mod takes one down before its time — a mob
     /// back to full health should not wear an empty bar for the rest of the
     /// second it was given.
-    fn adopt_badge(&mut self, badge: tiamot_core::particle::Badge) {
+    fn adopt_badge(&mut self, badge: tiamat_core::particle::Badge) {
         if badge.count == 0 {
             self.badges.remove(&badge.entity);
             return;
@@ -5565,7 +5565,7 @@ impl App {
         if self.badges.is_empty() {
             return Vec::new();
         }
-        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         let right = self.camera.right();
         let mut sprites = Vec::new();
         for (id, live) in &self.badges {
@@ -5575,7 +5575,7 @@ impl App {
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
-            let corner = tiamot_core::BlockPos::from_chunk_corner(pose.chunk);
+            let corner = tiamat_core::BlockPos::from_chunk_corner(pose.chunk);
             let feet = self.camera.position.offset_to([
                 f64::from(corner.x) + f64::from(pose.local[0]) / cells,
                 f64::from(corner.y) + f64::from(pose.local[1]) / cells,
@@ -5602,7 +5602,7 @@ impl App {
         if let Some(burst) = self.weather.rain.advance(dt, [x, y, z]) {
             let room =
                 crate::particles::PRECIPITATION_SHARE.saturating_sub(self.particles.live().len());
-            let burst = tiamot_core::particle::Burst {
+            let burst = tiamat_core::particle::Burst {
                 count: burst.count.min(u16::try_from(room).unwrap_or(u16::MAX)),
                 ..burst
             };
@@ -5686,7 +5686,7 @@ impl App {
         let origin = predictor.origin();
         let voxels = phys::Voxels::new(&self.store, origin);
         #[expect(clippy::cast_precision_loss, reason = "three, as a float")]
-        let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
+        let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
         let now = self.since_start.elapsed();
 
         // The player first, then everything drawn. Feet in cells relative to
@@ -5698,7 +5698,7 @@ impl App {
                 continue;
             };
             // Into the predictor's chunk frame, which is what `Voxels` indexes.
-            let span = tiamot_core::CHUNK_SUBNODES as i32;
+            let span = tiamat_core::CHUNK_SUBNODES as i32;
             let shift = |axis: usize, chunk: i32| {
                 (chunk
                     - match axis {
@@ -5747,7 +5747,7 @@ impl App {
             let radius = radius * (0.6 + 0.4 * closeness);
             // In cells, which is what the probe and the offsets below speak.
             let reach = radius * cells;
-            let corner = tiamot_core::BlockPos::from_chunk_corner(self.drawn_at(origin));
+            let corner = tiamat_core::BlockPos::from_chunk_corner(self.drawn_at(origin));
 
             for column in crate::render::blob_columns(at, reach, |probe| {
                 ground_below(&voxels, probe, REACH * cells)
@@ -5779,7 +5779,7 @@ impl App {
     /// Its own method because `pump_network` is at clippy's line ceiling, and
     /// because joining is a thing worth naming rather than the longest arm of a
     /// match.
-    fn joined_world(&mut self, spawn: tiamot_core::BlockPos, tick: u64, may_fly: bool, seed: u64) {
+    fn joined_world(&mut self, spawn: tiamat_core::BlockPos, tick: u64, may_fly: bool, seed: u64) {
         self.seed = Some(seed);
         // Kept so the fly toggle can refuse, rather than predicting a power
         // that would be ignored on arrival.
@@ -5811,8 +5811,8 @@ impl App {
         // (chunk, local cells) pair the server simulates in — no
         // conversion, so nothing to disagree about.
         let origin = spawn.chunk();
-        let corner = tiamot_core::BlockPos::from_chunk_corner(origin);
-        let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
+        let corner = tiamat_core::BlockPos::from_chunk_corner(origin);
+        let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
         self.predictor = Some(Predictor::new(
             origin,
             [
@@ -5863,7 +5863,7 @@ impl App {
     /// not is a disagreement every tick — continuous rubber-banding, which is
     /// the seam this repo has been bitten at before. `may_fly` moves with it,
     /// so the flight key and the flight the server honours stay one answer.
-    fn adopt_abilities(&mut self, abilities: tiamot_core::phys::Abilities) {
+    fn adopt_abilities(&mut self, abilities: tiamat_core::phys::Abilities) {
         self.abilities = abilities;
         self.may_fly = abilities.fly;
         if !abilities.wind_sky {
@@ -5882,7 +5882,7 @@ impl App {
 
     /// The abilities the predictor steps with.
     #[must_use]
-    pub const fn abilities(&self) -> tiamot_core::phys::Abilities {
+    pub const fn abilities(&self) -> tiamat_core::phys::Abilities {
         self.abilities
     }
 
@@ -6014,7 +6014,7 @@ impl App {
     /// rate — a gait arriving at twenty hertz would lag every start and stop by
     /// up to a frame and a half of walking.
     fn gait(&self) -> u8 {
-        use tiamot_core::ent::AnimTag;
+        use tiamat_core::ent::AnimTag;
         let Some(predictor) = self.predictor.as_ref() else {
             return AnimTag::IDLE.0;
         };
@@ -6035,7 +6035,7 @@ impl App {
 
     fn place_entities(&mut self) {
         let now = self.since_start.elapsed();
-        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
 
         let mut placed = Vec::with_capacity(self.entities.len());
         // **A mod's models, each in its own list.** `game.register_model`
@@ -6051,7 +6051,7 @@ impl App {
             // put a person where a mod meant a crate. An entity with no model
             // at all is a marker and is meant to be invisible.
             let model = entity.model.as_deref();
-            let own = model == Some(tiamot_core::ent::HUMANOID_MODEL);
+            let own = model == Some(tiamat_core::ent::HUMANOID_MODEL);
             let mods = model.filter(|id| self.renderer.has_model(id));
             if !own && mods.is_none() {
                 continue;
@@ -6059,7 +6059,7 @@ impl App {
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
-            let corner = tiamot_core::BlockPos::from_chunk_corner(pose.chunk);
+            let corner = tiamat_core::BlockPos::from_chunk_corner(pose.chunk);
             // The figure stands ON its feet, not centred in a box: the rig's
             // origin is between them, which is where the server's position is.
             let feet = [
@@ -6304,7 +6304,7 @@ impl App {
                             .map_or_else(|| format!("#{id}"), Clone::clone);
                         // Charter rule 5's display: blocks and spare nodes, not
                         // a raw unit count. 27 units is one block.
-                        let (blocks, spares) = tiamot_core::inventory::display(*units);
+                        let (blocks, spares) = tiamat_core::inventory::display(*units);
                         let marker = if slot == self.selected { ">" } else { " " };
                         format!("{marker}{}:{name} {blocks}b+{spares}n", slot + 1)
                     })
@@ -6350,7 +6350,7 @@ impl App {
     /// digs with the server's own default, which is the same tool this picks.
     /// The first `next_tool` is the first time the two could disagree, and that
     /// is when it is sent.
-    fn adopt_tools(&mut self, tools: Vec<tiamot_core::proto::ToolDef>) {
+    fn adopt_tools(&mut self, tools: Vec<tiamat_core::proto::ToolDef>) {
         // The default first, so a player who never touches the tool key is
         // holding whatever the mods call a bare hand.
         self.held_tool = tools.iter().position(|tool| tool.default).unwrap_or(0);
@@ -6398,7 +6398,7 @@ impl App {
     ///
     /// `None` when there is no runtime at all. An empty frame is not the same
     /// thing and is the ordinary case on a server that pushes no HUD.
-    pub fn hud_frame<T>(&self, visit: impl FnOnce(&tiamot_core::hud::Frame) -> T) -> Option<T> {
+    pub fn hud_frame<T>(&self, visit: impl FnOnce(&tiamat_core::hud::Frame) -> T) -> Option<T> {
         self.hud_vm.as_ref().and_then(|vm| vm.with_frame(visit))
     }
 
@@ -6406,15 +6406,15 @@ impl App {
     ///
     /// `None` before the player exists — there is no situation to describe yet,
     /// and a script asked about one would draw a hotbar of zeroes.
-    fn hud_state(&self) -> Option<tiamot_core::hud::State> {
+    fn hud_state(&self) -> Option<tiamat_core::hud::State> {
         let predictor = self.predictor.as_ref()?;
         let (x, y, z) = self.camera.position.to_world();
         let carried = self
             .hotbar
             .iter()
             .map(|slot| {
-                slot.as_ref().map(|stack| tiamot_core::hud::Carried {
-                    material: tiamot_core::MaterialId(stack.material),
+                slot.as_ref().map(|stack| tiamat_core::hud::Carried {
+                    material: tiamat_core::MaterialId(stack.material),
                     // The string id, because that is what is canonical (charter
                     // rule 8) and the number is per-session. A script showing a
                     // name shows this one.
@@ -6429,8 +6429,8 @@ impl App {
                 })
             })
             .collect();
-        let offhand = self.offhand().map(|stack| tiamot_core::hud::Carried {
-            material: tiamot_core::MaterialId(stack.material),
+        let offhand = self.offhand().map(|stack| tiamat_core::hud::Carried {
+            material: tiamat_core::MaterialId(stack.material),
             name: self
                 .materials
                 .get(&stack.material)
@@ -6444,8 +6444,8 @@ impl App {
         let looking_at = self.looking_at().map(|hit| {
             let material = voxels
                 .material(hit.cell[0], hit.cell[1], hit.cell[2])
-                .unwrap_or(tiamot_core::MaterialId::AIR);
-            tiamot_core::hud::Look {
+                .unwrap_or(tiamat_core::MaterialId::AIR);
+            tiamat_core::hud::Look {
                 cell: hit.cell,
                 material,
                 name: self
@@ -6455,7 +6455,7 @@ impl App {
                     .unwrap_or_else(|| format!("#{}", material.0)),
             }
         });
-        Some(tiamot_core::hud::State {
+        Some(tiamat_core::hud::State {
             position: [x, y, z],
             yaw: self.camera.yaw,
             pitch: self.camera.pitch,
@@ -6473,8 +6473,8 @@ impl App {
             )]
             dig: self
                 .dig
-                .map(|(_, progress)| tiamot_core::hud::Fill::per_mille((progress * 1000.0) as i32)),
-            tool: self.held_tool().map(|tool| tiamot_core::hud::HeldTool {
+                .map(|(_, progress)| tiamat_core::hud::Fill::per_mille((progress * 1000.0) as i32)),
+            tool: self.held_tool().map(|tool| tiamat_core::hud::HeldTool {
                 id: tool.id.clone(),
                 name: tool.name.clone(),
                 brush: tool.brush.clone(),
@@ -6521,7 +6521,7 @@ fn human_bytes(bytes: u64) -> String {
 /// lookups per body per frame — and the alternative is a ray cast answering the
 /// same question with more arithmetic. `None` means a body over a drop, which
 /// correctly casts no blob: there is no ground under it to mark.
-fn ground_below<S: tiamot_core::phys::ChunkLookup>(
+fn ground_below<S: tiamat_core::phys::ChunkLookup>(
     voxels: &phys::Voxels<'_, S>,
     at: [f32; 3],
     reach: f32,
@@ -6531,10 +6531,10 @@ fn ground_below<S: tiamot_core::phys::ChunkLookup>(
     // of a floor in this workspace and using the other one here would be a
     // reader's question every time.
     let (x, z) = (
-        tiamot_core::detgen::floor_to_i32(at[0]),
-        tiamot_core::detgen::floor_to_i32(at[2]),
+        tiamat_core::detgen::floor_to_i32(at[0]),
+        tiamat_core::detgen::floor_to_i32(at[2]),
     );
-    let top = tiamot_core::detgen::floor_to_i32(at[1]);
+    let top = tiamat_core::detgen::floor_to_i32(at[1]);
     #[expect(
         clippy::cast_possible_truncation,
         reason = "a reach of a few blocks is a small integer"
@@ -6544,7 +6544,7 @@ fn ground_below<S: tiamot_core::phys::ChunkLookup>(
         let y = top - step;
         if voxels
             .material(x, y, z)
-            .is_some_and(|material| material != tiamot_core::MaterialId::AIR)
+            .is_some_and(|material| material != tiamat_core::MaterialId::AIR)
         {
             // The TOP of that cell is the surface the disc lies on.
             #[expect(
@@ -6585,7 +6585,7 @@ pub fn compass(yaw: f32) -> &'static str {
 /// practice, but the table is a server's word — become it too.
 #[must_use]
 pub fn build_atlas(
-    table: &[tiamot_core::proto::MaterialDef],
+    table: &[tiamat_core::proto::MaterialDef],
     images: &BTreeMap<u16, Image>,
 ) -> Atlas {
     let highest = table.iter().map(|entry| entry.id).max().unwrap_or(0);
@@ -6626,7 +6626,7 @@ enum Resync {
 ///
 /// **A client that runs ahead of its server never recovers on its own.**
 /// `InputQueue::offer` refuses any tick more than
-/// [`tiamot_core::phys::input::MAX_LOOKAHEAD`] past the one being applied, and
+/// [`tiamat_core::phys::input::MAX_LOOKAHEAD`] past the one being applied, and
 /// both ends then advance at the same 20 Hz — so a gap opened once stays open
 /// and every input from then on is thrown away. Reported from the window as
 /// walking putting the player back where they started after using the pause
@@ -6636,7 +6636,7 @@ enum Resync {
 /// module's, so it fires before an input would be refused rather than after.
 const fn resync_plan(client: u64, server: u64) -> Resync {
     let want = server + INPUT_LEAD;
-    if client > want + tiamot_core::phys::input::MAX_LOOKAHEAD / 2 {
+    if client > want + tiamat_core::phys::input::MAX_LOOKAHEAD / 2 {
         return Resync::Ahead;
     }
     if client >= want {
@@ -6710,7 +6710,7 @@ fn shared_defaults(actions: &crate::input::Actions) -> Vec<(String, String)> {
 fn keeps_lock(to_block: [f32; 3], forward: [f32; 3], block_has_material: bool) -> bool {
     /// Half a block, in cells: the box reaches this far either side of its
     /// centre on every axis.
-    const HALF: f32 = tiamot_core::SUBNODES_PER_AXIS as f32 / 2.0;
+    const HALF: f32 = tiamat_core::SUBNODES_PER_AXIS as f32 / 2.0;
 
     if !block_has_material {
         return false;
@@ -6821,7 +6821,7 @@ mod dig_lock_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::proto::MaterialDef;
+    use tiamat_core::proto::MaterialDef;
 
     #[test]
     fn a_badge_is_a_centred_row_over_an_entitys_head() {
@@ -6830,7 +6830,7 @@ mod tests {
         // entity (a bar inside a cow is worse than none), it is CENTRED on it
         // whatever its length (or a health bar slides sideways as it drains),
         // and every icon draws the SAME picture.
-        let badge = tiamot_core::particle::Badge {
+        let badge = tiamat_core::particle::Badge {
             entity: 1,
             picture: [7; 32],
             count: 4,
@@ -6865,7 +6865,7 @@ mod tests {
         // out, which reads as a bar that drifts as it drains.
         let middle = |count: u8| {
             let row = badge_row(
-                &tiamot_core::particle::Badge { count, ..badge },
+                &tiamat_core::particle::Badge { count, ..badge },
                 [10.0, 20.0, 30.0],
                 5.4,
                 right,
@@ -6904,7 +6904,7 @@ mod tests {
         // is hardest to mesh would be the one never drawn.
         //
         // This is that case exactly: a deadline already long past.
-        use tiamot_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
+        use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
         let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
         for x in 0..6 {
@@ -6979,7 +6979,7 @@ mod tests {
 
     #[test]
     fn the_wire_carries_flight_and_not_just_the_flag_that_says_it_is_on() {
-        use tiamot_core::proto::actions;
+        use tiamat_core::proto::actions;
 
         // **The bug this exists for.** Flight was toggled, predicted locally
         // and drawn on the HUD, and the input that went to the server never
@@ -7013,7 +7013,7 @@ mod tests {
 
     #[test]
     fn a_client_that_ran_ahead_of_its_server_snaps_back() {
-        use tiamot_core::phys::input::MAX_LOOKAHEAD;
+        use tiamat_core::phys::input::MAX_LOOKAHEAD;
 
         // **Reported from the window**: after the pause menu, walking put the
         // player straight back where they started, for ever, and their own body
@@ -7523,9 +7523,9 @@ pub fn apply_to_renderer(config: &Config, renderer: &mut Renderer) {
     renderer.set_shadow_quality(config.shadow_quality);
     renderer.set_sky(
         crate::render::sky_colour(),
-        f32::from(config.view_distance) * tiamot_core::CHUNK_BLOCKS as f32,
+        f32::from(config.view_distance) * tiamat_core::CHUNK_BLOCKS as f32,
     );
     renderer.set_fog_height(
-        f32::from(config.vertical_view_distance) * tiamot_core::CHUNK_BLOCKS as f32,
+        f32::from(config.vertical_view_distance) * tiamat_core::CHUNK_BLOCKS as f32,
     );
 }

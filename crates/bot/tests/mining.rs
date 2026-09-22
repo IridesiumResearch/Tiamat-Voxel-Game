@@ -18,16 +18,16 @@
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::inventory::display;
-use tiamot_core::{BlockPos, MaterialId, SubNodePos, UNITS_PER_BLOCK};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::inventory::display;
+use tiamat_core::{BlockPos, MaterialId, SubNodePos, UNITS_PER_BLOCK};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 
 fn stone() -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for (index, name) in MATERIALS.iter().enumerate() {
         let assigned = registry.register(name).expect("register");
@@ -48,7 +48,7 @@ fn reference_mods() -> std::path::PathBuf {
 
 /// A server running the reference mods, so digging is possible at all.
 fn start_with_mods(name: &str) -> ServerHandle {
-    let dir = std::env::temp_dir().join("tiamot-mining").join(name);
+    let dir = std::env::temp_dir().join("tiamat-mining").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -71,7 +71,7 @@ fn start_with_mods(name: &str) -> ServerHandle {
 }
 
 fn start(name: &str) -> ServerHandle {
-    let dir = std::env::temp_dir().join("tiamot-mining").join(name);
+    let dir = std::env::temp_dir().join("tiamat-mining").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -105,10 +105,10 @@ fn saw_removal(bot: &Bot, pos: BlockPos) -> bool {
     bot.received().into_iter().any(|message| {
         matches!(
             message,
-            tiamot_core::proto::ServerMessage::BlockDelta {
-                edit: tiamot_core::proto::Edit::Block { pos: at, material },
+            tiamat_core::proto::ServerMessage::BlockDelta {
+                edit: tiamat_core::proto::Edit::Block { pos: at, material },
                 ..
-            } if at == pos && material == tiamot_core::MaterialId::AIR.0
+            } if at == pos && material == tiamat_core::MaterialId::AIR.0
         )
     })
 }
@@ -549,11 +549,11 @@ fn a_dig_takes_time_and_yields_the_block_it_broke() {
             .expect("the block should exist before it can be dug");
 
         // Aim at the middle cell of the block.
-        let target = tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+        let target = tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
         let started = std::time::Instant::now();
         bot.start_dig(target).await.expect("start dig");
 
-        bot.expect_block(pos, tiamot_core::MaterialId::AIR.0, Duration::from_secs(20))
+        bot.expect_block(pos, tiamat_core::MaterialId::AIR.0, Duration::from_secs(20))
             .await
             .expect("the block should break on its own once the ticks are counted");
         let took = started.elapsed();
@@ -595,7 +595,7 @@ fn cancelling_a_dig_leaves_the_block_alone() {
             .await
             .expect("place should land");
 
-        let target = tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+        let target = tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
         bot.start_dig(target).await.expect("start");
         tokio::time::sleep(Duration::from_millis(150)).await;
         bot.stop_dig().await.expect("cancel");
@@ -627,7 +627,7 @@ fn deleting_the_tools_mod_makes_the_world_undiggable() {
     // on one that cannot dig at all.
     let stone = stone();
     let target_of =
-        |pos: BlockPos| tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+        |pos: BlockPos| tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
 
     // With the tools mod: the block goes.
     let server = start_with_mods("tools-present");
@@ -640,7 +640,7 @@ fn deleting_the_tools_mod_makes_the_world_undiggable() {
             .expect("place should land");
 
         bot.start_dig(target_of(pos)).await.expect("start dig");
-        bot.expect_block(pos, tiamot_core::MaterialId::AIR.0, Duration::from_secs(20))
+        bot.expect_block(pos, tiamat_core::MaterialId::AIR.0, Duration::from_secs(20))
             .await
             .expect("with a tools mod loaded, digging must work");
     });
@@ -681,7 +681,7 @@ fn the_chisel_takes_one_cell_where_a_hand_takes_the_block() {
     block_on(async {
         let mut bot = join(&server).await;
         let pos = BlockPos::new(2, -1, 0);
-        let target = tiamot_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+        let target = tiamat_core::SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
 
         assert!(server.seed_block(pos, stone), "seed queue full");
         bot.expect_block(pos, stone, Duration::from_secs(10))
@@ -712,23 +712,23 @@ fn the_chisel_takes_one_cell_where_a_hand_takes_the_block() {
             .received()
             .into_iter()
             .filter_map(|message| match message {
-                tiamot_core::proto::ServerMessage::BlockDelta { edit, .. } => Some(edit),
+                tiamat_core::proto::ServerMessage::BlockDelta { edit, .. } => Some(edit),
                 _ => None,
             })
             .collect();
         assert!(
             edits.iter().any(|edit| matches!(
                 edit,
-                tiamot_core::proto::Edit::SubNode { pos: at, material }
-                    if *at == target && *material == tiamot_core::MaterialId::AIR.0
+                tiamat_core::proto::Edit::SubNode { pos: at, material }
+                    if *at == target && *material == tiamat_core::MaterialId::AIR.0
             )),
             "no sub-node removal at the chiselled cell: {edits:?}"
         );
         assert!(
             !edits.iter().any(|edit| matches!(
                 edit,
-                tiamot_core::proto::Edit::Block { pos: at, material }
-                    if *at == pos && *material == tiamot_core::MaterialId::AIR.0
+                tiamat_core::proto::Edit::Block { pos: at, material }
+                    if *at == pos && *material == tiamat_core::MaterialId::AIR.0
             )),
             "the chisel removed the whole block instead of one cell: {edits:?}"
         );
@@ -760,7 +760,7 @@ fn a_bot_that_has_just_jumped_digs_from_the_ground_and_not_from_the_air() {
         // deliberately. Sampled across the arc rather than at a guessed tick:
         // which tick is the top of a jump is a physics constant this test has
         // no business pinning.
-        bot.walk([0.0; 3], tiamot_core::proto::actions::JUMP, 1)
+        bot.walk([0.0; 3], tiamat_core::proto::actions::JUMP, 1)
             .await
             .expect("jump");
         let mut highest = ground;

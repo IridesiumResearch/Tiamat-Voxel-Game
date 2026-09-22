@@ -3,7 +3,7 @@
 
 //! Capturing a box of the world into a plan, and stamping one back.
 //!
-//! The server half of [`tiamot_core::plan`]: what a mod's `game.plans` calls
+//! The server half of [`tiamat_core::plan`]: what a mod's `game.plans` calls
 //! actually reach.
 //!
 //! # Reading goes through the lease; writing goes through the queue
@@ -31,9 +31,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tiamot_core::plan::{Plan, PlanError};
-use tiamot_core::proto::Edit;
-use tiamot_core::{BlockPos, BlockView};
+use tiamat_core::plan::{Plan, PlanError};
+use tiamat_core::proto::Edit;
+use tiamat_core::{BlockPos, BlockView};
 use tracing::debug;
 
 use crate::world::World;
@@ -48,7 +48,7 @@ use crate::world::World;
 ///
 /// At 20 Hz this is 5,120 blocks a second: a house of a few thousand blocks
 /// appears in under a second, and the largest plan the format allows
-/// ([`tiamot_core::plan::MAX_CELLS`], 65,536) takes about thirteen. Watching a
+/// ([`tiamat_core::plan::MAX_CELLS`], 65,536) takes about thirteen. Watching a
 /// big structure build itself over a few seconds is also the more useful
 /// behaviour of the two — a mod can play a sound over it, and a player can see
 /// where it is going.
@@ -99,7 +99,7 @@ struct Stamping {
     /// Positions whose block has already been replaced this stamp.
     ///
     /// A mixed block is several cells at one position (see
-    /// [`tiamot_core::plan`]): the first REPLACES the block and the rest add
+    /// [`tiamat_core::plan`]): the first REPLACES the block and the rest add
     /// their cells to it. Without this the second material would wipe the
     /// first, and the block would come out holding whichever material was
     /// captured last.
@@ -267,7 +267,7 @@ impl Stamping {
 /// add a second material to a block without erasing the first.
 fn block_edits(pos: BlockPos, material: u16, occupancy: u32, opened: bool) -> Vec<Edit> {
     if !opened {
-        return vec![if occupancy == tiamot_core::block::OCCUPANCY_FULL {
+        return vec![if occupancy == tiamat_core::block::OCCUPANCY_FULL {
             Edit::Block { pos, material }
         } else {
             Edit::Partial {
@@ -277,10 +277,10 @@ fn block_edits(pos: BlockPos, material: u16, occupancy: u32, opened: bool) -> Ve
             }
         }];
     }
-    (0..tiamot_core::block::SUBNODES_PER_BLOCK)
+    (0..tiamat_core::block::SUBNODES_PER_BLOCK)
         .filter(|index| occupancy & (1 << index) != 0)
         .map(|index| {
-            let (dx, dy, dz) = tiamot_core::block::subnode_offset(index);
+            let (dx, dy, dz) = tiamat_core::block::subnode_offset(index);
             Edit::SubNode {
                 pos: pos.subnode(dx as i32, dy as i32, dz as i32),
                 material,
@@ -312,7 +312,7 @@ impl EditQueue for crate::transport::Shared {
 ///
 /// # Errors
 ///
-/// [`PlanError::Side`] for a box bigger than [`tiamot_core::plan::MAX_SIDE`],
+/// [`PlanError::Side`] for a box bigger than [`tiamat_core::plan::MAX_SIDE`],
 /// [`PlanError::NotLoaded`] if any of it is in a chunk that is not resident,
 /// and [`PlanError::TooManyCells`] for a box holding more blocks than a plan
 /// may.
@@ -329,7 +329,7 @@ pub fn capture(
         let side = i64::from(high) - i64::from(low) + 1;
         u16::try_from(side)
             .ok()
-            .filter(|side| *side <= tiamot_core::plan::MAX_SIDE)
+            .filter(|side| *side <= tiamat_core::plan::MAX_SIDE)
             .ok_or(PlanError::Side {
                 axis,
                 side: u32::try_from(side).unwrap_or(u32::MAX),
@@ -343,7 +343,7 @@ pub fn capture(
     let mut plan = Plan::new(size)?;
 
     let terrain = world.solid(domain);
-    let mut held: Option<(tiamot_core::coords::ChunkPos, &tiamot_core::chunk::Chunk)> = None;
+    let mut held: Option<(tiamat_core::coords::ChunkPos, &tiamat_core::chunk::Chunk)> = None;
     for z in low.z..=high.z {
         for y in low.y..=high.y {
             for x in low.x..=high.x {
@@ -377,7 +377,7 @@ pub fn capture(
 /// Writes one block of the world into a plan.
 ///
 /// A mixed block becomes one entry per material, each with its own mask — the
-/// layering [`tiamot_core::plan`] documents. Air is not recorded at all.
+/// layering [`tiamat_core::plan`] documents. Air is not recorded at all.
 fn record(
     plan: &mut Plan,
     by_id: &BTreeMap<u16, String>,
@@ -388,15 +388,15 @@ fn record(
     // rule 8 says a preserved id reads as. Recording it keeps the plan the same
     // shape as the thing it was captured from; stamping it back finds no
     // registered material and leaves that block alone.
-    let name = |material: tiamot_core::MaterialId| -> &str {
+    let name = |material: tiamat_core::MaterialId| -> &str {
         by_id
             .get(&material.0)
-            .map_or(tiamot_core::material::UNKNOWN_NAME, String::as_str)
+            .map_or(tiamat_core::material::UNKNOWN_NAME, String::as_str)
     };
     match view {
         BlockView::Uniform(material) => {
             if !material.is_air() {
-                plan.set(at, name(*material), tiamot_core::block::OCCUPANCY_FULL)?;
+                plan.set(at, name(*material), tiamat_core::block::OCCUPANCY_FULL)?;
             }
         }
         BlockView::Partial {
@@ -407,7 +407,7 @@ fn record(
                 plan.set(
                     at,
                     name(*material),
-                    occupancy & tiamot_core::block::OCCUPANCY_FULL,
+                    occupancy & tiamat_core::block::OCCUPANCY_FULL,
                 )?;
             }
         }
@@ -462,7 +462,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::plan::Access for Shared {
+impl tiamat_core::plan::Access for Shared {
     fn capture(&self, domain: &str, from: BlockPos, to: BlockPos) -> Result<Plan, PlanError> {
         self.lease
             .with_world(|world| capture(world, &self.names.by_id, domain, from, to))
@@ -510,9 +510,9 @@ impl tiamot_core::plan::Access for Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiamot_core::MaterialId;
-    use tiamot_core::chunk::Chunk;
-    use tiamot_core::coords::ChunkPos;
+    use tiamat_core::MaterialId;
+    use tiamat_core::chunk::Chunk;
+    use tiamat_core::coords::ChunkPos;
 
     const MATERIALS: [&str; 3] = ["test:stone", "test:wood", "test:glass"];
 
@@ -531,18 +531,18 @@ mod tests {
 
     /// A world with the three test materials, and the name table for them.
     fn world(name: &str) -> (World, Names, Vec<MaterialId>) {
-        let dir = std::env::temp_dir().join("tiamot-plan-tests");
+        let dir = std::env::temp_dir().join("tiamat-plan-tests");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join(format!("{name}.sqlite"));
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
-        let mut registry = tiamot_core::Registry::new();
+        let mut registry = tiamat_core::Registry::new();
         let ids: Vec<MaterialId> = MATERIALS
             .iter()
             .map(|name| registry.register(name).expect("register"))
             .collect();
-        let db = tiamot_core::WorldDb::open(&path, &mut registry).expect("open");
+        let db = tiamat_core::WorldDb::open(&path, &mut registry).expect("open");
         // The world's own numbering, which is what a chunk holds and what an
         // edit names — NOT the runtime ids above (charter rule 8).
         let by_name = MATERIALS
@@ -610,7 +610,7 @@ mod tests {
                 ((index / 16) % 16) as u16,
                 (index / 256) as u16,
             ];
-            plan.set(at, "test:stone", tiamot_core::block::OCCUPANCY_FULL)
+            plan.set(at, "test:stone", tiamat_core::block::OCCUPANCY_FULL)
                 .expect("in bounds");
         }
         plan
@@ -620,7 +620,7 @@ mod tests {
     fn a_capture_reads_the_terrain_and_leaves_the_air_out() {
         let (mut world, names, ids) = world("capture");
         let mut flat = Flat(ids[0]);
-        let overworld = tiamot_core::domain::OVERWORLD;
+        let overworld = tiamat_core::domain::OVERWORLD;
         world
             .chunk(overworld, ChunkPos::new(0, -1, 0), &mut flat)
             .expect("load");
@@ -657,7 +657,7 @@ mod tests {
         let refusal = capture(
             &world,
             &names.by_id,
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             BlockPos::new(0, -4, 0),
             BlockPos::new(1, 1, 1),
         )
@@ -674,7 +674,7 @@ mod tests {
         let refusal = capture(
             &world,
             &names.by_id,
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             BlockPos::new(0, 0, 0),
             BlockPos::new(0, 0, 500),
         )
@@ -696,7 +696,7 @@ mod tests {
         // is the point of the engine.
         let (mut world, names, ids) = world("capture-mixed");
         let mut flat = Flat(ids[0]);
-        let overworld = tiamot_core::domain::OVERWORLD;
+        let overworld = tiamat_core::domain::OVERWORLD;
         let block = BlockPos::new(0, 4, 0);
         world
             .chunk(overworld, block.chunk(), &mut flat)
@@ -706,7 +706,7 @@ mod tests {
         let wood = names.by_name["test:wood"];
         let glass = names.by_name["test:glass"];
         for (cell, material) in [(0, wood), (1, wood), (2, glass)] {
-            let (dx, dy, dz) = tiamot_core::block::subnode_offset(cell);
+            let (dx, dy, dz) = tiamat_core::block::subnode_offset(cell);
             world
                 .apply(
                     overworld,
@@ -759,7 +759,7 @@ mod tests {
         let slate = Slate::with_room(usize::MAX);
         let blocks = BLOCKS_PER_TICK * 2 + 5;
         assert!(stamps.accept(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             BlockPos::new(0, 0, 0),
             cottage(blocks),
         ));
@@ -790,7 +790,7 @@ mod tests {
         let stamps = Stamps::new(std::sync::Arc::new(names));
         let slate = Slate::with_room(10);
         assert!(stamps.accept(
-            tiamot_core::domain::OVERWORLD,
+            tiamat_core::domain::OVERWORLD,
             BlockPos::new(0, 0, 0),
             cottage(30),
         ));
@@ -813,14 +813,14 @@ mod tests {
         let stamps = Stamps::new(std::sync::Arc::new(names));
         for _ in 0..MAX_PENDING {
             assert!(stamps.accept(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 BlockPos::new(0, 0, 0),
                 cottage(1),
             ));
         }
         assert!(
             !stamps.accept(
-                tiamot_core::domain::OVERWORLD,
+                tiamat_core::domain::OVERWORLD,
                 BlockPos::new(0, 0, 0),
                 cottage(1)
             ),
@@ -850,7 +850,7 @@ mod tests {
     fn what_a_capture_costs() {
         let (mut world, names, ids) = world("capture-cost");
         let mut flat = Flat(ids[0]);
-        let overworld = tiamot_core::domain::OVERWORLD;
+        let overworld = tiamat_core::domain::OVERWORLD;
         for x in -1..=4 {
             for y in -5..=5 {
                 for z in -1..=4 {
@@ -871,7 +871,7 @@ mod tests {
             println!(
                 "{what}: {taken:?} ({:.1}% of a 50 ms tick), {:?}",
                 taken.as_secs_f64() * 1000.0 / 50.0 * 100.0,
-                plan.as_ref().map(tiamot_core::plan::Plan::len)
+                plan.as_ref().map(tiamat_core::plan::Plan::len)
             );
         }
     }

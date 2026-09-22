@@ -34,7 +34,7 @@
 
 use std::sync::mpsc;
 
-use tiamot_core::{BlockPos, SubNodePos};
+use tiamat_core::{BlockPos, SubNodePos};
 
 /// One thing a script asked the bot to do.
 ///
@@ -96,7 +96,7 @@ pub enum Reply {
     /// The command succeeded and carried no data.
     Done,
     /// The current inventory, as `(material id, units)`.
-    Inventory(Vec<tiamot_core::proto::StackDef>),
+    Inventory(Vec<tiamat_core::proto::StackDef>),
     /// A line of text, for a report.
     Text(String),
     /// The command failed; the script should stop.
@@ -365,10 +365,10 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
 
     // Constants a script needs to do unit arithmetic without hard-coding 27.
     table
-        .set("UNITS_PER_BLOCK", tiamot_core::UNITS_PER_BLOCK)
+        .set("UNITS_PER_BLOCK", tiamat_core::UNITS_PER_BLOCK)
         .map_err(|err| format!("could not set bot.UNITS_PER_BLOCK: {err}"))?;
     table
-        .set("AIR", tiamot_core::MaterialId::AIR.0)
+        .set("AIR", tiamat_core::MaterialId::AIR.0)
         .map_err(|err| format!("could not set bot.AIR: {err}"))?;
 
     lua.globals()
@@ -546,7 +546,7 @@ mod tests {
              bot.assert(inv[2] == 243, 'expected 243 units, got ' .. tostring(inv[2]))\n\
              bot.assert(inv[2] / bot.UNITS_PER_BLOCK == 9, 'expected 9 blocks')",
             |command| match command {
-                Command::Inventory => Reply::Inventory(vec![tiamot_core::proto::StackDef {
+                Command::Inventory => Reply::Inventory(vec![tiamat_core::proto::StackDef {
                     material: 2,
                     units: 243,
                     shape: 0,

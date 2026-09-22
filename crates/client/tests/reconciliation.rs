@@ -22,7 +22,7 @@
 //! On loopback the client is a handful of milliseconds ahead of the server, so
 //! there is almost nothing in flight and almost nothing to reconcile. A
 //! reconciliation test on loopback passes on a client whose replay logic is
-//! entirely broken. See `tiamot_server::transport::Impairment`.
+//! entirely broken. See `tiamat_server::transport::Impairment`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -33,17 +33,17 @@ use client::config::{Config, RenderMode};
 use client::net::Connection;
 use client::predict::SNAP_DISTANCE;
 use client::render::{Gpu, Renderer};
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::transport::Impairment;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::transport::Impairment;
+use tiamat_server::{ServerHandle, Settings};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("tiamot-reconciliation")
+        .join("tiamat-reconciliation")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -63,8 +63,8 @@ fn gpu() -> Option<Gpu> {
         Ok(gpu) => Some(gpu),
         Err(err) => {
             assert!(
-                std::env::var("TIAMOT_REQUIRE_GPU").is_err(),
-                "TIAMOT_REQUIRE_GPU is set and no adapter was available: {err}"
+                std::env::var("TIAMAT_REQUIRE_GPU").is_err(),
+                "TIAMAT_REQUIRE_GPU is set and no adapter was available: {err}"
             );
             println!("SKIPPING: no graphics adapter on this machine ({err})");
             None
@@ -216,7 +216,7 @@ fn walking_over_a_bad_link_keeps_the_correction_small() {
          ({:.3} yards); {samples} of the sampled windows had any correction at all",
         conditions.latency_ms,
         conditions.loss_percent,
-        worst / tiamot_core::SUBNODES_PER_AXIS as f32,
+        worst / tiamat_core::SUBNODES_PER_AXIS as f32,
     );
 
     // Bounded ABOVE, which is the criterion: `SNAP_DISTANCE` is where the

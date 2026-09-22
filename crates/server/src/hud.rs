@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use tiamot_core::PlayerUuid;
-use tiamot_core::hud::Values;
+use tiamat_core::PlayerUuid;
+use tiamat_core::hud::Values;
 
 /// The mod-facing handle on the per-player HUD values.
 pub struct Shared {
@@ -30,7 +30,7 @@ impl Shared {
     }
 }
 
-impl tiamot_core::hud::Access for Shared {
+impl tiamat_core::hud::Access for Shared {
     fn set_hud(&self, mod_id: &str, player: [u8; 32], values: Values) -> bool {
         let uuid = PlayerUuid::from_bytes(player);
         // **Whether the player is here, not whether the write happened.** A mod

@@ -2304,9 +2304,9 @@ mod tests {
         //
         // A real file rather than `open_in_memory`, because the whole point is
         // to close a world and open it again with different code.
-        let dir = std::env::temp_dir().join("tiamot-pre-fluid-world");
+        let dir = std::env::temp_dir().join("tiamat-pre-fluid-world");
         std::fs::create_dir_all(&dir).expect("scratch dir");
-        let path = dir.join(format!("{}.tiamot", std::process::id()));
+        let path = dir.join(format!("{}.tiamat", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let pos = ChunkPos::new(2, 0, -1);

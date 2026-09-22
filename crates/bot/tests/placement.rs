@@ -27,11 +27,11 @@
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::inventory::display;
-use tiamot_core::{BlockPos, MaterialId, SubNodePos, UNITS_PER_BLOCK};
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::inventory::display;
+use tiamat_core::{BlockPos, MaterialId, SubNodePos, UNITS_PER_BLOCK};
+use tiamat_server::{ServerHandle, Settings};
 
 const MATERIALS: [&str; 2] = ["test:stone", "test:dirt"];
 
@@ -44,7 +44,7 @@ fn stone() -> u16 {
 
 /// The `index`th of [`MATERIALS`], as the world id it is registered with.
 fn material(index: usize) -> u16 {
-    let mut registry = tiamot_core::Registry::new();
+    let mut registry = tiamat_core::Registry::new();
     let mut id = MaterialId::AIR;
     for (at, name) in MATERIALS.iter().enumerate() {
         let assigned = registry.register(name).expect("register");
@@ -64,7 +64,7 @@ fn reference_mods() -> std::path::PathBuf {
 
 /// A server running the reference mods, so there are tools to dig with.
 fn start(name: &str) -> ServerHandle {
-    let dir = std::env::temp_dir().join("tiamot-placement").join(name);
+    let dir = std::env::temp_dir().join("tiamat-placement").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
@@ -361,7 +361,7 @@ fn a_subnode_placement_into_an_occupied_cell_is_refused_and_says_so() {
             .expect("credit");
         assert_eq!(held(&bot, stone), 1);
 
-        bot.hold_brush(tiamot_core::dig::Brush::SubNode.name())
+        bot.hold_brush(tiamat_core::dig::Brush::SubNode.name())
             .await
             .expect("a subnode tool is registered");
         bot.place_from_inventory(solid, stone).await.expect("send");
@@ -495,11 +495,11 @@ fn placing_inside_a_player_is_refused() {
         // call without SSE4.1 (charter rule 4). A test is not exempt — a test
         // that computed a different cell on a different machine would be a
         // flake nobody could reproduce.
-        let cell = |axis: usize| tiamot_core::detgen::floor_to_i32(position.local[axis]);
+        let cell = |axis: usize| tiamat_core::detgen::floor_to_i32(position.local[axis]);
         let feet = SubNodePos::new(
-            position.chunk.x * tiamot_core::CHUNK_SUBNODES as i32 + cell(0),
-            position.chunk.y * tiamot_core::CHUNK_SUBNODES as i32 + cell(1),
-            position.chunk.z * tiamot_core::CHUNK_SUBNODES as i32 + cell(2),
+            position.chunk.x * tiamat_core::CHUNK_SUBNODES as i32 + cell(0),
+            position.chunk.y * tiamat_core::CHUNK_SUBNODES as i32 + cell(1),
+            position.chunk.z * tiamat_core::CHUNK_SUBNODES as i32 + cell(2),
         );
 
         bot.place_from_inventory(feet, stone).await.expect("send");
@@ -543,7 +543,7 @@ fn topping_up_a_half_mined_block_fills_its_gaps_and_keeps_what_was_left() {
 
         // Nine cells of stone, left in the bottom layer.
         assert!(
-            server.seed_partial(carved, stone, tiamot_core::inventory::placement_mask(9)),
+            server.seed_partial(carved, stone, tiamat_core::inventory::placement_mask(9)),
             "seed queue full"
         );
         bot.expect_partial(carved, stone, 9, Duration::from_secs(10))
@@ -614,7 +614,7 @@ fn a_block_brush_tops_up_a_carved_block_with_a_different_material() {
             "seed queue full"
         );
         assert!(
-            server.seed_partial(carved, stone, tiamot_core::inventory::placement_mask(9)),
+            server.seed_partial(carved, stone, tiamat_core::inventory::placement_mask(9)),
             "seed queue full"
         );
         bot.expect_partial(carved, stone, 9, Duration::from_secs(10))
@@ -634,10 +634,10 @@ fn a_block_brush_tops_up_a_carved_block_with_a_different_material() {
         // delete the stone beside them — `place::writes` sends a mixed fill
         // cell by cell for exactly that reason, and asserting on a `Partial`
         // here is asserting the conservation hole.
-        let gaps: Vec<SubNodePos> = tiamot_core::inventory::fill_order()
+        let gaps: Vec<SubNodePos> = tiamat_core::inventory::fill_order()
             .skip(9)
             .map(|index| {
-                let (ox, oy, oz) = tiamot_core::block::subnode_offset(index);
+                let (ox, oy, oz) = tiamat_core::block::subnode_offset(index);
                 SubNodePos::new(
                     carved.x * 3 + ox as i32,
                     carved.y * 3 + oy as i32,
@@ -705,7 +705,7 @@ fn one_block_can_hold_two_materials_at_once() {
 
         // Twenty-two cells of stone, five gaps.
         assert!(
-            server.seed_partial(carved, stone, tiamot_core::inventory::placement_mask(22)),
+            server.seed_partial(carved, stone, tiamat_core::inventory::placement_mask(22)),
             "seed queue full"
         );
         bot.expect_partial(carved, stone, 22, Duration::from_secs(10))
@@ -716,12 +716,12 @@ fn one_block_can_hold_two_materials_at_once() {
         // every gap at once with the material in hand, which is a different
         // (and since 2026-09-04 also supported) way to make a mixed block —
         // this test wants the cell-by-cell one.
-        bot.hold_brush(tiamot_core::dig::Brush::SubNode.name())
+        bot.hold_brush(tiamat_core::dig::Brush::SubNode.name())
             .await
             .expect("the reference mods register a chisel");
 
-        for index in tiamot_core::inventory::fill_order().skip(22) {
-            let (ox, oy, oz) = tiamot_core::block::subnode_offset(index);
+        for index in tiamat_core::inventory::fill_order().skip(22) {
+            let (ox, oy, oz) = tiamat_core::block::subnode_offset(index);
             let cell = SubNodePos::new(
                 carved.x * 3 + ox as i32,
                 carved.y * 3 + oy as i32,
@@ -742,7 +742,7 @@ fn one_block_can_hold_two_materials_at_once() {
 
         // Break the whole thing and count. Twenty-two of one and five of the
         // other, out of a block that is now neither.
-        bot.hold_brush(tiamot_core::dig::Brush::Block.name())
+        bot.hold_brush(tiamat_core::dig::Brush::Block.name())
             .await
             .expect("the reference mods register a block tool");
         bot.dig_block(carved).await.expect("the block should break");

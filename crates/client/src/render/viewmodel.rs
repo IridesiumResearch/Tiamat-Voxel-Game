@@ -243,7 +243,7 @@ fn cells(mask: u32, item: bool) -> Vec<Cell> {
             ],
         }];
     }
-    if mask == 0 || mask == tiamot_core::inventory::Shape::ALL {
+    if mask == 0 || mask == tiamat_core::inventory::Shape::ALL {
         return vec![Cell {
             offset: [0.0; 3],
             half: [shape::BLOCK; 3],
@@ -621,7 +621,7 @@ mod tests {
             Hand::Main,
             Held {
                 tile,
-                shape: tiamot_core::inventory::Shape::ALL,
+                shape: tiamat_core::inventory::Shape::ALL,
                 item: false,
                 swing: 0.0,
             },

@@ -30,10 +30,10 @@ fn signed(signer: &SigningKey, edit: impl FnOnce(&mut Manifest)) -> (Vec<u8>, Ve
         notes: None,
         artifacts: vec![Artifact {
             target: "x86_64-unknown-linux-gnu".to_owned(),
-            name: "tiamot-0.2.0-x86_64-unknown-linux-gnu.tar.gz".to_owned(),
+            name: "tiamat-0.2.0-x86_64-unknown-linux-gnu.tar.gz".to_owned(),
             size: 9,
             hash: blake3::hash(b"a release").to_hex().to_string(),
-            urls: vec!["https://example.invalid/tiamot.tar.gz".to_owned()],
+            urls: vec!["https://example.invalid/tiamat.tar.gz".to_owned()],
         }],
     };
     edit(&mut manifest);
@@ -148,7 +148,7 @@ fn every_documented_limit_is_checked_before_the_manifest_is_used() {
 
     // A file name that is a path escapes the directory it is written into.
     assert!(matches!(
-        refused(|m| m.artifacts[0].name = "../../etc/cron.d/tiamot".to_owned()),
+        refused(|m| m.artifacts[0].name = "../../etc/cron.d/tiamat".to_owned()),
         ReleaseError::Unusable { .. }
     ));
     // Plain http would not let anybody swap the bytes — the hash decides — but

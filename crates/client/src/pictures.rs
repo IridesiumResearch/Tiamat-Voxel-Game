@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 
-use tiamot_core::proto::ContentHash;
+use tiamat_core::proto::ContentHash;
 
 use crate::texture::Image;
 
@@ -109,7 +109,7 @@ impl Pictures {
     /// the recursion around a detail of texture upload. A tree names a handful
     /// of pictures, so doing them all first costs a map of two or three
     /// entries and keeps the walk immutable.
-    pub fn resolve(&mut self, ctx: &egui::Context, tree: &tiamot_core::ui::Tree) -> Resolved {
+    pub fn resolve(&mut self, ctx: &egui::Context, tree: &tiamat_core::ui::Tree) -> Resolved {
         self.resolve_hashes(ctx, &tree.content())
     }
 

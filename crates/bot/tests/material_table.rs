@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_core::proto::ServerMessage;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_core::proto::ServerMessage;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("tiamot-material-table")
+        .join("tiamat-material-table")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -252,7 +252,7 @@ fn the_ids_in_the_table_are_the_ids_in_a_chunk_blob() {
     block_on(async {
         let mut bot = authenticate(&server).await;
         let table = bot.material_table().expect("table");
-        bot.send(&tiamot_core::proto::ClientMessage::JoinWorld)
+        bot.send(&tiamat_core::proto::ClientMessage::JoinWorld)
             .await
             .expect("join");
         bot.recv_until(|m| matches!(m, ServerMessage::JoinWorld { .. }))
@@ -270,7 +270,7 @@ fn the_ids_in_the_table_are_the_ids_in_a_chunk_blob() {
         let chunk = bot
             .decode_chunk(
                 pos,
-                &tiamot_core::persist::idmap::MaterialMap::passthrough(),
+                &tiamat_core::persist::idmap::MaterialMap::passthrough(),
             )
             .expect("a client can decode what the server sent it");
 

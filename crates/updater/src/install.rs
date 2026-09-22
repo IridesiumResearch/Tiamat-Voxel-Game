@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! <install>/
-//!   tiamot            this launcher
+//!   tiamat            this launcher
 //!   current/          the game
 //!   staged/           an update the client downloaded and verified
 //!   previous/         what `current` was, kept for one rollback
@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tiamot_core::release::Manifest;
+use tiamat_core::release::Manifest;
 
 /// What went wrong.
 #[derive(Debug, thiserror::Error)]
@@ -325,14 +325,14 @@ impl Install {
             return Ok(std::process::ExitCode::SUCCESS);
         }
 
-        eprintln!("tiamot: the game exited with {status}");
+        eprintln!("tiamat: the game exited with {status}");
         if attempt.failed_starts >= FAILURES_BEFORE_ROLLBACK && self.previous().exists() {
             eprintln!(
-                "tiamot: that is {} failed starts in a row; putting the previous version back.",
+                "tiamat: that is {} failed starts in a row; putting the previous version back.",
                 attempt.failed_starts
             );
             self.rollback()?;
-            eprintln!("tiamot: rolled back. Start it again to play the version before the update.");
+            eprintln!("tiamat: rolled back. Start it again to play the version before the update.");
         }
         Ok(std::process::ExitCode::FAILURE)
     }
@@ -370,10 +370,10 @@ impl Install {
 }
 
 /// Whether this build carries a release key, for `--status`.
-const RELEASE_KEY_PRESENT: bool = option_env!("TIAMOT_RELEASE_KEY").is_some();
+const RELEASE_KEY_PRESENT: bool = option_env!("TIAMAT_RELEASE_KEY").is_some();
 
 /// The target triple this binary was built for, as the manifest names it.
-const TARGET: &str = env!("TIAMOT_TARGET");
+const TARGET: &str = env!("TIAMAT_TARGET");
 
 /// What an executable is called here.
 #[cfg(windows)]
@@ -384,7 +384,7 @@ const EXE: &str = "";
 
 /// The `current` directory inside an unpacked archive.
 ///
-/// The archive holds `tiamot-0.2.0-<target>/current/…`, so this looks one
+/// The archive holds `tiamat-0.2.0-<target>/current/…`, so this looks one
 /// level down as well as at the top — rather than hard-coding the name, which
 /// carries the version in it.
 fn find_current(root: &Path) -> Option<PathBuf> {

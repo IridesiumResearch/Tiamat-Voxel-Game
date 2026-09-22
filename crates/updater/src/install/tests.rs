@@ -13,12 +13,12 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey};
-use tiamot_core::release::{Artifact, Manifest, SCHEMA, to_hex};
+use tiamat_core::release::{Artifact, Manifest, SCHEMA, to_hex};
 
 use super::*;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-install-tests").join(name);
+    let dir = std::env::temp_dir().join("tiamat-install-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
     dir
@@ -34,11 +34,11 @@ fn release_archive(version: &str) -> Vec<u8> {
     let body = format!("version {version}");
     for (name, bytes) in [
         (
-            format!("tiamot-{version}-{TARGET}/current/client{EXE}"),
+            format!("tiamat-{version}-{TARGET}/current/client{EXE}"),
             body.as_bytes(),
         ),
         (
-            format!("tiamot-{version}-{TARGET}/current/marker"),
+            format!("tiamat-{version}-{TARGET}/current/marker"),
             body.as_bytes(),
         ),
     ] {
@@ -78,10 +78,10 @@ fn stage(root: &Path, signer: &SigningKey, version: &str, edit: impl FnOnce(&mut
         notes: None,
         artifacts: vec![Artifact {
             target: TARGET.to_owned(),
-            name: format!("tiamot-{version}-{TARGET}.tar.gz"),
+            name: format!("tiamat-{version}-{TARGET}.tar.gz"),
             size: archive.len() as u64,
             hash: blake3::hash(&archive).to_hex().to_string(),
-            urls: vec!["https://example.invalid/tiamot.tar.gz".to_owned()],
+            urls: vec!["https://example.invalid/tiamat.tar.gz".to_owned()],
         }],
     };
     edit(&mut manifest);

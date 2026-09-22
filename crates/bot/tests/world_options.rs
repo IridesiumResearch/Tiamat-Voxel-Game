@@ -15,13 +15,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bot::Bot;
-use tiamot_core::BlockPos;
-use tiamot_core::identity::{Allowlist, Identity};
-use tiamot_core::interest::ViewDistance;
-use tiamot_server::{ServerHandle, Settings};
+use tiamat_core::BlockPos;
+use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::interest::ViewDistance;
+use tiamat_server::{ServerHandle, Settings};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("tiamot-world-options").join(name);
+    let dir = std::env::temp_dir().join("tiamat-world-options").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -98,7 +98,7 @@ fn ground_material(server: &ServerHandle, visitor: &str) -> String {
             // first claimed it in a world (charter rule 13), and every visit
             // here is a fresh identity.
             bot.join(visitor).await.expect("join");
-            let origin = tiamot_core::ChunkPos::new(0, 0, 0);
+            let origin = tiamat_core::ChunkPos::new(0, 0, 0);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
             while !bot.chunks_received().contains(&origin) && tokio::time::Instant::now() < deadline
             {
@@ -107,7 +107,7 @@ fn ground_material(server: &ServerHandle, visitor: &str) -> String {
             // An id map built from the table the server sent, in its order,
             // the way every other streamed-chunk test builds one.
             let table = bot.material_table().expect("material table");
-            let mut registry = tiamot_core::Registry::new();
+            let mut registry = tiamat_core::Registry::new();
             for entry in &table {
                 // The engine's own two are in a fresh registry already.
                 if entry.name.starts_with("engine:") {
@@ -115,7 +115,7 @@ fn ground_material(server: &ServerHandle, visitor: &str) -> String {
                 }
                 registry.register(&entry.name).expect("register");
             }
-            let db = tiamot_core::WorldDb::open_in_memory(&mut registry).expect("id map");
+            let db = tiamat_core::WorldDb::open_in_memory(&mut registry).expect("id map");
             let chunk = bot
                 .decode_chunk(origin, db.materials())
                 .expect("the origin chunk");

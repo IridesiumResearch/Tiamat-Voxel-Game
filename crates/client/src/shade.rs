@@ -58,14 +58,14 @@
 //! the determinism gate or the tick. The interpolation is integer arithmetic
 //! anyway — see `WEIGHTS` — which is a convenience rather than a requirement.
 
-use tiamot_core::SUBNODES_PER_AXIS;
-use tiamot_core::light::{CHANNELS, Light};
+use tiamat_core::SUBNODES_PER_AXIS;
+use tiamat_core::light::{CHANNELS, Light};
 
 /// Block-resolution light, as the mesher needs to sample it.
 ///
 /// Coordinates are **chunk-local blocks and may be out of range**: a vertex on
 /// a chunk's edge samples blocks in the neighbour, so `-1` and
-/// [`tiamot_core::CHUNK_BLOCKS`] are ordinary inputs rather than errors.
+/// [`tiamat_core::CHUNK_BLOCKS`] are ordinary inputs rather than errors.
 pub trait BlockLight {
     /// The light at a chunk-local block.
     fn at(&self, x: i32, y: i32, z: i32) -> Light;
@@ -401,7 +401,7 @@ const fn plane_axes(axis: usize) -> (usize, usize) {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use tiamot_core::light::MAX_LEVEL;
+    use tiamat_core::light::MAX_LEVEL;
 
     /// Light set per block, dark everywhere else.
     struct Sparse(BTreeMap<(i32, i32, i32), Light>);
@@ -637,7 +637,7 @@ mod tests {
 #[cfg(test)]
 mod gradient_tests {
     use super::*;
-    use tiamot_core::light::MAX_LEVEL;
+    use tiamat_core::light::MAX_LEVEL;
 
     /// Block light falling one level per block along x, as a lamp's does.
     struct Ramp;
