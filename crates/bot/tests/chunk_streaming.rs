@@ -65,7 +65,8 @@ fn start(name: &str, view: ViewDistance) -> ServerHandle {
         operators: Vec::new(),
         view_distance: view,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(1),
         rcon: None,
         materials: MATERIALS.iter().map(|name| (*name).to_owned()).collect(),
@@ -733,8 +734,9 @@ fn a_streamed_chunk_carries_generated_terrain() {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: view,
-        mods_path: Some(repo_mods),
-        enabled_mods: None,
+        mods_path: Some(repo_mods.clone()),
+        enabled_mods: bot::fixture::enabled_mods_for(&repo_mods)
+            .expect("the reference mods' manifests"),
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
@@ -812,8 +814,13 @@ fn generated_terrain_is_the_same_after_a_restart() {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: view,
-        mods_path: mods,
-        enabled_mods: None,
+        mods_path: mods.clone(),
+        enabled_mods: mods
+            .as_deref()
+            .map(bot::fixture::enabled_mods_for)
+            .transpose()
+            .expect("the reference mods' manifests")
+            .flatten(),
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),

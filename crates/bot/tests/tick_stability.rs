@@ -264,8 +264,9 @@ fn worldgen_under_a_joining_player_stays_inside_the_tick_budget() {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: view,
-        mods_path: Some(repo_mods),
-        enabled_mods: None,
+        mods_path: Some(repo_mods.clone()),
+        enabled_mods: bot::fixture::enabled_mods_for(&repo_mods)
+            .expect("the reference mods' manifests"),
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),

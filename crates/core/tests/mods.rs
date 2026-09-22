@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use tiamat_core::coords::LocalBlock;
+use tiamat_core::modload::ModManifest;
 use tiamat_core::script::{EngineHost, ModHost, Phase, ScriptVm, VmLimits};
 use tiamat_core::{BLOCKS_PER_CHUNK, ChunkPos, MaterialId};
 
@@ -21,30 +22,38 @@ fn game_dir() -> PathBuf {
         .expect("the game/ directory should exist at the repo root")
 }
 
-/// The fixture mods a developer is invited to copy into `game/` by hand.
+/// The ids of the reference mods: the `core_*` directories in `game/`.
 ///
-/// `docs/fixtures/README.md` says to `cp -r docs/fixtures/relief game/relief`
-/// and delete it afterwards, so a checkout with one sitting in `game/` is a
-/// DOCUMENTED state, not a mistake — and before this existed it turned
-/// `the_reference_mods_load_in_dependency_order` red, which reads exactly like
-/// a regression in mod loading.
+/// **`core_*` is what a reference mod IS**, and `.gitignore` is where that is
+/// decided: everything in `game/` is ignored except `README.md` and `core_*/`,
+/// so a mod under any other name cannot be committed. Everything else there is
+/// a developer's own — a mod in progress, a symlink to one, a fixture copied in
+/// from `docs/fixtures/` as its README says to — and a test that loaded it
+/// would be testing that mod as well. A world mod with its own generator turned
+/// every terrain assertion below red, which reads exactly like a regression.
 ///
-/// Read from the directory rather than hard-coded so the list cannot drift
-/// from what is actually offered. Subtracting only these names is what keeps
-/// the exhaustive assertion honest: a genuinely new reference mod in `game/`
-/// is not in `docs/fixtures/`, so it still fails the test.
-fn known_fixtures() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/fixtures");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
+/// Ids rather than directory names, because `core_blocks` registers as `core`.
+/// `bot::fixture` is the same rule for the tests that start a server.
+fn reference_mod_ids() -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(game_dir())
+        .expect("read game/")
         .flatten()
-        .filter(|entry| entry.path().join("mod.toml").is_file())
-        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("core_"))
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            ModManifest::load(&entry.path())
+                .expect("a reference mod's manifest")
+                .id
+        })
         .collect();
-    names.sort();
-    names
+    ids.sort();
+    ids
+}
+
+/// The reference mods, loaded — and nothing else that is in `game/`.
+fn reference_host() -> EngineHost {
+    ModHost::load_selected(&game_dir(), VmLimits::default(), Some(&reference_mod_ids()))
+        .expect("load the reference mods")
 }
 
 /// A scratch directory holding hand-written mods for one test.
@@ -77,30 +86,13 @@ fn host_for(root: &Path) -> EngineHost {
 
 #[test]
 fn the_reference_mods_load_in_dependency_order() {
-    let host = host_for(&game_dir());
-    // Every mod in `game/`, in load order, minus any fixture copied in by hand
-    // — see `known_fixtures`. Listed exhaustively rather than spot-checked:
-    // this is the test that notices a reference mod being added or removed,
-    // which is exactly the change most likely to be made without thinking
-    // about load order.
-    // **`core_*` is what a reference mod IS**, and `.gitignore` is where that is
-    // decided: everything in `game/` is ignored except `README.md` and
-    // `core_*/`, so a mod under any other name cannot be committed. The
-    // exhaustive assertion loses nothing by scoping to them and stops being red
-    // for every developer who keeps their own mods where the guide tells them
-    // to — including the fixtures `known_fixtures` was written for, which are
-    // not `core_*` either.
-    //
-    // A new reference mod still fails this, which is the point: it has to be
-    // `core_*` to be committed at all.
-    let fixtures = known_fixtures();
-    let loaded: Vec<&str> = host
-        .resolved()
-        .ids()
-        .into_iter()
-        .filter(|id| *id == "core" || id.starts_with("core_"))
-        .filter(|id| !fixtures.iter().any(|fixture| fixture == id))
-        .collect();
+    let host = reference_host();
+    // Every reference mod, in load order. Listed exhaustively rather than
+    // spot-checked: this is the test that notices a reference mod being added
+    // or removed, which is exactly the change most likely to be made without
+    // thinking about load order. A new one still fails it, which is the point:
+    // it has to be `core_*` to be committed at all, so it is selected.
+    let loaded: Vec<&str> = host.resolved().ids();
     assert_eq!(
         loaded,
         vec![
@@ -129,7 +121,7 @@ fn the_reference_generator_produces_the_half_white_world() {
     // above — and the top block of that solid is `core:ground`, which drinks.
     // Milk poured on a world of nothing but `core:white` pools for ever,
     // because there is nowhere for it to go.
-    let mut host = host_for(&game_dir());
+    let mut host = reference_host();
     host.freeze().expect("freeze");
     assert_eq!(host.phase(), Phase::Frozen);
 
@@ -193,7 +185,7 @@ fn the_reference_generator_produces_the_half_white_world() {
 
 #[test]
 fn generation_is_reproducible_through_the_script_path() {
-    let mut host = host_for(&game_dir());
+    let mut host = reference_host();
     host.freeze().expect("freeze");
 
     let pos = ChunkPos::new(3, -1, -7);
@@ -254,7 +246,7 @@ fn the_reference_generator_matches_its_golden_hashes() {
     ];
 
     tiamat_core::detgen::assert_ieee_mode();
-    let mut host = host_for(&game_dir());
+    let mut host = reference_host();
     host.freeze().expect("freeze");
 
     assert_golden(&mut host, &GOLDEN, "reference mods");
@@ -599,8 +591,8 @@ fn a_resolution_failure_is_fatal_rather_than_partial() {
 
 #[test]
 fn the_resolved_set_has_a_stable_fingerprint() {
-    let host = host_for(&game_dir());
-    let again = host_for(&game_dir());
+    let host = reference_host();
+    let again = reference_host();
     assert_eq!(
         host.resolved().fingerprint(),
         again.resolved().fingerprint(),

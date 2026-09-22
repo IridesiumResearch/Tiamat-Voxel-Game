@@ -56,7 +56,8 @@ fn start_in(world: &Path) -> ServerHandle {
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(4),
         rcon: None,
         materials: Vec::new(),

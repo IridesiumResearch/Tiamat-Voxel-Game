@@ -61,7 +61,8 @@ fn settings_with_mods(dir: &std::path::Path) -> Settings {
     Settings {
         world_options: Vec::new(),
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         ..settings(dir)
     }
 }

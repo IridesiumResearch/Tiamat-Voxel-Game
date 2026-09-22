@@ -43,7 +43,8 @@ fn start(name: &str) -> ServerHandle {
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(repo().join("game")),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&repo().join("game"))
+            .expect("the reference mods' manifests"),
         seed: Some(5),
         rcon: None,
         materials: Vec::new(),

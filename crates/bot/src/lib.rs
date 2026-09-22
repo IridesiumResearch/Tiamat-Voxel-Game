@@ -23,6 +23,7 @@
 
 pub mod bench;
 pub mod client;
+pub mod fixture;
 pub mod replay;
 pub mod runner;
 pub mod script;

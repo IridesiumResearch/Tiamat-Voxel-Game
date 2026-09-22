@@ -58,7 +58,8 @@ fn start(name: &str, bind: &str, max_players: u32) -> ServerHandle {
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(3),
         rcon: None,
         materials: Vec::new(),

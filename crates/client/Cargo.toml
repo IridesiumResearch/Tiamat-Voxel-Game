@@ -67,6 +67,8 @@ egui-winit.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+# `bot::fixture` — which of `game/` a test server loads.
+bot = { path = "../bot" }
 proptest.workspace = true
 criterion.workspace = true
 

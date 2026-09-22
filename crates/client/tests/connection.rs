@@ -52,7 +52,8 @@ fn start(name: &str) -> ServerHandle {
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(4242),
         rcon: None,
         materials: Vec::new(),
@@ -61,19 +62,24 @@ fn start(name: &str) -> ServerHandle {
     .expect("start")
 }
 
-/// A server whose mod directory is a copy of `game/` with one mod removed.
+/// A server whose mod directory is a copy of the reference mods with one removed.
 ///
 /// **This is how the sky criterion is checked**, and it is checked by absence:
 /// the claim is that sky content lives in a mod, and the way to test that is to
 /// take the mod away and watch the day disappear while everything else keeps
 /// working.
+///
+/// Only the `core_*` directories are copied — see `bot::fixture` for what else
+/// a developer's `game/` holds, and a mod there that needs the omitted one
+/// would stop the server starting at all.
 fn start_without(name: &str, omit: &str) -> ServerHandle {
     let mods = scratch(&format!("{name}-mods"));
     let _ = std::fs::remove_dir_all(&mods);
     std::fs::create_dir_all(&mods).expect("mod dir");
     for entry in std::fs::read_dir(reference_mods()).expect("read game/") {
         let entry = entry.expect("entry");
-        if !entry.path().is_dir() || entry.file_name() == omit {
+        let is_reference = entry.file_name().to_string_lossy().starts_with("core_");
+        if !entry.path().is_dir() || !is_reference || entry.file_name() == omit {
             continue;
         }
         let target = mods.join(entry.file_name());

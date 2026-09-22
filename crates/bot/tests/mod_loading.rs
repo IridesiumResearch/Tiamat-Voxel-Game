@@ -49,8 +49,13 @@ fn start(world: &Path, mods: Option<PathBuf>) -> ServerHandle {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
-        mods_path: mods,
-        enabled_mods: None,
+        mods_path: mods.clone(),
+        enabled_mods: mods
+            .as_deref()
+            .map(bot::fixture::enabled_mods_for)
+            .transpose()
+            .expect("the reference mods' manifests")
+            .flatten(),
         seed: Some(1),
         rcon: None,
         materials: Vec::new(),

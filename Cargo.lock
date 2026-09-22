@@ -786,6 +786,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bot",
  "bytemuck",
  "criterion",
  "ed25519-dalek",

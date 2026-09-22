@@ -390,7 +390,16 @@ fn bench_mode(
     // tick for the whole run. That is not a server under load, it is a server
     // being asked to do something no real one does, and it doubled the measured
     // p99 while the physics itself costs microseconds.
-    let mods = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../game");
+    // The reference mods ONLY: whatever else a developer keeps in `game/` would
+    // be measured too, and against a baseline that never had it.
+    let mods = bot::fixture::game_dir();
+    let enabled_mods = match bot::fixture::enabled_mods_for(&mods) {
+        Ok(enabled_mods) => enabled_mods,
+        Err(err) => {
+            eprintln!("could not read the reference mods: {err}");
+            return 1;
+        }
+    };
     let server = match ServerHandle::start(&Settings {
         world_options: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
@@ -401,7 +410,7 @@ fn bench_mode(
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: mods.canonicalize().ok(),
-        enabled_mods: None,
+        enabled_mods,
         seed: Some(0x7149_7231),
         rcon: None,
         materials: vec!["bench:stone".to_owned()],

@@ -89,7 +89,8 @@ fn embedded_with_view(name: &str, view: ViewDistance) -> ServerHandle {
         operators: Vec::new(),
         view_distance: view,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
@@ -113,7 +114,8 @@ fn embedded_operated(name: &str, operator: &str) -> ServerHandle {
         operators: vec![operator.to_owned()],
         view_distance: ViewDistance::DEFAULT,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
@@ -143,7 +145,8 @@ fn embedded_for(name: &str, max_players: u32) -> ServerHandle {
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),

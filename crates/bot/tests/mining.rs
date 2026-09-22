@@ -62,7 +62,8 @@ fn start_with_mods(name: &str) -> ServerHandle {
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(reference_mods()),
-        enabled_mods: None,
+        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
+            .expect("the reference mods' manifests"),
         seed: Some(5),
         rcon: None,
         materials: MATERIALS.iter().map(|name| (*name).to_owned()).collect(),
