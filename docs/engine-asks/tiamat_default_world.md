@@ -1,6 +1,6 @@
-# Engine asks from Tiamot Default World
+# Engine asks from Tiamat Default World
 
-From the `tiamot_default_world` mod (the Spindle; repo `Tiamot_Default_World`,
+From the `tiamat_default_world` mod (the Spindle; repo `Tiamat_Default_World`,
 beside the engine). Kept here rather than in that repo so the engine agent
 finds every mod's asks in one place.
 
