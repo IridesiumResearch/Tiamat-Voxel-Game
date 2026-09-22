@@ -1066,6 +1066,7 @@ mod tests {
                 name: "test:water".to_owned(),
                 waterlogs_at: 14,
                 tick_rate: 1,
+                washes: true,
                 evaporates: 0,
                 color: [0, 0, 255],
                 material,

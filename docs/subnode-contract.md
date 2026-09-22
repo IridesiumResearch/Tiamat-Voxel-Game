@@ -413,6 +413,12 @@ No fluid is lost, so the conservation invariant below is untouched.
   broadcasts and persists like any other edit.
 - **Nothing is dropped.** What a washed plant leaves behind is a mod's
   business; the engine registers no plants and has no opinion about seeds.
+- **A fluid may decline to wash** *(added 2026-09-22, World ask 38 and
+  Weather ask W14 — the same ask, filed a day apart by two mods)*: `washes =
+  false` on `register_fluid`, default true. Rain is a fluid, and a shower's
+  puddle spreads a few cells into the grass beside it, so without this every
+  storm stripped the meadow it fell on. The FLUID's author decides, because a
+  plant cannot be expected to name every fluid in the world.
 - Only a flow INTO the block washes it. A plant that stops fluid outright is
   never reached by one, which is why this is declared by the same materials
   that declare `passable` — a flood runs through a tuft rather than into it,

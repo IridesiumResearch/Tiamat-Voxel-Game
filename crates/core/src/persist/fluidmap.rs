@@ -313,6 +313,7 @@ mod tests {
 
             waterlogs_at: 14,
             tick_rate: 1,
+            washes: true,
             evaporates: 0,
             color: [255, 255, 255],
             material: MaterialId(4),

@@ -358,6 +358,11 @@ pub struct Registered {
     /// One means every fluid tick. Larger is a slower, more viscous fluid, and
     /// it costs proportionally less to simulate.
     pub tick_rate: u8,
+    /// Whether this fluid sweeps away a block that declares `washes_away`.
+    ///
+    /// True unless a mod says otherwise — World ask 38, Weather ask W14. See
+    /// [`Tuning::washes`].
+    pub washes: bool,
     /// One in how many fluid ticks an exposed block loses a cell, or zero.
     ///
     /// **A declared sink** (Sub-Node Contract §4.3). Only a block with air
@@ -466,6 +471,7 @@ impl Fluids {
             // would rearrange a world the moment somebody disabled something.
             waterlogs_at: 1,
             tick_rate: 1,
+            washes: true,
             evaporates: 0,
             // Never drawn and never submerged in, so the colour is arbitrary;
             // white is the one that cannot be mistaken for a deliberate choice.
@@ -629,6 +635,7 @@ mod tests {
                 evaporates: 0,
                 color: [255, 255, 255],
                 tick_rate: 1,
+                washes: true,
                 material: MaterialId(4),
                 opacity: crate::script::FluidRules::DEFAULT_OPACITY,
                 light_falloff: 0,
@@ -649,6 +656,7 @@ mod tests {
             evaporates: 0,
             color: [255, 255, 255],
             tick_rate: 1,
+            washes: true,
             material: MaterialId(4),
             opacity: crate::script::FluidRules::DEFAULT_OPACITY,
             light_falloff: 0,
@@ -671,6 +679,7 @@ mod tests {
                     evaporates: 0,
                     color: [255, 255, 255],
                     tick_rate: 1,
+                    washes: true,
                     material: MaterialId(1),
                     opacity: crate::script::FluidRules::DEFAULT_OPACITY,
                     light_falloff: 0,
@@ -684,6 +693,7 @@ mod tests {
                 evaporates: 0,
                 color: [255, 255, 255],
                 tick_rate: 1,
+                washes: true,
                 material: MaterialId(1),
                 opacity: crate::script::FluidRules::DEFAULT_OPACITY,
                 light_falloff: 0,

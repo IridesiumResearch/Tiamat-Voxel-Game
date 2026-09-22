@@ -430,6 +430,7 @@ impl Fluidics {
                     waterlogs_at: f.waterlogs_at,
                     tick_rate: f.tick_rate,
                     evaporates: f.evaporates,
+                    washes: f.washes,
                 },
             )
         }))
@@ -1000,6 +1001,7 @@ pub fn fluids_from_rules(
             name: rule.fluid.clone(),
             waterlogs_at: rule.waterlogs_at,
             tick_rate: rule.tick_rate,
+            washes: rule.washes,
             evaporates: rule.evaporates,
             color: rule.color,
             material,
@@ -1047,6 +1049,7 @@ mod tests {
                 name: "test:milk".into(),
                 waterlogs_at: 14,
                 tick_rate: 1,
+                washes: true,
                 evaporates: 0,
                 color: [255, 255, 255],
                 material: tiamot_core::MaterialId(4),
@@ -1105,6 +1108,7 @@ mod tests {
                 name: "test:sea".into(),
                 waterlogs_at: 14,
                 tick_rate: 1,
+                washes: true,
                 evaporates: 0,
                 color: [255, 255, 255],
                 material: tiamot_core::MaterialId(4),

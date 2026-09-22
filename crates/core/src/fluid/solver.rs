@@ -161,6 +161,16 @@ pub struct Tuning {
     /// directly above it evaporates, so a wide shallow pool goes before a deep
     /// narrow one. Zero never evaporates.
     pub evaporates: u32,
+    /// Whether this fluid sweeps away a block that declares `washes_away`.
+    ///
+    /// **True, because that is what ask 37 was for**: water running into a
+    /// tuft of grass clears it. But a fluid is not only rivers — the weather
+    /// mod's rainwater is a fluid, its puddles spread a few cells on open
+    /// ground, and every shower would strip the meadow it fell on. So the
+    /// fluid's author says whether theirs is the washing kind; the plant's
+    /// author cannot be expected to list every fluid in the world (World ask
+    /// 38, Weather ask W14 — the same ask, filed by two mods a day apart).
+    pub washes: bool,
 }
 
 impl Tuning {
@@ -173,6 +183,9 @@ impl Tuning {
         tick_rate: 1,
         // Off. Destroying matter is a mod's call, exactly as creating it was.
         evaporates: 0,
+        // A fluid sweeps a plant away unless its author says otherwise, which
+        // is what `washes_away` on the block means by itself.
+        washes: true,
     };
 }
 
@@ -727,6 +740,7 @@ fn transfer(
     into: BlockPos,
     fluid: FluidId,
     cells: u32,
+    washes: bool,
     record: &mut Record<'_>,
 ) {
     if cells == 0 {
@@ -735,7 +749,10 @@ fn transfer(
     // **Every way fluid enters a block runs through here**, which is why the
     // question is asked here and not at the four call sites — World ask 37,
     // and a fifth way added later would otherwise wash nothing.
-    if world.washes_away(into) && !record.washed.contains(&into) {
+    //
+    // `washes` is the FLUID's answer (World 38, Weather W14): rain spreading
+    // into the grass beside its puddle must leave it standing.
+    if washes && world.washes_away(into) && !record.washed.contains(&into) {
         record.washed.push(into);
     }
     let was_from = world.fluid(from);
@@ -885,6 +902,9 @@ fn settle_one(
         return;
     }
     let fluid = here.fluid();
+    // The fluid's own answer to "does this sweep a plant away", read once for
+    // the whole settle rather than at each of the four transfers.
+    let washes = tunings.of(fluid).washes;
 
     // **Terrain arriving in a flooded block.** Somebody placed stone where milk
     // was, so the block now holds more than fits. Pushed out below and sideways
@@ -914,7 +934,7 @@ fn settle_one(
     let mine = world.fluid(pos).volume();
     let falling = accepts(world, tunings, below, fluid).min(mine);
     if falling > 0 {
-        transfer(world, pos, below, fluid, falling, record);
+        transfer(world, pos, below, fluid, falling, washes, record);
         if world.fluid(pos).is_empty() {
             return;
         }
@@ -946,7 +966,7 @@ fn settle_one(
         let half = (mine - theirs) / 2;
         let moved = half.min(accepts(world, tunings, at, fluid));
         if moved > 0 {
-            transfer(world, pos, at, fluid, moved, record);
+            transfer(world, pos, at, fluid, moved, washes, record);
         }
     }
 
@@ -966,7 +986,7 @@ fn settle_one(
             if accepts(world, tunings, under, fluid) == 0 {
                 continue;
             }
-            transfer(world, pos, at, fluid, mine, record);
+            transfer(world, pos, at, fluid, mine, washes, record);
             return;
         }
     }
@@ -1001,6 +1021,7 @@ fn spill(
     cells: u32,
     record: &mut Record<'_>,
 ) -> u32 {
+    let washes = tunings.of(fluid).washes;
     let mut left = cells;
     let turn = rotation(pos);
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
@@ -1014,7 +1035,7 @@ fn spill(
         }
         let moved = accepts(world, tunings, at, fluid).min(left);
         if moved > 0 {
-            transfer(world, pos, at, fluid, moved, record);
+            transfer(world, pos, at, fluid, moved, washes, record);
             left -= moved;
         }
     }
@@ -1538,6 +1559,55 @@ mod tests {
     }
 
     #[test]
+    fn a_gentle_fluid_runs_into_a_plant_and_leaves_it_standing() {
+        // World ask 38 and Weather W14, filed a day apart by two mods that hit
+        // the same wall: `washes_away` is the plant's declaration and names no
+        // fluid, so rain — which is a fluid, and whose puddles spread a few
+        // cells on open ground — would strip every meadow it fell on.
+        let mut scene = Scene::floored(-4..=4, -4..=4);
+        scene.plant(0, 1, 0);
+        scene.pour(BlockPos::new(0, 2, 0), MAX_VOLUME);
+
+        let mut solver = Solver::new();
+        let gentle = Tunings::uniform(Tuning {
+            washes: false,
+            ..Tuning::DEFAULT
+        });
+        solver.touch(BlockPos::new(0, 2, 0));
+        for tick in 0..12 {
+            solver.tick(&mut scene, &gentle, 64, 7, tick);
+        }
+        assert!(
+            solver.take_washed().is_empty(),
+            "rain swept the grass it fell on"
+        );
+
+        // The fluid still FLOWS into it — the plant is passable, so the water
+        // stands in the same block, which is what ask 29 made true. What
+        // changes is only whether the plant survives it.
+        assert!(
+            scene.fluid(BlockPos::new(0, 1, 0)).volume() > 0,
+            "a gentle fluid should still run into the plant's block"
+        );
+
+        // And the same scene with the ordinary fluid washes it, so the
+        // difference is the flag rather than the fixture.
+        let mut washing = Scene::floored(-4..=4, -4..=4);
+        washing.plant(0, 1, 0);
+        washing.pour(BlockPos::new(0, 2, 0), MAX_VOLUME);
+        let mut solver = Solver::new();
+        let tunings = Tunings::uniform(Tuning::DEFAULT);
+        solver.touch(BlockPos::new(0, 2, 0));
+        for tick in 0..12 {
+            solver.tick(&mut washing, &tunings, 64, 7, tick);
+        }
+        assert!(
+            solver.take_washed().contains(&BlockPos::new(0, 1, 0)),
+            "the ordinary fluid stopped washing"
+        );
+    }
+
+    #[test]
     fn a_flow_into_a_plant_sweeps_it_away_once() {
         // World ask 37. A tuft is `passable`, so a flood runs through it and
         // stands in the same block — the mod's own report of a meadow flooded
@@ -1742,6 +1812,7 @@ mod tests {
                 LAVA,
                 Tuning {
                     tick_rate: 4,
+                    washes: true,
                     ..Tuning::DEFAULT
                 },
             ),
@@ -1783,6 +1854,7 @@ mod tests {
         solver.touch(BlockPos::new(0, 1, 0));
         let slow = Tunings::uniform(Tuning {
             tick_rate: 4,
+            washes: true,
             ..Tuning::DEFAULT
         });
         for tick in 0..16 {

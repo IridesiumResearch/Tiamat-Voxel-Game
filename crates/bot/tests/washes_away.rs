@@ -49,15 +49,22 @@ local ground = game.register_block{ id = "ground" }
 -- surface. One washes away and one does not.
 game.register_block{ id = "tuft", passable = true, washes_away = true }
 game.register_block{ id = "reed", passable = true }
+-- The same plant again, for the gentle fluid to run into (World 38, W14).
+game.register_block{ id = "sedge", passable = true, washes_away = true }
 game.register_block{ id = "water_block" }
 game.register_block{ id = "marker" }
 game.register_fluid{ id = "water", material = "meadow:water_block", tick_rate = 1 }
+-- Rain: a fluid too gentle to sweep a plant away. Weather's rainwater is
+-- exactly this, and without it every shower would strip the meadow.
+game.register_fluid{ id = "rain", material = "meadow:water_block", tick_rate = 1,
+                     washes = false }
 game.register_on_generate(function(buf, pos)
     buf:fill_below_heightmap(game.flat_heightmap(0), ground)
 end)
 
 local TUFT = { x = 2, y = 1, z = 2 }
 local REED = { x = 6, y = 1, z = 6 }
+local SEDGE = { x = 10, y = 1, z = 10 }
 -- The bottom cell layer of the block: the nine cells with y = 0, indexed
 -- x + 3*y + 9*z. A tuft standing on the ground, as the world mod grows one.
 local STANDING = 0x1C0E07
@@ -66,7 +73,7 @@ local ticks = 0
 game.register_on_tick(function()
     ticks = ticks + 1
     if ticks == 20 then
-        for _, plant in ipairs({ TUFT, REED }) do
+        for _, plant in ipairs({ TUFT, REED, SEDGE }) do
             -- A walled well, so the water stays where it is poured instead of
             -- running off and reaching the plant from somewhere unpredictable.
             for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
@@ -77,6 +84,7 @@ game.register_on_tick(function()
         end
         game.set_block(TUFT, "meadow:tuft", STANDING)
         game.set_block(REED, "meadow:reed", STANDING)
+        game.set_block(SEDGE, "meadow:sedge", STANDING)
     elseif ticks == 30 then
         -- Poured ABOVE each plant, so what reaches it is a flow into its block
         -- rather than a mod writing fluid straight into the plant.
@@ -84,10 +92,14 @@ game.register_on_tick(function()
             game.set_fluid({ x = plant.x, y = plant.y + 1, z = plant.z },
                 { fluid = "meadow:water", volume = 27 })
         end
+        -- The sedge gets rain instead: the same shape of pour, the gentle
+        -- fluid, and it must still be standing at the end.
+        game.set_fluid({ x = SEDGE.x, y = SEDGE.y + 1, z = SEDGE.z },
+            { fluid = "meadow:rain", volume = 27 })
     elseif ticks == 70 then
         -- What is left, written where the test can see it. y = 41 for gone,
         -- y = 42 for still standing.
-        for i, plant in ipairs({ TUFT, REED }) do
+        for i, plant in ipairs({ TUFT, REED, SEDGE }) do
             local at = game.get_block(plant)
             local empty = (at == nil) or (at.occupancy == 0)
             game.set_block({ x = i * 2, y = empty and 41 or 42, z = 20 }, "meadow:marker")
@@ -158,7 +170,7 @@ fn water_running_into_a_plant_sweeps_it_away_and_leaves_its_neighbour() {
             };
             let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
             while tokio::time::Instant::now() < deadline
-                && !(read(&bot, 2).is_some() && read(&bot, 4).is_some())
+                && !(read(&bot, 2).is_some() && read(&bot, 4).is_some() && read(&bot, 6).is_some())
             {
                 let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
             }
@@ -172,6 +184,13 @@ fn water_running_into_a_plant_sweeps_it_away_and_leaves_its_neighbour() {
                 read(&bot, 4),
                 Some(false),
                 "a plant that never said `washes_away` was cleared anyway"
+            );
+            // World 38 and Weather W14: the sedge declares `washes_away` and
+            // the rain declares `washes = false`, so it is still standing.
+            assert_eq!(
+                read(&bot, 6),
+                Some(false),
+                "a gentle fluid swept a plant away"
             );
             bot.disconnect().await;
         });

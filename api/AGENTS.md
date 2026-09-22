@@ -1289,6 +1289,11 @@ BLOCKED, and nothing blocked that one. Declare `washes_away` on the plant and
 the engine clears the block when fluid enters it. Nothing is dropped; if a
 washed plant should leave seeds, spawn them yourself.
 
+**And a fluid can decline to break them: `washes = false` on
+`register_fluid`.** Rain is a fluid and its puddles spread, so a shower would
+strip the meadow it fell on. The fluid's author sets this, not the plant's —
+a plant cannot know about every fluid in the world.
+
 **A floor can be slick: `friction` on `register_block`,** a share of the
 ordinary grip from 0 to 1. Ice at 0.1 is slow to start on and glides several
 blocks after the keys are let go. It is read per sub-node under the centre of

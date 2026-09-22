@@ -511,6 +511,12 @@ pub struct FluidRules {
     /// never evaporates. Only a block open to the air above loses anything, so
     /// a wide shallow pool goes before a deep narrow one.
     pub evaporates: u32,
+    /// Whether this fluid sweeps away a block that declares `washes_away`.
+    ///
+    /// True by default. A fluid whose author says `washes = false` — rain in
+    /// a puddle, a trickle of milk — runs into a plant and leaves it standing
+    /// (World ask 38, Weather ask W14).
+    pub washes: bool,
     /// What being inside it looks like, sRGB `0..=255`.
     pub color: [u8; 3],
     /// How much of what is behind it a surface of this fluid hides, `0.0..=1.0`.

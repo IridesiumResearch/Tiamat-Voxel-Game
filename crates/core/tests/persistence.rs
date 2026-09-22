@@ -305,6 +305,7 @@ fn fluid_named(name: &str) -> tiamot_core::fluid::Registered {
         name: name.to_owned(),
         waterlogs_at: 14,
         tick_rate: 1,
+        washes: true,
         evaporates: 0,
         color: [255, 255, 255],
         material: MaterialId(4),

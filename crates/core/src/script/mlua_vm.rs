@@ -3343,6 +3343,7 @@ impl ScriptVm for MluaVm {
                     tick_rate: entry.get("tick_rate").ok()?,
                     opacity: entry.get("opacity").ok()?,
                     light_falloff: entry.get("light_falloff").ok()?,
+                    washes: entry.get("washes").ok()?,
                 })
             })
             .collect();
@@ -8615,6 +8616,14 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     entry.set("evaporates", evaporates)?;
     entry.set("opacity", opacity)?;
     entry.set("light_falloff", light_falloff)?;
+    // World ask 38 and Weather W14: a fluid too gentle to sweep a plant away.
+    // `Option<bool>` because a missing Lua field reads as `false` for a plain
+    // one, and the default here is TRUE — the mistake that cost a day in the
+    // abilities work.
+    entry.set(
+        "washes",
+        spec.get::<Option<bool>>("washes")?.unwrap_or(true),
+    )?;
     entry.set("color_r", color[0])?;
     entry.set("color_g", color[1])?;
     entry.set("color_b", color[2])?;
@@ -8976,7 +8985,7 @@ const CLOUD_MAP_FIELDS: [&str; 5] = ["origin", "cell", "size", "cover", "darknes
 /// configured something.
 const ABILITY_FIELDS: [&str; 4] = ["fly", "speed", "sprint", "wind_sky"];
 
-const FLUID_FIELDS: [&str; 8] = [
+const FLUID_FIELDS: [&str; 9] = [
     "id",
     "material",
     "waterlogs_at",
@@ -8985,6 +8994,7 @@ const FLUID_FIELDS: [&str; 8] = [
     "opacity",
     "color",
     "light_falloff",
+    "washes",
 ];
 
 /// Fields `register_block` accepts. Anything else is an error naming the field.
