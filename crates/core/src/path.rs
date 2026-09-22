@@ -234,11 +234,22 @@ pub fn steer(chunks: &impl ChunkLookup, from: [f64; 3], to: [f64; 3], height: i3
     let jump = match block_at(ahead) {
         Some(front) => {
             let view = Passability { chunks, height };
-            // Something in the way at foot level, room to stand on top of it,
-            // and a body's worth of headroom over that. All three, or a mob
-            // jumps at a wall it cannot climb — which reads worse than walking
-            // into it, because it looks like it is trying.
-            !view.passable(front) && view.standable(BlockPos::new(front.x, front.y + 1, front.z))
+            // **Only a rise the step cannot take** — Life ask 12. The old rule
+            // jumped whenever the block ahead was not `passable`, and
+            // `passable` means "no floor cells", so a single cell of floor —
+            // a third of a block, which `phys::step` climbs for nothing —
+            // counted as an obstacle. On smoothed terrain nearly every rise is
+            // one cell, so a steered mob hopped across ordinary ground.
+            // Reported from the window as "cows and pigs should really not
+            // jump unless they are stuck in a hole".
+            //
+            // Room to stand on top of it and a body's worth of headroom are
+            // still required, or a mob jumps at a wall it cannot climb — which
+            // reads worse than walking into it, because it looks like it is
+            // trying.
+            let rise = view.rise_at(ahead, from[1]);
+            rise > crate::phys::Tuning::DEFAULT.step_height
+                && view.standable(BlockPos::new(front.x, front.y + 1, front.z))
         }
         None => false,
     };
@@ -271,6 +282,65 @@ struct Passability<'a, C: ChunkLookup> {
 }
 
 impl<C: ChunkLookup> Passability<'_, C> {
+    /// How far the floor at a point stands above the feet, in CELLS.
+    ///
+    /// **Cells, because that is what the step is measured in** (Sub-Node
+    /// Contract §2: step-up is one sub-node). A block of stone is three, a
+    /// chiselled lip is one, and open air is nothing at all.
+    ///
+    /// The one column under the point, across the block the feet are in and
+    /// the one above it: a mob about to climb is looking at what is directly
+    /// in front of its toes, and the sweep that actually moves it will be the
+    /// judge either way.
+    fn rise_at(&self, at: [f64; 3], feet: f64) -> f32 {
+        let cells = f64::from(crate::SUBNODES_PER_AXIS);
+        let Some(block) = block_at(at) else {
+            return 0.0;
+        };
+        // The cell column inside the block, from the point's own fraction.
+        let column = |value: f64| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a fraction of a block scaled to 0..3, then clamped"
+            )]
+            let index = (value.rem_euclid(1.0) * cells) as u32;
+            index.min(crate::SUBNODES_PER_AXIS - 1)
+        };
+        let (x, z) = (column(at[0]), column(at[2]));
+
+        // The block the feet are in, then the one above: a rise of more than a
+        // block is a wall, and one lookup further is enough to say so.
+        let mut top: Option<f64> = None;
+        for step in 0..2 {
+            let here = BlockPos::new(block.x, block.y + step, block.z);
+            let Some(chunk) = self.chunks.chunk(here.chunk()) else {
+                continue;
+            };
+            let Some(view) = chunk.get_block(here) else {
+                continue;
+            };
+            for y in (0..crate::SUBNODES_PER_AXIS).rev() {
+                if !view.subnode_at(x, y, z).is_air() {
+                    // The TOP of that cell, in world cells.
+                    let surface = f64::from(here.y) * cells + f64::from(y) + 1.0;
+                    top = Some(top.map_or(surface, |best: f64| best.max(surface)));
+                    break;
+                }
+            }
+        }
+
+        let Some(top) = top else {
+            return 0.0;
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a handful of cells; steering is not simulation state a hash gate reads"
+        )]
+        let rise = (top - feet * cells).max(0.0) as f32;
+        rise
+    }
+
     fn passable(&self, block: BlockPos) -> bool {
         let Some(chunk) = self.chunks.chunk(block.chunk()) else {
             return false;
@@ -623,6 +693,43 @@ mod tests {
     }
 
     #[test]
+    fn a_lip_the_step_can_take_is_walked_rather_than_jumped() {
+        // **Life ask 12**, reported from the window as cows and pigs hopping
+        // across ordinary ground: "they should really not jump unless they are
+        // stuck in a hole". The old rule jumped at anything that was not
+        // `passable`, and `passable` means "no floor cells" — so a single cell
+        // of floor, a third of a block, counted as an obstacle. The physics
+        // steps exactly that for nothing (Sub-Node Contract §2: step-up is one
+        // sub-node), and on the Spindle's smoothed terrain nearly every rise
+        // is one cell.
+        let mut world = Loaded::default()
+            .air(ChunkPos::new(0, 0, 0))
+            .floor(0, 0, 12);
+        for z in 0..8 {
+            // One cell of floor standing on the surface at x = 4: a lip.
+            world = world.lip(BlockPos::new(4, 1, z), 1);
+        }
+
+        let at_lip = steer(&world, [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
+        assert!(
+            !at_lip.jump,
+            "a one-cell lip was jumped at; the step climbs it for nothing"
+        );
+        assert!(at_lip.walk[0] > 0.9, "and it should still be walking east");
+
+        // Two cells is past the step, so that one IS jumped — which is what
+        // stops this test passing on a steer that never jumps at all.
+        let mut taller = Loaded::default()
+            .air(ChunkPos::new(0, 0, 0))
+            .floor(0, 0, 12);
+        for z in 0..8 {
+            taller = taller.lip(BlockPos::new(4, 1, z), 2);
+        }
+        let at_step = steer(&taller, [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
+        assert!(at_step.jump, "two cells is more than the step can take");
+    }
+
+    #[test]
     fn a_wall_too_tall_to_climb_is_not_jumped_at() {
         // A mob bouncing against a cliff reads worse than one walking into it,
         // because it looks like it is trying. Two blocks is one more than a
@@ -671,6 +778,35 @@ mod tests {
                 .or_insert_with(|| Chunk::new(pos, MaterialId::AIR));
             chunk
                 .set_block(block, BlockValue::Uniform(STONE))
+                .expect("the block is in the chunk it names");
+            self
+        }
+
+        /// A block holding `cells` of floor, standing on the surface: a lip
+        /// the physics steps over rather than a block it must climb.
+        fn lip(mut self, block: BlockPos, layers: u32) -> Self {
+            let pos = block.chunk();
+            let chunk = self
+                .0
+                .entry(pos)
+                .or_insert_with(|| Chunk::new(pos, MaterialId::AIR));
+            // The bottom `layers` cell layers of the block, all nine columns.
+            let mut occupancy = 0;
+            for y in 0..layers {
+                for z in 0..crate::SUBNODES_PER_AXIS {
+                    for x in 0..crate::SUBNODES_PER_AXIS {
+                        occupancy |= 1 << crate::block::subnode_index(x, y, z);
+                    }
+                }
+            }
+            chunk
+                .set_block(
+                    block,
+                    BlockValue::Partial {
+                        material: STONE,
+                        occupancy,
+                    },
+                )
                 .expect("the block is in the chunk it names");
             self
         }

@@ -1868,6 +1868,13 @@ function game.play_loop(spec) end
 ---wherever you want the mob to go — the next waypoint of a route, or the player
 ---it is following.
 ---
+---**It jumps only for a rise the step cannot take.** The physics steps up one
+---sub-node — a third of a block — for nothing, so a chiselled lip is walked
+---over and only a taller rise is jumped. Before 2026-09-22 anything that was
+---not open floor counted as an obstacle, which on smoothed terrain meant a mob
+---hopped at nearly every rise; if you wrote your own steering to avoid that,
+---you can stop.
+---
 ---```lua
 ---game.register_on_tick(function()
 ---    for _, id in ipairs(game.entities_in_radius(home, 64, "mymod")) do

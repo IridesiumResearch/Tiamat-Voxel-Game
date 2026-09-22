@@ -55,29 +55,3 @@ bypasses the gaits a mob was meant to use.
 
 **Smallest change.** `speed` on `drive` (or on the entity), the multiplier
 `Abilities::speed` already is for players, through `Abilities::tuning`.
-
-## 12. `steer_entity` jumps at every rise the physics would climb (2026-09-22)
-
-**Seen, in play.** Cows and pigs hop across ordinary ground. The designer:
-"cows and pigs should really not jump unless they are stuck in a hole."
-
-**Why.** `path::steer` jumps when the block half a block ahead is not
-`passable` and the block over it is standable. `passable` is "no floor
-cells", so a block of smooth terrain holding a single cell of floor, a
-third-of-a-block lip, counts as an obstacle and is jumped. But the physics
-already climbs exactly that: `step_height` is one cell, and
-`a_step_up_of_one_subnode_succeeds_and_two_does_not`. On the Spindle's
-smooth ground nearly every rise is one cell, so a steered mob jumps at
-nearly every rise.
-
-**What the mod does now.** Walkers no longer use `steer_entity`. They set
-`drive` toward the target themselves, and jump only when stuck: trying to
-walk and not moving for half a second (a hole, a full block ahead). If
-three jumps do not free them, they give up on that target. That works, and
-it is a second copy of steering the engine meant every mod not to write.
-
-**Smallest change.** Jump only for a rise the step cannot take: the height
-of the floor ahead above the feet, in cells, greater than
-`tuning.step_height`. A one-cell lip is walked; two cells or a full block
-is jumped, as now. Optionally a `jump = "stuck"` mode, for mods that want
-the calmer rule.
