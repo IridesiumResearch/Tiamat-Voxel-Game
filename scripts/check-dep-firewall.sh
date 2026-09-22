@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 # a display server, it is that the program which decides what is authentic
 # should stay small enough to read, and must never grow a way to fetch what it
 # is signing (`docs/distribution.md` §8).
-GUARDED_PACKAGES=(tiamot-core server relman)
+GUARDED_PACKAGES=(tiamot-core server relman updater)
 
 # Forbidden crate families. Matched as a prefix followed by end-of-name or a
 # separator, so `wgpu` also catches `wgpu-core` and `wgpu-hal`, and `egui`

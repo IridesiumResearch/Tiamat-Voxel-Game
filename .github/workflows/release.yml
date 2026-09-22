@@ -77,8 +77,21 @@ jobs:
 
       - name: Package
         shell: bash
+        # The release key's PUBLIC half and the manifest URL are repository
+        # variables rather than secrets: both are published to every tester
+        # inside the binary, and a secret nobody can keep is a secret that
+        # makes logs harder to read for nothing. The private half never comes
+        # near CI — see docs/distribution.md §8.
+        env:
+          TIAMOT_RELEASE_KEY: ${{ vars.TIAMOT_RELEASE_KEY }}
+          TIAMOT_MANIFEST_URL: ${{ vars.TIAMOT_MANIFEST_URL }}
         run: |
           channel="${{ inputs.channel || 'test' }}"
+          if [ -z "${TIAMOT_RELEASE_KEY:-}" ]; then
+            echo "::warning::No TIAMOT_RELEASE_KEY variable is set, so this build"
+            echo "::warning::will apply no updates. Set it under Settings ->"
+            echo "::warning::Secrets and variables -> Actions -> Variables."
+          fi
           scripts/package.sh --target ${{ matrix.target }} --channel "$channel"
 
       # Kept whatever happens, so a dispatch run with no tag still produces

@@ -46,6 +46,10 @@ echo "==> building ${name} (channel ${channel})"
 # **The stamp is an environment variable read at compile time**, which is what
 # `core::build` reads back. A build with no commit says so rather than guessing
 # one, so a developer's copy can never claim to be a release.
+# `TIAMOT_RELEASE_KEY` and `TIAMOT_MANIFEST_URL` are inherited from the
+# environment when the release workflow sets them. A build made without them
+# trusts no key and asks nobody for updates, which is what a working copy
+# should do — see `core::build` and the launcher's `RELEASE_KEY`.
 export TIAMOT_CHANNEL="$channel"
 [ -n "$commit" ] && export TIAMOT_COMMIT="$commit"
 
@@ -68,10 +72,11 @@ echo "==> assembling"
 for binary in client server; do
     cp "${built}/${binary}${suffix}" "$stage/current/"
 done
-if [ -f "${built}/updater${suffix}" ]; then
+# The launcher's binary is called `tiamot` — it is what the player clicks.
+if [ -f "${built}/tiamot${suffix}" ]; then
     # The launcher sits ABOVE `current/`, because it is the one thing an update
     # does not replace — see `docs/distribution.md` §1.
-    cp "${built}/updater${suffix}" "${stage}/tiamot${suffix}"
+    cp "${built}/tiamot${suffix}" "${stage}/tiamot${suffix}"
 fi
 
 # --- mods ------------------------------------------------------------------

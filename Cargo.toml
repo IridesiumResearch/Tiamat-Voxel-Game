@@ -6,6 +6,7 @@ members = [
     "crates/client",
     "crates/bot",
     "crates/relman",
+    "crates/updater",
     "spikes/subnode",
     "spikes/ecs",
 ]
@@ -20,6 +21,7 @@ default-members = [
     "crates/client",
     "crates/bot",
     "crates/relman",
+    "crates/updater",
 ]
 
 # Shared metadata. Individual crates inherit with `field.workspace = true` so

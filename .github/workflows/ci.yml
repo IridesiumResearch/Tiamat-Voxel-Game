@@ -230,6 +230,17 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             -- -max_total_time=60 -rss_limit_mb=2048
 
+      # Charter rule 14 for the bytes that become FILES. Every other decoder
+      # here turns a stranger's bytes into a picture or a sound; the release
+      # archive turns them into a directory that is then executed, so a path
+      # that escapes it is the worst bug this project could ship. The target
+      # asserts the caps AND that nothing was written outside the destination.
+      - name: Fuzz the release archive extractor (smoke)
+        run: |
+          cargo +nightly fuzz run archive_ingest \
+            --target x86_64-unknown-linux-gnu \
+            -- -max_total_time=60 -rss_limit_mb=2048
+
       # Charter rule 14 again, for Task 10's chunk-light payloads. A run-length
       # format is exactly the shape that goes wrong under hostile input — a run
       # header claiming more than a chunk, a run of zero length, a payload that

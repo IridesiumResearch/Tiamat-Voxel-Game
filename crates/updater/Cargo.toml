@@ -1,0 +1,34 @@
+[package]
+name = "updater"
+description = "The launcher: applies a staged update, then starts the game."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# **The one component an update cannot replace**, so it stays small enough to
+# read and depends on as little as possible (`docs/distribution.md` §1). No
+# network: the client downloads, this applies. No GUI: it runs for a fraction
+# of a second.
+[dependencies]
+tiamot-core.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json = "1.0.151"
+thiserror.workspace = true
+# Pure-Rust inflate (charter rule 14: no C codec in a path that parses a
+# stranger's bytes). `rust_backend` is miniz_oxide rather than zlib.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+
+[lib]
+name = "updater"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tiamot"
+path = "src/main.rs"

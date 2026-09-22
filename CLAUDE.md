@@ -26,6 +26,9 @@ X," the answer is that a future mod needs X, and the engine's job is to make X e
    - `crates/server` — thin binary over core. Headless. No GUI deps, no X11.
    - `crates/client` — core + wgpu/winit/kira/egui.
    - `crates/bot`    — scripted headless client for tests/benchmarks/load.
+   - `crates/updater` — the launcher a player clicks: applies a staged update
+     and starts the game. No network, no GUI; it is the one component an
+     update cannot replace. See `docs/distribution.md`.
    - `crates/relman` — release manager: hashes a built release into a signed
      manifest. Offline by construction; no network, no GUI. See
      `docs/distribution.md`.
