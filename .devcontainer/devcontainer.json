@@ -4,5 +4,19 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
-  }
+  },
+  "mounts": [
+    // The mods being developed live beside the engine on the host, and each is
+    // linked into game/ by its Windows path. Docker Desktop resolves such a
+    // link under /mnt/host/, so their folder is mounted where the links point.
+    "source=${localEnv:USERPROFILE}/Documents/Projects/Games,target=/mnt/host/c/Users/${localEnv:USERNAME}/Documents/Projects/Games,type=bind",
+    // The repository is on a Windows mount, where building is slow and target/
+    // is shared with the Windows build. Linux builds go on a volume, which also
+    // keeps them across a rebuild of the container.
+    "source=tiamat-target,target=/home/vscode/.cache/tiamat-target,type=volume"
+  ],
+  "containerEnv": {
+    "CARGO_TARGET_DIR": "/home/vscode/.cache/tiamat-target"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh"
 }

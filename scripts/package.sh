@@ -63,7 +63,8 @@ cargo build --release --target "$target" "${packages[@]}"
 
 suffix=""
 case "$target" in *windows*) suffix=".exe" ;; esac
-built="target/${target}/release"
+# Cargo builds wherever CARGO_TARGET_DIR says, when it is set.
+built="${CARGO_TARGET_DIR:-target}/${target}/release"
 
 rm -rf "$stage"
 mkdir -p "$stage/current"
