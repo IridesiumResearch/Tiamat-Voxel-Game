@@ -853,6 +853,94 @@ fn a_mods_spray_reaches_the_window_and_is_handed_to_the_renderer() {
 }
 
 #[test]
+fn a_badge_over_a_mob_reaches_the_frame_and_takes_itself_down() {
+    // `game.show_over` from a real mod to what the renderer is told to draw —
+    // Life ask 15. The mod emits NO particles at all, so every sprite the
+    // renderer is handed is a badge icon and the count is an exact claim:
+    // five icons asked for, five drawn.
+    //
+    // And then it goes. Nothing tells the client to take a badge down — the
+    // server sends no such message — so expiry is the client's own clock, and
+    // a badge that stayed up for ever would be invisible to every test that
+    // only looked at the first second.
+    let Some(gpu) = gpu() else { return };
+    let mods = scratch("badge-mods");
+    let dir = mods.join("herd");
+    std::fs::create_dir_all(dir.join("textures")).expect("mod dir");
+    std::fs::write(
+        dir.join("textures/heart.png"),
+        b"\x89PNG\r\n\x1a\nbytes standing in for a heart",
+    )
+    .expect("picture");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"herd\"\nname = \"Herd\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        "local ground = game.register_block{ id = \"ground\" }\n\
+         local heart = game.register_picture{ id = \"heart\", file = \"textures/heart.png\" }\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
+         end)\n\
+         local cow = nil\n\
+         local turn = 0\n\
+         game.register_on_tick(function()\n\
+         \x20   turn = turn + 1\n\
+         \x20   if cow == nil then\n\
+         \x20       cow = game.spawn_entity{ pos = { x = 1, y = 0, z = 1 },\n\
+         \x20           model = \"engine:humanoid\", collider = { width = 0.6, height = 1.8 } }\n\
+         \x20       return\n\
+         \x20   end\n\
+         -- Hung once and never again: the client's own clock must take it\n\
+         -- down, and a mod re-hanging it every tick would hide that.\n\
+         \x20   if turn == 10 then\n\
+         \x20       game.show_over(cow, { picture = heart, count = 5, seconds = 1, size = 0.5 })\n\
+         \x20   end\n\
+         end)\n",
+    )
+    .expect("script");
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("badge-world"),
+        identity_path: None,
+        max_players: 1,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods),
+        enabled_mods: None,
+        seed: Some(7),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("the embedded server must start");
+    let mut app = client("badge", &server, gpu);
+
+    assert!(
+        run_frames(&mut app, |app| app.joined()
+            && app.drawn().particle_count() > 0),
+        "a badge hung over a mob never reached the renderer"
+    );
+    assert_eq!(
+        app.renderer().particle_count(),
+        5,
+        "five icons were asked for; the mod emits no particles, so this is all of them"
+    );
+
+    // A second later it is gone, and nothing was sent to make it go.
+    assert!(
+        run_frames(&mut app, |app| app.drawn().particle_count() == 0),
+        "the badge never came down: expiry is the client's own business"
+    );
+
+    app.shutdown();
+    assert!(server.stop());
+}
+
+#[test]
 fn the_selection_outlines_the_real_shape_of_a_chiselled_block() {
     // The task asks for an outline "honouring Partial occupancy — outline the
     // actual occupied sub-node cells". The easy version draws a cube whatever

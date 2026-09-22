@@ -114,6 +114,80 @@ impl Burst {
     }
 }
 
+/// The most icons one badge may show.
+///
+/// A row of hearts over a cow, an "!" over a startled animal, a quest marker.
+/// Sixteen is twice the longest health bar anybody draws and still a row that
+/// fits over an entity rather than across the screen.
+pub const MAX_BADGE_ICONS: u8 = 16;
+
+/// A row of pictures hung over an entity — Life ask 15.
+///
+/// **Why this is not a burst.** A burst is scattered at a PLACE and each client
+/// animates it; a badge is anchored to an ENTITY and follows it, which a burst
+/// cannot do — the mod's own workaround re-sprayed the row every tick to keep
+/// it over a moving cow. One badge replaces whatever the same entity had, so a
+/// draining health bar is a badge a tick, not a queue.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Badge {
+    /// The entity it hangs over. It follows that entity, and goes when it does.
+    pub entity: u64,
+    /// The picture each icon draws — a hash `register_picture` answered.
+    ///
+    /// Required, unlike a burst's: a badge with no picture would be a row of
+    /// blank squares, which is not a thing anybody means to ask for.
+    pub picture: crate::proto::ContentHash,
+    /// How many icons, laid left to right and centred over the entity.
+    pub count: u8,
+    /// How long the row stays before it fades, in seconds.
+    pub seconds: f32,
+    /// How big each icon is, in blocks across.
+    pub size: f32,
+    /// What the picture is tinted by, as a burst's colour tints its particles.
+    pub colour: [u8; 4],
+}
+
+impl Badge {
+    /// Whether every number in it is one a client should accept.
+    ///
+    /// The hostile-input check, as [`Burst::is_valid`] is: a badge of four
+    /// billion icons is a hostile message rather than a large one.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let within =
+            |value: f32, low: f32, high: f32| value.is_finite() && (low..=high).contains(&value);
+        self.count <= MAX_BADGE_ICONS
+            && within(self.seconds, 0.0, MAX_LIFETIME)
+            && within(self.size, 0.0, MAX_SIZE)
+    }
+}
+
+/// A mod's request: a badge, and who should see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BadgeRequest {
+    /// The badge itself.
+    pub badge: Badge,
+    /// How far away a player may be and still be sent it, in blocks.
+    pub radius: f32,
+    /// One player to see it, or everyone in reach.
+    ///
+    /// Narrows, never widens, exactly as [`EmitRequest::player`] does — and
+    /// the reason the ask names it: the hitter sees the hearts, not the whole
+    /// server.
+    pub player: Option<crate::identity::PlayerUuid>,
+}
+
+/// Clamps a mod's badge into ranges every client accepts.
+#[must_use]
+pub fn sanitise_badge(mut request: BadgeRequest) -> BadgeRequest {
+    let badge = &mut request.badge;
+    badge.count = badge.count.min(MAX_BADGE_ICONS);
+    badge.seconds = clamp_finite(badge.seconds, 0.0, MAX_LIFETIME, 2.0);
+    badge.size = clamp_finite(badge.size, 0.0, MAX_SIZE, 0.4);
+    request.radius = clamp_finite(request.radius, 0.0, MAX_RADIUS, 32.0);
+    request
+}
+
 /// A mod's request: a burst, and who should see it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmitRequest {
@@ -180,6 +254,14 @@ pub trait Access: Send + Sync {
     /// many were told. Not a promise anybody SAW it — a client behind a wall,
     /// or with its particle budget full, still counts.
     fn emit(&self, request: &EmitRequest) -> u32;
+
+    /// Hangs a row of pictures over an entity, returning how many players were
+    /// told.
+    ///
+    /// The domain and the position come from the ENTITY rather than from the
+    /// mod: a badge over something that has stopped existing is told to
+    /// nobody, which is the answer a mod wants and not an error.
+    fn show_over(&self, request: &BadgeRequest) -> u32;
 }
 
 #[cfg(test)]

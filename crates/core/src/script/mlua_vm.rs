@@ -3663,6 +3663,24 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("emit_particles", emit_particles)
             .map_err(|err| self.vm_error(&err))?;
+
+        // `game.show_over` — the other half of Life ask 15, and installed
+        // beside its sibling because both reach the same slot: who is close
+        // enough to be shown something.
+        let slot = std::sync::Arc::clone(&self.particles);
+        let show_over = self
+            .lua
+            .create_function(move |_, (entity, spec): (u64, Table)| {
+                let request = crate::particle::sanitise_badge(badge_request(entity, &spec)?);
+                let told = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.show_over(&request)));
+                Ok(told.unwrap_or(0))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("show_over", show_over)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -9668,6 +9686,56 @@ fn particle_request(spec: &Table) -> mlua::Result<crate::particle::EmitRequest> 
     })
 }
 
+/// Reads `game.show_over`'s table into a request, before sanitising.
+///
+/// Where it hangs is the ENTITY, so there is no `pos` and no `domain` to read:
+/// the server takes both from the entity, which is what makes the row follow
+/// it rather than stay where it was hung.
+fn badge_request(entity: u64, spec: &Table) -> mlua::Result<crate::particle::BadgeRequest> {
+    let colour = match spec
+        .get::<Option<Table>>("colour")
+        .map_err(|_| mlua::Error::external("show_over: `colour` is a table { r, g, b, a }"))?
+    {
+        Some(colour) => {
+            let channel = |value: Option<f32>| match value {
+                Some(value) if value.is_nan() => u8::MAX,
+                Some(value) => (value.clamp(0.0, 1.0) * 255.0) as u8,
+                None => u8::MAX,
+            };
+            [
+                channel(colour.get("r")?),
+                channel(colour.get("g")?),
+                channel(colour.get("b")?),
+                channel(colour.get("a")?),
+            ]
+        }
+        None => [u8::MAX; 4],
+    };
+    let count = spec.get::<Option<i64>>("count")?.unwrap_or(1);
+    Ok(crate::particle::BadgeRequest {
+        badge: crate::particle::Badge {
+            entity,
+            // Required: a badge with no picture is a row of blank squares.
+            picture: content_hash(spec, "picture")?,
+            count: u8::try_from(count.max(0)).unwrap_or(u8::MAX),
+            seconds: spec.get::<Option<f32>>("seconds")?.unwrap_or(2.0),
+            size: spec.get::<Option<f32>>("size")?.unwrap_or(0.4),
+            colour,
+        },
+        radius: spec.get::<Option<f32>>("radius")?.unwrap_or(32.0),
+        player: spec
+            .get::<Option<String>>("player")?
+            .map(|uuid| {
+                crate::identity::PlayerUuid::from_hex(&uuid).map_err(|_| {
+                    mlua::Error::external(format!(
+                        "show_over: `player` is a player's UUID in hex, not `{uuid}`"
+                    ))
+                })
+            })
+            .transpose()?,
+    })
+}
+
 /// The shape of a particle from a mod's table — everything but where and how
 /// many, which `emit_particles` and `set_precipitation` fill differently.
 /// `what` names the call in errors.
@@ -11112,10 +11180,11 @@ mod tests {
         assert_eq!(set[1].1, None, "nil is the plain sky");
     }
 
-    /// Records every burst a mod asked for.
+    /// Records every burst and badge a mod asked for.
     #[derive(Default)]
     struct Spray {
         asked: std::sync::Mutex<Vec<crate::particle::EmitRequest>>,
+        hung: std::sync::Mutex<Vec<crate::particle::BadgeRequest>>,
     }
 
     impl crate::particle::Access for Spray {
@@ -11123,6 +11192,67 @@ mod tests {
             self.asked.lock().expect("spray lock").push(request.clone());
             3
         }
+
+        fn show_over(&self, request: &crate::particle::BadgeRequest) -> u32 {
+            self.hung.lock().expect("spray lock").push(request.clone());
+            2
+        }
+    }
+
+    #[test]
+    fn a_mod_hangs_a_row_of_pictures_over_an_entity() {
+        // Life ask 15's second half: "a row of icons billboarded over an
+        // entity that follows it" — health bars, an "!" over a startled
+        // animal, a quest marker. The table's shape reaches the seam, the
+        // entity is the mod's argument and the rest is defaulted or clamped.
+        let mut host = vm();
+        let spray = std::sync::Arc::new(Spray::default());
+        host.set_particle_access(spray.clone());
+        load(
+            &mut host,
+            "life",
+            "told = game.show_over(77, { picture = string.rep('cd', 32), count = 5,\n\
+             \x20   seconds = 1.5, size = 0.3, colour = { r = 1, g = 0.2, b = 0.2 },\n\
+             \x20   radius = 20 })\n\
+             game.show_over(9, { picture = string.rep('ef', 32), count = 1000,\n\
+             \x20   seconds = 0/0 })",
+        )
+        .expect("load");
+        assert_eq!(
+            host.environment("life")
+                .expect("env")
+                .get::<u32>("told")
+                .expect("told"),
+            2,
+            "the count of players told came back"
+        );
+
+        let hung = spray.hung.lock().expect("lock").clone();
+        assert_eq!(hung.len(), 2);
+        assert_eq!(hung[0].badge.entity, 77);
+        assert_eq!(hung[0].badge.picture, [0xCD; 32]);
+        assert_eq!(hung[0].badge.count, 5);
+        assert!((hung[0].badge.seconds - 1.5).abs() < f32::EPSILON);
+        assert_eq!(hung[0].badge.colour, [255, 51, 51, 255]);
+        assert!((hung[0].radius - 20.0).abs() < f32::EPSILON);
+        assert!(hung[0].badge.is_valid());
+
+        // Clamped, not refused — a careless number still shows something.
+        assert_eq!(hung[1].badge.count, crate::particle::MAX_BADGE_ICONS);
+        assert!(
+            (hung[1].badge.seconds - 2.0).abs() < f32::EPSILON,
+            "a NaN duration is the default"
+        );
+        assert!(hung[1].badge.is_valid());
+
+        // A badge with no picture is a row of blank squares, so it is an
+        // error where the mod can see it.
+        let mut fresh = vm();
+        fresh.set_particle_access(std::sync::Arc::new(Spray::default()));
+        assert!(
+            load(&mut fresh, "life", "game.show_over(1, { count = 3 })").is_err(),
+            "a badge with no picture was accepted"
+        );
     }
 
     #[test]

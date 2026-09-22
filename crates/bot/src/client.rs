@@ -668,6 +668,18 @@ impl Bot {
             .collect()
     }
 
+    /// Every badge received so far, in arrival order.
+    #[must_use]
+    pub fn badges_received(&self) -> Vec<tiamot_core::particle::Badge> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::ShowOver { badge } => Some(badge),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// What the client holds within `view` chunks of where the server last put
     /// it, worked out from the messages in order: the last of chunk, summary
     /// or unload for a position is what the client has for it.

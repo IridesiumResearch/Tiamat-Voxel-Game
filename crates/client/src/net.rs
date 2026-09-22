@@ -431,6 +431,9 @@ pub enum Event {
     /// Bursts of particles a mod scattered nearby.
     Particles(Vec<tiamot_core::particle::Burst>),
 
+    /// A row of pictures to hang over an entity — Life ask 15.
+    ShowOver(tiamot_core::particle::Badge),
+
     /// A downsampled chunk, for the horizon.
     ///
     /// Arrives INSTEAD of an [`Event::Chunk`] for a position outside the detail
@@ -1438,6 +1441,10 @@ async fn session(
 
             ServerMessage::Particles { bursts } => {
                 let _ = events.send(Event::Particles(bursts));
+            }
+
+            ServerMessage::ShowOver { badge } => {
+                let _ = events.send(Event::ShowOver(badge));
             }
 
             ServerMessage::ChunkSummary { pos, blob } => {

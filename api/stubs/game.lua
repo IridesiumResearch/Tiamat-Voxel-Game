@@ -2443,6 +2443,49 @@ function game.play_sound(spec) end
 ---@return integer told
 function game.emit_particles(spec) end
 
+---Fields accepted by `game.show_over`.
+---@class Tiamot.BadgeSpec
+---@field picture string Required. The 64 hex characters `game.register_picture` answered. Every icon in the row draws it.
+---@field count integer? How many icons, side by side. Default 1, at most 16. **Zero takes the badge down** before its time — a mob back to full health should not wear an empty bar.
+---@field seconds number? How long it stays, before fading over its last fifth. Default 2, at most 30.
+---@field size number? How big each icon is, in blocks across. Default 0.4, at most 4.
+---@field colour { r: number?, g: number?, b: number?, a: number? }? Tints the picture, 0..1; an unnamed channel is 1. One white heart serves red hearts and grey ones.
+---@field radius number? How far away a player may be and still be sent it. Default 32, at most 128.
+---@field player string? A player's UUID in hex. Shows it to that one player and nobody else — the hitter sees the hearts, not the whole server. Narrows, never widens.
+
+---Hangs a row of pictures over an entity, following it.
+---
+---Health bars, an "!" over a startled animal, a quest marker. The row is
+---camera-facing and level, centred over the entity's head, and it MOVES WITH
+---IT — where it is comes from the entity every frame, not from the call.
+---
+---**Latest state, not an event.** A badge replaces whatever that entity had,
+---so a bar draining over a second is a call a tick and costs one message per
+---network pass however often you ask. It expires on the client, so there is
+---nothing to take down; call it again with `count = 0` to take it down early.
+---
+---Unlit, unlike particles: a health bar nobody can read at night is a health
+---bar that does not work. Still depth-tested, so a mob behind a wall does not
+---advertise itself through it.
+---
+---Returns how many players were told. An entity that has gone — or was never
+---there — tells nobody and returns 0, which is an answer rather than an error.
+---
+---```lua
+---local heart = game.register_picture{ id = "heart", file = "textures/heart.png" }
+---
+------ Hit a cow: hearts over it for a second, for the player who hit it.
+---game.show_over(cow, { picture = heart, count = health, seconds = 1,
+---    size = 0.3, player = hitter })
+---
+------ And take it down the moment it is healed again.
+---game.show_over(cow, { picture = heart, count = 0 })
+---```
+---@param entity integer The entity to hang it over.
+---@param spec Tiamot.BadgeSpec
+---@return integer told
+function game.show_over(entity, spec) end
+
 ---A walkable route between two points, or why there is not one.
 ---
 ---Navigation is **block resolution** and deliberately simple (Sub-Node Contract

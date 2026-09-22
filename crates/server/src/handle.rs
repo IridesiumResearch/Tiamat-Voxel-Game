@@ -2496,6 +2496,7 @@ impl ServerHandle {
             seeds: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            badges: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -2970,6 +2971,7 @@ impl ServerHandle {
                             host.vm_mut()
                                 .set_particle_access(std::sync::Arc::new(Sprayer {
                                     shared: std::sync::Arc::clone(&shared),
+                                    population: std::sync::Arc::clone(&population),
                                 }));
                             // And whose screen a mod's dialogs open on. Kept
                             // by this loop as well as by the VM, because
@@ -5908,6 +5910,9 @@ struct Earshot {
 /// coordinates is not in the overworld's sky at the same numbers.
 struct Sprayer {
     shared: std::sync::Arc<crate::transport::endpoint::Shared>,
+    /// The mobs, for `show_over`: a badge hangs over an ENTITY, so where it is
+    /// and which domain it is in are the entity's answers and not the mod's.
+    population: std::sync::Arc<std::sync::RwLock<crate::ent::Population>>,
 }
 
 impl tiamot_core::particle::Access for Sprayer {
@@ -5938,6 +5943,51 @@ impl tiamot_core::particle::Access for Sprayer {
                 continue;
             }
             if self.shared.queue_particles(uuid, request.burst) {
+                told += 1;
+            }
+        }
+        told
+    }
+
+    fn show_over(&self, request: &tiamot_core::particle::BadgeRequest) -> u32 {
+        // **Where the entity is, not where the mod thinks it is.** A badge
+        // that took a position from the caller would hang a tick behind
+        // everything that moves, which is the bug the mod's own workaround
+        // had.
+        let id = tiamot_core::ent::EntityId(request.badge.entity);
+        let Ok(mobs) = self.population.read() else {
+            return 0;
+        };
+        let Some(entity) = mobs.get(id) else {
+            // Gone, or never there. Nobody is told, and that is an answer
+            // rather than an error: a mod badging a mob that died this tick
+            // did nothing wrong.
+            return 0;
+        };
+        let at = entity.transform.to_world();
+        let domain = mobs.domain_of(id).to_owned();
+        drop(mobs);
+
+        let Ok(bodies) = self.shared.bodies.lock() else {
+            return 0;
+        };
+        let radius = f64::from(request.radius);
+        let mut told = 0;
+        for (uuid, player) in bodies.iter() {
+            if player.domain != domain {
+                continue;
+            }
+            if request.player.is_some_and(|only| only != *uuid) {
+                continue;
+            }
+            let eye =
+                tiamot_core::ent::Transform::at(player.origin, player.body.position).to_world();
+            let offset = [eye[0] - at[0], eye[1] - at[1], eye[2] - at[2]];
+            let distance = offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2];
+            if distance > radius * radius {
+                continue;
+            }
+            if self.shared.queue_badge(uuid, request.badge) {
                 told += 1;
             }
         }

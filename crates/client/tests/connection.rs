@@ -228,6 +228,7 @@ impl Seen {
             // none, and an empty table is still a table that arrives.
             Event::ModSettings { .. } => {}
             Event::Particles(_)
+            | Event::ShowOver(_)
             | Event::SkyModifier(_)
             | Event::Flash(_)
             | Event::Precipitation(_) => {}

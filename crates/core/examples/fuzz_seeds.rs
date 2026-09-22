@@ -476,8 +476,21 @@ fn server_messages() -> Vec<Vec<u8>> {
                 area: [tiamot_core::particle::MAX_AREA, 0.0, 1.0],
                 gravity: -9.5,
                 collide: false,
-                texture: None,
+                // Protocol v71: a burst naming a picture, so the decoder sees
+                // the field present as well as absent.
+                texture: Some([0xA5; 32]),
             }],
+        },
+        // Protocol v72: a badge, at the edge of every range it may have.
+        ServerMessage::ShowOver {
+            badge: tiamot_core::particle::Badge {
+                entity: u64::MAX,
+                picture: [0x5A; 32],
+                count: tiamot_core::particle::MAX_BADGE_ICONS,
+                seconds: tiamot_core::particle::MAX_LIFETIME,
+                size: tiamot_core::particle::MAX_SIZE,
+                colour: [255, 0, 128, 40],
+            },
         },
         ServerMessage::BlockDelta {
             edit: Edit::Block {

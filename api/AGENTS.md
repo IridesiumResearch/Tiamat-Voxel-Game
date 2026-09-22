@@ -729,6 +729,21 @@ picture before they are drawn, so a scene mixing plain dots and three pictures
 is four draws rather than one per particle. A hash whose bytes are still in
 flight draws the plain dot until they land: never nothing.
 
+**A row of pictures over an entity: `game.show_over(entity, spec)`.** Health
+bars, an "!" over a startled animal, a quest marker. The row is camera-facing,
+level, centred over the entity's head, and follows it — where it is comes from
+the entity every frame, not from your call, so you hang it once rather than
+re-hanging it every tick to keep up with a walking cow.
+
+It is **latest state**: a badge replaces whatever that entity had, so a bar
+draining over a second is a call a tick and still costs one message per network
+pass. It expires on the client by itself, so there is nothing to take down;
+`count = 0` takes it down early, which is what a mob healed back to full wants.
+`player` narrows it to the one who hit, as `emit_particles` does. Unlit, so it
+is readable at night, and depth-tested, so a mob behind a wall does not
+advertise itself through it. An entity that has gone tells nobody and returns
+0 — not an error.
+
 ---
 
 ## Interfaces: what a mod can and cannot do to the look

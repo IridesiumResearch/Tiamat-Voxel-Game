@@ -9,31 +9,22 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-Landed and in use as of 2026-09-20: 0 (15302d1 and the texture step), 1 and 9
-(dc3b5ee, 82444e7), 2 (eab4c2d), 3, 4, 5, 7 and 8 (a3db9fa), and 10 and 11
-(990bf8a).
+**Every ask on this sheet has landed as of 2026-09-22.** There is nothing open
+here. New ones go at the top, newest first, in the shape the ones above had.
+
+Landed and in use: 0 (15302d1 and the texture step), 1 and 9 (dc3b5ee,
+82444e7), 2 (eab4c2d), 3, 4, 5, 7 and 8 (a3db9fa), 10 and 11 (990bf8a), 12
+(aa77731), 13 (7c0679c), 14 (033f4e6), and 15 (e5c0394 and the badge step).
 
 Step 2 of ask 0 (a texture on a mod's model) landed 2026-09-20, with the
 placement it needed: an entity wearing a mod's model was never put in the
 world at all, so the cow was on the GPU and not in the frame.
 
-## 15. A picture over an entity (2026-09-22)
-
-**Wanted.** Hit a cow and a row of hearts shows over it for a second,
-draining. The designer asked for exactly that.
-
-**Why the mod cannot do it properly.** Nothing puts a picture in the world
-over an entity: a nametag is text, set only at spawn; the HUD script has
-no camera, so it cannot place anything over a thing in the world; a
-particle is a flat square of one colour.
-
-**What the mod does now.** Draws each heart in pixels, one particle per
-pixel (13 a heart, 65 for a cow), each with no speed, spread or gravity so
-it stays put, sent only to the hitter and turned square to them. It works,
-and it is 65 messages a blow for what is one picture.
-
-**Smallest change.** Either `texture` on `emit_particles` (a registered
-picture, so a heart is one particle), or `game.show_over(entity, { picture,
-count, seconds, player })`, a row of icons billboarded over an entity that
-follows it. The first is general; the second is what health bars, "!"
-over a startled animal and quest markers all are.
+Ask 15 landed in two halves, both of them usable and neither replacing the
+other. `texture` on `emit_particles` makes a heart ONE particle instead of
+thirteen, and is the general answer — any burst may carry a picture.
+`game.show_over(entity, spec)` is the specific one the row of hearts wanted: a
+camera-facing row centred over an entity's head that FOLLOWS it, latest-state
+per entity, expiring on the client. Health bars, an "!" over a startled
+animal and a quest marker are all the second one. Both are documented in
+`api/stubs/game.lua` and `api/AGENTS.md`.

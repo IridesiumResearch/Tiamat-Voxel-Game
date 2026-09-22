@@ -183,6 +183,91 @@ pub const TELEPORT_DISTANCE: f64 = 50_000.0;
 /// criterion's round number needs no rounding here.
 pub const TELEPORT_CHUNKS: i32 = 3_125;
 
+/// How far apart a badge's icons sit, as a share of one icon's width.
+///
+/// Slightly more than touching: a row of hearts wants a hairline between them
+/// so five reads as five, and a picture whose art does not fill its square
+/// would otherwise look gapped anyway.
+const BADGE_SPACING: f32 = 1.05;
+
+/// How far over an entity's head a badge floats, as a share of an icon's size.
+const BADGE_CLEARANCE: f32 = 0.75;
+
+/// The collider height assumed for an entity that declares none, in cells.
+///
+/// A person: the engine's own rig. An entity with no collider is a marker and
+/// is usually invisible, so this is the rare case rather than the common one.
+const DEFAULT_BADGE_HEIGHT: f32 = 1.8 * tiamot_core::SUBNODES_PER_AXIS as f32;
+
+/// The longest a badge may stay up, in seconds.
+///
+/// The same bound the protocol checks, restated here because a client does not
+/// trust the server it is talking to (charter rule 14): a badge asking to hang
+/// for a year is a hostile message and this is where it stops being one.
+const MAX_BADGE_SECONDS: f32 = tiamot_core::particle::MAX_LIFETIME;
+
+/// One badge's icons, laid out over an entity.
+///
+/// Pure, and separate from the frame loop, because every claim worth making
+/// about a badge is a claim about this: that the row sits over the entity's
+/// head rather than in it, that it is centred on the entity whatever its
+/// length, and that every icon draws the same picture.
+///
+/// `feet` is the entity's position, already camera-relative — the server's
+/// position for an entity is between its feet. `height` is its collider
+/// height in CELLS, which is the unit the entity stream carries.
+fn badge_row(
+    badge: &tiamot_core::particle::Badge,
+    feet: [f32; 3],
+    height: f32,
+    right: glam::Vec3,
+    fade: f32,
+) -> Vec<crate::render::particle::Sprite> {
+    let cells = tiamot_core::SUBNODES_PER_AXIS as f32;
+    // **Over its head, not over its feet**, plus a little air: a badge sunk
+    // into a cow is worse than no badge.
+    let over = [
+        feet[0],
+        feet[1] + height / cells + badge.size * BADGE_CLEARANCE,
+        feet[2],
+    ];
+    // Laid out along the camera's own right, which is level because
+    // `Camera::right` crosses with up: a row of hearts stays a row however
+    // the player tilts, and it turns to face them for free.
+    let count = f32::from(badge.count);
+    let step = badge.size * BADGE_SPACING;
+    let start = -(count - 1.0) * 0.5 * step;
+    let channel = |value: u8| f32::from(value) / 255.0;
+    (0..badge.count)
+        .map(|index| {
+            let along = start + f32::from(index) * step;
+            crate::render::particle::Sprite {
+                centre: [
+                    over[0] + right.x * along,
+                    over[1] + right.y * along,
+                    over[2] + right.z * along,
+                ],
+                size: badge.size,
+                colour: [
+                    channel(badge.colour[0]),
+                    channel(badge.colour[1]),
+                    channel(badge.colour[2]),
+                    channel(badge.colour[3]) * fade,
+                ],
+                texture: Some(badge.picture),
+            }
+        })
+        .collect()
+}
+
+/// A badge on this client, and when it comes down.
+struct LiveBadge {
+    /// What the server hung there.
+    badge: tiamot_core::particle::Badge,
+    /// When it expires, on this client's own clock.
+    until: std::time::Duration,
+}
+
 /// How far ahead of the server the client keeps its input tick.
 ///
 /// An input has to arrive before the tick it is for, so the lead has to cover
@@ -1032,6 +1117,14 @@ pub struct App {
     heard: Vec<crate::net::Event>,
     /// Every particle a mod has scattered near this player, still in flight.
     particles: crate::particles::System,
+    /// What hangs over each entity, and when it goes — Life ask 15.
+    ///
+    /// **Keyed by entity and not a list**, because a badge is latest state all
+    /// the way down: a draining health bar arrives as a badge a tick, and each
+    /// one replaces the last over that entity. Expiry is the client's own
+    /// business — the server sends no "take it down" message, so a badge over
+    /// a mob whose server went quiet fades rather than staying for ever.
+    badges: std::collections::BTreeMap<u64, LiveBadge>,
     /// What each material sounds like to walk on, by world material id.
     step_sounds: std::collections::BTreeMap<u16, String>,
     /// Distance walked since the last footstep, in blocks.
@@ -1361,6 +1454,10 @@ impl App {
     /// Separate so tests and the bot can build an `App` without a bindings file
     /// on disk, which is the overwhelmingly common case for both.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "almost all of it is one struct literal naming every field of `App` once;                   splitting that into helpers that each build a few fields would hide which                   fields exist and where each one's starting value is decided, which is the                   only thing anybody reads this function for"
+    )]
     pub fn with_bindings(
         config: Config,
         connection: Connection,
@@ -1408,6 +1505,7 @@ impl App {
             mixer,
             heard: Vec::new(),
             particles: crate::particles::System::default(),
+            badges: std::collections::BTreeMap::new(),
             step_sounds: std::collections::BTreeMap::new(),
             items: std::collections::BTreeSet::new(),
             hosting: None,
@@ -1514,6 +1612,16 @@ impl App {
     /// The renderer, for drawing a frame.
     pub fn renderer(&mut self) -> &mut Renderer {
         &mut self.renderer
+    }
+
+    /// The renderer, to ask it something.
+    ///
+    /// Shared, unlike [`App::renderer`], so a test's frame-loop predicate can
+    /// read what the last frame was handed — which is the only honest way to
+    /// ask "did this reach the frame?" from outside.
+    #[must_use]
+    pub const fn drawn(&self) -> &Renderer {
+        &self.renderer
     }
 
     /// Whether a mod's model of this id has arrived and been uploaded.
@@ -4633,6 +4741,7 @@ impl App {
             }
 
             Event::Particles(bursts) => self.adopt_particles(&bursts),
+            Event::ShowOver(badge) => self.adopt_badge(badge),
 
             Event::PlayerState(state) => self.accept_player_state(&state),
 
@@ -5423,6 +5532,65 @@ impl App {
         }
     }
 
+    /// Hangs a badge over an entity, replacing whatever it had.
+    ///
+    /// A count of zero is how a mod takes one down before its time — a mob
+    /// back to full health should not wear an empty bar for the rest of the
+    /// second it was given.
+    fn adopt_badge(&mut self, badge: tiamot_core::particle::Badge) {
+        if badge.count == 0 {
+            self.badges.remove(&badge.entity);
+            return;
+        }
+        let until = self.since_start.elapsed()
+            + std::time::Duration::from_secs_f32(badge.seconds.clamp(0.0, MAX_BADGE_SECONDS));
+        self.badges.insert(badge.entity, LiveBadge { badge, until });
+    }
+
+    /// This frame's badge icons, as sprites for the particle pass.
+    ///
+    /// **Rebuilt every frame from where the entity is now**, which is what
+    /// makes the row follow it. Expired badges, and badges over entities that
+    /// have gone, are dropped here rather than on a timer: the frame that
+    /// would have drawn one is the frame that knows it should not.
+    ///
+    /// **Unlit, unlike a particle.** A spray takes the light where it was
+    /// scattered, because it is part of the scene; a badge is a label, and a
+    /// health bar nobody can read at night is a health bar that does not
+    /// work. It is still depth-tested with everything else in the pass, so a
+    /// mob behind a wall does not advertise itself through it.
+    fn badge_sprites(&mut self) -> Vec<crate::render::particle::Sprite> {
+        let now = self.since_start.elapsed();
+        self.badges.retain(|_, live| live.until > now);
+        if self.badges.is_empty() {
+            return Vec::new();
+        }
+        let cells = f64::from(tiamot_core::SUBNODES_PER_AXIS);
+        let right = self.camera.right();
+        let mut sprites = Vec::new();
+        for (id, live) in &self.badges {
+            let Some(entity) = self.entities.get(*id) else {
+                continue;
+            };
+            let Some(pose) = entity.pose(now) else {
+                continue;
+            };
+            let corner = tiamot_core::BlockPos::from_chunk_corner(pose.chunk);
+            let feet = self.camera.position.offset_to([
+                f64::from(corner.x) + f64::from(pose.local[0]) / cells,
+                f64::from(corner.y) + f64::from(pose.local[1]) / cells,
+                f64::from(corner.z) + f64::from(pose.local[2]) / cells,
+            ]);
+            // The last fifth of its life, faded out — a bar that vanished
+            // between one frame and the next reads as a dropped message.
+            let left = (live.until.saturating_sub(now)).as_secs_f32();
+            let fade = (left / (live.badge.seconds.max(0.001) * 0.2)).clamp(0.0, 1.0);
+            let height = entity.collider.map_or(DEFAULT_BADGE_HEIGHT, |box_| box_[1]);
+            sprites.extend(badge_row(&live.badge, feet, height, right, fade));
+        }
+        sprites
+    }
+
     /// Moves every particle on and hands the renderer where they are now.
     ///
     /// A colliding particle dies in a cell that stops a body — solid and not
@@ -5470,6 +5638,11 @@ impl App {
                 texture: particle.texture,
             })
             .collect();
+        // Badges share the particle pass: they are camera-facing textured
+        // quads, which is exactly what it draws, and sharing means one sorted
+        // upload rather than a second pipeline drawing three hearts.
+        let mut sprites = sprites;
+        sprites.extend(self.badge_sprites());
         self.renderer.set_particles(&sprites);
     }
 
@@ -6649,6 +6822,78 @@ mod dig_lock_tests {
 mod tests {
     use super::*;
     use tiamot_core::proto::MaterialDef;
+
+    #[test]
+    fn a_badge_is_a_centred_row_over_an_entitys_head() {
+        // Life ask 15's geometry. Three claims, and each of them is a way the
+        // row is wrong in a picture rather than in a log: it sits OVER the
+        // entity (a bar inside a cow is worse than none), it is CENTRED on it
+        // whatever its length (or a health bar slides sideways as it drains),
+        // and every icon draws the SAME picture.
+        let badge = tiamot_core::particle::Badge {
+            entity: 1,
+            picture: [7; 32],
+            count: 4,
+            seconds: 2.0,
+            size: 0.5,
+            colour: [255, 128, 0, 255],
+        };
+        // A collider 5.4 cells tall: 1.8 blocks, a person.
+        let right = glam::Vec3::new(1.0, 0.0, 0.0);
+        let row = badge_row(&badge, [10.0, 20.0, 30.0], 5.4, right, 1.0);
+
+        assert_eq!(row.len(), 4, "four icons were asked for");
+        assert!(
+            row.iter().all(|icon| icon.texture == Some([7; 32])),
+            "an icon drew something other than the badge's picture"
+        );
+        // 1.8 blocks of collider, plus three quarters of an icon of air.
+        let feet = 20.0;
+        let over = row[0].centre[1] - feet;
+        assert!(
+            (over - (1.8 + 0.5 * 0.75)).abs() < 0.001,
+            "the row is {over:.3} blocks over the feet, not over its head"
+        );
+        assert!(
+            row.iter()
+                .all(|icon| (icon.centre[1] - row[0].centre[1]).abs() < f32::EPSILON),
+            "a row of icons is level"
+        );
+
+        // Centred: the middle of the row is the entity's own x, however many
+        // icons there are. An off-by-one in the layout puts it half a heart
+        // out, which reads as a bar that drifts as it drains.
+        let middle = |count: u8| {
+            let row = badge_row(
+                &tiamot_core::particle::Badge { count, ..badge },
+                [10.0, 20.0, 30.0],
+                5.4,
+                right,
+                1.0,
+            );
+            let sum: f32 = row.iter().map(|icon| icon.centre[0]).sum();
+            sum / row.len() as f32
+        };
+        for count in 1..=5 {
+            let at = middle(count);
+            assert!(
+                (at - 10.0).abs() < 0.001,
+                "a row of {count} is centred at {at:.3}, not on the entity at 10"
+            );
+        }
+        // And it is a row, not a heap: consecutive icons are one spacing apart.
+        let gap = row[1].centre[0] - row[0].centre[0];
+        assert!(
+            (gap - 0.5 * BADGE_SPACING).abs() < 0.001,
+            "icons sit {gap:.3} apart"
+        );
+
+        // The fade multiplies the alpha and leaves the colour alone: a heart
+        // going out stays red.
+        let going = badge_row(&badge, [10.0, 20.0, 30.0], 5.4, right, 0.25);
+        assert!((going[0].colour[3] - 0.25).abs() < 0.001);
+        assert!((going[0].colour[0] - 1.0).abs() < 0.001);
+    }
 
     #[test]
     fn a_job_makes_progress_even_when_the_budget_is_already_spent() {

@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 71;
+pub const PROTOCOL_VERSION: u32 = 72;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 71;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v72 (Life 15): appended `ServerMessage::ShowOver`, a row of pictures hung
+// over an entity and following it. The texture on a burst makes a heart one
+// particle; this makes a health bar one message, and is what an "!" over a
+// startled animal and a quest marker are as well.
 // v71 (Life 15): `particle::Burst` carries `texture`, a registered picture
 // drawn on each particle instead of a flat disc. Without it a mod drew a row
 // of hearts over a struck cow one particle per PIXEL — 65 a blow.
@@ -2242,6 +2246,17 @@ pub enum ServerMessage {
         /// The grid, or `None` for one sky everywhere.
         map: Option<crate::atmosphere::CloudMap>,
     },
+    /// A row of pictures to hang over an entity — Life ask 15.
+    ///
+    /// **Appended at the end** (protocol v72). Latest state per entity rather
+    /// than an event: a badge replaces whatever that entity had, so a health
+    /// bar draining over a second is one message a tick and not a queue, and a
+    /// client that missed one shows the next. It expires on the client without
+    /// being told to. See [`crate::particle::Badge`].
+    ShowOver {
+        /// Where it hangs and what it draws.
+        badge: crate::particle::Badge,
+    },
 }
 
 /// [`phys::Abilities`](crate::phys::Abilities) as it travels.
@@ -2843,6 +2858,19 @@ fn check_particles(bursts: &[crate::particle::Burst]) -> Result<(), ProtocolErro
     }
 }
 
+/// Rejects a badge asking for more icons, or a longer stay, than a client draws.
+fn check_badge(badge: &crate::particle::Badge) -> Result<(), ProtocolError> {
+    if badge.is_valid() {
+        Ok(())
+    } else {
+        Err(ProtocolError::FieldTooLarge {
+            field: "badge",
+            len: 0,
+            limit: 0,
+        })
+    }
+}
+
 /// Rejects an occupancy mask that addresses cells a block does not have.
 ///
 /// A block has [`crate::UNITS_PER_BLOCK`] cells, so only that many
@@ -3268,6 +3296,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         // bursts, and every number in each — a burst of four billion particles
         // is a hostile message, not a large one.
         ServerMessage::Particles { bursts } => check_particles(bursts)?,
+        ServerMessage::ShowOver { badge } => check_badge(badge)?,
         ServerMessage::EntityArmed { entities } => {
             check_len("entity_armed", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
             for entity in entities {

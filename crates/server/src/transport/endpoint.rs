@@ -307,6 +307,21 @@ pub struct Shared {
     pub particles:
         std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, Vec<tiamot_core::particle::Burst>>>,
 
+    /// Badges waiting for each player, keyed by the entity each hangs over.
+    ///
+    /// **A map and not a queue, which is the whole design.** A badge is latest
+    /// state: a health bar draining over a second is a mod calling
+    /// `show_over` every tick, and queueing twenty of those would show a
+    /// player a second-old bar and then nineteen more. Keying by entity means
+    /// the newest replaces the oldest and a busy mod costs one message per
+    /// entity per network pass, whatever it asks for.
+    pub badges: std::sync::Mutex<
+        std::collections::BTreeMap<
+            PlayerUuid,
+            std::collections::BTreeMap<u64, tiamot_core::particle::Badge>,
+        >,
+    >,
+
     /// Entity messages waiting for one player.
     ///
     /// **Per player, not broadcast**, because which entities somebody can see
@@ -1009,6 +1024,14 @@ const MAX_QUEUED_ENTITY_MESSAGES: usize = 60;
 /// A second of a busy coast's spray. Past it a burst is dropped, which is the
 /// right loss for decoration — see `Shared::particles`.
 pub const MAX_QUEUED_BURSTS: usize = 256;
+
+/// How many entities one player may be shown a badge over at once.
+///
+/// Every mob in sight wearing a health bar, and then some. Past it a badge
+/// over a NEW entity is dropped while every entity already badged keeps
+/// updating, which is the loss that reads best: the bars a player is watching
+/// stay live.
+pub const MAX_BADGED_ENTITIES: usize = 64;
 
 /// How many unread notices one player may accumulate.
 ///
@@ -2480,6 +2503,37 @@ impl Shared {
         true
     }
 
+    /// Hangs a badge over an entity for one player, replacing whatever that
+    /// entity had.
+    ///
+    /// Returns whether it was kept. Bounded by [`MAX_BADGED_ENTITIES`] — and
+    /// the bound is on how many DIFFERENT entities one player is shown at
+    /// once, not on how often a mod asks, because asking again is free.
+    pub fn queue_badge(&self, uuid: &PlayerUuid, badge: tiamot_core::particle::Badge) -> bool {
+        let Ok(mut queues) = self.badges.lock() else {
+            return false;
+        };
+        let queue = queues.entry(*uuid).or_default();
+        if queue.len() >= MAX_BADGED_ENTITIES && !queue.contains_key(&badge.entity) {
+            return false;
+        }
+        queue.insert(badge.entity, badge);
+        true
+    }
+
+    /// Takes the badges waiting for one player.
+    pub fn take_badges(&self, uuid: &PlayerUuid) -> Vec<tiamot_core::particle::Badge> {
+        self.badges
+            .lock()
+            .map(|mut queues| {
+                queues
+                    .remove(uuid)
+                    .map(|badges| badges.into_values().collect())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
     /// Takes the bursts waiting for one player.
     pub fn take_particles(&self, uuid: &PlayerUuid) -> Vec<tiamot_core::particle::Burst> {
         self.particles
@@ -2898,6 +2952,11 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                             bursts: batch.to_vec(),
                         };
                         frame::write(&mut send, &message).await?;
+                    }
+                    // And what hangs over an entity near them. One message per
+                    // badged entity per pass, however often the mod asked.
+                    for badge in shared.take_badges(&uuid) {
+                        frame::write(&mut send, &ServerMessage::ShowOver { badge }).await?;
                     }
                 }
                 continue;
@@ -3743,6 +3802,7 @@ mod tests {
             inventory_dirty: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            badges: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
