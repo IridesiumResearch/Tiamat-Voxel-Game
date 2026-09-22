@@ -5754,7 +5754,7 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
 
 /// The deck Weather tuned after the first look: coarser, calmer, cheaper.
 ///
-/// Their numbers in `docs/engine-asks/tiamot_weather.md` are measured against
+/// Their numbers in `docs/engine-asks/tiamat_weather.md` are measured against
 /// this, so anything measured here has to use it to be comparable.
 fn tuned_deck() -> tiamat_core::atmosphere::CloudLayer {
     tiamat_core::atmosphere::CloudLayer {
@@ -5776,7 +5776,7 @@ fn tuned_deck() -> tiamat_core::atmosphere::CloudLayer {
 #[ignore = "a measurement, not a gate; run with --ignored --nocapture"]
 fn how_long_the_deck_costs_from_three_views() {
     // **The mod author's own harness, so the numbers can be compared.**
-    // `docs/engine-asks/tiamot_weather.md` reports the deck's cost over a bare
+    // `docs/engine-asks/tiamat_weather.md` reports the deck's cost over a bare
     // sky from three views — level at the horizon, thirty degrees up, and from
     // above the deck looking down — and sets an acceptance against them. This
     // measures the same three.

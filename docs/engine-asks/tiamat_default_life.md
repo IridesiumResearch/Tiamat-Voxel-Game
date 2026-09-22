@@ -1,7 +1,7 @@
 # Engine asks from Tiamat Default Life
 
-From the `tiamot_default_life` mod (vitals, the HUD, creatures, world modes;
-repo `Tiamot_Default_Life`, beside the engine). Kept here rather than in
+From the `tiamat_default_life` mod (vitals, the HUD, creatures, world modes;
+repo `Tiamat_Default_Life`, beside the engine). Kept here rather than in
 that repo so the engine agent finds every mod's asks in one place.
 
 Numbered as in that repo's `docs/engine-asks.md`, which keeps the history:

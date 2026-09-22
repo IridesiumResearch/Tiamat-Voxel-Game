@@ -801,15 +801,15 @@ mod's `tdl` or `inv` is simply not there. `depends` orders loading and nothing
 else. The channel between two mods is an EXPORT:
 
 ```lua
--- in tiamot_default_life, in the registration window, once
+-- in tiamat_default_life, in the registration window, once
 game.export{
     version = 1,
     humidity = HUMIDITY,                       -- a compiled density: passes through
     biome_under = function(x, z) return biome_at(x, z) end,
 }
 
--- in tiamot_weather, whose mod.toml lists tiamot_default_life in depends
-local life = game.exports("tiamot_default_life")   -- nil if absent, or not a dependency
+-- in tiamat_weather, whose mod.toml lists tiamat_default_life in depends
+local life = game.exports("tiamat_default_life")   -- nil if absent, or not a dependency
 if life then
     local wet = life.humidity:at(x, 0, z, game.world_seed)
     local biome = life.biome_under(x, z)

@@ -2627,7 +2627,7 @@ function game.register_fluid(spec) end
 ---longer offer, and `nil` for an id no loaded mod declares.
 ---
 ---```lua
----local biome = game.world_option("tiamot_default_world:biome")
+---local biome = game.world_option("tiamat_default_world:biome")
 ---game.register_on_generate(function(buf, pos)
 ---    if biome == "spindle" then
 ---        return generate_spindle(buf, pos)
@@ -2687,7 +2687,7 @@ function game.export(exports) end
 ---first line of `init.lua`.
 ---
 ---```lua
----local life = game.exports("tiamot_default_life")
+---local life = game.exports("tiamat_default_life")
 ---if life then
 ---    life.add_button("Wardrobe", function(player) open_wardrobe(player) end)
 ---end

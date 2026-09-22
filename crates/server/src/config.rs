@@ -78,7 +78,7 @@ pub struct Config {
     ///
     /// ```toml
     /// [world_options]
-    /// "tiamot_default_world:biome" = "savanna"
+    /// "tiamat_default_world:biome" = "savanna"
     /// ```
     ///
     /// The value is the option's text, or `"true"`/`"false"` for a toggle —

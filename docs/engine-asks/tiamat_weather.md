@@ -1,9 +1,9 @@
 # Engine asks from Tiamat Weather
 
-From the `tiamot_weather` mod (repo `Tiamot_Default_Weather`, beside the
+From the `tiamat_weather` mod (repo `Tiamat_Default_Weather`, beside the
 engine checkout). Kept here, in the engine's `docs/engine-asks/`, so the
 engine agent finds every mod's asks in one place and they are versioned with
-the engine. Pictures and patches an ask cites are in `tiamot_weather/` beside
+the engine. Pictures and patches an ask cites are in `tiamat_weather/` beside
 this file; W12's are kept there as the record of engine 0d8e857.
 
 Numbered W*n*, continuing the weather sheet: W1–W9 were filed in that repo's
@@ -27,7 +27,7 @@ AGAIN on its own, against the same `sky.w`, so modes 1 and 2 wash out too.
 Rendered with the fog a player actually has (`set_sky(sky, 256)`), the sky
 is empty:
 
-![the fog erases the deck](tiamot_weather/cloud-fog-2026-09-22.png)
+![the fog erases the deck](tiamat_weather/cloud-fog-2026-09-22.png)
 
 Top and third rows: engine 9c4e120 at a 256-block view distance, fair and
 storm — the deck is gone. Second and fourth: the prototype. The harness's
@@ -78,10 +78,10 @@ cost above that, in the four views:
   and are the biggest of the three. The pair is pictured — they are hard to
   tell apart at a glance:
 
-  ![full against optimised](tiamot_weather/cloud-optimised-2026-09-22.png)
+  ![full against optimised](tiamat_weather/cloud-optimised-2026-09-22.png)
 
 The patch with all of it is
-`tiamot_weather/cloud-fog-shape-prototype-2026-09-22.patch`, against
+`tiamat_weather/cloud-fog-shape-prototype-2026-09-22.patch`, against
 9c4e120. As always: a sketch to measure against, not a patch to merge. It
 does not touch W13's genera, which are still open and still wanted.
 
@@ -98,7 +98,7 @@ asked for three kinds (fair, storm, mega storm). The designer then asked
 for more: the heaps are "pretty undetailed noise-wise", and the sky wants
 "somewhat realistic shapes like stratocumulus, altocumulus and cumulonimbus
 approximations". This replaces it. The first version's pictures and patch
-stay in `tiamot_weather/` (`cloud-kinds-*`) as the record.
+stay in `tiamat_weather/` (`cloud-kinds-*`) as the record.
 
 **Why the mod cannot.** The deck's shape is registration-only, one shape
 for the whole world; per player `set_clouds` moves `cover`, `darkness` and
@@ -110,7 +110,7 @@ screenshot harness (a temporary ignored test, since removed), 960 x 540,
 Beautiful, Normal quality, Weather's deck (cell 16, thickness 160, 1/500,
 towers 0.2), base 400 over the camera:
 
-![five skies](tiamot_weather/cloud-genera-2026-09-19.png)
+![five skies](tiamat_weather/cloud-genera-2026-09-19.png)
 
 Rows: fair cumulus (cover 0.45); stratocumulus (0.75, darkness 0.15);
 altocumulus over a few cumulus (0.8 and 0.2); a storm (stratocumulus 0.85,
@@ -118,7 +118,7 @@ cumulonimbus 0.6, cumulus 0.2, darkness 0.7); a mega storm (cumulonimbus 1
 among cumulus, stratocumulus and altocumulus at 0.3, darkness 0.6).
 Columns: level, 30 degrees up, level and turned 90 degrees, and from 480
 blocks over the base. The patch is
-`tiamot_weather/cloud-genera-prototype-2026-09-19.patch`: a sketch to
+`tiamat_weather/cloud-genera-prototype-2026-09-19.patch`: a sketch to
 measure against, not a patch to merge. The three new numbers ride in
 `view.yzw` from an environment variable; the real thing wants them in
 `Clouds`.

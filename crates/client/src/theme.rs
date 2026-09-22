@@ -660,7 +660,7 @@ mod tests {
         // label rather than falling back.
         //
         // Reported from the window as
-        // `FontFamily::Name("mod-font-tiamot_default_ui:theme_font") is not
+        // `FontFamily::Name("mod-font-tiamat_default_ui:theme_font") is not
         // bound to any fonts`, on the client's very first frame.
         let ctx = egui::Context::default();
         crate::app::install_fonts(&ctx);
