@@ -826,11 +826,31 @@ impl Gpu {
 
     /// Creates a device with no surface, for offscreen rendering.
     ///
+    /// **Without debug labels, unless `WGPU_DEBUG=1` asks for them.** The tests
+    /// are what call this: one device per test, many tests to a process, on
+    /// parallel threads. A debug build names every object it creates through
+    /// `vkSetDebugUtilsObjectNameEXT`, and the Vulkan loader finds the device
+    /// behind that call by walking every live device in the process — while
+    /// `vkDestroyDevice` on another thread frees a device before unlinking it,
+    /// outside the lock the walk takes (Vulkan-Loader 1.4.341,
+    /// `loader_get_icd_and_device` against `loader_layer_destroy_device`). A
+    /// test finishing while another named a pipeline read freed memory: about
+    /// one run in five of a three-test file segfaulted on Ubuntu 26.04's
+    /// loader, always in that frame, in device setup and in `Renderer::new`
+    /// alike. Nothing reads the labels headless — no validation layer is
+    /// installed where the tests run — so they are off, and the other
+    /// `WGPU_*` switches are honoured with them.
+    ///
     /// # Errors
     ///
     /// As [`Gpu::open`].
     pub fn headless() -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.flags = descriptor
+            .flags
+            .difference(wgpu::InstanceFlags::DEBUG)
+            .with_env();
+        let instance = wgpu::Instance::new(descriptor);
         Self::open(&instance, None)
     }
 }
