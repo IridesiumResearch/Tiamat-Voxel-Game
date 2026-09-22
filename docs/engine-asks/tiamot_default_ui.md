@@ -29,12 +29,16 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-Open: 12. Landed so far, asserted by the native check except 11, which is the
-client's own drawing:
+No open asks. Landed so far, asserted by the native check except 11 and 12,
+which are the client's own drawing:
+
+- **12**, descriptions a size down (engine 990bf8a): the start screen's
+  secondary lines are `TextStyle::Small`, 85% of body, and a theme changes
+  faces but never sizes.
 
 - **9**, a theme's second face (engine 86dcbb9): `[theme] text_font` is
   Spectral, on chat, text fields and prose, and `font` keeps Cinzel on
-  headings and buttons. Its other half is 12, above.
+  headings and buttons. Its other half is 12.
 - **10**, a themed sheet's contents clear its frame (86dcbb9): not as asked.
   The engine draws every frame `FRAME_BORDER` (18) points deep whatever the
   art's resolution, and insets the contents by the same, so each dimension of
