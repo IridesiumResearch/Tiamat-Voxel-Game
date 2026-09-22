@@ -4011,6 +4011,72 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
 }
 
 #[test]
+fn a_mods_model_casts_a_shadow_like_the_engines_own_rig() {
+    // **Life ask 13**, reported from the window as "the 3d models do not cast
+    // shadows": the cow and the pig floated while the players beside them were
+    // anchored by theirs. The models were drawn in the world pass and never
+    // into the cascades, which is the same bug the engine's own figure had
+    // once — and the comment on that call says why it matters.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // Mode 3 is the one with cascades, and a low sun off to one side throws
+    // the shadow across the floor rather than under the body.
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.75, -0.35, 0.55]);
+    let bare = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+
+    // A mod's model, uploaded as a pushed one is, standing where the engine's
+    // own figure stands in the test above.
+    renderer.add_model("zoo:cow", tiamot_core::model::humanoid(), 1.0);
+    let mut posed = std::collections::BTreeMap::new();
+    posed.insert(
+        "zoo:cow".to_owned(),
+        vec![client::render::skinned::Figure {
+            offset: [0.0, -10.0, 6.0],
+            yaw: 0.0,
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+        }],
+    );
+    renderer.set_model_figures(posed);
+    let with_cow = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+
+    // The floor is darker with the cow there: its own pixels plus the shadow
+    // it throws. Measured over the whole lower frame, so it does not depend on
+    // knowing where the shadow lands — the same measure the engine rig's test
+    // uses, for the same reason.
+    let ground = |frame: &Image| {
+        let colour = average(frame, 0, HEIGHT / 2, WIDTH, HEIGHT);
+        colour[0] + colour[1] + colour[2]
+    };
+    println!(
+        "ground: {:.4} bare, {:.4} with the cow",
+        ground(&bare),
+        ground(&with_cow)
+    );
+    // **A threshold, not merely "darker".** Measured three ways: the floor
+    // reads 2.7783 with no cow, 2.7774 with one drawn but not casting, and
+    // 2.7712 with one that casts. So a model that reached the world pass and
+    // not the cascades still darkens the frame a little — by its own pixels —
+    // and `with < bare` would have passed without the fix at all. The shadow
+    // is seven times that, and this is the line between them.
+    let darkening = ground(&bare) - ground(&with_cow);
+    assert!(
+        darkening > 0.004,
+        "the floor darkened by only {darkening:.4} when a mod's model appeared; its own pixels \
+         account for about 0.0009, so the model is reaching the world pass and not the cascades"
+    );
+}
+
+#[test]
 fn a_hundred_entities_all_reach_the_instance_buffer() {
     // The figure instance array and the joint palette are both grown in powers
     // of two. A crowd is where an off-by-one in that arithmetic shows up, and

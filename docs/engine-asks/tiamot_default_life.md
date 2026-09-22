@@ -56,19 +56,6 @@ bypasses the gaits a mob was meant to use.
 **Smallest change.** `speed` on `drive` (or on the entity), the multiplier
 `Abilities::speed` already is for players, through `Abilities::tuning`.
 
-## 13. A mod's model casts no shadow (2026-09-22)
-
-**Seen, in play.** "The 3d models do not cast shadows." The cow and the pig
-float on the ground while the players beside them are anchored by theirs.
-
-**Why.** `Renderer::draw_shadow_casters` draws the engine's own rig
-(`self.skinned`) into every cascade, and the models a mod pushed live in
-`figures.passes` and are never drawn there. The comment on that very call
-says why it matters: a mob with no shadow floats.
-
-**Smallest change.** Draw each pass in `figures.passes` into the cascades
-with `skinned_shadow`, as `self.skinned` is. Nothing for a mod to do.
-
 ## 12. `steer_entity` jumps at every rise the physics would climb (2026-09-22)
 
 **Seen, in play.** Cows and pigs hop across ordinary ground. The designer:

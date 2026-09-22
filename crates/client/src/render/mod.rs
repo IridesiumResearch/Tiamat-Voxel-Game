@@ -2804,12 +2804,20 @@ impl Renderer {
             // Figures, in their own pipeline. **A mob with no shadow floats**,
             // which is the one thing about a drawn body that everybody notices
             // immediately — and it is what led to the two sweeps above.
-            if self.skinned.drawn() > 0
+            if self.any_figure()
                 && let Some(skinned_shadow) = self.skinned_shadow.as_ref()
                 && let Some(bind) = shadows.cascade_bind(cascade)
             {
                 pass.set_pipeline(skinned_shadow);
                 pass.set_bind_group(1, bind, &[]);
+                // **A mod's models as well as the engine's rig** — Life ask
+                // 13. They were drawn in the world pass and not here, so a
+                // mod's cow floated while the players beside it were anchored
+                // by their shadows. One pipeline serves both: a mod's model
+                // goes through the same `Skinned`, so its layouts match.
+                for model in self.figures.passes.values() {
+                    model.draw(pass);
+                }
                 self.skinned.draw(pass);
             }
         });
