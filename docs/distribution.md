@@ -41,6 +41,11 @@ fresh download.
 An updater executes what it downloads. It is the most dangerous code in the
 project, and the rules are not negotiable:
 
+- **The trusted key lives in the repository**, at `release-key.pub`, and is
+  compiled in from there. Not a CI variable: a variable can be changed by
+  anyone with settings access and leaves no trace, while a change to the file
+  is a diff in the history. A build that finds no key applies no updates at
+  all, which is what a fork with no key of its own should do.
 - **The signature is the trust, not the transport.** The manifest is fetched
   over HTTPS with the pure-Rust TLS stack already in the tree, and then its
   Ed25519 signature is checked against a public key **compiled into the binary**.

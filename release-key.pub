@@ -1,0 +1,15 @@
+# The public half of the key that signs Tiamot releases.
+#
+# **This is a trust root.** A build compiles it in and will apply an update
+# only if the manifest is signed by this key, or by a successor whose hash a
+# manifest signed by this key already committed to (docs/distribution.md §2).
+#
+# It lives in the repository rather than in a CI variable on purpose: a
+# variable can be changed by anyone with settings access and leaves no trace,
+# while a change to this file is a diff in the history that a person can see.
+# Changing it means every installed build stops accepting updates until it is
+# replaced by hand, so it changes when a key is lost and at no other time.
+#
+# The private half is on the maintainer's machine and never in this repository,
+# in CI, or in any log.
+16b76ab8cddd949fa38a4906a735e47383534be3cd4e22409d86f72894849fb7

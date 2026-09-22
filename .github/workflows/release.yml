@@ -77,19 +77,22 @@ jobs:
 
       - name: Package
         shell: bash
-        # The release key's PUBLIC half and the manifest URL are repository
-        # variables rather than secrets: both are published to every tester
-        # inside the binary, and a secret nobody can keep is a secret that
-        # makes logs harder to read for nothing. The private half never comes
-        # near CI — see docs/distribution.md §8.
+        # The signing key's PUBLIC half is not here: it is `release-key.pub`
+        # in the repository, so every build — CI's and anybody's — trusts the
+        # same key and a change to it is a diff somebody can see. The private
+        # half never comes near CI (docs/distribution.md §2 and §8).
+        #
+        # The manifest URL is a repository variable because it is deployment
+        # rather than trust: a build pointed at the wrong URL fetches nothing,
+        # and a build pointed at a hostile one still refuses everything it is
+        # offered.
         env:
-          TIAMOT_RELEASE_KEY: ${{ vars.TIAMOT_RELEASE_KEY }}
           TIAMOT_MANIFEST_URL: ${{ vars.TIAMOT_MANIFEST_URL }}
         run: |
           channel="${{ inputs.channel || 'test' }}"
-          if [ -z "${TIAMOT_RELEASE_KEY:-}" ]; then
-            echo "::warning::No TIAMOT_RELEASE_KEY variable is set, so this build"
-            echo "::warning::will apply no updates. Set it under Settings ->"
+          if [ -z "${TIAMOT_MANIFEST_URL:-}" ]; then
+            echo "::warning::No TIAMOT_MANIFEST_URL variable is set, so this build"
+            echo "::warning::will not look for updates. Set it under Settings ->"
             echo "::warning::Secrets and variables -> Actions -> Variables."
           fi
           scripts/package.sh --target ${{ matrix.target }} --channel "$channel"
