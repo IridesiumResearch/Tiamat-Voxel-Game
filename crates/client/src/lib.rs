@@ -60,6 +60,7 @@ pub mod sky;
 pub mod texture;
 pub mod theme;
 pub mod trust;
+pub mod update;
 
 /// Interface controls whose behaviour is shared between screens.
 pub mod widget {

@@ -124,6 +124,13 @@ pub struct Front {
     /// The look the installed mods ask this screen to wear, read off the local
     /// disk because there is no server yet — see [`crate::theme::Local`].
     dress: crate::theme::Local,
+    /// The update check: whether a newer version is published, and a way to
+    /// fetch it.
+    ///
+    /// **Here rather than in the world screen**, because an update is applied
+    /// by the launcher at the next start and the front screen is where a
+    /// player is not in the middle of anything.
+    updates: crate::update::Updates,
     /// This frame's art from that look.
     ///
     /// **Held on the screen rather than passed down**, because every tab draws
@@ -140,6 +147,7 @@ impl Front {
         let name = library.unused_name("New World");
         Self {
             tab: Tab::default(),
+            updates: crate::update::Updates::new(),
             dress: crate::theme::Local::default(),
             worn: crate::theme::Dressing::default(),
             selected: (!library.entries.is_empty()).then_some(0),
@@ -290,6 +298,15 @@ impl Front {
                 if let Some(notice) = &self.notice {
                     ui.colored_label(egui::Color32::from_rgb(230, 170, 90), notice);
                     ui.separator();
+                }
+
+                // **Asked on the first frame this screen draws**, rather than
+                // in `new`: a check is a network round trip, and the screen is
+                // built before the window is shown. `check` itself only asks
+                // once, so calling it every frame costs a comparison.
+                self.updates.check();
+                if self.draw_update(ui, dressing) {
+                    action = Action::Quit;
                 }
 
                 // **First decided wins.** `Tab::Play` assigned straight into
@@ -834,6 +851,71 @@ impl Front {
 
     /// Which mods are ticked, for a world about to start.
     #[must_use]
+    /// Draws what is known about updates, returning whether the player asked
+    /// to restart into one.
+    ///
+    /// **One line, above the tabs, and nothing at all when there is nothing to
+    /// say.** A build with no update to offer should look exactly as it did
+    /// before any of this existed.
+    fn draw_update(&mut self, ui: &mut egui::Ui, dressing: crate::theme::Dressing) -> bool {
+        use crate::update::Status;
+
+        let mut restart = false;
+        match self.updates.status() {
+            // Nothing worth a line: a build that does not check, a check in
+            // flight, or the newest version already installed.
+            Status::Idle | Status::Checking | Status::UpToDate => return false,
+            Status::Available { version, size } => {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Version {version} is available ({}).",
+                        megabytes(size)
+                    ));
+                    if crate::widget::button(ui, dressing.button, "Download").clicked() {
+                        self.updates.download();
+                    }
+                });
+            }
+            Status::Downloading { done, total } => {
+                let share = if total == 0 {
+                    0.0
+                } else {
+                    // Cast for a progress bar: a hundred megabytes is exact in
+                    // an f32 and the bar is 200 pixels wide regardless.
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "a share of a download, drawn as a bar"
+                    )]
+                    {
+                        done as f32 / total as f32
+                    }
+                };
+                ui.add(
+                    egui::ProgressBar::new(share)
+                        .desired_width(240.0)
+                        .text(format!("{} of {}", megabytes(done), megabytes(total))),
+                );
+            }
+            Status::Staged { version } => {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Version {version} is ready."));
+                    if crate::widget::button(ui, dressing.button, "Restart to finish").clicked() {
+                        // The launcher applies it at the next start — nothing
+                        // here overwrites a running program.
+                        restart = true;
+                    }
+                });
+            }
+            Status::Failed { what } => {
+                crate::theme::secondary(ui, format!("Could not check for updates: {what}"));
+            }
+        }
+        ui.separator();
+        restart
+    }
+
+    /// The mods a new world should load: the ones that are ticked.
+    #[must_use]
     pub fn enabled_mods(&self) -> Vec<String> {
         self.catalogue.enabled()
     }
@@ -871,6 +953,11 @@ fn choice<T: PartialEq + Copy>(
         }
     });
     changed
+}
+
+/// A size in whole megabytes, for a line a player reads.
+fn megabytes(bytes: u64) -> String {
+    format!("{} MB", bytes.div_ceil(1024 * 1024))
 }
 
 #[cfg(test)]

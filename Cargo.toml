@@ -104,6 +104,12 @@ getrandom = "0.3"
 quinn = "0.11"
 # quinn's TLS. `ring` rather than aws-lc-rs: it builds without cmake or a C++
 # toolchain, which keeps the from-source build working on a bare Windows box.
+# HTTPS for the update check, and nothing else — see `client::update`. rustls
+# rather than the system's TLS (charter rule 14's pure-Rust rule), and without
+# the response decompressors: the manifest is a few hundred bytes and the
+# archive is already compressed, so every decoder enabled here would be one
+# more parser running on a stranger's bytes for no gain.
+ureq = { version = "3.4", default-features = false, features = ["rustls", "rustls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1.12"
 # Self-signed server certificates. There is no CA in this model — clients pin

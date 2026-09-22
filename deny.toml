@@ -62,6 +62,12 @@ allow = [
     "MIT",
     "MIT-0",
     "MPL-2.0",
+    # Mozilla's root certificate list, which `webpki-roots` ships for the
+    # update check's TLS. A permissive licence for DATA rather than code: it
+    # allows redistribution and asks for the notice, which the generated
+    # THIRD-PARTY.md in every archive carries. Nothing in it is linked or
+    # derived from — it is a list of certificates.
+    "CDLA-Permissive-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
