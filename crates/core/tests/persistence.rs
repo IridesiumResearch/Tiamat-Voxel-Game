@@ -1117,6 +1117,41 @@ fn the_domain_instances_round_trip() {
 }
 
 #[test]
+fn where_instances_sit_round_trips_and_a_bad_line_costs_only_itself() {
+    // A body made at a star is at that star next morning, or the sky drawn
+    // from it is another sky. And a world from before positions existed has
+    // no such key and opens with none.
+    let path = scratch("domain-positions");
+    let at = |x: i64| tiamat_core::sky::UniversalPos::new(x, -2, 3_000_000_000_000);
+    let saved = vec![
+        ("mod:body/17".to_owned(), at(1)),
+        ("mod:body/18".to_owned(), at(-1_000_000_000_000_000)),
+    ];
+    {
+        let mut registry = registry_with(&[]);
+        let db = WorldDb::open(&path, &mut registry).expect("open");
+        assert_eq!(db.domain_positions().expect("read"), Vec::new());
+        db.set_domain_positions(&saved).expect("set");
+        db.close().expect("close");
+    }
+    let mut registry = registry_with(&[]);
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(db.domain_positions().expect("read"), saved);
+    db.set_meta(
+        "domain_positions",
+        b"mod:body/17\t1\t2\t3\nno tabs at all\nmod:body/19\t1\tx\t3\n\t4\t5\t6",
+    )
+    .expect("set");
+    assert_eq!(
+        db.domain_positions().expect("read"),
+        vec![(
+            "mod:body/17".to_owned(),
+            tiamat_core::sky::UniversalPos::new(1, 2, 3)
+        )]
+    );
+}
+
+#[test]
 fn a_world_with_no_instances_reads_as_none_rather_than_failing() {
     // Every world written before this feature existed has no such key, and
     // every one of them must open.

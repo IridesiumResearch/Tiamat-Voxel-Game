@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 74;
+pub const PROTOCOL_VERSION: u32 = 75;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,12 @@ pub const PROTOCOL_VERSION: u32 = 74;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v75 (space): `SkyFrame` carries `stars`, how much of the star catalog shows,
+// and `SkyTable` carries `observer`, where in the universe the domain being
+// streamed sits, which is what the catalog is drawn from. The table is now
+// sent again after every `DomainChanged`, for that domain's sky: a space
+// between worlds has no dawn, and a body a player lands on has a sky of its
+// own. The catalog itself never travels — both ends derive it from the seed.
 // v74 (weather W16): `atmosphere::CloudMap` carries `stratocumulus`,
 // `altocumulus` and `cumulonimbus` per cell, a byte each and empty when a mod
 // sends none, so a storm over the next valley has its sheet and its anvil
@@ -1663,18 +1669,26 @@ pub enum ServerMessage {
         light: Vec<u8>,
     },
 
-    /// The sky a mod registered, sent once on join.
+    /// The sky a mod registered, sent on join and again after every
+    /// [`ServerMessage::DomainChanged`], for the domain now being streamed.
     ///
     /// **Appended at the end** (protocol v9).
     ///
     /// Empty keyframes mean no mod registered a sky, which is a legitimate
     /// world with no day rather than an error — the client holds its colours
     /// fixed. Charter rule 1: the engine has no sky of its own to fall back to.
+    ///
+    /// The observer is where the domain sits in the universe, in blocks
+    /// (`crate::sky::UniversalPos`), which is the point the star catalog is
+    /// drawn from. The catalog itself is not sent: the client derives it from
+    /// the seed `JoinWorld` carries, exactly as the server does.
     SkyTable {
         /// Ticks in a full day.
         day_length_ticks: u32,
         /// Colour keyframes, sorted by time.
         keyframes: Vec<SkyFrame>,
+        /// Where the sky is seen from, in universal blocks.
+        observer: [i64; 3],
     },
 
     /// Where the server's clock stands in the day.
@@ -2533,6 +2547,8 @@ pub struct SkyFrame {
     pub intensity: f32,
     /// How the finished frame is graded at this moment.
     pub grade: SkyGrade,
+    /// How much of the star catalog shows, `0.0..=1.0`. Zero is none.
+    pub stars: f32,
 }
 
 /// How a moment's finished picture is graded, on the wire.
@@ -4141,6 +4157,7 @@ mod tests {
                 ServerMessage::SkyTable {
                     day_length_ticks: 0,
                     keyframes: Vec::new(),
+                    observer: [0; 3],
                 },
                 17,
             ),

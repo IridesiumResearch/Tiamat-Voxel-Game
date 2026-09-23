@@ -101,6 +101,7 @@ fn the_reference_mods_load_in_dependency_order() {
             "core_milk",
             "core_mimic",
             "core_sky",
+            "core_space",
             "core_tools",
             "core_ui",
             "core_worldgen"

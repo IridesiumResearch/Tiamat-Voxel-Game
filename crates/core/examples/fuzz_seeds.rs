@@ -730,7 +730,9 @@ fn server_messages() -> Vec<Vec<u8>> {
                 sun: [1.0, 0.98, 0.9],
                 intensity: 1.0,
                 grade: SkyGrade::NONE,
+                stars: 0.0,
             }],
+            observer: [1, -2, 3],
         },
         ServerMessage::TimeOfDay { time: 0.25 },
         ServerMessage::ChunkFluid {

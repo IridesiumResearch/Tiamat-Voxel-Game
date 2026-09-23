@@ -1128,6 +1128,15 @@ pub struct MluaVm {
     /// answers `Unavailable` whenever the engine is mid-edit, which is why the
     /// Lua function has a third return value and the others do not.
     sight: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::sight::Access>>>>,
+    /// The world's seed once the host has said it, for the star catalog.
+    ///
+    /// `None` through the registration window, when `game.stars` answers nil
+    /// on the same terms `game.world_seed` does.
+    seed_cell: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+    /// The catalog for that seed, built on first use and shared by every
+    /// reader: two thousand positions a mod asks for once and the engine
+    /// consults on every `game.star_in_view`.
+    catalog: StarCache,
     /// Where `game.find_path` searches, through the same lending window.
     paths: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn crate::path::Access>>>>,
 }
@@ -1757,6 +1766,99 @@ fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier>
     ))
 }
 
+/// The star catalog for a seed, shared: `(seed, catalog)`.
+type Catalog = (u64, std::sync::Arc<Vec<crate::sky::StarRecord>>);
+
+/// The star catalog for a seed, built once.
+type StarCache = std::sync::Arc<std::sync::Mutex<Option<Catalog>>>;
+
+/// The catalog for the world's seed, or `None` before the seed is known.
+///
+/// Built on first use and kept: the seed cannot change under a running
+/// world, and the one case it does — a VM reused across worlds in tests —
+/// is caught by keeping the seed beside the catalog and comparing.
+fn catalog_of(seed_cell: &std::sync::Mutex<Option<u64>>, cache: &StarCache) -> Option<Catalog> {
+    let seed = (*seed_cell.lock().ok()?)?;
+    let mut held = cache.lock().ok()?;
+    if let Some((built_for, catalog)) = held.as_ref()
+        && *built_for == seed
+    {
+        return Some((seed, std::sync::Arc::clone(catalog)));
+    }
+    let catalog = std::sync::Arc::new(crate::sky::star_catalog(seed));
+    *held = Some((seed, std::sync::Arc::clone(&catalog)));
+    Some((seed, catalog))
+}
+
+/// Which way a player is looking, through the sight seam.
+fn gaze_of(
+    sight: &std::sync::Mutex<Option<std::sync::Arc<dyn crate::sight::Access>>>,
+    player: [u8; 32],
+) -> mlua::Result<Option<crate::sight::Gaze>> {
+    Ok(sight
+        .lock()
+        .map_err(|_| {
+            mlua::Error::external("the world lease is poisoned; the simulation thread panicked")
+        })?
+        .as_ref()
+        .and_then(|access| access.gaze(player)))
+}
+
+/// The most a universal coordinate may be, in blocks: well inside `i64`, and
+/// four thousand times the catalog's radius, so a mod placing something past
+/// every star still can and one handing over a NaN or an infinity cannot.
+const UNIVERSAL_SPAN: f64 = 4.0e18;
+
+/// A `position = {x, y, z}` field in universal blocks, if `table` has one.
+///
+/// Read as numbers rather than integers because a Lua that has no integers
+/// still has to be able to say where a star is, and every catalog position
+/// is exact in a double.
+fn universal_position(table: &Table, call: &str) -> mlua::Result<Option<crate::sky::UniversalPos>> {
+    let Some(position) = table.get::<Option<Table>>("position")? else {
+        return Ok(None);
+    };
+    let axis = |key: &str| -> mlua::Result<i64> {
+        let value: f64 = position.get(key).map_err(|_| {
+            mlua::Error::external(format!(
+                "{call}: `position` needs `{key}`, a number of blocks in the universe"
+            ))
+        })?;
+        if !value.is_finite() || value.abs() > UNIVERSAL_SPAN {
+            return Err(mlua::Error::external(format!(
+                "{call}: `position.{key}` must be a finite number within {UNIVERSAL_SPAN:e} blocks, got {value}"
+            )));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "bounded to UNIVERSAL_SPAN just above, which is inside i64"
+        )]
+        Ok(value as i64)
+    };
+    Ok(Some(crate::sky::UniversalPos::new(
+        axis("x")?,
+        axis("y")?,
+        axis("z")?,
+    )))
+}
+
+/// A position stored on a domain's registry entry by `register_domain`.
+fn stored_position(entry: &Table) -> Option<crate::sky::UniversalPos> {
+    let axis = |key: &str| -> Option<i64> {
+        let value: f64 = entry.get(key).ok()?;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "stored by `universal_position`, which bounded it"
+        )]
+        Some(value as i64)
+    };
+    Some(crate::sky::UniversalPos::new(
+        axis("position_x")?,
+        axis("position_y")?,
+        axis("position_z")?,
+    ))
+}
+
 /// The player a mod named, as raw UUID bytes.
 fn player_of(uuid: &str, what: &str) -> mlua::Result<[u8; 32]> {
     crate::identity::PlayerUuid::from_hex(uuid)
@@ -2253,6 +2355,8 @@ impl ScriptVm for MluaVm {
             atmosphere: std::sync::Arc::new(std::sync::Mutex::new(None)),
             containers: std::sync::Arc::new(std::sync::Mutex::new(None)),
             sight: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            seed_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            catalog: std::sync::Arc::new(std::sync::Mutex::new(None)),
             paths: std::sync::Arc::new(std::sync::Mutex::new(None)),
             edits: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
@@ -2583,6 +2687,9 @@ impl ScriptVm for MluaVm {
     }
 
     fn set_world_seed(&mut self, seed: u64) {
+        if let Ok(mut cell) = self.seed_cell.lock() {
+            *cell = Some(seed);
+        }
         // Every mod's own table: `game` is per mod (see `build_game_table`),
         // so there is no one table to set it on. Set with the same conversion
         // `pos.seed` is, so the two compare equal in Lua.
@@ -3352,6 +3459,7 @@ impl ScriptVm for MluaVm {
                         },
                         scale: entry.get("scale").ok()?,
                         instanced: entry.get("instanced").ok()?,
+                        position: stored_position(&entry),
                     },
                 ))
             })
@@ -3570,69 +3678,26 @@ impl ScriptVm for MluaVm {
     }
 
     fn registered_sky(&self) -> Option<Sky> {
-        let registry = self
-            .lua
-            .named_registry_value::<Table>("tiamat.skies")
-            .ok()?;
+        self.sky_for(None)
+    }
 
-        // Lowest mod id wins where several register one, the same rule the
-        // default tool uses: arbitrary but fixed beats depending on load order.
-        let mut entries: Vec<(String, Table)> = registry
+    fn registered_skies(&self) -> Vec<Sky> {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.skies") else {
+            return Vec::new();
+        };
+        // Every domain any mod named, and the unnamed sky first: `None`
+        // sorts before `Some`.
+        let mut domains: Vec<Option<String>> = registry
             .pairs::<String, Table>()
             .filter_map(Result::ok)
+            .map(|(_, entry)| entry.get::<Option<String>>("domain").ok().flatten())
             .collect();
-        // **The lowest mod id wins — among mods that are not reference mods.**
-        // The engine's own fixture loses to any real mod, whatever the ids.
-        entries.sort_by_key(|(id, _)| (self.reference_mods.contains(id), id.clone()));
-        let (mod_id, entry) = entries.into_iter().next()?;
-
-        let frames: Table = entry.get("keyframes").ok()?;
-        let mut keyframes: Vec<SkyKeyframe> = frames
-            .sequence_values::<Table>()
-            .filter_map(Result::ok)
-            .filter_map(|frame| {
-                let colour = |key: &str| -> Option<[f32; 3]> {
-                    let table: Table = frame.get(key).ok()?;
-                    Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?])
-                };
-                Some(SkyKeyframe {
-                    time: frame.get("time").ok()?,
-                    sky: colour("sky")?,
-                    sun: colour("sun")?,
-                    intensity: frame.get("intensity").ok()?,
-                    // Validated in `register_sky`; absent means no grading, which
-                    // is a keyframe saying nothing rather than an error.
-                    grade: frame
-                        .get::<Option<Table>>("grade")
-                        .ok()
-                        .flatten()
-                        .as_ref()
-                        .map_or(SkyGrade::NONE, read_grade),
-                })
-            })
-            .collect();
-        if keyframes.is_empty() {
-            return None;
-        }
-        // Sorted here rather than trusted from the mod: the client walks these
-        // in order to interpolate, and an out-of-order list would make the sky
-        // jump backwards partway through the day.
-        keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
-
-        Some(Sky {
-            mod_id,
-            day_length_ticks: entry.get("day_length_ticks").ok()?,
-            keyframes,
-            // Morning unless the mod says otherwise. A counter left at zero
-            // opens every new world at midnight, which is the one hour with
-            // nothing in it to look at.
-            start_time: entry
-                .get::<Option<f32>>("start_time")
-                .ok()
-                .flatten()
-                .unwrap_or(DEFAULT_START_TIME)
-                .rem_euclid(1.0),
-        })
+        domains.sort();
+        domains.dedup();
+        domains
+            .into_iter()
+            .filter_map(|domain| self.sky_for(domain.as_deref()))
+            .collect()
     }
 
     fn call_void(&mut self, mod_id: &str, name: &str) -> Result<(), ScriptError> {
@@ -5603,7 +5668,7 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("looking_at", self.crosshair_reader()?)
             .map_err(|err| self.vm_error(&err))?;
-        Ok(())
+        self.install_stars(game)
     }
 
     /// The `game.looking_at` function — Life mod's ask 5.
@@ -5641,6 +5706,119 @@ impl MluaVm {
                 out.set("face", face)?;
                 Ok(mlua::Value::Table(out))
             })
+            .map_err(|err| self.vm_error(&err))
+    }
+
+    /// `game.stars`, `game.world_position`, `game.look_direction` and
+    /// `game.star_in_view`: the catalog, where this world is in it, and a
+    /// player's gaze held against it — Task 15c's four asks.
+    ///
+    /// The catalog is [`crate::sky::star_catalog`] for the world's seed, the
+    /// same derivation the client draws from, which is what makes the star
+    /// `star_in_view` names the star a player sees.
+    fn install_stars(&self, game: &Table) -> Result<(), ScriptError> {
+        let (seed_known, star_list) = (self.seed_cell.clone(), self.catalog.clone());
+        let stars = self
+            .lua
+            .create_function(move |lua, ()| {
+                let Some((_, catalog)) = catalog_of(&seed_known, &star_list) else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let out = lua.create_table_with_capacity(catalog.len(), 0)?;
+                for (index, star) in catalog.iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("id", star.id)?;
+                    entry.set("x", star.position.x)?;
+                    entry.set("y", star.position.y)?;
+                    entry.set("z", star.position.z)?;
+                    entry.set("magnitude", star.magnitude)?;
+                    entry.set("warmth", star.warmth)?;
+                    out.set(index + 1, entry)?;
+                }
+                Ok(mlua::Value::Table(out))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("stars", stars)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let seed_of_world = self.seed_cell.clone();
+        let world_position = self
+            .lua
+            .create_function(move |lua, ()| {
+                let Some(seed) = seed_of_world.lock().ok().and_then(|cell| *cell) else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let at = crate::sky::world_position(seed);
+                let out = lua.create_table()?;
+                out.set("x", at.x)?;
+                out.set("y", at.y)?;
+                out.set("z", at.z)?;
+                Ok(mlua::Value::Table(out))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("world_position", world_position)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let eyes = std::sync::Arc::clone(&self.sight);
+        let look_direction = self
+            .lua
+            .create_function(move |lua, uuid: String| {
+                let player = player_of(&uuid, "look_direction")?;
+                let Some(looking) = gaze_of(&eyes, player)? else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let out = lua.create_table()?;
+                out.set("x", looking.direction[0])?;
+                out.set("y", looking.direction[1])?;
+                out.set("z", looking.direction[2])?;
+                out.set("domain", looking.domain)?;
+                Ok(mlua::Value::Table(out))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("look_direction", look_direction)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let watcher = std::sync::Arc::clone(&self.sight);
+        let spaces = std::sync::Arc::clone(&self.domains);
+        let clock = std::sync::Arc::clone(&self.sounds);
+        let (seed_slot, star_cache) = (self.seed_cell.clone(), self.catalog.clone());
+        let star_in_view = self
+            .lua
+            .create_function(move |lua, uuid: String| {
+                let player = player_of(&uuid, "star_in_view")?;
+                let Some(looking) = gaze_of(&watcher, player)? else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let Some((seed, catalog)) = catalog_of(&seed_slot, &star_cache) else {
+                    return Ok(mlua::Value::Nil);
+                };
+                // The domain's own place, or the world's: a cellar is on the
+                // same planet as the field above it.
+                let observer = spaces
+                    .lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .and_then(|access| access.position_of(&looking.domain))
+                    })
+                    .unwrap_or_else(|| crate::sky::world_position(seed));
+                let time = clock
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.time_of_day()))
+                    .unwrap_or(0.0);
+                let Some((id, alignment)) =
+                    crate::sky::star_in_view(&catalog, observer, looking.direction, time)
+                else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let out = lua.create_table()?;
+                out.set("id", id)?;
+                out.set("alignment", alignment)?;
+                Ok(mlua::Value::Table(out))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("star_in_view", star_in_view)
             .map_err(|err| self.vm_error(&err))
     }
 
@@ -6449,16 +6627,25 @@ impl MluaVm {
         let slot = std::sync::Arc::clone(&self.domains);
         let create = self
             .lua
-            .create_function(move |_, (template, key): (String, String)| {
-                // The instance's id, or nil. A mod uses the id to transfer
-                // things in, so handing back a boolean would mean it had to
-                // rebuild `template/key` itself — and that spelling is the
-                // engine's, not something a mod should have to know.
-                Ok(slot.lock().ok().and_then(|slot| {
-                    slot.as_ref()
-                        .and_then(|store| store.create(&template, &key))
-                }))
-            })
+            .create_function(
+                move |_, (template, key, options): (String, String, Option<Table>)| {
+                    // Where the instance sits in the universe, if the mod
+                    // says: a body made for a star is made AT the star, so
+                    // the sky drawn from it is that star's.
+                    let position = match &options {
+                        Some(options) => universal_position(options, "create_domain")?,
+                        None => None,
+                    };
+                    // The instance's id, or nil. A mod uses the id to transfer
+                    // things in, so handing back a boolean would mean it had to
+                    // rebuild `template/key` itself — and that spelling is the
+                    // engine's, not something a mod should have to know.
+                    Ok(slot.lock().ok().and_then(|slot| {
+                        slot.as_ref()
+                            .and_then(|store| store.create_at(&template, &key, position))
+                    }))
+                },
+            )
             .map_err(|err| self.vm_error(&err))?;
         game.set("create_domain", create)
             .map_err(|err| self.vm_error(&err))?;
@@ -8557,6 +8744,7 @@ fn register_domain(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         )));
     }
     let instanced: bool = spec.get("instanced").unwrap_or(false);
+    let position = universal_position(spec, &format!("register_domain(\"{qualified}\")"))?;
 
     // **A domain fills itself, or it is air.** Stored under the domain's own
     // key rather than the mod's: one mod may declare several spaces and each
@@ -8586,6 +8774,17 @@ fn register_domain(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     entry.set("kind", kind)?;
     entry.set("scale", scale)?;
     entry.set("instanced", instanced)?;
+    if let Some(at) = position {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "bounded by `universal_position` to what a double holds exactly"
+        )]
+        {
+            entry.set("position_x", at.x as f64)?;
+            entry.set("position_y", at.y as f64)?;
+            entry.set("position_z", at.z as f64)?;
+        }
+    }
     registry.set(qualified, entry)?;
     Ok(())
 }
@@ -8865,38 +9064,7 @@ fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         .map_err(|_| mlua::Error::external("register_sky: missing required field `keyframes`"))?;
     let mut count = 0;
     for frame in keyframes.sequence_values::<Table>() {
-        let frame = frame?;
-        let time: f32 = frame
-            .get("time")
-            .map_err(|_| mlua::Error::external("register_sky: every keyframe needs a `time`"))?;
-        if !(0.0..=1.0).contains(&time) {
-            return Err(mlua::Error::external(format!(
-                "register_sky: keyframe time must be 0..=1, got {time}"
-            )));
-        }
-        let intensity: f32 = frame.get("intensity").map_err(|_| {
-            mlua::Error::external("register_sky: every keyframe needs an `intensity`")
-        })?;
-        if !(0.0..=1.0).contains(&intensity) {
-            return Err(mlua::Error::external(format!(
-                "register_sky: keyframe intensity must be 0..=1, got {intensity}"
-            )));
-        }
-        for key in ["sky", "sun"] {
-            let colour: Table = frame.get(key).map_err(|_| {
-                mlua::Error::external(format!(
-                    "register_sky: every keyframe needs a `{key}` colour"
-                ))
-            })?;
-            if colour.len()? != 3 {
-                return Err(mlua::Error::external(format!(
-                    "register_sky: `{key}` must be three numbers, {{r, g, b}}"
-                )));
-            }
-        }
-        if let Some(grade) = frame.get::<Option<Table>>("grade")? {
-            validate_grade(&grade)?;
-        }
+        validate_keyframe(&frame?)?;
         count += 1;
     }
     if count == 0 {
@@ -8905,11 +9073,88 @@ fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         ));
     }
 
+    // Which domain this sky is for. A name rather than a registered id: a
+    // mod may register the sky for a domain before the domain, and the
+    // server matches the two once both are known.
+    let domain: Option<String> = spec.get("domain")?;
+    if let Some(domain) = &domain
+        && (domain.is_empty()
+            || domain.len() > crate::domain::MAX_KEY * 2
+            || domain.chars().any(char::is_whitespace))
+    {
+        return Err(mlua::Error::external(format!(
+            "register_sky: `domain` must be a domain id, got {domain:?}"
+        )));
+    }
+
     let registry: Table = lua.named_registry_value("tiamat.skies")?;
     let entry = lua.create_table()?;
+    entry.set("mod_id", owner.to_owned())?;
+    entry.set("domain", domain.clone())?;
     entry.set("day_length_ticks", day_length_ticks)?;
     entry.set("keyframes", keyframes)?;
-    registry.set(owner.to_owned(), entry)?;
+    // **Stored, since 2026-09-23.** It was read back by `registered_sky`
+    // and never written here, so every world opened at the default hour
+    // whatever a mod said — the field the allowlist exists to catch, missed
+    // one step later.
+    if let Some(start_time) = spec.get::<Option<f32>>("start_time")? {
+        if !start_time.is_finite() {
+            return Err(mlua::Error::external(
+                "register_sky: start_time must be a number, 0..1",
+            ));
+        }
+        entry.set("start_time", start_time)?;
+    }
+    // One sky per mod per domain: a second registration for the same domain
+    // replaces the first, as it always has.
+    registry.set(
+        format!("{owner}|{}", domain.as_deref().unwrap_or("")),
+        entry,
+    )?;
+    Ok(())
+}
+
+/// Checks one keyframe, so a mistake in it is a registration error rather
+/// than a colour nobody can explain.
+fn validate_keyframe(frame: &Table) -> mlua::Result<()> {
+    let time: f32 = frame
+        .get("time")
+        .map_err(|_| mlua::Error::external("register_sky: every keyframe needs a `time`"))?;
+    if !(0.0..=1.0).contains(&time) {
+        return Err(mlua::Error::external(format!(
+            "register_sky: keyframe time must be 0..=1, got {time}"
+        )));
+    }
+    let intensity: f32 = frame
+        .get("intensity")
+        .map_err(|_| mlua::Error::external("register_sky: every keyframe needs an `intensity`"))?;
+    if !(0.0..=1.0).contains(&intensity) {
+        return Err(mlua::Error::external(format!(
+            "register_sky: keyframe intensity must be 0..=1, got {intensity}"
+        )));
+    }
+    for key in ["sky", "sun"] {
+        let colour: Table = frame.get(key).map_err(|_| {
+            mlua::Error::external(format!(
+                "register_sky: every keyframe needs a `{key}` colour"
+            ))
+        })?;
+        if colour.len()? != 3 {
+            return Err(mlua::Error::external(format!(
+                "register_sky: `{key}` must be three numbers, {{r, g, b}}"
+            )));
+        }
+    }
+    if let Some(grade) = frame.get::<Option<Table>>("grade")? {
+        validate_grade(&grade)?;
+    }
+    if let Some(stars) = frame.get::<Option<f32>>("stars")?
+        && !(0.0..=1.0).contains(&stars)
+    {
+        return Err(mlua::Error::external(format!(
+            "register_sky: keyframe stars must be 0..=1, got {stars}"
+        )));
+    }
     Ok(())
 }
 
@@ -9029,7 +9274,7 @@ const GRADE_MIN_GAMMA: f32 = 0.1;
 /// has no sky at all, which is exactly what happened when `start_time` was
 /// added: no day, no sun, no shadows, and every graphics setting looking the
 /// same because there was nothing lit to tell them apart.
-const SKY_FIELDS: [&str; 3] = ["day_length_ticks", "keyframes", "start_time"];
+const SKY_FIELDS: [&str; 4] = ["day_length_ticks", "keyframes", "start_time", "domain"];
 
 /// Fields `register_model` accepts.
 const MODEL_FIELDS: [&str; 4] = ["id", "file", "scale", "texture"];
@@ -9064,7 +9309,7 @@ const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "defa
 /// Checked so a typo is an error rather than a silent default — the same rule
 /// every other registration applies, and for the reason `register_fluid` gives:
 /// a misspelled field is a mod that thinks it configured something.
-const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator"];
+const DOMAIN_FIELDS: [&str; 6] = ["id", "kind", "scale", "instanced", "generator", "position"];
 
 /// Fields the `map` of a `game.set_clouds` spec accepts — weather ask W10.
 const CLOUD_MAP_FIELDS: [&str; 8] = [
@@ -10058,6 +10303,92 @@ fn compile_density(
     Ok(())
 }
 
+impl MluaVm {
+    /// The winning sky for one domain, or for every domain not named.
+    ///
+    /// Lowest mod id wins where several register one, the same rule the
+    /// default tool uses: arbitrary but fixed beats depending on load order —
+    /// **among mods that are not reference mods.** The engine's own fixture
+    /// loses to any real mod, whatever the ids.
+    fn sky_for(&self, domain: Option<&str>) -> Option<Sky> {
+        let registry = self
+            .lua
+            .named_registry_value::<Table>("tiamat.skies")
+            .ok()?;
+        let mut entries: Vec<(String, Table)> = registry
+            .pairs::<String, Table>()
+            .filter_map(Result::ok)
+            .filter_map(|(_, entry)| {
+                let for_domain = entry.get::<Option<String>>("domain").ok().flatten();
+                if for_domain.as_deref() != domain {
+                    return None;
+                }
+                let mod_id: String = entry.get("mod_id").ok()?;
+                Some((mod_id, entry))
+            })
+            .collect();
+        entries.sort_by_key(|(id, _)| (self.reference_mods.contains(id), id.clone()));
+        let (mod_id, entry) = entries.into_iter().next()?;
+
+        let frames: Table = entry.get("keyframes").ok()?;
+        let mut keyframes: Vec<SkyKeyframe> = frames
+            .sequence_values::<Table>()
+            .filter_map(Result::ok)
+            .filter_map(|frame| {
+                let colour = |key: &str| -> Option<[f32; 3]> {
+                    let table: Table = frame.get(key).ok()?;
+                    Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?])
+                };
+                Some(SkyKeyframe {
+                    time: frame.get("time").ok()?,
+                    sky: colour("sky")?,
+                    sun: colour("sun")?,
+                    intensity: frame.get("intensity").ok()?,
+                    // Validated in `register_sky`; absent means no grading, which
+                    // is a keyframe saying nothing rather than an error.
+                    grade: frame
+                        .get::<Option<Table>>("grade")
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        .map_or(SkyGrade::NONE, read_grade),
+                    // Absent is none: a sky written before stars existed
+                    // draws none, and whether a world has them is content.
+                    stars: frame
+                        .get::<Option<f32>>("stars")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0.0)
+                        .clamp(0.0, 1.0),
+                })
+            })
+            .collect();
+        if keyframes.is_empty() {
+            return None;
+        }
+        // Sorted here rather than trusted from the mod: the client walks these
+        // in order to interpolate, and an out-of-order list would make the sky
+        // jump backwards partway through the day.
+        keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+        Some(Sky {
+            mod_id,
+            domain: domain.map(str::to_owned),
+            day_length_ticks: entry.get("day_length_ticks").ok()?,
+            keyframes,
+            // Morning unless the mod says otherwise. A counter left at zero
+            // opens every new world at midnight, which is the one hour with
+            // nothing in it to look at.
+            start_time: entry
+                .get::<Option<f32>>("start_time")
+                .ok()
+                .flatten()
+                .unwrap_or(DEFAULT_START_TIME)
+                .rem_euclid(1.0),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -10580,6 +10911,8 @@ mod tests {
         /// What `surface_at` should answer, and what it was asked.
         surface: std::sync::Mutex<Option<crate::sight::Surface>>,
         columns_asked: std::sync::Mutex<Vec<ColumnAsk>>,
+        /// What `gaze` should answer.
+        gaze: std::sync::Mutex<Option<crate::sight::Gaze>>,
     }
 
     /// What `surface_at` was asked: domain, column, from, depth, skip.
@@ -10625,6 +10958,10 @@ mod tests {
                 .ok()
                 .and_then(|reply| reply.clone())
                 .unwrap_or(crate::sight::Reading::Unavailable)
+        }
+
+        fn gaze(&self, _uuid: [u8; 32]) -> Option<crate::sight::Gaze> {
+            self.gaze.lock().ok().and_then(|reply| reply.clone())
         }
     }
 
@@ -15372,5 +15709,377 @@ mod entity_tests {
 
         assert!(vm.entity_steppers().is_empty());
         assert!(vm.entity_step("quiet", &[1], 1).expect("vm ok").is_none());
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    //! The four asks Task 15c's mod makes of the engine: a sky per domain
+    //! with stars in it, a domain with a place in the universe, the catalog
+    //! itself, and a gaze held against it.
+
+    use std::path::Path;
+
+    use super::*;
+
+    fn vm() -> MluaVm {
+        MluaVm::new(VmLimits::default()).expect("create vm")
+    }
+
+    fn load(vm: &mut MluaVm, id: &str, source: &str) -> Result<(), ScriptError> {
+        vm.load_mod(id, source, Path::new("."))
+    }
+
+    fn detail_of(err: &ScriptError) -> String {
+        match err {
+            ScriptError::Vm { detail, .. }
+            | ScriptError::Load { detail, .. }
+            | ScriptError::Runtime { detail, .. } => detail.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    fn player() -> String {
+        crate::PlayerUuid::from_bytes([9; 32]).to_hex()
+    }
+
+    /// A world that answers a gaze and nothing else.
+    #[derive(Default)]
+    struct Gazer {
+        gaze: std::sync::Mutex<Option<crate::sight::Gaze>>,
+    }
+
+    impl crate::sight::Access for Gazer {
+        fn line_of_sight(&self, _: &str, _: [f64; 3], _: [f64; 3]) -> crate::sight::Sighting {
+            crate::sight::Sighting::Unavailable
+        }
+
+        fn block_at(&self, _: &str, _: crate::BlockPos) -> crate::sight::Reading {
+            crate::sight::Reading::Unavailable
+        }
+
+        fn gaze(&self, _: [u8; 32]) -> Option<crate::sight::Gaze> {
+            self.gaze.lock().ok().and_then(|reply| reply.clone())
+        }
+    }
+
+    /// A domain store that remembers what it was asked to make, and where.
+    #[derive(Default)]
+    struct Places {
+        made: std::sync::Mutex<Vec<(String, String, Option<crate::sky::UniversalPos>)>>,
+        positions: std::sync::Mutex<std::collections::BTreeMap<String, crate::sky::UniversalPos>>,
+    }
+
+    impl crate::domain::Access for Places {
+        fn create(&self, template: &str, key: &str) -> Option<String> {
+            self.create_at(template, key, None)
+        }
+
+        fn create_at(
+            &self,
+            template: &str,
+            key: &str,
+            position: Option<crate::sky::UniversalPos>,
+        ) -> Option<String> {
+            let id = format!("{template}/{key}");
+            if let Ok(mut made) = self.made.lock() {
+                made.push((template.to_owned(), key.to_owned(), position));
+            }
+            if let (Some(at), Ok(mut positions)) = (position, self.positions.lock()) {
+                positions.insert(id.clone(), at);
+            }
+            Some(id)
+        }
+
+        fn destroy(&self, _: &str) -> bool {
+            false
+        }
+
+        fn exists(&self, _: &str) -> bool {
+            true
+        }
+
+        fn position_of(&self, id: &str) -> Option<crate::sky::UniversalPos> {
+            self.positions.lock().ok()?.get(id).copied()
+        }
+    }
+
+    #[test]
+    fn a_sky_names_its_domain_and_how_much_of_the_stars_show() {
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "space",
+            r"
+            game.register_sky{ day_length_ticks = 24000, keyframes = {
+                { time = 0.0, sky = {0, 0, 0.05}, sun = {0.2, 0.2, 0.4}, intensity = 0.05, stars = 1.0 },
+                { time = 0.5, sky = {0.5, 0.7, 1.0}, sun = {1, 1, 1}, intensity = 1.0 },
+            } }
+            game.register_sky{ domain = 'space:void', day_length_ticks = 100, keyframes = {
+                { time = 0.0, sky = {0, 0, 0}, sun = {0, 0, 0}, intensity = 0.0, stars = 0.75 },
+            } }
+            ",
+        )
+        .expect("load");
+
+        let skies = vm.registered_skies();
+        assert_eq!(skies.len(), 2, "two skies were registered: {skies:?}");
+        // The unnamed one first, and it is what `registered_sky` answers.
+        assert_eq!(skies[0].domain, None);
+        assert_eq!(skies[1].domain.as_deref(), Some("space:void"));
+        assert_eq!(vm.registered_sky().expect("a sky"), skies[0]);
+        // Stars come through, and a keyframe that said nothing shows none.
+        assert!((skies[0].keyframes[0].stars - 1.0).abs() < f32::EPSILON);
+        assert!((skies[0].keyframes[1].stars - 0.0).abs() < f32::EPSILON);
+        assert!((skies[1].keyframes[0].stars - 0.75).abs() < f32::EPSILON);
+        assert_eq!(skies[1].day_length_ticks, 100);
+    }
+
+    #[test]
+    fn stars_out_of_range_and_a_nameless_domain_are_refused() {
+        let mut vm = vm();
+        let err = load(
+            &mut vm,
+            "space",
+            r"game.register_sky{ day_length_ticks = 100, keyframes = {
+                { time = 0, sky = {0,0,0}, sun = {0,0,0}, intensity = 0, stars = 1.5 },
+            } }",
+        )
+        .expect_err("should refuse");
+        assert!(
+            detail_of(&err).contains("stars"),
+            "the error should name the field: {err:?}"
+        );
+        let err = load(
+            &mut vm,
+            "space2",
+            r"game.register_sky{ domain = '', day_length_ticks = 100, keyframes = {
+                { time = 0, sky = {0,0,0}, sun = {0,0,0}, intensity = 0 },
+            } }",
+        )
+        .expect_err("should refuse");
+        assert!(
+            detail_of(&err).contains("domain"),
+            "the error should name the field: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_skys_start_time_is_kept() {
+        // Read back by `registered_sky` and, until 2026-09-23, written by
+        // nothing: every world opened at the default hour whatever a mod said.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "space",
+            r"game.register_sky{ day_length_ticks = 100, start_time = 0.9, keyframes = {
+                { time = 0, sky = {0,0,0}, sun = {0,0,0}, intensity = 0 },
+            } }",
+        )
+        .expect("load");
+        let sky = vm.registered_sky().expect("a sky");
+        assert!(
+            (sky.start_time - 0.9).abs() < 1e-6,
+            "start_time {}",
+            sky.start_time
+        );
+    }
+
+    #[test]
+    fn a_domain_registers_where_it_sits_and_an_instance_can_be_made_somewhere_else() {
+        let mut vm = vm();
+        let places = std::sync::Arc::new(Places::default());
+        vm.set_domain_access(places.clone());
+        load(
+            &mut vm,
+            "space",
+            r"
+            game.register_domain{ id = 'body', instanced = true,
+                position = { x = 1e15, y = -2, z = 3 } }
+            game.register_domain{ id = 'cellar' }
+            game.register_on_tick(function()
+                made = game.create_domain('space:body', '17', { position = { x = 5, y = 6, z = 7 } })
+                plain = game.create_domain('space:body', '18')
+            end)
+            ",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let registered = vm.registered_domains();
+        let (_, body) = registered
+            .iter()
+            .find(|(id, _)| id == "space:body")
+            .expect("the template");
+        assert_eq!(
+            body.position,
+            Some(crate::sky::UniversalPos::new(1_000_000_000_000_000, -2, 3))
+        );
+        let (_, cellar) = registered
+            .iter()
+            .find(|(id, _)| id == "space:cellar")
+            .expect("the cellar");
+        assert_eq!(
+            cellar.position, None,
+            "a domain that said nothing is at home"
+        );
+
+        vm.tick(1).expect("tick");
+        let made = places.made.lock().expect("lock").clone();
+        assert_eq!(
+            made,
+            vec![
+                (
+                    "space:body".to_owned(),
+                    "17".to_owned(),
+                    Some(crate::sky::UniversalPos::new(5, 6, 7))
+                ),
+                ("space:body".to_owned(), "18".to_owned(), None),
+            ]
+        );
+        let env = vm.environment("space").expect("env");
+        assert_eq!(env.get::<String>("made").expect("made"), "space:body/17");
+        assert_eq!(env.get::<String>("plain").expect("plain"), "space:body/18");
+    }
+
+    #[test]
+    fn a_position_that_is_not_a_number_is_refused() {
+        let mut vm = vm();
+        let err = load(
+            &mut vm,
+            "space",
+            "game.register_domain{ id = 'body', position = { x = 0/0, y = 0, z = 0 } }",
+        )
+        .expect_err("should refuse");
+        assert!(
+            detail_of(&err).contains("position.x"),
+            "the error should name the axis: {err:?}"
+        );
+        let err = load(
+            &mut vm,
+            "space2",
+            "game.register_domain{ id = 'body', position = { x = 1, y = 2 } }",
+        )
+        .expect_err("should refuse");
+        assert!(
+            detail_of(&err).contains("`z`"),
+            "the error should name the missing axis: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_catalog_and_the_worlds_place_are_the_seeds() {
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "space",
+            r"
+            early = game.stars()
+            early_home = game.world_position()
+            game.register_on_tick(function()
+                stars = game.stars()
+                home = game.world_position()
+            end)
+            ",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        vm.set_world_seed(7);
+        vm.tick(1).expect("tick");
+
+        let env = vm.environment("space").expect("env");
+        assert!(
+            env.get::<Value>("early").expect("early").is_nil(),
+            "before the seed is known there is no catalog, as there is no world_seed"
+        );
+        assert!(env.get::<Value>("early_home").expect("early_home").is_nil());
+        let stars: Table = env.get("stars").expect("stars");
+        let catalog = crate::sky::star_catalog(7);
+        assert_eq!(stars.len().expect("len") as usize, catalog.len());
+        let first: Table = stars.get(1).expect("first");
+        assert_eq!(first.get::<u32>("id").expect("id"), catalog[0].id);
+        assert_eq!(first.get::<i64>("x").expect("x"), catalog[0].position.x);
+        assert_eq!(first.get::<i64>("z").expect("z"), catalog[0].position.z);
+        assert!(
+            (first.get::<f32>("magnitude").expect("magnitude") - catalog[0].magnitude).abs() < 1e-6
+        );
+        let home: Table = env.get("home").expect("home");
+        let expected = crate::sky::world_position(7);
+        assert_eq!(home.get::<i64>("x").expect("x"), expected.x);
+        assert_eq!(home.get::<i64>("y").expect("y"), expected.y);
+        assert_eq!(home.get::<i64>("z").expect("z"), expected.z);
+    }
+
+    #[test]
+    fn looking_along_a_star_names_it_through_lua() {
+        // The no-desync property from the mod's side: the direction the sky
+        // draws star N along, handed to `game.star_in_view` as a gaze,
+        // answers N — from the world's own place, at the day's turn.
+        let mut vm = vm();
+        let eye = std::sync::Arc::new(Gazer::default());
+        vm.set_sight_access(eye.clone());
+        let catalog = crate::sky::star_catalog(7);
+        let observer = crate::sky::world_position(7);
+        let star = &catalog[300];
+        // With no clock lent, the time of day is zero.
+        let drawn = crate::sky::wheeled(
+            star.direction_from(observer).expect("not here"),
+            crate::sky::turn(0.0),
+        );
+        *eye.gaze.lock().expect("lock") = Some(crate::sight::Gaze {
+            domain: crate::domain::OVERWORLD.to_owned(),
+            direction: drawn,
+        });
+        load(
+            &mut vm,
+            "space",
+            &format!(
+                "game.register_on_tick(function()\n\
+                 \x20   seen = game.star_in_view('{0}')\n\
+                 \x20   gaze = game.look_direction('{0}')\n\
+                 end)",
+                player()
+            ),
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        vm.set_world_seed(7);
+        vm.tick(1).expect("tick");
+
+        let env = vm.environment("space").expect("env");
+        let seen: Table = env.get("seen").expect("seen");
+        assert_eq!(seen.get::<u32>("id").expect("id"), star.id);
+        assert!(seen.get::<f32>("alignment").expect("alignment") > 0.9999);
+        let gaze: Table = env.get("gaze").expect("gaze");
+        assert!((gaze.get::<f32>("x").expect("x") - drawn[0]).abs() < 1e-6);
+        assert!((gaze.get::<f32>("y").expect("y") - drawn[1]).abs() < 1e-6);
+        assert!((gaze.get::<f32>("z").expect("z") - drawn[2]).abs() < 1e-6);
+        assert_eq!(
+            gaze.get::<String>("domain").expect("domain"),
+            crate::domain::OVERWORLD
+        );
+    }
+
+    #[test]
+    fn a_player_nobody_can_see_has_no_gaze_and_no_star() {
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "space",
+            &format!(
+                "game.register_on_tick(function()\n\
+                 \x20   seen = game.star_in_view('{0}')\n\
+                 \x20   gaze = game.look_direction('{0}')\n\
+                 end)",
+                player()
+            ),
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        vm.set_world_seed(7);
+        vm.tick(1).expect("tick");
+        let env = vm.environment("space").expect("env");
+        assert!(env.get::<Value>("seen").expect("seen").is_nil());
+        assert!(env.get::<Value>("gaze").expect("gaze").is_nil());
     }
 }

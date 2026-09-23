@@ -1483,10 +1483,12 @@ async fn session(
             ServerMessage::SkyTable {
                 day_length_ticks,
                 keyframes,
+                observer,
             } => {
                 let _ = events.send(Event::Sky(crate::sky::Sky::new(
                     day_length_ticks,
                     keyframes,
+                    tiamat_core::sky::UniversalPos::new(observer[0], observer[1], observer[2]),
                 )));
             }
 

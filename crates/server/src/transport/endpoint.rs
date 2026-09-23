@@ -152,8 +152,15 @@ pub struct Shared {
     /// Ticks in a full day, or 0 if no mod registered a sky.
     pub sky_day_length: u32,
 
-    /// The sky's colour keyframes, sorted by time.
-    pub sky_keyframes: Vec<tiamat_core::proto::SkyFrame>,
+    /// Every sky the mods registered, by domain. See [`crate::skies`].
+    pub skies: crate::skies::SkyBook,
+
+    /// The live domain registry, once the simulation thread has built it.
+    ///
+    /// Set once, by that thread, after the world is open — which is after
+    /// this is constructed, hence the cell. Read by a connection to find where
+    /// in the universe a domain sits when it sends that domain's sky.
+    pub domains: std::sync::OnceLock<Arc<std::sync::RwLock<tiamat_core::domain::Registry>>>,
 
     /// Where the clock stands in the day, in ticks since midnight.
     ///
@@ -1417,6 +1424,25 @@ impl Shared {
     }
 
     /// Where the day stands now, without advancing it.
+    /// Where this world sits in the universe, from its seed.
+    #[must_use]
+    pub fn world_position(&self) -> tiamat_core::sky::UniversalPos {
+        tiamat_core::sky::world_position(self.seed.load(Ordering::Relaxed))
+    }
+
+    /// The sky table for a domain: its sky by [`crate::skies`]' rule, seen
+    /// from where the domain sits — its own place if a mod gave it one, else
+    /// the world's.
+    #[must_use]
+    pub fn sky_table_for(&self, domain: &str) -> ServerMessage {
+        let observer = self
+            .domains
+            .get()
+            .and_then(|registry| registry.read().ok()?.position_of(domain))
+            .unwrap_or_else(|| self.world_position());
+        self.skies.table_for(domain, observer)
+    }
+
     #[must_use]
     pub fn day_fraction(&self) -> f32 {
         use std::sync::atomic::Ordering;
@@ -2882,6 +2908,10 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                             },
                         )
                         .await?;
+                        // And the sky of the place they have arrived in,
+                        // seen from where in the universe it sits: a space
+                        // between worlds has no dawn, and a body has its own.
+                        frame::write(&mut send, &shared.sky_table_for(&domain)).await?;
                     }
                     for pos in streamer.recentre(chunk) {
                         frame::write(&mut send, &ServerMessage::ChunkUnload { pos }).await?;
@@ -3074,7 +3104,12 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 cloud_layer: shared.cloud_layer,
                 hud_scripts: &shared.hud_scripts,
                 sound_bindings: &shared.sound_bindings,
-                sky: (shared.sky_day_length, &shared.sky_keyframes),
+                sky: {
+                    let (day_length_ticks, keyframes) =
+                        shared.skies.frames_for(tiamat_core::domain::OVERWORLD);
+                    let home = shared.world_position();
+                    (day_length_ticks, keyframes, [home.x, home.y, home.z])
+                },
                 allowlist: &allowlist,
                 max_players: shared.max_players,
                 current_players: shared.players.load(Ordering::Acquire),
@@ -3777,7 +3812,8 @@ mod tests {
             sound_bindings: Vec::new(),
             fluid_table: Vec::new(),
             sky_day_length: 0,
-            sky_keyframes: Vec::new(),
+            skies: crate::skies::SkyBook::default(),
+            domains: std::sync::OnceLock::new(),
             time_of_day: std::sync::atomic::AtomicU64::new(0),
             allowlist: std::sync::RwLock::new(Allowlist::open()),
             operators: std::collections::BTreeSet::new(),

@@ -89,6 +89,16 @@ pub struct Spec {
     /// documentation for why the registration window cannot name every domain
     /// a world will need.
     pub instanced: bool,
+    /// Where this domain sits in the universe, if the mod said.
+    ///
+    /// The frame [`crate::sky::UniversalPos`] describes: where a WORLD is, in
+    /// blocks, which is what the sky is drawn from — a domain placed at a
+    /// star's position sees that star's sky. `None` is the same place as the
+    /// overworld, which is right for a cellar and a ship's hold and wrong for
+    /// nothing a mod could not fix by saying otherwise. A template's position
+    /// is what its instances inherit unless [`Registry::create_at`] was given
+    /// one of their own.
+    pub position: Option<crate::sky::UniversalPos>,
 }
 
 impl Default for Spec {
@@ -97,6 +107,7 @@ impl Default for Spec {
             kind: Kind::Voxel,
             scale: 1.0,
             instanced: false,
+            position: None,
         }
     }
 }
@@ -184,6 +195,13 @@ pub struct Registry {
     ///
     /// Persisted, so a ship somebody built is still there next week.
     instances: BTreeMap<String, String>,
+    /// Instances given a place of their own at creation, by id.
+    ///
+    /// Beside `instances` rather than inside it because most instances have
+    /// none — a ship is wherever its template is — and because the world file
+    /// keeps the two lists apart, so a world written before positions existed
+    /// reads back with every instance and no positions.
+    positions: BTreeMap<String, crate::sky::UniversalPos>,
     /// Domains found in the world that nothing currently registers.
     ///
     /// Kept so their chunks are never dropped and re-registering a mod gives
@@ -214,6 +232,7 @@ impl Registry {
         Self {
             specs,
             instances: BTreeMap::new(),
+            positions: BTreeMap::new(),
             unknown: BTreeSet::new(),
             frozen: false,
         }
@@ -305,6 +324,27 @@ impl Registry {
     /// [`DomainError::NotATemplate`] if `template` was not registered with
     /// [`Spec::instanced`], and [`DomainError::BadId`] for an unusable key.
     pub fn create(&mut self, template: &str, key: &str) -> Result<String, DomainError> {
+        self.create_at(template, key, None)
+    }
+
+    /// Makes an instance of a template with a place of its own in the
+    /// universe, or without one, in which case it is wherever its template is.
+    ///
+    /// Idempotent like [`Registry::create`], and the position is set only when
+    /// the instance is new: a second creation of an instance that exists
+    /// answers its id and moves nothing, because a body that changed place
+    /// every time somebody re-ran the command that made it would put every
+    /// sky drawn from it somewhere else.
+    ///
+    /// # Errors
+    ///
+    /// As [`Registry::create`].
+    pub fn create_at(
+        &mut self,
+        template: &str,
+        key: &str,
+        position: Option<crate::sky::UniversalPos>,
+    ) -> Result<String, DomainError> {
         match self.specs.get(template) {
             Some(spec) if spec.instanced => {}
             Some(_) => {
@@ -323,11 +363,54 @@ impl Registry {
         // Idempotent by construction: the id is a pure function of the
         // template and the key, so "already there" needs no test beyond
         // declining to touch what is in the map.
-        self.instances
-            .entry(id.clone())
-            .or_insert_with(|| template.to_owned());
+        if !self.instances.contains_key(&id) {
+            self.instances.insert(id.clone(), template.to_owned());
+            if let Some(position) = position {
+                self.positions.insert(id.clone(), position);
+            }
+        }
         self.unknown.remove(&id);
         Ok(id)
+    }
+
+    /// Where a domain sits in the universe, if anything said.
+    ///
+    /// An instance's own place first, then its template's, then a registered
+    /// domain's own. `None` means the overworld's place — which the registry
+    /// does not know, because it comes from the seed and this is registration.
+    #[must_use]
+    pub fn position_of(&self, id: &str) -> Option<crate::sky::UniversalPos> {
+        if let Some(position) = self.positions.get(id) {
+            return Some(*position);
+        }
+        let spec = match self.instances.get(id) {
+            Some(template) => self.specs.get(template),
+            None => self.specs.get(id),
+        };
+        spec.and_then(|spec| spec.position)
+    }
+
+    /// Every instance that was given a place of its own, as `(instance,
+    /// position)`, sorted for the world file like [`Registry::instances`].
+    #[must_use]
+    pub fn instance_positions(&self) -> Vec<(&str, crate::sky::UniversalPos)> {
+        self.positions
+            .iter()
+            .map(|(id, position)| (id.as_str(), *position))
+            .collect()
+    }
+
+    /// Restores instance positions read from the world file.
+    ///
+    /// Only for instances the registry holds: a position for an instance that
+    /// was not restored — its template is gone — is dropped with it, since the
+    /// unknown domain it became has no sky to draw.
+    pub fn restore_positions(&mut self, positions: Vec<(String, crate::sky::UniversalPos)>) {
+        for (id, position) in positions {
+            if self.instances.contains_key(&id) {
+                self.positions.insert(id, position);
+            }
+        }
     }
 
     /// Forgets an instance, given nothing is inside it.
@@ -356,6 +439,7 @@ impl Registry {
             });
         }
         self.instances.remove(id);
+        self.positions.remove(id);
         Ok(())
     }
 
@@ -416,6 +500,28 @@ pub trait Access: Send + Sync {
     /// Returns its id. `None` if the template is not one, or the key is
     /// unusable — the mistakes a mod can fix.
     fn create(&self, template: &str, key: &str) -> Option<String>;
+
+    /// Makes an instance with a place of its own in the universe.
+    ///
+    /// Defaulted to [`Access::create`], which drops the position: a store that
+    /// has not learned about positions still makes the ship, and the ship is
+    /// wherever its template is.
+    fn create_at(
+        &self,
+        template: &str,
+        key: &str,
+        position: Option<crate::sky::UniversalPos>,
+    ) -> Option<String> {
+        let _ = position;
+        self.create(template, key)
+    }
+
+    /// Where a domain sits in the universe, on the terms of
+    /// [`Registry::position_of`]: `None` is the overworld's own place.
+    fn position_of(&self, id: &str) -> Option<crate::sky::UniversalPos> {
+        let _ = id;
+        None
+    }
 
     /// Removes an instance and everything stored under it.
     ///
@@ -679,6 +785,96 @@ mod tests {
             reopened.instances(),
             vec![("mod:ship/17", "mod:ship"), ("mod:ship/18", "mod:ship")]
         );
+    }
+
+    #[test]
+    fn a_domain_sits_where_it_said_and_an_instance_where_it_was_made() {
+        // The places: an instance's own first, then its template's, then a
+        // registered domain's own; a domain that said nothing is at home,
+        // which the registry cannot know the place of.
+        let at = |x: i64| crate::sky::UniversalPos::new(x, 0, 0);
+        let mut registry = Registry::new();
+        registry
+            .register(
+                "mod:body",
+                Spec {
+                    position: Some(at(100)),
+                    ..template()
+                },
+            )
+            .expect("register");
+        registry
+            .register(
+                "mod:moon",
+                Spec {
+                    position: Some(at(7)),
+                    ..Spec::default()
+                },
+            )
+            .expect("register");
+        registry
+            .register("mod:cellar", Spec::default())
+            .expect("register");
+        registry
+            .create_at("mod:body", "17", Some(at(1)))
+            .expect("create");
+        registry.create("mod:body", "18").expect("create");
+
+        assert_eq!(registry.position_of("mod:body/17"), Some(at(1)));
+        assert_eq!(
+            registry.position_of("mod:body/18"),
+            Some(at(100)),
+            "the template's"
+        );
+        assert_eq!(registry.position_of("mod:moon"), Some(at(7)));
+        assert_eq!(registry.position_of("mod:cellar"), None);
+        assert_eq!(registry.position_of(OVERWORLD), None);
+        assert_eq!(registry.position_of("nobody:knows"), None);
+
+        // Making it again moves nothing.
+        registry
+            .create_at("mod:body", "17", Some(at(999)))
+            .expect("create");
+        assert_eq!(registry.position_of("mod:body/17"), Some(at(1)));
+        assert_eq!(registry.instance_positions(), vec![("mod:body/17", at(1))]);
+
+        // And destroying it forgets where it was.
+        registry.destroy("mod:body/17", 0).expect("destroy");
+        assert!(registry.instance_positions().is_empty());
+    }
+
+    #[test]
+    fn instance_positions_survive_the_round_trip_and_orphans_lose_theirs() {
+        let at = |x: i64| crate::sky::UniversalPos::new(x, 2, 3);
+        let mut registry = Registry::new();
+        registry.register("mod:body", template()).expect("register");
+        registry
+            .create_at("mod:body", "17", Some(at(1)))
+            .expect("create");
+        let instances: Vec<(String, String)> = registry
+            .instances()
+            .into_iter()
+            .map(|(id, template)| (id.to_owned(), template.to_owned()))
+            .collect();
+        let positions: Vec<(String, crate::sky::UniversalPos)> = registry
+            .instance_positions()
+            .into_iter()
+            .map(|(id, at)| (id.to_owned(), at))
+            .collect();
+
+        let mut reopened = Registry::new();
+        reopened.register("mod:body", template()).expect("register");
+        reopened.restore(instances.clone());
+        reopened.restore_positions(positions.clone());
+        assert_eq!(reopened.position_of("mod:body/17"), Some(at(1)));
+
+        // Its template gone, the instance is an unknown domain with no place:
+        // there is no sky to draw from it.
+        let mut orphaned = Registry::new();
+        orphaned.restore(instances);
+        orphaned.restore_positions(positions);
+        assert_eq!(orphaned.position_of("mod:body/17"), None);
+        assert!(orphaned.instance_positions().is_empty());
     }
 
     #[test]

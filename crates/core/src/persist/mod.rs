@@ -97,6 +97,13 @@ pub mod meta_keys {
     /// would be a domain nothing could name the next morning. See
     /// [`crate::domain`].
     pub const DOMAIN_INSTANCES: &str = "domain_instances";
+    /// Where instances made with a place of their own sit, as
+    /// `instance\tx\ty\tz` lines in universal blocks.
+    ///
+    /// A list of its own rather than more columns on the instances: a world
+    /// written before positions existed reads back with every instance and
+    /// no positions, and a body's sky is drawn from wherever its template is.
+    pub const DOMAIN_POSITIONS: &str = "domain_positions";
     /// Which rule built the cached summaries, as [`crate::lod::SUMMARY_RULE`].
     pub const SUMMARY_RULE: &str = "summary_rule";
 }
@@ -1925,6 +1932,49 @@ impl WorldDb {
             .collect::<Vec<_>>()
             .join("\n");
         self.set_meta(meta_keys::DOMAIN_INSTANCES, text.as_bytes())
+    }
+
+    /// Reads where instances made with a place of their own sit, as
+    /// `(instance, position)`, on the same terms as
+    /// [`Self::domain_instances`]: a line that does not parse is skipped.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn domain_positions(&self) -> Result<Vec<(String, crate::sky::UniversalPos)>, WorldError> {
+        let Some(bytes) = self.meta(meta_keys::DOMAIN_POSITIONS)? else {
+            return Ok(Vec::new());
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok(Vec::new());
+        };
+        Ok(text
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                let instance = fields.next().filter(|name| !name.is_empty())?;
+                let mut axis = || fields.next()?.parse::<i64>().ok();
+                let (x, y, z) = (axis()?, axis()?, axis()?);
+                Some((instance.to_owned(), crate::sky::UniversalPos::new(x, y, z)))
+            })
+            .collect())
+    }
+
+    /// Writes where instances made with a place of their own sit.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn set_domain_positions(
+        &self,
+        positions: &[(String, crate::sky::UniversalPos)],
+    ) -> Result<(), WorldError> {
+        let text = positions
+            .iter()
+            .map(|(instance, at)| format!("{instance}\t{}\t{}\t{}", at.x, at.y, at.z))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.set_meta(meta_keys::DOMAIN_POSITIONS, text.as_bytes())
     }
 
     /// Removes everything stored under one domain.

@@ -225,6 +225,9 @@ pub struct Sky {
     keyframes: Vec<SkyFrame>,
     /// Where the day stands, `0.0..1.0`.
     time: f32,
+    /// Where in the universe this sky is seen from — the domain's place,
+    /// which is what the star catalog is drawn from.
+    observer: tiamat_core::sky::UniversalPos,
 }
 
 /// What the sky looks like at one moment.
@@ -242,6 +245,9 @@ pub struct Moment {
     /// Shadow maps need this and colour alone cannot supply it. See
     /// [`Sky::sun_direction`] for the arc it walks and what is fixed about it.
     pub sun_direction: [f32; 3],
+    /// How much of the star catalog shows, `0.0..=1.0`. Zero is none, and
+    /// is what a sky that never mentioned stars gets.
+    pub stars: f32,
     /// How the finished picture is graded now.
     ///
     /// Interpolated between keyframes like the colours are, and **sanitised** on
@@ -264,12 +270,17 @@ impl Sky {
             day_length_ticks: 0,
             keyframes: Vec::new(),
             time: 0.0,
+            observer: tiamat_core::sky::UniversalPos::CENTRE,
         }
     }
 
     /// The sky a server described.
     #[must_use]
-    pub fn new(day_length_ticks: u32, mut keyframes: Vec<SkyFrame>) -> Self {
+    pub fn new(
+        day_length_ticks: u32,
+        mut keyframes: Vec<SkyFrame>,
+        observer: tiamat_core::sky::UniversalPos,
+    ) -> Self {
         // Sorted defensively. The server sorts too, but this is data from a
         // peer and an out-of-order list would make the sky walk backwards
         // partway through the day rather than fail in any visible way.
@@ -278,7 +289,22 @@ impl Sky {
             day_length_ticks,
             keyframes,
             time: 0.0,
+            observer,
         }
+    }
+
+    /// Where in the universe this sky is seen from.
+    #[must_use]
+    pub const fn observer(&self) -> tiamat_core::sky::UniversalPos {
+        self.observer
+    }
+
+    /// How far the stars have wheeled at this moment, as `(cos, sin)` of the
+    /// day's turn — the same turn the server holds a gaze against, so the
+    /// star drawn is the star named. See [`tiamat_core::sky::turn`].
+    #[must_use]
+    pub fn turn(&self) -> (f32, f32) {
+        tiamat_core::sky::turn(self.time)
     }
 
     /// Whether a mod gave this world a day.
@@ -339,6 +365,7 @@ impl Sky {
                 // than nowhere: straight down would make every shadow a
                 // vertical smear and every vertical face unlit.
                 sun_direction: NOON,
+                stars: 0.0,
                 // Ungraded, and it matters that this is exact rather than
                 // near-identity: mode 3 skips the LUT entirely for this value,
                 // which is what keeps a world with no sky mod pixel-for-pixel
@@ -381,6 +408,16 @@ impl Sky {
             sun: mix(before.sun, after.sun, blend),
             intensity: before.intensity + (after.intensity - before.intensity) * blend,
             sun_direction: self.sun_direction(),
+            // Sanitised like the grade: a peer's NaN would be a sky of stars
+            // at noon, or none at midnight, with nothing to say why.
+            stars: {
+                let stars = before.stars + (after.stars - before.stars) * blend;
+                if stars.is_finite() {
+                    stars.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            },
             grade: mix_grade(&before.grade, &after.grade, blend),
         }
     }
@@ -514,8 +551,12 @@ mod tests {
             sun: [value; 3],
             intensity,
             grade: SkyGrade::NONE,
+            stars: 0.0,
         }
     }
+
+    /// Where the tests' skies are seen from: nowhere in particular.
+    const HERE: tiamat_core::sky::UniversalPos = tiamat_core::sky::UniversalPos::CENTRE;
 
     /// A keyframe that grades, for the tests about grading.
     fn graded(time: f32, saturation: f32) -> SkyFrame {
@@ -556,7 +597,7 @@ mod tests {
 
     #[test]
     fn the_clock_lands_between_the_keyframes_it_sits_between() {
-        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(1.0, 1.0, 1.0)]);
+        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(1.0, 1.0, 1.0)], HERE);
         sky.set_time(0.25);
         let moment = sky.moment();
         assert!(
@@ -572,7 +613,7 @@ mod tests {
         // **The bug a naive lookup produces**: a sky that snaps from the last
         // keyframe to the first once a day. Between the last keyframe and 1.0,
         // the sky is on its way back to the first one.
-        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(0.5, 1.0, 1.0)]);
+        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(0.5, 1.0, 1.0)], HERE);
         sky.set_time(0.75);
         let midway = sky.moment();
         assert!(
@@ -596,7 +637,7 @@ mod tests {
     fn keyframes_out_of_order_are_sorted_rather_than_trusted() {
         // Data from a peer. An unsorted list would make the sky walk backwards
         // partway through the day rather than fail in any way anyone could see.
-        let mut sky = Sky::new(100, vec![frame(1.0, 1.0, 1.0), frame(0.0, 0.0, 0.0)]);
+        let mut sky = Sky::new(100, vec![frame(1.0, 1.0, 1.0), frame(0.0, 0.0, 0.0)], HERE);
         sky.set_time(0.25);
         assert!((sky.moment().intensity - 0.25).abs() < 1e-5);
     }
@@ -605,7 +646,7 @@ mod tests {
     fn a_time_outside_the_day_wraps_into_it() {
         // A peer sending 1.5 means the middle of the next day. Clamping would
         // hold the sky at midnight until the next update.
-        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(1.0, 1.0, 1.0)]);
+        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(1.0, 1.0, 1.0)], HERE);
         sky.set_time(1.5);
         assert!((sky.time() - 0.5).abs() < 1e-6);
         // And a non-finite value is a peer sending nonsense, which must not
@@ -617,7 +658,7 @@ mod tests {
     #[test]
     fn two_keyframes_at_the_same_moment_do_not_divide_by_zero() {
         // A mod's mistake, not a crash.
-        let mut sky = Sky::new(100, vec![frame(0.5, 0.0, 0.0), frame(0.5, 1.0, 1.0)]);
+        let mut sky = Sky::new(100, vec![frame(0.5, 0.0, 0.0), frame(0.5, 1.0, 1.0)], HERE);
         sky.set_time(0.5);
         assert!(sky.moment().intensity.is_finite());
     }
@@ -626,7 +667,7 @@ mod tests {
     fn advancing_covers_the_whole_day_in_the_length_the_mod_set() {
         // 100 ticks at 20 Hz is five seconds, so five seconds of advancing
         // should return the clock to where it started.
-        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(1.0, 1.0, 1.0)]);
+        let mut sky = Sky::new(100, vec![frame(0.0, 0.0, 0.0), frame(1.0, 1.0, 1.0)], HERE);
         sky.advance(2.5);
         assert!(
             (sky.time() - 0.5).abs() < 1e-4,
@@ -645,7 +686,7 @@ mod tests {
         // The convention `game/core_sky`'s keyframes are written against, and
         // the one shadow directions depend on. Stated as a test because it is
         // otherwise only recorded in the sign of a `cos`.
-        let mut sky = Sky::new(24_000, frames());
+        let mut sky = Sky::new(24_000, frames(), HERE);
 
         sky.set_time(0.25);
         let dawn = sky.sun_direction();
@@ -683,7 +724,7 @@ mod tests {
     fn the_sun_direction_is_always_a_unit_vector() {
         // Shadow maths assumes it. A direction that drifted off unit length
         // would stretch the cascades by however much it drifted.
-        let mut sky = Sky::new(24_000, frames());
+        let mut sky = Sky::new(24_000, frames(), HERE);
         for step in 0..64 {
             #[allow(
                 clippy::cast_precision_loss,
@@ -707,7 +748,7 @@ mod tests {
     fn the_grade_interpolates_between_keyframes_like_the_colours_do() {
         // A grade that jumped at each keyframe would be a visible step in the
         // middle of a fade the rest of the sky is doing smoothly.
-        let mut sky = Sky::new(100, vec![graded(0.0, 0.0), graded(1.0, 1.0)]);
+        let mut sky = Sky::new(100, vec![graded(0.0, 0.0), graded(1.0, 1.0)], HERE);
         sky.set_time(0.5);
         let saturation = sky.moment().grade.saturation;
         assert!(
@@ -721,7 +762,7 @@ mod tests {
         // Mode 3 skips the grading table on exactly this comparison, and the
         // skip is what keeps an ungraded world pixel-for-pixel what it was. A
         // grade that arrived as 0.999999 would grade every frame for ever.
-        let mut sky = Sky::new(100, frames());
+        let mut sky = Sky::new(100, frames(), HERE);
         for step in 0..16 {
             sky.set_time(step as f32 / 16.0);
             assert_eq!(
@@ -749,7 +790,7 @@ mod tests {
             },
             ..frame(0.0, 0.5, 0.5)
         };
-        let mut sky = Sky::new(100, vec![poison, frame(1.0, 0.5, 0.5)]);
+        let mut sky = Sky::new(100, vec![poison, frame(1.0, 0.5, 0.5)], HERE);
         sky.set_time(0.0);
         let grade = sky.moment().grade;
 

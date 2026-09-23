@@ -658,6 +658,13 @@ pub struct SkyKeyframe {
     /// mode 3 applies it — grading is a property of the post chain, and modes 1
     /// and 2 have no post chain to put it in.
     pub grade: SkyGrade,
+    /// How much of the star catalog shows at this moment, `0.0..=1.0`.
+    ///
+    /// Zero, and a sky written before stars existed draws none: whether a
+    /// world has stars is content, so the mod says. The engine draws
+    /// [`crate::sky::star_catalog`] from wherever the player's domain sits,
+    /// scaled by this — it never decides that night means stars.
+    pub stars: f32,
 }
 
 /// The sky a mod registered.
@@ -670,6 +677,13 @@ pub struct SkyKeyframe {
 pub struct Sky {
     /// The mod that registered it.
     pub mod_id: String,
+    /// The domain this sky is for, or `None` for every domain without one.
+    ///
+    /// A space between worlds has no dawn, and a body a player lands on has a
+    /// sky of its own; a sky registered without a domain is what every domain
+    /// that was not named gets, which is every domain a mod written before
+    /// this existed has.
+    pub domain: Option<String>,
     /// Ticks in one full day.
     ///
     /// At the 20 Hz tick, 24,000 is twenty minutes — the figure this genre
@@ -1685,6 +1699,15 @@ pub trait ScriptVm: Sized {
     /// the lowest mod id wins, for the same reason the default tool does —
     /// a rule that is arbitrary but fixed beats one that depends on load order.
     fn registered_sky(&self) -> Option<Sky>;
+
+    /// Every sky a mod registered: the one for every domain not named, then
+    /// one per domain named, sorted by domain, each the winner by the rule
+    /// [`Self::registered_sky`] states.
+    ///
+    /// Defaulted to the one sky, for a VM that knows no domains.
+    fn registered_skies(&self) -> Vec<Sky> {
+        self.registered_sky().into_iter().collect()
+    }
 
     /// Every model a mod registered, in registration order.
     ///

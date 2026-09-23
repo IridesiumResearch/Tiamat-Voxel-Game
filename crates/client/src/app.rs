@@ -4713,7 +4713,12 @@ impl App {
                 vertical,
             } => self.accept_view_distance(horizontal, vertical),
 
-            Event::Sky(sky) => self.sky = sky,
+            Event::Sky(sky) => {
+                // The catalog is drawn from wherever this sky is seen from —
+                // a body's own place, when a player has gone to one.
+                self.renderer.set_observer(sky.observer());
+                self.sky = sky;
+            }
 
             // Ignored while the clock is being scrubbed by hand. The server
             // is still the authority and still sending; a local override
@@ -5129,6 +5134,7 @@ impl App {
         let moment = crate::sky::flashed(moment, &self.weather.flashes);
         self.renderer
             .set_sun(moment.intensity, moment.sun, moment.sun_direction);
+        self.renderer.set_stars(moment.stars, self.sky.turn());
         // The deck drifts and evolves on frame time for the same reason the
         // clock above does: it is presentation, and charter rule 4 exempts it.
         self.renderer.advance_clouds(dt);
@@ -5781,6 +5787,9 @@ impl App {
     /// match.
     fn joined_world(&mut self, spawn: tiamat_core::BlockPos, tick: u64, may_fly: bool, seed: u64) {
         self.seed = Some(seed);
+        // The star catalog is the seed's, derived here exactly as the server
+        // derives it, so the star a mod names is the star on screen.
+        self.renderer.set_star_catalog(seed);
         // Kept so the fly toggle can refuse, rather than predicting a power
         // that would be ignored on arrival.
         self.may_fly = may_fly;

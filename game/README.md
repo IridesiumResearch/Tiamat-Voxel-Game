@@ -14,6 +14,7 @@ implementations and test fixtures, not shipped content.
 | `core_sky` | Sky content lives in Lua — delete it and the world loses its day and keeps everything else (Task 10). |
 | `core_gear` | Items that are not blocks, dropping and picking up, and a worn-slot view all live in Lua — the engine draws a dropped stack and decides nothing else about it. |
 | `core_ui` | The HUD and the inventory screen live in Lua — delete it and a client keeps a crosshair, chat and settings, and loses everything else on the screen (Task 14). |
+| `core_space` | Every star in the sky is a place: a body made at a star's position from the catalog, with a sky of its own, and the travel rule in Lua — the engine knows nothing of "visit" (Task 15c). |
 
 Each of those is checked by a test that removes the directory and asserts what
 stops working, which is the only way a claim like "this lives in a mod" can be

@@ -2318,41 +2318,21 @@ impl ServerHandle {
             })
             .collect();
 
-        // The sky, as the wire carries it. Absent is legitimate: a world whose
-        // mods register no sky has no day, and the client holds its colours
-        // fixed rather than being given one the engine invented.
-        let sky = host
-            .as_ref()
-            .and_then(|loaded| loaded.vm().registered_sky())
-            .map_or((0, Vec::new(), 0.0), |sky| {
-                let frames = sky
-                    .keyframes
-                    .iter()
-                    .map(|frame| tiamat_core::proto::SkyFrame {
-                        time: frame.time,
-                        sky: frame.sky,
-                        sun: frame.sun,
-                        intensity: frame.intensity,
-                        grade: tiamat_core::proto::SkyGrade {
-                            exposure: frame.grade.exposure,
-                            tint: frame.grade.tint,
-                            offset: frame.grade.offset,
-                            contrast: frame.grade.contrast,
-                            saturation: frame.grade.saturation,
-                            gamma: frame.grade.gamma,
-                        },
-                    })
-                    .collect();
-                (sky.day_length_ticks, frames, sky.start_time)
-            });
-        if sky.0 > 0 {
+        // The skies, as the wire carries them, one per domain that named one
+        // and one for the rest. Absent is legitimate: a world whose mods
+        // register no sky has no day, and the client holds its colours fixed
+        // rather than being given one the engine invented.
+        let skies = crate::skies::SkyBook::from_registered(
+            host.as_ref()
+                .map(|loaded| loaded.vm().registered_skies())
+                .unwrap_or_default(),
+        );
+        if !skies.is_empty() {
             info!(
-                day_length_ticks = sky.0,
-                keyframes = sky.1.len(),
+                day_length_ticks = skies.day_length_ticks(),
                 "a mod registered a sky"
             );
         }
-
         let tools = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_tools())
@@ -2455,15 +2435,16 @@ impl ServerHandle {
             sound_bindings,
             hud_scripts,
             fluid_table,
-            sky_day_length: sky.0,
-            sky_keyframes: sky.1,
+            sky_day_length: skies.day_length_ticks(),
             // Where the mod said its day starts, in ticks. A counter left at
             // zero opens every new world at midnight, which is the one hour
             // with no sun, no shadows and nothing to tell two graphics settings
             // apart.
             time_of_day: std::sync::atomic::AtomicU64::new(
-                (f64::from(sky.2) * f64::from(sky.0)) as u64,
+                (f64::from(skies.start_time()) * f64::from(skies.day_length_ticks())) as u64,
             ),
+            skies,
+            domains: std::sync::OnceLock::new(),
             content: content_index,
             allowlist: std::sync::RwLock::new(settings.allowlist.clone()),
             // **Parsed once, here, and anything unreadable is refused loudly.**
@@ -2667,9 +2648,24 @@ impl ServerHandle {
                                 error!(%err, "a mod's domain was refused");
                             }
                         }
+                        // **And the instances the world already had.** A body
+                        // somebody visited last week is still a domain this
+                        // morning, at the same place in the universe; until
+                        // 2026-09-23 the list was written by nothing and every
+                        // instance was an unknown domain after a restart.
+                        match world.db().domain_instances() {
+                            Ok(instances) => registry.restore(instances),
+                            Err(err) => error!(%err, "could not read the world's domain instances"),
+                        }
+                        match world.db().domain_positions() {
+                            Ok(positions) => registry.restore_positions(positions),
+                            Err(err) => error!(%err, "could not read where the world's instances sit"),
+                        }
                         registry.freeze();
                         registry
                     }));
+                    // The connections send a domain's sky from where it sits.
+                    let _ = shared.domains.set(std::sync::Arc::clone(&domains));
                     // Which domains hold no voxels, told to the world once. A
                     // chunk read or write naming one of them is then an error
                     // rather than an empty answer, wherever it comes from.
@@ -4457,6 +4453,35 @@ impl ServerHandle {
                             // neither can do this alone.
                             if let Err(err) = world.forget_domain(&id) {
                                 error!(domain = %id, "could not remove a destroyed domain: {err}");
+                            }
+                        }
+                        // What instances exist, and where they sit, written
+                        // whenever either changed this tick — so a restart
+                        // finds them (charter rule 8: their chunks were never
+                        // going anywhere, but a domain nothing could name is a
+                        // domain nobody can enter).
+                        if domain_access
+                            .as_ref()
+                            .is_some_and(|access| access.take_changed())
+                            && let Ok(registry) = domains.read()
+                        {
+                            let instances: Vec<(String, String)> = registry
+                                .instances()
+                                .into_iter()
+                                .map(|(id, template)| (id.to_owned(), template.to_owned()))
+                                .collect();
+                            let positions: Vec<(String, tiamat_core::sky::UniversalPos)> =
+                                registry
+                                    .instance_positions()
+                                    .into_iter()
+                                    .map(|(id, at)| (id.to_owned(), at))
+                                    .collect();
+                            if let Err(err) = world
+                                .db()
+                                .set_domain_instances(&instances)
+                                .and_then(|()| world.db().set_domain_positions(&positions))
+                            {
+                                error!("could not write the world's domain instances: {err}");
                             }
                         }
 

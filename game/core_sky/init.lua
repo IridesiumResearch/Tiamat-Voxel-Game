@@ -28,7 +28,9 @@ local DAY_LENGTH_TICKS = 24000
 -- order here because that is how a person reads them.
 --
 -- `sky` is the colour the horizon goes, and it is also what distance fog fades
--- towards; `sun` tints the stored sunlight; `intensity` scales it. Setting
+-- towards; `sun` tints the stored sunlight; `intensity` scales it; `stars` is
+-- how much of the star catalog shows, none unless a keyframe says so, because
+-- whether a world has stars is content and not the engine's call. Setting
 -- intensity to zero at midnight is what makes caves and the surface equally
 -- dark at night while lamps keep working.
 --
@@ -54,13 +56,13 @@ game.register_sky{
         -- The grade is what makes moonlight read as moonlight: the eye loses
         -- colour in the dark, so night is desaturated and cool, and opened up a
         -- little so the shapes are still legible at an intensity of 0.08.
-        { time = 0.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08,
+        { time = 0.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08, stars = 1.0,
           grade = { exposure = 1.15, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 0.95 } },
         -- The hour before dawn, still blue.
-        { time = 0.20, sky = {0.05, 0.07, 0.15}, sun = {0.40, 0.45, 0.75}, intensity = 0.10,
+        { time = 0.20, sky = {0.05, 0.07, 0.15}, sun = {0.40, 0.45, 0.75}, intensity = 0.10, stars = 0.9,
           grade = { exposure = 1.12, saturation = 0.60, tint = {0.94, 0.97, 1.10}, contrast = 0.96 } },
         -- Sunrise, warm and low.
-        { time = 0.27, sky = {0.85, 0.50, 0.35}, sun = {1.00, 0.65, 0.40}, intensity = 0.55,
+        { time = 0.27, sky = {0.85, 0.50, 0.35}, sun = {1.00, 0.65, 0.40}, intensity = 0.55, stars = 0.0,
           grade = { saturation = 1.10, tint = {1.05, 1.00, 0.95}, contrast = 1.05 } },
         -- Full morning.
         { time = 0.35, sky = {0.55, 0.72, 0.95}, sun = {1.00, 0.96, 0.90}, intensity = 0.95,
@@ -72,15 +74,15 @@ game.register_sky{
         { time = 0.65, sky = {0.55, 0.70, 0.95}, sun = {1.00, 0.95, 0.88}, intensity = 0.95,
           grade = { saturation = 1.04, contrast = 1.02 } },
         -- Sunset, warmer than sunrise because it reads better against terrain.
-        { time = 0.73, sky = {0.90, 0.45, 0.28}, sun = {1.00, 0.55, 0.30}, intensity = 0.50,
+        { time = 0.73, sky = {0.90, 0.45, 0.28}, sun = {1.00, 0.55, 0.30}, intensity = 0.50, stars = 0.0,
           grade = { saturation = 1.15, tint = {1.07, 1.00, 0.94}, contrast = 1.06 } },
         -- Dusk falling.
-        { time = 0.80, sky = {0.15, 0.12, 0.25}, sun = {0.55, 0.45, 0.70}, intensity = 0.18,
+        { time = 0.80, sky = {0.15, 0.12, 0.25}, sun = {0.55, 0.45, 0.70}, intensity = 0.18, stars = 0.7,
           grade = { exposure = 1.08, saturation = 0.75, tint = {0.97, 0.98, 1.08}, contrast = 0.98 } },
         -- And back to midnight. **The last keyframe must restate the first's
         -- colours** — and its grade, for the same reason — or the day ends on a
         -- hard cut back to 0.00 at the moment the clock wraps.
-        { time = 1.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08,
+        { time = 1.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08, stars = 1.0,
           grade = { exposure = 1.15, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 0.95 } },
     },
 }

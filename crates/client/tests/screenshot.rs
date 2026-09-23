@@ -5410,6 +5410,8 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         view_projection: glam::camera::rh::proj::directx::perspective(1.0, 16.0 / 9.0, 0.1, 4000.0),
         camera: [1000.0, 80.0, -2000.0],
         sun_direction: [-0.2, -0.15, 0.96],
+        stars: 0.0,
+        star_turn: (1.0, 0.0),
         sun: [1.0, 0.86, 0.62],
         sky: [0.42, 0.58, 0.85],
         fog_end: 3000.0,
@@ -7032,4 +7034,149 @@ fn dump_the_golden_hour() {
             println!("wrote {}", path.display());
         }
     }
+}
+
+/// Pixels in the top `share` of a frame bright enough to be a star on a
+/// black sky, and the brightest of them.
+fn star_pixels(frame: &Image, share: f32) -> (usize, (u32, u32)) {
+    let rows = (HEIGHT as f32 * share) as u32;
+    let mut count = 0;
+    let mut brightest = (0u8, (0, 0));
+    for y in 0..rows {
+        for x in 0..WIDTH {
+            if let Some(pixel) = frame.pixel(x, y) {
+                let peak = pixel[0].max(pixel[1]).max(pixel[2]);
+                if peak >= 120 {
+                    count += 1;
+                }
+                if peak > brightest.0 {
+                    brightest = (peak, (x, y));
+                }
+            }
+        }
+    }
+    (count, brightest.1)
+}
+
+/// A night: black sky, the sun below the world, no glow.
+fn night(renderer: &mut Renderer) {
+    renderer.set_sun(0.0, [0.0; 3], [0.0, 1.0, 0.0]);
+    renderer.set_sky([0.0; 3], 2000.0);
+}
+
+#[test]
+fn stars_show_where_the_sky_says_and_the_star_on_screen_is_the_star_the_catalog_names() {
+    // Task 15c's asks, from the client's side. A sky whose `stars` is zero
+    // draws none, whatever the catalog; at one it draws the catalog, seen
+    // from the observer, wheeled by the day — and the brightest pixel on
+    // screen, unprojected, is a direction the catalog names a star along:
+    // the no-desync property, since `star_in_view` is what the server answers
+    // a mod with.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    night(&mut renderer);
+    let seed = 11;
+    let observer = tiamat_core::sky::world_position(seed);
+    renderer.set_star_catalog(seed);
+    renderer.set_observer(observer);
+    let mut camera = viewpoint();
+    camera.look(0.0, 1.6);
+
+    // None asked for: none drawn.
+    renderer.set_stars(0.0, tiamat_core::sky::turn(0.3));
+    let dark = target.capture(&mut renderer, &camera).expect("capture");
+    let (none, _) = star_pixels(&dark, 0.75);
+    assert_eq!(
+        none, 0,
+        "{none} bright pixels in a night sky with no stars asked for"
+    );
+
+    // Asked for: a field of them.
+    renderer.set_stars(1.0, tiamat_core::sky::turn(0.3));
+    let starry = target.capture(&mut renderer, &camera).expect("capture");
+    let (lit, brightest) = star_pixels(&starry, 0.75);
+    println!("star pixels: {lit}, brightest at {brightest:?}");
+    assert!(
+        (8..WIDTH as usize * HEIGHT as usize / 20).contains(&lit),
+        "{lit} bright pixels: not a starfield"
+    );
+
+    // The brightest pixel, unprojected as the shader unprojects it, is
+    // within a pixel or two of a catalog star's drawn direction.
+    let aspect = WIDTH as f32 / HEIGHT as f32;
+    let inverse = camera.view_projection(aspect).inverse();
+    let ndc = glam::Vec2::new(
+        (brightest.0 as f32 + 0.5) / WIDTH as f32 * 2.0 - 1.0,
+        1.0 - (brightest.1 as f32 + 0.5) / HEIGHT as f32 * 2.0,
+    );
+    let near = inverse * glam::Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
+    let far = inverse * glam::Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+    let direction = (far.truncate() / far.w - near.truncate() / near.w).normalize();
+    let catalog = tiamat_core::sky::star_catalog(seed);
+    let (id, alignment) =
+        tiamat_core::sky::star_in_view(&catalog, observer, direction.to_array(), 0.3)
+            .expect("a star");
+    println!("brightest pixel looks at star {id}, alignment {alignment}");
+    // Two pixels of arc at this resolution is about a hundredth of a radian.
+    assert!(
+        alignment > 0.9999,
+        "the brightest pixel is {alignment} from the nearest catalog star; the sky and \
+         the catalog have come apart"
+    );
+
+    // And the world hides them: looking down, the bottom of the frame is
+    // ground, and no star shows through it.
+    let ground = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+    let mut through = 0;
+    for y in HEIGHT * 3 / 4..HEIGHT {
+        for x in 0..WIDTH {
+            if let Some(pixel) = ground.pixel(x, y)
+                && pixel[0].max(pixel[1]).max(pixel[2]) >= 120
+            {
+                through += 1;
+            }
+        }
+    }
+    assert_eq!(through, 0, "{through} star pixels drawn through the ground");
+
+    // The deck at a lower resolution draws the stars in its resolve, at the
+    // frame's own resolution: about as many as before, not a quarter and
+    // not none.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(tiamat_core::atmosphere::CloudLayer {
+            base: 420.0,
+            thickness: 96.0,
+            cell: 8.0,
+            detail: 2,
+            frequency: 1.0 / 600.0,
+            octaves: 3,
+            towers: 0.25,
+            drift: [1.5, 0.4],
+            evolve: 1.0 / 2400.0,
+            colour: [1.0; 3],
+            shade: [0.42, 0.44, 0.58],
+        }),
+        clouds: Some(tiamat_core::atmosphere::Clouds {
+            cover: 0.0,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
+        }),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 1,
+    });
+    let resolved = target.capture(&mut renderer, &camera).expect("capture");
+    let (lit_at_normal, _) = star_pixels(&resolved, 0.75);
+    println!("star pixels at Normal: {lit_at_normal}");
+    assert!(
+        lit_at_normal * 2 >= lit && lit_at_normal <= lit * 2,
+        "{lit_at_normal} star pixels through the resolve against {lit} drawn direct"
+    );
 }

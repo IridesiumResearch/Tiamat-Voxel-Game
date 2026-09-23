@@ -36,6 +36,7 @@ pub mod plans;
 pub mod rcon;
 pub mod shutdown;
 pub mod sim;
+pub mod skies;
 pub mod storage;
 pub mod trace;
 pub mod transport;

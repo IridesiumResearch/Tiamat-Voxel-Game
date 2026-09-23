@@ -193,6 +193,10 @@ struct Uniforms {
     /// The cover map's corner x and z, its cell size in blocks, and how many
     /// cells a side — zero for "no map, use `weather` everywhere". Ask W10.
     map: [f32; 4],
+    /// How much of the star catalog shows, the day's turn as `(cos, sin)`,
+    /// and whether `fragment_main` draws the stars (1) or the resolve does
+    /// (0), which is the case when the deck is at a lower resolution.
+    stars: [f32; 4],
     /// The five shares per cell as bytes, two cells to a `vec4<u32>`,
     /// row-major by z: a cell's first word is cover, darkness, stratocumulus
     /// and altocumulus a byte each from the low end, its second word is
@@ -220,6 +224,10 @@ pub struct Frame {
     pub camera: [f64; 3],
     /// Which way sunlight travels.
     pub sun_direction: [f32; 3],
+    /// How much of the star catalog shows, `0.0..=1.0`.
+    pub stars: f32,
+    /// How far the stars have wheeled, as `(cos, sin)` of the day's turn.
+    pub star_turn: (f32, f32),
     /// The sun's colour.
     pub sun: [f32; 3],
     /// The sky's colour.
@@ -292,6 +300,8 @@ pub struct Pass {
     map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
     /// Seconds since the client started, for drift and evolution.
     seconds: f32,
+    /// The star catalog, sorted for the shader.
+    starfield: Starfield,
 }
 
 impl Pass {
@@ -305,16 +315,20 @@ impl Pass {
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("cloud-bind-layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    star_layout_entry(STAR_BINS_BINDING),
+                    star_layout_entry(STAR_LIST_BINDING),
+                ],
             });
         let uniforms = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cloud-uniforms"),
@@ -322,13 +336,18 @@ impl Pass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let starfield = Starfield::new(gpu);
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("clouds"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms.as_entire_binding(),
+                },
+                starfield.bind_entry(STAR_BINS_BINDING),
+                starfield.bind_entry(STAR_LIST_BINDING),
+            ],
         });
         let (shadow_view, shadow_sampler) = shade_target(gpu);
         let resolve_layout = resolve_layout(gpu);
@@ -356,7 +375,33 @@ impl Pass {
             deck: Deck::default(),
             map: None,
             seconds: 0.0,
+            starfield,
         }
+    }
+
+    /// Gives the sky the star catalog for a world's seed.
+    ///
+    /// The same [`tiamat_core::sky::star_catalog`] the server holds a gaze
+    /// against, so the star a mod names is the star drawn.
+    pub fn set_catalog(&mut self, gpu: &Gpu, seed: u64) {
+        self.starfield.catalog = Some(std::sync::Arc::new(tiamat_core::sky::star_catalog(seed)));
+        self.starfield.rebuild(gpu);
+    }
+
+    /// Moves the point the catalog is seen from.
+    pub fn set_observer(&mut self, gpu: &Gpu, observer: tiamat_core::sky::UniversalPos) {
+        if self.starfield.observer == observer {
+            return;
+        }
+        self.starfield.observer = observer;
+        self.starfield.rebuild(gpu);
+    }
+
+    /// How many entries the star list holds, for tests: zero until a catalog
+    /// has been given.
+    #[must_use]
+    pub const fn star_entries(&self) -> usize {
+        self.starfield.entries
     }
 
     /// Sets the deck, the weather over it, and the player's own quality.
@@ -389,15 +434,7 @@ impl Pass {
         self.draws = true;
         let quality = self.deck.quality;
         let layer = self.layer_to_draw(quality);
-        let state = self.deck.clouds.unwrap_or(Clouds {
-            cover: 0.0,
-            darkness: 0.0,
-            base: None,
-            ease_ticks: 0,
-            stratocumulus: 0.0,
-            altocumulus: 0.0,
-            cumulonimbus: 0.0,
-        });
+        let state = self.state_to_draw();
         // Zero stays zero: it is the shader's "no deck".
         let cell = if layer.cell > 0.0 {
             (layer.cell * quality.cell_scale()).max(1.0)
@@ -443,9 +480,20 @@ impl Pass {
                 {
                     frame.pixel_angle.max(1e-6) * divisor as f32
                 },
+                // The frame's own pixel, for the stars: drawn at full
+                // resolution whatever the deck is marched at, because a star
+                // is a point and a point two pixels square is a block.
+                frame.pixel_angle.max(1e-6),
                 0.0,
                 0.0,
-                0.0,
+            ],
+            stars: [
+                frame.stars,
+                frame.star_turn.0,
+                frame.star_turn.1,
+                // Whether `fragment_main` draws them, or the resolve does —
+                // the latter when the deck is at a lower resolution.
+                if divisor == 1 { 1.0 } else { 0.0 },
             ],
             sun_direction: [
                 frame.sun_direction[0],
@@ -491,6 +539,19 @@ impl Pass {
     /// The deck to draw at this quality: the registered one, or an empty one
     /// with a `cell` of zero — the shader's "march nothing, paint the sky" —
     /// for a world with no deck or a player who turned clouds off.
+    /// The weather over the deck, or a clear sky where none has been set.
+    fn state_to_draw(&self) -> Clouds {
+        self.deck.clouds.unwrap_or(Clouds {
+            cover: 0.0,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
+        })
+    }
+
     fn layer_to_draw(&self, quality: Quality) -> CloudLayer {
         self.deck
             .layer
@@ -743,6 +804,8 @@ impl Pass {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&depth),
                 },
+                self.starfield.bind_entry(STAR_BINS_BINDING),
+                self.starfield.bind_entry(STAR_LIST_BINDING),
             ],
         });
         self.half = Some(HalfTarget {
@@ -752,6 +815,261 @@ impl Pass {
             bind,
         });
     }
+}
+
+/// Where the shader finds the star bins, in both bind group layouts.
+const STAR_BINS_BINDING: u32 = 3;
+/// Where the shader finds the star list, in both bind group layouts.
+const STAR_LIST_BINDING: u32 = 4;
+/// Bins along each axis of the octahedral map the catalog is sorted into.
+///
+/// Thirty-two: a thousand bins over the sphere, so a bin spans about six
+/// degrees and the two thousand stars are two to a bin before the overlap.
+/// The shader reads ONE bin per sky pixel — the alternative was two thousand
+/// dot products per pixel, which is a frame on the minimum spec's GPU.
+pub const STAR_BINS_PER_AXIS: u32 = 32;
+/// How many bins there are.
+const STAR_BIN_COUNT: usize = (STAR_BINS_PER_AXIS * STAR_BINS_PER_AXIS) as usize;
+/// The most stars one bin lists. The faintest are dropped past it, which at
+/// two to a bin never happens outside a test that puts them all in one place.
+const STAR_BIN_CAP: usize = 64;
+/// The most entries the list holds, and the buffer's size.
+///
+/// A star lands in every bin its glow reaches, about four at the reach
+/// below, so eight thousand entries is the working size and this is three
+/// times that: 384 KiB, written once per catalog or observer change.
+const STAR_LIST_CAP: usize = 24_576;
+/// How far a star's glow reaches from its centre, as the chord between unit
+/// vectors — a fifth of a bin. A star is listed in every bin whose reach
+/// overlaps its own, which is what lets the shader read one bin and still
+/// draw a halo across the bin's edge.
+const STAR_REACH: f32 = 0.05;
+
+/// The catalog sorted for the shader: bins over an octahedral map of the
+/// sky, each listing the stars whose glow reaches into it.
+///
+/// Entries are `[x, y, z, packed]`: the direction from the observer in the
+/// catalog's own frame — three floats carried as their bits, exact — and the
+/// star's brightness and warmth as two unorm16s, `unpack2x16unorm` on the
+/// other side. Bins are `[offset, count]` into the list.
+struct Starfield {
+    bins: wgpu::Buffer,
+    list: wgpu::Buffer,
+    catalog: Option<std::sync::Arc<Vec<tiamat_core::sky::StarRecord>>>,
+    observer: tiamat_core::sky::UniversalPos,
+    /// How many entries the list holds, for tests.
+    entries: usize,
+}
+
+impl Starfield {
+    fn new(gpu: &Gpu) -> Self {
+        let storage = |label: &str, size: usize| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                // Zeroed by wgpu: every bin lists nothing until a catalog
+                // arrives, which is a sky with no stars rather than a read
+                // past the end of nothing.
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            bins: storage("star-bins", STAR_BIN_COUNT * size_of::<[u32; 2]>()),
+            list: storage("star-list", STAR_LIST_CAP * size_of::<[u32; 4]>()),
+            catalog: None,
+            observer: tiamat_core::sky::UniversalPos::CENTRE,
+            entries: 0,
+        }
+    }
+
+    fn bind_entry(&self, binding: u32) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: if binding == STAR_BINS_BINDING {
+                self.bins.as_entire_binding()
+            } else {
+                self.list.as_entire_binding()
+            },
+        }
+    }
+
+    /// Sorts the catalog from the observer's place and uploads it.
+    fn rebuild(&mut self, gpu: &Gpu) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        let (bins, list) = bin_stars(catalog, self.observer);
+        self.entries = list.len();
+        gpu.queue
+            .write_buffer(&self.bins, 0, bytemuck::cast_slice(&bins));
+        if !list.is_empty() {
+            gpu.queue
+                .write_buffer(&self.list, 0, bytemuck::cast_slice(&list));
+        }
+    }
+}
+
+/// Sorts a catalog into bins for the shader, from `observer`.
+///
+/// Every star lands in each bin whose reach — the chord from the bin's
+/// centre to its farthest corner, plus [`STAR_REACH`] — covers the star's
+/// direction, brightest first within a bin so the cap drops the faintest.
+/// Pure, for the tests: the property that matters is that a pixel's own bin
+/// lists every star it can see.
+#[must_use]
+pub fn bin_stars(
+    catalog: &[tiamat_core::sky::StarRecord],
+    observer: tiamat_core::sky::UniversalPos,
+) -> (Vec<[u32; 2]>, Vec<[u32; 4]>) {
+    // Each star once: direction, brightness, warmth.
+    let stars: Vec<([f32; 3], f32, f32)> = catalog
+        .iter()
+        .filter_map(|star| {
+            let direction = star.direction_from(observer)?;
+            // Most of the catalog is faint (magnitude is a square), and a
+            // square root brings the faint ones up to visible without
+            // flattening the bright ones: the sky reads as a few bright
+            // stars over a field of dim ones, which is what a sky is.
+            let brightness = 0.18 + 0.82 * star.apparent(observer).sqrt();
+            Some((
+                direction,
+                brightness.clamp(0.0, 1.0),
+                star.warmth.clamp(0.0, 1.0),
+            ))
+        })
+        .collect();
+    let mut bins = Vec::with_capacity(STAR_BIN_COUNT);
+    let mut list: Vec<[u32; 4]> = Vec::with_capacity(stars.len() * 4);
+    for bin in 0..STAR_BIN_COUNT {
+        let (centre, reach) = bin_reach(bin);
+        let reach_squared = (reach + STAR_REACH) * (reach + STAR_REACH);
+        let mut held: Vec<&([f32; 3], f32, f32)> = stars
+            .iter()
+            .filter(|(direction, _, _)| {
+                let chord = [
+                    direction[0] - centre[0],
+                    direction[1] - centre[1],
+                    direction[2] - centre[2],
+                ];
+                chord[0] * chord[0] + chord[1] * chord[1] + chord[2] * chord[2] <= reach_squared
+            })
+            .collect();
+        held.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0[0].total_cmp(&b.0[0])));
+        held.truncate(STAR_BIN_CAP);
+        let offset = list.len();
+        if offset + held.len() > STAR_LIST_CAP {
+            // Out of room, which a real catalog never reaches; the bins past
+            // here list nothing rather than something out of range.
+            bins.push([0, 0]);
+            continue;
+        }
+        for (direction, brightness, warmth) in held {
+            list.push([
+                direction[0].to_bits(),
+                direction[1].to_bits(),
+                direction[2].to_bits(),
+                pack_unorm16_pair(*brightness, *warmth),
+            ]);
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the list is capped at STAR_LIST_CAP, far inside u32"
+        )]
+        bins.push([offset as u32, (list.len() - offset) as u32]);
+    }
+    (bins, list)
+}
+
+/// Two unit values as `unpack2x16unorm` reads them: `a` in the low half.
+fn pack_unorm16_pair(a: f32, b: f32) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=1 and scaled to a u16's range"
+    )]
+    let unorm = |value: f32| (value.clamp(0.0, 1.0) * 65_535.0 + 0.5) as u32;
+    unorm(a) | (unorm(b) << 16)
+}
+
+/// A bin's centre direction and its reach: the longest chord from the
+/// centre to any corner or edge midpoint of the bin on the sphere.
+fn bin_reach(bin: usize) -> ([f32; 3], f32) {
+    #[expect(clippy::cast_precision_loss, reason = "bin indices are small")]
+    let (x, y) = (
+        (bin % STAR_BINS_PER_AXIS as usize) as f32,
+        (bin / STAR_BINS_PER_AXIS as usize) as f32,
+    );
+    let axis = STAR_BINS_PER_AXIS as f32;
+    let at = |u: f32, v: f32| oct_decode((x + u) / axis, (y + v) / axis);
+    let centre = at(0.5, 0.5);
+    let mut reach: f32 = 0.0;
+    for (u, v) in [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (0.5, 0.0),
+        (0.5, 1.0),
+        (0.0, 0.5),
+        (1.0, 0.5),
+    ] {
+        let point = at(u, v);
+        let chord = [
+            point[0] - centre[0],
+            point[1] - centre[1],
+            point[2] - centre[2],
+        ];
+        reach = reach.max((chord[0] * chord[0] + chord[1] * chord[1] + chord[2] * chord[2]).sqrt());
+    }
+    (centre, reach)
+}
+
+/// The octahedral map's `(u, v)` in `0..=1` for a direction — the same
+/// mapping `oct_encode` in `clouds.wgsl` uses, so the CPU's bins are the
+/// shader's.
+#[must_use]
+pub fn oct_encode(direction: [f32; 3]) -> [f32; 2] {
+    let l1 = direction[0].abs() + direction[1].abs() + direction[2].abs();
+    let (px, py) = (direction[0] / l1, direction[1] / l1);
+    let sign = |value: f32| if value >= 0.0 { 1.0 } else { -1.0 };
+    let (qx, qy) = if direction[2] < 0.0 {
+        ((1.0 - py.abs()) * sign(px), (1.0 - px.abs()) * sign(py))
+    } else {
+        (px, py)
+    };
+    [qx * 0.5 + 0.5, qy * 0.5 + 0.5]
+}
+
+/// The direction at an octahedral `(u, v)`, normalised: the inverse of
+/// [`oct_encode`].
+#[must_use]
+pub fn oct_decode(u: f32, v: f32) -> [f32; 3] {
+    let (px, py) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
+    let z = 1.0 - px.abs() - py.abs();
+    let sign = |value: f32| if value >= 0.0 { 1.0 } else { -1.0 };
+    let (x, y) = if z < 0.0 {
+        ((1.0 - py.abs()) * sign(px), (1.0 - px.abs()) * sign(py))
+    } else {
+        (px, py)
+    };
+    let length = (x * x + y * y + z * z).sqrt().max(1e-6);
+    [x / length, y / length, z / length]
+}
+
+/// Which bin a direction falls in, as the shader works it out.
+#[must_use]
+pub fn bin_of(direction: [f32; 3]) -> usize {
+    let [u, v] = oct_encode(direction);
+    let axis = STAR_BINS_PER_AXIS as f32;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped into the map's range"
+    )]
+    let cell =
+        |value: f32| ((value.clamp(0.0, 0.999_99) * axis) as u32).min(STAR_BINS_PER_AXIS - 1);
+    (cell(v) * STAR_BINS_PER_AXIS + cell(u)) as usize
 }
 
 /// The pipeline for one target format.
@@ -899,8 +1217,25 @@ fn resolve_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
                     },
                     count: None,
                 },
+                star_layout_entry(STAR_BINS_BINDING),
+                star_layout_entry(STAR_LIST_BINDING),
             ],
         })
+}
+
+/// A read-only storage binding for the fragment stage: the star bins and
+/// the star list, in both the deck's layout and the resolve's.
+fn star_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
 }
 
 /// The resolve's pipeline for one target format: `resolve_main` lifting the
@@ -1066,5 +1401,70 @@ mod tests {
                 "{quality:?} details past where it draws"
             );
         }
+    }
+
+    #[test]
+    fn every_star_is_listed_in_the_bin_its_own_direction_falls_in() {
+        // The property the shader rests on: a sky pixel reads ONE bin, so
+        // the bin a star's direction lands in must list that star, or the
+        // star is never drawn.
+        let catalog = tiamat_core::sky::star_catalog(11);
+        let observer = tiamat_core::sky::world_position(11);
+        let (bins, list) = bin_stars(&catalog, observer);
+        assert_eq!(bins.len(), STAR_BIN_COUNT);
+        assert!(list.len() <= STAR_LIST_CAP);
+        let mut missing = 0;
+        for star in &catalog {
+            let direction = star.direction_from(observer).expect("not here");
+            let [offset, count] = bins[bin_of(direction)];
+            // The bits, since that is what the entry carries: the direction
+            // is stored exactly, so exact is the right comparison.
+            let listed = (offset..offset + count).any(|index| {
+                let entry = list[index as usize];
+                entry[..3] == direction.map(f32::to_bits)
+            });
+            if !listed {
+                missing += 1;
+            }
+        }
+        assert_eq!(missing, 0, "{missing} stars are not in their own bin");
+        // And the overlap is bounded: a star reaches into a few bins, not
+        // a whole row of them.
+        assert!(
+            list.len() < catalog.len() * 8,
+            "{} entries for {} stars",
+            list.len(),
+            catalog.len()
+        );
+    }
+
+    #[test]
+    fn the_octahedral_map_round_trips_and_agrees_with_the_bins() {
+        for direction in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [-0.6, 0.0, 0.8],
+            [0.3, -0.4, -0.866],
+        ] {
+            let [u, v] = oct_encode(direction);
+            let back = oct_decode(u, v);
+            for axis in 0..3 {
+                assert!(
+                    (back[axis] - direction[axis]).abs() < 1e-3,
+                    "{direction:?} came back as {back:?}"
+                );
+            }
+            assert!(bin_of(direction) < STAR_BIN_COUNT);
+        }
+    }
+
+    #[test]
+    fn brightness_and_warmth_pack_as_the_shader_unpacks_them() {
+        let packed = pack_unorm16_pair(0.5, 1.0);
+        assert_eq!(packed & 0xFFFF, 32_768);
+        assert_eq!(packed >> 16, 65_535);
+        assert_eq!(pack_unorm16_pair(0.0, 0.0), 0);
     }
 }

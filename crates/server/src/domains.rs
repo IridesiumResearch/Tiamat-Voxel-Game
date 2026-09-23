@@ -30,6 +30,9 @@ pub struct Shared {
     /// See the module documentation: the refusal and the chunk removal both
     /// need things only the tick has.
     doomed: Mutex<Vec<String>>,
+    /// Whether an instance was made or unmade since the tick last wrote the
+    /// list to the world file. See [`Shared::take_changed`].
+    changed: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -39,7 +42,18 @@ impl Shared {
         Self {
             registry,
             doomed: Mutex::new(Vec::new()),
+            changed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether the instances changed since this was last asked, and clears it.
+    ///
+    /// The tick asks once, after it has applied the destroys, and writes the
+    /// registry's lists to the world file when the answer is yes.
+    #[must_use]
+    pub fn take_changed(&self) -> bool {
+        self.changed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Takes every instance asked to be destroyed since the last tick.
@@ -54,15 +68,33 @@ impl Shared {
 
 impl Access for Shared {
     fn create(&self, template: &str, key: &str) -> Option<String> {
+        self.create_at(template, key, None)
+    }
+
+    fn create_at(
+        &self,
+        template: &str,
+        key: &str,
+        position: Option<tiamat_core::sky::UniversalPos>,
+    ) -> Option<String> {
         // Creating is immediate: it makes an entry and touches no storage, so
         // there is nothing for the tick to do and a mod that has just made a
-        // ship can move somebody into it in the same breath.
-        self.registry
+        // ship can move somebody into it in the same breath. The tick writes
+        // the list to the world file afterwards, told by `changed`.
+        let id = self
+            .registry
             .write()
             .ok()?
-            .create(template, key)
+            .create_at(template, key, position)
             .inspect_err(|err| tracing::warn!(%err, "a mod could not make a domain"))
-            .ok()
+            .ok()?;
+        self.changed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Some(id)
+    }
+
+    fn position_of(&self, id: &str) -> Option<tiamat_core::sky::UniversalPos> {
+        self.registry.read().ok()?.position_of(id)
     }
 
     fn destroy(&self, id: &str) -> bool {
@@ -76,6 +108,8 @@ impl Access for Shared {
         if !known {
             return false;
         }
+        self.changed
+            .store(true, std::sync::atomic::Ordering::Release);
         self.doomed
             .lock()
             .map(|mut queued| queued.push(id.to_owned()))

@@ -90,6 +90,9 @@ struct Clouds {
     // side — zero for "no map", which is every world until a mod sends one.
     // Weather ask W10.
     map: vec4<f32>,
+    // How much of the star catalog shows, the day's turn as (cos, sin), and
+    // whether `fragment_main` draws the stars (1) or `resolve_main` does (0).
+    stars: vec4<f32>,
     // The five shares per cell as bytes, two cells to a vec4<u32>, row-major
     // by z: a cell's first word holds cover, darkness, stratocumulus and
     // altocumulus a byte each from the low end, its second cumulonimbus
@@ -108,6 +111,66 @@ struct Clouds {
 // frame — weather ask W15's last step. Bound by the resolve pipeline alone.
 @group(0) @binding(1) var deck_colour: texture_2d<f32>;
 @group(0) @binding(2) var deck_depth: texture_depth_2d;
+// The star catalog, sorted into bins over an octahedral map of the sky so
+// a pixel asks the few stars near its direction rather than all two
+// thousand. An entry is a direction in the catalog's own frame — three
+// floats carried as their bits — and brightness and warmth packed as two
+// unorm16s. A bin is an offset and a count into the list. Built in
+// `clouds.rs::bin_stars`, in both bind group layouts.
+@group(0) @binding(3) var<storage, read> star_bins: array<vec2<u32>>;
+@group(0) @binding(4) var<storage, read> star_list: array<vec4<u32>>;
+
+const STAR_BINS_PER_AXIS: u32 = 32u;
+
+// The octahedral map's (u, v) in 0..1 for a direction: `clouds.rs::oct_encode`.
+fn oct_encode(d: vec3<f32>) -> vec2<f32> {
+    let p = d.xy / (abs(d.x) + abs(d.y) + abs(d.z));
+    let signs = select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+    let q = select(p, (1.0 - abs(p.yx)) * signs, d.z < 0.0);
+    return q * 0.5 + 0.5;
+}
+
+// The stars along a direction in the world's frame, scaled by how much of
+// them the sky shows. `pixel` is the frame's pixel in radians: a star is a
+// point, so its core is about a pixel wide whatever the resolution, and the
+// bright ones a little wider with a halo.
+fn stars_along(direction: vec3<f32>, pixel: f32) -> vec3<f32> {
+    let visibility = clouds.stars.x;
+    if (visibility <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    // The world turns under the catalog: the gaze is taken back into the
+    // catalog's frame by the day's turn, as `sky::unwheeled` does it.
+    let c = clouds.stars.y;
+    let s = clouds.stars.z;
+    let d = vec3<f32>(
+        direction.x * c - direction.y * s,
+        direction.y * c + direction.x * s,
+        direction.z,
+    );
+    let uv = clamp(oct_encode(d), vec2<f32>(0.0), vec2<f32>(0.99999));
+    let cell = vec2<u32>(uv * f32(STAR_BINS_PER_AXIS));
+    let bin = star_bins[cell.y * STAR_BINS_PER_AXIS + cell.x];
+    let core = max(0.0016, pixel * 0.9);
+    var light = vec3<f32>(0.0);
+    for (var i = 0u; i < bin.y; i = i + 1u) {
+        let star = star_list[bin.x + i];
+        let at = bitcast<vec3<f32>>(star.xyz);
+        if (dot(d, at) <= 0.0) {
+            continue;
+        }
+        let bw = unpack2x16unorm(star.w);
+        // The sine of the angle between the gaze and the star, which for
+        // the angles that matter is the angle.
+        let off = length(cross(d, at));
+        let radius = core * (1.0 + 1.5 * bw.x);
+        let point = 1.0 - smoothstep(0.0, radius, off);
+        let halo = 1.0 - smoothstep(0.0, radius * 4.0, off);
+        let colour = mix(vec3<f32>(0.70, 0.80, 1.0), vec3<f32>(1.0, 0.86, 0.66), bw.y);
+        light = light + colour * bw.x * (point + 0.12 * halo * halo);
+    }
+    return light * visibility;
+}
 
 // The weather over one place: the five shares — cumulus `cover`, darkness,
 // and the three genera beside them — from the map where there is one and from
@@ -1111,6 +1174,12 @@ fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     // object in the sky whose SIZE a player judges everything else against.
     let disc = smoothstep(0.9994, 0.9997, alignment);
     colour = mix(colour, clouds.sun.xyz * 1.6, disc);
+    // The stars, behind everything: only where this pass draws at the
+    // frame's own resolution. At a lower one `resolve_main` adds them, so
+    // a star stays a point rather than a block of pixels.
+    if (clouds.stars.w > 0.5) {
+        colour = colour + stars_along(direction, clouds.view.y) * headroom;
+    }
     return colour;
 }
 
@@ -1331,5 +1400,17 @@ fn resolve_main(in: Varyings) -> Resolved {
     var out: Resolved;
     out.colour = textureLoad(deck_colour, at, 0);
     out.depth = textureLoad(deck_depth, at, 0);
+    // The stars, at the frame's own resolution, on the pixels the deck left
+    // as sky: the mark says which those are.
+    if (clouds.stars.w < 0.5 && out.colour.a >= SKY_MARK) {
+        let near = clouds.inverse_view_projection * vec4<f32>(in.ndc, 0.0, 1.0);
+        let far = clouds.inverse_view_projection * vec4<f32>(in.ndc, 1.0, 1.0);
+        let direction = normalize(far.xyz / far.w - near.xyz / near.w);
+        let headroom = select(1.0, 2.6, clouds.quality.w >= 2.0);
+        out.colour = vec4<f32>(
+            out.colour.xyz + stars_along(direction, clouds.view.y) * headroom,
+            out.colour.a,
+        );
+    }
     return out;
 }

@@ -272,6 +272,93 @@ fn sample_position(rng: &mut StreamRng, radius: i64) -> UniversalPos {
     }
 }
 
+/// Where the sky has turned to at a moment of the day, as `(cos, sin)`.
+///
+/// The stars wheel with the sun. The client's sun rises in the east at 0.25,
+/// stands highest at 0.5 and sets in the west at 0.75, turning about the
+/// world's z axis; the catalog's directions turn the same way, so a star that
+/// was beside the setting sun is beside it every evening. A full turn a day.
+///
+/// `detgen::trig` rather than `f32::sin`, because the server answers
+/// `game.star_in_view` from this and a mod acts on the answer — it is world
+/// state (charter rule 4) — and the client draws from the same table so the
+/// star it draws and the star the server names are one star.
+#[must_use]
+pub fn turn(time_of_day: f32) -> (f32, f32) {
+    use crate::detgen::trig;
+    let angle = (time_of_day.rem_euclid(1.0) - 0.25) * std::f32::consts::TAU;
+    (trig::cos(angle), trig::sin(angle))
+}
+
+/// A catalog direction as it appears in a world's sky at a moment of the day.
+///
+/// Rotates about the world's z axis by the day's [`turn`], the sense the sun
+/// moves in: at 0.25 the catalog frame and the world frame coincide.
+#[must_use]
+pub fn wheeled(direction: [f32; 3], turn: (f32, f32)) -> [f32; 3] {
+    let (cos, sin) = turn;
+    [
+        direction[0] * cos + direction[1] * sin,
+        direction[1] * cos - direction[0] * sin,
+        direction[2],
+    ]
+}
+
+/// The inverse of [`wheeled`]: a world direction taken back into the catalog
+/// frame, which is how a gaze is matched against the catalog.
+#[must_use]
+pub fn unwheeled(direction: [f32; 3], turn: (f32, f32)) -> [f32; 3] {
+    let (cos, sin) = turn;
+    [
+        direction[0] * cos - direction[1] * sin,
+        direction[1] * cos + direction[0] * sin,
+        direction[2],
+    ]
+}
+
+/// The star nearest to a gaze, and how squarely it is looked at.
+///
+/// `gaze` is a unit direction in the world's frame and `observer` is where the
+/// world is; the answer is the id of the catalog star whose direction from
+/// there, wheeled to `time_of_day`, lies closest along the gaze, with the
+/// cosine of the angle between them — `1.0` is dead centre. `None` only for an
+/// empty catalog or a gaze that is not a direction.
+///
+/// **This is the sky renderer's arithmetic run backwards**, and it must stay
+/// that: the client draws star N along [`StarRecord::direction_from`] turned
+/// by [`wheeled`], and a mod asking which star a player is looking at has to
+/// be told N — Task 15c's no-desync property.
+#[must_use]
+pub fn star_in_view(
+    catalog: &[StarRecord],
+    observer: UniversalPos,
+    gaze: [f32; 3],
+    time_of_day: f32,
+) -> Option<(u32, f32)> {
+    let length = (gaze[0] * gaze[0] + gaze[1] * gaze[1] + gaze[2] * gaze[2]).sqrt();
+    if !length.is_finite() || length <= 0.0 {
+        return None;
+    }
+    let gaze = unwheeled(
+        [gaze[0] / length, gaze[1] / length, gaze[2] / length],
+        turn(time_of_day),
+    );
+    let mut best: Option<(u32, f32)> = None;
+    for star in catalog {
+        let Some(direction) = star.direction_from(observer) else {
+            continue;
+        };
+        let alignment = direction[0] * gaze[0] + direction[1] * gaze[1] + direction[2] * gaze[2];
+        // Strictly greater: the first of two stars in exactly one direction
+        // wins, so the answer is a function of the catalog's order and not of
+        // anything else.
+        if best.is_none_or(|(_, held)| alignment > held) {
+            best = Some((star.id, alignment));
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +535,90 @@ mod tests {
             "only {} distinct x coordinates among {} stars; positions are on a lattice",
             distinct.len(),
             stars.len()
+        );
+    }
+
+    #[test]
+    fn wheeling_a_direction_and_unwheeling_it_gives_it_back() {
+        let direction = [0.6, 0.0, 0.8];
+        for time in [0.0, 0.1, 0.25, 0.5, 0.77, 0.999] {
+            let turned = turn(time);
+            let there = wheeled(direction, turned);
+            let back = unwheeled(there, turned);
+            for axis in 0..3 {
+                assert!(
+                    (back[axis] - direction[axis]).abs() < 1e-5,
+                    "time {time}: axis {axis} came back as {} from {}",
+                    back[axis],
+                    direction[axis]
+                );
+            }
+            let length = (there[0] * there[0] + there[1] * there[1] + there[2] * there[2]).sqrt();
+            assert!(
+                (length - 1.0).abs() < 1e-5,
+                "a turn changed a direction's length"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stars_wheel_the_way_the_sun_does() {
+        // The client's sun is at east (-x) on the horizon at 0.25 and straight
+        // up at 0.5. A star that sits where the dawn sun is must be overhead at
+        // noon, or the sky comes apart from its own sun.
+        let east = [-1.0, 0.0, 0.0];
+        let same = wheeled(east, turn(0.25));
+        for axis in 0..3 {
+            assert!(
+                (same[axis] - east[axis]).abs() < 1e-6,
+                "at 0.25 the frames coincide, got {same:?}"
+            );
+        }
+        let noon = wheeled(east, turn(0.5));
+        assert!(
+            noon[1] > 0.999,
+            "the dawn star at noon points {noon:?}, not up"
+        );
+        let dusk = wheeled(east, turn(0.75));
+        assert!(
+            dusk[0] > 0.999,
+            "the dawn star at dusk points {dusk:?}, not west"
+        );
+    }
+
+    #[test]
+    fn looking_along_a_star_names_that_star() {
+        // The no-desync property, run from the catalog's side: the direction
+        // the sky draws star N along, handed back as a gaze, answers N.
+        let catalog = star_catalog(7);
+        let observer = world_position(7);
+        for (index, star) in catalog.iter().enumerate().step_by(97) {
+            let time = (index as f32 * 0.037).rem_euclid(1.0);
+            let drawn = wheeled(star.direction_from(observer).expect("not here"), turn(time));
+            let (id, alignment) = star_in_view(&catalog, observer, drawn, time).expect("a star");
+            assert_eq!(
+                id, star.id,
+                "looking along star {} found star {id}",
+                star.id
+            );
+            assert!(alignment > 0.9999, "alignment {alignment}");
+        }
+    }
+
+    #[test]
+    fn a_gaze_that_is_not_a_direction_finds_nothing() {
+        let catalog = star_catalog(7);
+        assert_eq!(
+            star_in_view(&catalog, UniversalPos::CENTRE, [0.0; 3], 0.5),
+            None
+        );
+        assert_eq!(
+            star_in_view(&catalog, UniversalPos::CENTRE, [f32::NAN, 0.0, 0.0], 0.5),
+            None
+        );
+        assert_eq!(
+            star_in_view(&[], UniversalPos::CENTRE, [0.0, 1.0, 0.0], 0.5),
+            None
         );
     }
 

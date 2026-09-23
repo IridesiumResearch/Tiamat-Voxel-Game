@@ -434,6 +434,15 @@ impl sight::Access for Shared {
             face: hit.normal,
         })
     }
+
+    fn gaze(&self, uuid: [u8; 32]) -> Option<sight::Gaze> {
+        let bodies = self.bodies.as_ref()?.lock().ok()?;
+        let player = bodies.get(&tiamat_core::PlayerUuid::from_bytes(uuid))?;
+        Some(sight::Gaze {
+            domain: player.domain.clone(),
+            direction: look_direction(player.look),
+        })
+    }
 }
 
 /// The unit vector a player's `look` points along.

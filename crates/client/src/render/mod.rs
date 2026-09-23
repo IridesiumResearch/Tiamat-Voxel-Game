@@ -991,6 +991,9 @@ pub struct Renderer {
     /// Which way its light travels, for the cascades. Set by the sky with the
     /// colour, and pointing sensibly downward until one arrives.
     sun_direction: [f32; 3],
+    /// How much of the star catalog shows now, `0.0..=1.0`, and how far the
+    /// stars have wheeled, as `(cos, sin)` of the day's turn.
+    stars: (f32, (f32, f32)),
     /// The sky's colour now, which fog fades towards.
     sky_colour: [f32; 3],
     /// How the finished frame is graded now.
@@ -1123,9 +1126,7 @@ impl Renderer {
 
         // One tint entry, meaning nothing varies: no material does until a
         // table says one does, and the shader's first test is the scale.
-        let place_fog = place_fog::PlaceFog::new(&gpu);
-        let particles = particle::Pass::new(&gpu);
-        let clouds = clouds::Pass::new(&gpu);
+        let (place_fog, particles, clouds) = build_atmosphere(&gpu);
         let (view, grid, side, tints, bind_group) =
             build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, &place_fog, &clouds);
 
@@ -1197,6 +1198,7 @@ impl Renderer {
             sun_intensity: 1.0,
             sun_colour: [1.0, 1.0, 1.0, 1.0],
             sun_direction: NOON,
+            stars: (0.0, (1.0, 0.0)),
             sky_colour: sky_colour(),
             // Ungraded until a sky says otherwise, which keeps a world with no
             // sky mod exactly what it was before grading existed.
@@ -1239,6 +1241,32 @@ impl Renderer {
         self.sun_intensity = intensity.clamp(0.0, 1.0);
         self.sun_colour = [colour[0], colour[1], colour[2], 1.0];
         self.sun_direction = direction;
+    }
+
+    /// Sets how much of the star catalog shows and how far it has wheeled.
+    ///
+    /// `visibility` is the sky's `stars` at this moment and `turn` is
+    /// [`crate::sky::Sky::turn`]. Nothing is drawn until
+    /// [`Renderer::set_star_catalog`] has said which catalog.
+    pub fn set_stars(&mut self, visibility: f32, turn: (f32, f32)) {
+        self.stars = (visibility.clamp(0.0, 1.0), turn);
+    }
+
+    /// Gives the sky the star catalog for a world's seed.
+    ///
+    /// Derived here, as [`tiamat_core::sky::star_catalog`], rather than sent:
+    /// both ends compute the same two thousand positions from the same seed,
+    /// which is what makes the star a mod names the star on screen.
+    pub fn set_star_catalog(&mut self, seed: u64) {
+        let gpu = self.gpu.clone();
+        self.clouds.set_catalog(&gpu, seed);
+    }
+
+    /// Moves the point the star catalog is seen from — a domain's place in
+    /// the universe, from its sky table.
+    pub fn set_observer(&mut self, observer: tiamat_core::sky::UniversalPos) {
+        let gpu = self.gpu.clone();
+        self.clouds.set_observer(&gpu, observer);
     }
 
     /// Sets the sky's colour and where fog fades to it.
@@ -1763,6 +1791,8 @@ impl Renderer {
             view_projection,
             camera: [x, y, z],
             sun_direction: self.sun_direction,
+            stars: self.stars.0,
+            star_turn: self.stars.1,
             sun: [self.sun_colour[0], self.sun_colour[1], self.sun_colour[2]],
             sky: self.sky_colour,
             fog_end: self.fog_end,
@@ -4531,6 +4561,16 @@ fn build_world_pipeline(
 /// Split out of `Renderer::new`, which is at clippy's line ceiling — and split
 /// HERE because these five things are one decision: what the world shader reads
 /// before any material table has arrived.
+/// The three passes that draw the air: a place's fog, the particles and
+/// the sky with its deck and its stars.
+fn build_atmosphere(gpu: &Gpu) -> (place_fog::PlaceFog, particle::Pass, clouds::Pass) {
+    (
+        place_fog::PlaceFog::new(gpu),
+        particle::Pass::new(gpu),
+        clouds::Pass::new(gpu),
+    )
+}
+
 fn build_atlas_bindings(
     gpu: &Gpu,
     layout: &wgpu::BindGroupLayout,

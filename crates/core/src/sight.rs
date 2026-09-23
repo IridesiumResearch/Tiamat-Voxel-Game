@@ -157,6 +157,26 @@ pub trait Access: Send + Sync {
         let _ = uuid;
         None
     }
+
+    /// Which way a player is looking, and from which domain.
+    ///
+    /// Unlike [`Access::looking_at`] this is not bounded by reach and never
+    /// needs a block under the crosshair: it is the direction itself, for a
+    /// mod that wants to know which star a player is facing (`game.stars`,
+    /// `game.star_in_view`). `None` for a player who is not connected.
+    fn gaze(&self, uuid: [u8; 32]) -> Option<Gaze> {
+        let _ = uuid;
+        None
+    }
+}
+
+/// Which way a player is looking, from [`Access::gaze`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gaze {
+    /// The space the player is in.
+    pub domain: String,
+    /// The unit vector their camera points along, in the world's frame.
+    pub direction: [f32; 3],
 }
 
 /// What a player's crosshair is on, from [`Access::looking_at`].

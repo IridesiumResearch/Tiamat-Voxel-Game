@@ -1425,6 +1425,18 @@ hour. `game.flash{ pos, radius, intensity, colour, attack_ticks, decay_ticks }`
 is lightning: a moment's light on the sun and sky of everyone in reach, with no
 relight. The sun's direction and the keyframes themselves cannot be moved.
 
+**Stars are places, and the sky is per domain.** A keyframe's `stars` (0 to 1)
+says how much of the catalog shows at that hour — omit it and none do; the
+engine never decides that night means stars. The catalog is `game.stars()`,
+two thousand positions derived from the seed on both ends of the wire, so the
+star a player sees is the star `game.star_in_view(uuid)` names. A domain
+registered with a `position`, or an instance made with
+`game.create_domain(template, key, { position = ... })`, sees the sky from
+there; `register_sky{ domain = ... }` gives it colours of its own, sent to the
+client when a player arrives. Travel is yours: which star has a surface, what
+takes you there and what brings you back is a mod's rule, and `game/core_space`
+is the smallest one that works.
+
 **A place's fog and tint are asked when a chunk is SERVED, and never again.**
 Change what your callback returns and only chunks a player has not loaded yet
 will show it — which means the change appears at the edge of the view distance
