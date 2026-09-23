@@ -1725,7 +1725,8 @@ impl Renderer {
         &mut self,
         map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
     ) {
-        self.clouds.set_map(map);
+        let gpu = self.gpu.clone();
+        self.clouds.set_map(&gpu, map);
     }
 
     /// Advances the deck's own clock.

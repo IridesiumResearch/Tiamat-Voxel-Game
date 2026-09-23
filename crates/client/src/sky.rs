@@ -19,7 +19,7 @@
 //! doing the presenting. What the server owns is the *clock*, because two
 //! players standing together must see the same sky.
 
-use tiamat_core::atmosphere::{Flash, SkyModifier};
+use tiamat_core::atmosphere::{CloudMap, Clouds, Flash, SkyModifier};
 use tiamat_core::proto::{SkyFrame, SkyGrade};
 
 /// Everything a mod's weather does to this player's sky: the standing
@@ -34,6 +34,262 @@ pub struct Weather {
     /// The rain around this client, spawned here from the shape the server
     /// sent.
     pub rain: crate::particles::Emitter,
+    /// How much cloud this player is under, easing — weather ask W18.
+    pub deck: EasedDeck,
+    /// The coarse cover map, easing cell by cell — weather ask W18.
+    pub map: EasedMap,
+}
+
+/// A clear sky over a plain deck: what a world is under until a mod says,
+/// and what a deck fades to when the weather is called off.
+pub const CLEAR: Clouds = Clouds {
+    cover: 0.0,
+    darkness: 0.0,
+    base: None,
+    ease_ticks: 0,
+    stratocumulus: 0.0,
+    altocumulus: 0.0,
+    cumulonimbus: 0.0,
+};
+
+/// The deck's state on its way to where the server put it — weather ask
+/// W18.
+///
+/// `Clouds::ease_ticks` was carried in the message and read by nothing: a
+/// change of cover, darkness, genus or floor was a step on the client. Now
+/// the state blends from wherever it had got to over the ticks the new one
+/// names, as the sky modifier does — and, as there, "back to clear" takes as
+/// long as the weather took to arrive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EasedDeck {
+    from: Clouds,
+    to: Clouds,
+    /// What the server last said, verbatim: `None` is no state at all.
+    target: Option<Clouds>,
+    elapsed: f32,
+    duration: f32,
+}
+
+impl Default for EasedDeck {
+    fn default() -> Self {
+        Self {
+            from: CLEAR,
+            to: CLEAR,
+            target: None,
+            elapsed: 0.0,
+            duration: 0.0,
+        }
+    }
+}
+
+impl EasedDeck {
+    /// Sets where to go, eased over the target's `ease_ticks` — or, for a
+    /// clearing, over the ticks the last state had.
+    pub fn set(&mut self, target: Option<Clouds>) {
+        let ticks = target.map_or(self.to.ease_ticks, |target| target.ease_ticks);
+        self.from = self.current().unwrap_or(CLEAR);
+        self.to = target.unwrap_or(CLEAR);
+        self.target = target;
+        self.elapsed = 0.0;
+        self.duration = tiamat_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
+    }
+
+    /// Advances by a frame.
+    pub fn advance(&mut self, dt: f32) {
+        self.elapsed += dt.max(0.0);
+    }
+
+    /// What the server last said, for the tests that check it arrived.
+    #[must_use]
+    pub const fn target(&self) -> Option<Clouds> {
+        self.target
+    }
+
+    /// The ticks the state now eases over, which a map arriving beside it
+    /// eases over too.
+    #[must_use]
+    pub const fn ease_ticks(&self) -> u32 {
+        self.to.ease_ticks
+    }
+
+    fn arrived(&self) -> bool {
+        self.duration <= 0.0 || self.elapsed >= self.duration
+    }
+
+    /// Where the deck stands now: exactly the target once arrived, and
+    /// `None` only when there is no state at all and nothing to fade from.
+    #[must_use]
+    pub fn current(&self) -> Option<Clouds> {
+        if self.arrived() {
+            return self.target;
+        }
+        let blend = (self.elapsed / self.duration).clamp(0.0, 1.0);
+        let scalar = |from: f32, to: f32| from + (to - from) * blend;
+        Some(Clouds {
+            cover: scalar(self.from.cover, self.to.cover),
+            darkness: scalar(self.from.darkness, self.to.darkness),
+            // A floor eases between two floors; a floor appearing or going
+            // has nothing to ease from, and steps.
+            base: match (self.from.base, self.to.base) {
+                (Some(from), Some(to)) => Some(scalar(from, to)),
+                _ => self.to.base,
+            },
+            ease_ticks: self.to.ease_ticks,
+            stratocumulus: scalar(self.from.stratocumulus, self.to.stratocumulus),
+            altocumulus: scalar(self.from.altocumulus, self.to.altocumulus),
+            cumulonimbus: scalar(self.from.cumulonimbus, self.to.cumulonimbus),
+        })
+    }
+}
+
+/// The cover map on its way to the one the server last sent — weather ask
+/// W18.
+///
+/// Cell by cell, over the ticks the deck's own state eases over: a map
+/// re-sent with one cell darker does not step that cell in one frame. Two
+/// maps on the same grid blend; a map arriving where there was none blends
+/// up from the plain state, and one going away blends down to it; a map on
+/// a different grid — moved, or resized — steps, since its cells are not
+/// the old ones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EasedMap {
+    from: Option<std::sync::Arc<CloudMap>>,
+    to: Option<std::sync::Arc<CloudMap>>,
+    /// The plain state a map arriving where there was none fades up from.
+    plain_from: Clouds,
+    elapsed: f32,
+    duration: f32,
+}
+
+impl Default for EasedMap {
+    fn default() -> Self {
+        Self {
+            from: None,
+            to: None,
+            plain_from: CLEAR,
+            elapsed: 0.0,
+            duration: 0.0,
+        }
+    }
+}
+
+impl EasedMap {
+    /// Sets the map to go to, eased over `ticks`; `plain` is the single
+    /// state the deck stands at now, which a map fades in from or out to.
+    pub fn set(&mut self, target: Option<std::sync::Arc<CloudMap>>, ticks: u32, plain: &Clouds) {
+        self.from = self.current(plain);
+        self.plain_from = *plain;
+        self.to = target;
+        self.elapsed = 0.0;
+        self.duration = tiamat_core::tick::TICK_DURATION.as_secs_f32() * ticks as f32;
+    }
+
+    /// Advances by a frame.
+    pub fn advance(&mut self, dt: f32) {
+        self.elapsed += dt.max(0.0);
+    }
+
+    /// What the server last sent, for the tests that check it arrived.
+    #[must_use]
+    pub fn target(&self) -> Option<&CloudMap> {
+        self.to.as_deref()
+    }
+
+    fn arrived(&self) -> bool {
+        self.duration <= 0.0 || self.elapsed >= self.duration
+    }
+
+    /// The map to draw now: exactly the target once arrived, a blend on the
+    /// way, and the target at once when the grids differ.
+    #[must_use]
+    pub fn current(&self, plain: &Clouds) -> Option<std::sync::Arc<CloudMap>> {
+        if self.arrived() {
+            return self.to.clone();
+        }
+        let blend = (self.elapsed / self.duration).clamp(0.0, 1.0);
+        match (&self.from, &self.to) {
+            (Some(from), Some(to)) if same_grid(from, to) => {
+                Some(std::sync::Arc::new(blend_maps(from, to, blend)))
+            }
+            (None, Some(to)) => {
+                let from = filled_like(to, &self.plain_from);
+                Some(std::sync::Arc::new(blend_maps(&from, to, blend)))
+            }
+            (Some(from), None) => {
+                let to = filled_like(from, plain);
+                Some(std::sync::Arc::new(blend_maps(from, &to, blend)))
+            }
+            _ => self.to.clone(),
+        }
+    }
+}
+
+/// Whether two maps' cells are the same cells: the same corner, size and
+/// side, bit for bit — a grid that moved by a hair is another grid.
+fn same_grid(a: &CloudMap, b: &CloudMap) -> bool {
+    a.size == b.size
+        && a.origin[0].to_bits() == b.origin[0].to_bits()
+        && a.origin[1].to_bits() == b.origin[1].to_bits()
+        && a.cell.to_bits() == b.cell.to_bits()
+}
+
+/// A map on `like`'s grid holding the plain state in every cell: what a
+/// grid looked like before it arrived, or will once it has gone.
+fn filled_like(like: &CloudMap, plain: &Clouds) -> CloudMap {
+    let count = usize::from(like.size) * usize::from(like.size);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a unit share to a byte"
+    )]
+    let byte = |share: f32| (share.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    CloudMap {
+        origin: like.origin,
+        cell: like.cell,
+        size: like.size,
+        cover: vec![byte(plain.cover); count],
+        darkness: vec![byte(plain.darkness); count],
+        stratocumulus: vec![byte(plain.stratocumulus); count],
+        altocumulus: vec![byte(plain.altocumulus); count],
+        cumulonimbus: vec![byte(plain.cumulonimbus); count],
+    }
+}
+
+/// Two maps on one grid, `blend` of the way from the first to the second.
+/// A genus left out of one is none anywhere in it, and blends from that.
+fn blend_maps(from: &CloudMap, to: &CloudMap, blend: f32) -> CloudMap {
+    let count = usize::from(to.size) * usize::from(to.size);
+    let cells = |a: &[u8], b: &[u8]| -> Vec<u8> {
+        if a.is_empty() && b.is_empty() {
+            return Vec::new();
+        }
+        (0..count)
+            .map(|index| {
+                let (from, to) = (
+                    f32::from(a.get(index).copied().unwrap_or(0)),
+                    f32::from(b.get(index).copied().unwrap_or(0)),
+                );
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "between two bytes"
+                )]
+                {
+                    (from + (to - from) * blend + 0.5) as u8
+                }
+            })
+            .collect()
+    };
+    CloudMap {
+        origin: to.origin,
+        cell: to.cell,
+        size: to.size,
+        cover: cells(&from.cover, &to.cover),
+        darkness: cells(&from.darkness, &to.darkness),
+        stratocumulus: cells(&from.stratocumulus, &to.stratocumulus),
+        altocumulus: cells(&from.altocumulus, &to.altocumulus),
+        cumulonimbus: cells(&from.cumulonimbus, &to.cumulonimbus),
+    }
 }
 
 /// A mod's sky modifier on its way to where the mod put it.
@@ -921,6 +1177,134 @@ mod tests {
             flashed(plain, &flashes),
             plain,
             "and the moment is exactly what it was"
+        );
+    }
+
+    #[test]
+    fn a_deck_eases_from_clear_to_storm_over_its_ticks_and_arrives_exactly() {
+        // Weather ask W18's second half: `set_clouds` from clear to storm
+        // with `ease_ticks = 600` is not overcast on the next frame and is by
+        // the thirtieth second.
+        let storm = Clouds {
+            cover: 1.0,
+            darkness: 1.0,
+            base: Some(300.0),
+            ease_ticks: 600,
+            stratocumulus: 0.5,
+            altocumulus: 0.0,
+            cumulonimbus: 1.0,
+        };
+        let mut deck = EasedDeck::default();
+        assert_eq!(deck.current(), None, "no state at all draws no deck");
+        deck.set(Some(storm));
+        deck.advance(1.0 / 60.0);
+        let first = deck.current().expect("a state on the way");
+        assert!(first.cover < 0.01, "overcast on the next frame: {first:?}");
+        assert!(first.darkness < 0.01);
+        assert_eq!(
+            first.base,
+            Some(300.0),
+            "a floor appearing steps rather than eases from nothing"
+        );
+        deck.advance(15.0);
+        let half = deck.current().expect("a state on the way");
+        assert!(
+            (half.cover - 0.5).abs() < 0.01,
+            "half way after fifteen seconds: {half:?}"
+        );
+        assert!((half.cumulonimbus - 0.5).abs() < 0.01);
+        deck.advance(15.0);
+        assert_eq!(deck.current(), Some(storm), "arrived exactly, not nearly");
+        assert_eq!(deck.target(), Some(storm));
+
+        // Clearing takes as long as the storm took to arrive.
+        deck.set(None);
+        deck.advance(15.0);
+        let fading = deck.current().expect("still fading");
+        assert!((fading.cover - 0.5).abs() < 0.01, "{fading:?}");
+        deck.advance(15.0);
+        assert_eq!(deck.current(), None);
+    }
+
+    #[test]
+    fn a_newcomers_first_sky_with_no_ticks_is_at_once() {
+        let mut deck = EasedDeck::default();
+        deck.set(Some(Clouds {
+            cover: 0.8,
+            ..CLEAR
+        }));
+        let now = deck.current().expect("a state");
+        assert!((now.cover - 0.8).abs() < f32::EPSILON);
+    }
+
+    fn grid(darkness: u8, size: u8) -> std::sync::Arc<CloudMap> {
+        let count = usize::from(size) * usize::from(size);
+        std::sync::Arc::new(CloudMap {
+            origin: [0.0, 0.0],
+            cell: 256.0,
+            size,
+            cover: vec![255; count],
+            darkness: vec![darkness; count],
+            stratocumulus: Vec::new(),
+            altocumulus: Vec::new(),
+            cumulonimbus: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_map_re_sent_with_a_cell_darker_does_not_step_that_cell_in_one_frame() {
+        let mut map = EasedMap::default();
+        map.set(Some(grid(0, 4)), 0, &CLEAR);
+        assert_eq!(map.current(&CLEAR).expect("a map").darkness[5], 0);
+        let mut darker = (*grid(0, 4)).clone();
+        darker.darkness[5] = 200;
+        map.set(Some(std::sync::Arc::new(darker.clone())), 600, &CLEAR);
+        map.advance(1.0 / 60.0);
+        let soon = map.current(&CLEAR).expect("a map on the way");
+        assert!(
+            soon.darkness[5] < 10,
+            "the cell stepped: {}",
+            soon.darkness[5]
+        );
+        assert_eq!(soon.darkness[4], 0, "a cell that did not change moved");
+        map.advance(15.0);
+        let half = map.current(&CLEAR).expect("a map on the way");
+        assert!(
+            (95..=105).contains(&half.darkness[5]),
+            "half way: {}",
+            half.darkness[5]
+        );
+        map.advance(15.0);
+        assert_eq!(*map.current(&CLEAR).expect("arrived"), darker);
+        assert_eq!(map.target().map(|map| map.darkness[5]), Some(200));
+    }
+
+    #[test]
+    fn a_map_fades_up_from_the_plain_state_and_a_new_grid_steps() {
+        // Arriving where there was none: the cells start at the plain
+        // state's shares — cover 0.4 here — rather than at nothing.
+        let plain = Clouds {
+            cover: 0.4,
+            ..CLEAR
+        };
+        let mut map = EasedMap::default();
+        map.set(Some(grid(255, 4)), 600, &plain);
+        map.advance(1.0 / 60.0);
+        let soon = map.current(&plain).expect("a map on the way");
+        assert!(
+            (100..=104).contains(&soon.cover[0]),
+            "from the plain cover: {}",
+            soon.cover[0]
+        );
+        assert!(soon.darkness[0] < 10);
+        // A different grid does not blend: its cells are not the old ones.
+        map.set(Some(grid(50, 8)), 600, &plain);
+        map.advance(1.0 / 60.0);
+        let stepped = map.current(&plain).expect("a map");
+        assert_eq!(stepped.size, 8);
+        assert_eq!(
+            stepped.darkness[0], 50,
+            "a resized grid should step to the new map"
         );
     }
 }

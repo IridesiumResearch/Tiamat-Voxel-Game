@@ -7327,3 +7327,149 @@ fn the_deck_is_dark_at_midnight_and_still_lit_from_below_at_golden_hour() {
         "the bases at golden hour ({dusk_under:.3}) are no brighter than at midnight ({under:.3})"
     );
 }
+
+#[test]
+fn a_front_in_the_cover_map_is_a_gradient_a_cell_wide_and_not_a_line() {
+    // Weather ask W18. The map was read nearest-cell, and since every share
+    // of the field steps at a cell's edge, a rain cell beside a storm cell
+    // was a plane through the sky with the cloud cut along it. Read
+    // filtered, the darkness across the boundary changes over a whole cell.
+    // Measured straight up at a deck overcast everywhere and dark on one
+    // side: the column-mean luminance a quarter cell either side of the
+    // seam sits a quarter and three quarters of the way across the step,
+    // where a nearest read would already be on its plateau.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let deck = low_deck();
+    let overcast = sky_of(1.0, 0.0, 0.0, 0.0);
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, 1.5);
+    const SIZE: usize = 16;
+    const CELL: f32 = 256.0;
+    // The seam between the two middle columns of cells runs through the
+    // camera's own x, which is the frame's centre column.
+    let origin = [
+        24.0 - CELL * (SIZE as f32) / 2.0,
+        20.0 - CELL * (SIZE as f32) / 2.0,
+    ];
+    let mut darkness = vec![0_u8; SIZE * SIZE];
+    for z in 0..SIZE {
+        for x in SIZE / 2..SIZE {
+            darkness[z * SIZE + x] = 255;
+        }
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "SIZE is 16")]
+    let map = std::sync::Arc::new(tiamat_core::atmosphere::CloudMap {
+        origin,
+        cell: CELL,
+        size: SIZE as u8,
+        cover: vec![255; SIZE * SIZE],
+        darkness,
+        stratocumulus: Vec::new(),
+        altocumulus: Vec::new(),
+        cumulonimbus: Vec::new(),
+    });
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(deck),
+        clouds: Some(overcast),
+        quality: client::render::clouds::Quality::Fine,
+        seed: 4242,
+    });
+    // Three frames: no deck, the deck with no map (overcast everywhere,
+    // dark nowhere), and the deck with the map. Over the pixels that are
+    // cloud, the ratio of the last two, column by column, is the darkness
+    // alone: the heaps' own light and shade divide out, and the sky between
+    // them — the same in both — is left out rather than diluting the dark
+    // side wherever the heaps thin.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: Some(overcast),
+        quality: client::render::clouds::Quality::Fine,
+        seed: 4242,
+    });
+    let bare = target.capture(&mut renderer, &camera).expect("capture");
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(deck),
+        clouds: Some(overcast),
+        quality: client::render::clouds::Quality::Fine,
+        seed: 4242,
+    });
+    renderer.set_cloud_map(None);
+    let bright = target.capture(&mut renderer, &camera).expect("capture");
+    renderer.set_cloud_map(Some(map));
+    let frame = target.capture(&mut renderer, &camera).expect("capture");
+    let luma = |pixel: [u8; 4]| {
+        0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2])
+    };
+    let profile: Vec<f32> = (0..WIDTH)
+        .map(|x| {
+            let (mut dark, mut lit) = (0.0, 0.0);
+            for y in 0..HEIGHT {
+                if is_cloud(&bright, &bare, x, y)
+                    && let (Some(with), Some(without)) = (frame.pixel(x, y), bright.pixel(x, y))
+                {
+                    dark += luma(with);
+                    lit += luma(without);
+                }
+            }
+            dark / lit.max(1.0)
+        })
+        .collect();
+    println!(
+        "darkness ratio every 16 px: {:?}",
+        (0..WIDTH)
+            .step_by(16)
+            .map(|x| format!("{:.2}", profile[x as usize]))
+            .collect::<Vec<_>>()
+    );
+    let mean = |from: u32, to: u32| {
+        profile[from as usize..to as usize].iter().sum::<f32>() / (to - from) as f32
+    };
+    // A quarter cell in pixels, at the deck's base straight up: the frame's
+    // half-width there is the height times the tangent of half the field
+    // of view, times the aspect.
+    let height = deck.base - 18.0;
+    let half_angle = camera.fov_y / 2.0;
+    let tangent =
+        tiamat_core::detgen::trig::sin(half_angle) / tiamat_core::detgen::trig::cos(half_angle);
+    let half_width = height * tangent * (WIDTH as f32 / HEIGHT as f32);
+    let quarter = (CELL / 4.0) / half_width * (WIDTH as f32 / 2.0);
+    println!("a quarter cell is {quarter:.1} px");
+    let (left, right) = (mean(0, 24), mean(WIDTH - 24, WIDTH));
+    assert!(
+        left < 0.6 && right > 0.9,
+        "the plateaus are not in the frame: dark side {left:.2}, bright side {right:.2}"
+    );
+    // The crossing from a fifth of the way to four fifths spans at least
+    // two quarter cells' worth of pixels, less a margin for the march's own
+    // grid; a nearest-cell read crossed in one grid column, sixteen pixels.
+    let step = right - left;
+    let crossing = |share: f32| {
+        (0..WIDTH)
+            .find(|x| mean(x.saturating_sub(4), (x + 4).min(WIDTH)) >= left + step * share)
+            .unwrap_or(WIDTH)
+    };
+    let width = crossing(0.8).saturating_sub(crossing(0.2));
+    println!("the front crosses a fifth to four fifths over {width} px");
+    assert!(
+        width as f32 >= quarter * 2.0 * 0.6,
+        "the front is a line, {width} px wide, where a cell is {:.0} px",
+        quarter * 4.0
+    );
+    // And it is a ramp, not a stagger: every sixteen-pixel window from the
+    // dark side to the bright is no darker than the one before it.
+    let mut previous = f32::MIN;
+    for x in (0..WIDTH - 16).step_by(16) {
+        let here = mean(x, x + 16);
+        assert!(
+            here >= previous - 0.03,
+            "the darkness rises back to {here:.2} at column {x} after {previous:.2}"
+        );
+        previous = here;
+    }
+}

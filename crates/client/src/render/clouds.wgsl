@@ -93,17 +93,6 @@ struct Clouds {
     // How much of the star catalog shows, the day's turn as (cos, sin), and
     // whether `fragment_main` draws the stars (1) or `resolve_main` does (0).
     stars: vec4<f32>,
-    // The five shares per cell as bytes, two cells to a vec4<u32>, row-major
-    // by z: a cell's first word holds cover, darkness, stratocumulus and
-    // altocumulus a byte each from the low end, its second cumulonimbus
-    // (ask W16).
-    //
-    // **A vec4 array, and that is not a preference**: WGSL gives a uniform
-    // array element a stride of at least sixteen bytes, so a flat array is
-    // not expressible here at all. The Rust side packs to match, and the
-    // warning on `view` above applies double — a disagreement about this
-    // layout empties the sky rather than failing to compile.
-    cells: array<vec4<u32>, 128>,
 }
 
 @group(0) @binding(0) var<uniform> clouds: Clouds;
@@ -121,6 +110,17 @@ struct Clouds {
 @group(0) @binding(4) var<storage, read> star_list: array<vec4<u32>>;
 
 const STAR_BINS_PER_AXIS: u32 = 32u;
+
+// The cover map, as two textures a mod's cell to a texel — cover, darkness,
+// stratocumulus and altocumulus in one, cumulonimbus in the other — and a
+// linear, clamped sampler, so a cell's weather is read FILTERED between
+// cell centres (weather ask W18). Bound by the deck pipelines alone.
+@group(0) @binding(5) var map_cells: texture_2d<f32>;
+@group(0) @binding(6) var map_storm: texture_2d<f32>;
+@group(0) @binding(7) var map_sampler: sampler;
+
+// Texels a side of the map textures: the biggest map a mod may send.
+const MAP_TEXELS: f32 = 16.0;
 
 // The octahedral map's (u, v) in 0..1 for a direction: `clouds.rs::oct_encode`.
 fn oct_encode(d: vec3<f32>) -> vec2<f32> {
@@ -176,10 +176,13 @@ fn stars_along(direction: vec3<f32>, pixel: f32) -> vec3<f32> {
 // and the three genera beside them — from the map where there is one and from
 // the single per-player state everywhere else. Weather asks W10 and W16.
 //
-// **Nearest cell, not bilinear.** A cell is hundreds of blocks and the field
-// it feeds is heaps of cloud with their own edges, so an interpolated boundary
-// buys nothing a player could see and costs three more fetches on every step
-// of every ray. The mod's grid is the resolution of its own weather.
+// **Bilinear between cell centres, since W18.** It was nearest-cell, on the
+// argument that a cell's weather needed no interpolation to be believed —
+// written before the cell decided the deck's shape. Since W16 all five
+// shares step at a cell's edge, so a rain cell beside a storm cell was a
+// plane through the sky with the cloud cut along it: the sheet, the heaps
+// and the towers all changed at once on one line. Filtered, a front is a
+// gradient a cell wide, and the texture unit does it for one fetch.
 struct Weather {
     cover: f32,
     darkness: f32,
@@ -195,34 +198,32 @@ fn weather_at(cell_xz: vec2<f32>) -> Weather {
     plain.stratocumulus = clouds.genera.x;
     plain.altocumulus = clouds.genera.y;
     plain.cumulonimbus = clouds.genera.z;
-    let size = i32(clouds.map.w);
-    if (size <= 0) {
+    let size = clouds.map.w;
+    if (size <= 0.0) {
         return plain;
     }
     let cell = max(clouds.map.z, 1.0);
     let local = (cell_xz - vec2<f32>(clouds.map.x, clouds.map.y)) / cell;
-    let x = i32(floor(local.x));
-    let z = i32(floor(local.y));
     // Outside the grid the single state answers, which is what lets a mod
     // describe the weather it knows about and leave the rest of the world
-    // alone.
-    if (x < 0 || z < 0 || x >= size || z >= size) {
+    // alone — and the last half cell before the edge fades into it, so the
+    // grid's own boundary is not a line either.
+    let beyond = max(max(-local.x, local.x - size), max(-local.y, local.y - size));
+    if (beyond >= 0.5) {
         return plain;
     }
-    let index = z * size + x;
-    let packed = clouds.cells[index / 2];
-    var first = packed.x;
-    var second = packed.y;
-    if ((index & 1) == 1) {
-        first = packed.z;
-        second = packed.w;
-    }
+    // Between cell centres, clamped to the edge cells' own: the texture is
+    // the biggest map's size, so the map's corner is sampled and no more.
+    let centred = clamp(local, vec2<f32>(0.5), vec2<f32>(size - 0.5)) / MAP_TEXELS;
+    let four = textureSampleLevel(map_cells, map_sampler, centred, 0.0);
+    let storm = textureSampleLevel(map_storm, map_sampler, centred, 0.0).x;
+    let toward_plain = clamp(beyond / 0.5, 0.0, 1.0);
     var here: Weather;
-    here.cover = f32(first & 255u) / 255.0;
-    here.darkness = f32((first >> 8u) & 255u) / 255.0;
-    here.stratocumulus = f32((first >> 16u) & 255u) / 255.0;
-    here.altocumulus = f32((first >> 24u) & 255u) / 255.0;
-    here.cumulonimbus = f32(second & 255u) / 255.0;
+    here.cover = mix(four.x, plain.cover, toward_plain);
+    here.darkness = mix(four.y, plain.darkness, toward_plain);
+    here.stratocumulus = mix(four.z, plain.stratocumulus, toward_plain);
+    here.altocumulus = mix(four.w, plain.altocumulus, toward_plain);
+    here.cumulonimbus = mix(storm, plain.cumulonimbus, toward_plain);
     return here;
 }
 

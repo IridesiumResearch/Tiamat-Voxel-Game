@@ -1094,13 +1094,6 @@ pub struct App {
     /// Registration state, so it arrives once and does not change. `None` is
     /// a world with no clouds, which is most of them.
     cloud_layer: Option<tiamat_core::atmosphere::CloudLayer>,
-    /// How much cloud this player is under, as the weather last said.
-    clouds: Option<tiamat_core::atmosphere::Clouds>,
-    /// The coarse cover map a mod sent, if any — weather ask W10.
-    ///
-    /// Behind an `Arc` so the once-a-frame handover to the renderer copies a
-    /// pointer rather than half a kilobyte of grid.
-    cloud_map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
 
     /// What each mod wants this player's HUD to show, by mod id.
     ///
@@ -1454,10 +1447,6 @@ impl App {
     /// Separate so tests and the bot can build an `App` without a bindings file
     /// on disk, which is the overwhelmingly common case for both.
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "almost all of it is one struct literal naming every field of `App` once;                   splitting that into helpers that each build a few fields would hide which                   fields exist and where each one's starting value is decided, which is the                   only thing anybody reads this function for"
-    )]
     pub fn with_bindings(
         config: Config,
         connection: Connection,
@@ -1551,8 +1540,6 @@ impl App {
             hud_reserve: 0,
             theme: crate::theme::Theme::none(),
             cloud_layer: None,
-            clouds: None,
-            cloud_map: None,
             hud_vm: start_hud_vm(),
             fps: 0.0,
             last_dt: 0.0,
@@ -3981,8 +3968,15 @@ impl App {
             crate::net::Event::Flash(flash) => self.weather.flashes.strike(*flash),
             crate::net::Event::Precipitation(rain) => self.weather.rain.set(*rain),
             crate::net::Event::CloudLayer(layer) => self.cloud_layer = *layer,
-            crate::net::Event::Clouds(clouds) => self.clouds = *clouds,
-            crate::net::Event::CloudMap(map) => self.cloud_map.clone_from(map),
+            // Eased on the client over the ticks the message names, as it
+            // promises — weather ask W18. The map eases over the deck's own
+            // ticks, from the plain state it is laid over.
+            crate::net::Event::Clouds(clouds) => self.weather.deck.set(*clouds),
+            crate::net::Event::CloudMap(map) => {
+                let plain = self.weather.deck.current().unwrap_or(crate::sky::CLEAR);
+                let ticks = self.weather.deck.ease_ticks();
+                self.weather.map.set(map.clone(), ticks, &plain);
+            }
             // Unreachable by construction: the caller matched these five.
             // An arm rather than an `unreachable!`, because a sixth weather
             // event added to the caller and forgotten here should do nothing
@@ -3998,7 +3992,7 @@ impl App {
     /// between them is where a feature goes quietly missing.
     #[must_use]
     pub fn cloud_map(&self) -> Option<&tiamat_core::atmosphere::CloudMap> {
-        self.cloud_map.as_deref()
+        self.weather.map.target()
     }
 
     /// The cloud deck this world registered, and what this player is under.
@@ -4012,7 +4006,7 @@ impl App {
         Option<tiamat_core::atmosphere::CloudLayer>,
         Option<tiamat_core::atmosphere::Clouds>,
     ) {
-        (self.cloud_layer, self.clouds)
+        (self.cloud_layer, self.weather.deck.target())
     }
 
     /// The look this server's mods asked the engine's own screens to wear.
@@ -5131,6 +5125,8 @@ impl App {
         let moment = crate::sky::modified(self.sky.moment(), &modifier);
         // And lightning over that: a moment's light, no relight.
         self.weather.flashes.advance(dt);
+        self.weather.deck.advance(dt);
+        self.weather.map.advance(dt);
         let moment = crate::sky::flashed(moment, &self.weather.flashes);
         self.renderer
             .set_sun(moment.intensity, moment.sun, moment.sun_direction);
@@ -5140,10 +5136,15 @@ impl App {
         self.renderer.advance_clouds(dt);
         // The coarse cover map, handed over beside the deck — weather ask
         // W10. An `Arc`, so this is a pointer a frame rather than a grid.
-        self.renderer.set_cloud_map(self.cloud_map.clone());
+        let deck_state = self.weather.deck.current();
+        self.renderer.set_cloud_map(
+            self.weather
+                .map
+                .current(&deck_state.unwrap_or(crate::sky::CLEAR)),
+        );
         self.renderer.set_clouds(crate::render::clouds::Deck {
             layer: self.cloud_layer,
-            clouds: self.clouds,
+            clouds: deck_state,
             quality: self.config.clouds,
             seed: self.seed.unwrap_or(0),
         });

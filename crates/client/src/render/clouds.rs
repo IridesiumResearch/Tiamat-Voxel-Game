@@ -197,23 +197,170 @@ struct Uniforms {
     /// and whether `fragment_main` draws the stars (1) or the resolve does
     /// (0), which is the case when the deck is at a lower resolution.
     stars: [f32; 4],
-    /// The five shares per cell as bytes, two cells to a `vec4<u32>`,
-    /// row-major by z: a cell's first word is cover, darkness, stratocumulus
-    /// and altocumulus a byte each from the low end, its second word is
-    /// cumulonimbus. Weather ask W16 put the genera in; the packing is what
-    /// keeps the uniform at the 2 KiB it was.
-    ///
-    /// **A `vec4` array rather than a flat one**: WGSL's uniform address space
-    /// gives an array element a stride of at least sixteen bytes, so a flat
-    /// array is not expressible there and a flat Rust array would silently
-    /// disagree with the shader's idea of it.
-    cells: [[u32; 4]; MAP_VEC4S],
 }
 
-/// How many `vec4`s the packed cover map takes: two cells each.
-const MAP_VEC4S: usize = (tiamat_core::atmosphere::MAX_MAP_SIZE as usize
-    * tiamat_core::atmosphere::MAX_MAP_SIZE as usize)
-    .div_ceil(2);
+/// Texels a side of the cover map's textures: the biggest map a mod may
+/// send. A smaller map fills its corner and is sampled no further.
+const MAP_TEXELS: u32 = tiamat_core::atmosphere::MAX_MAP_SIZE as u32;
+/// Where the shader finds the map's cover, darkness, stratocumulus and
+/// altocumulus, a byte each.
+const MAP_CELLS_BINDING: u32 = 5;
+/// Where the shader finds the map's cumulonimbus.
+const MAP_STORM_BINDING: u32 = 6;
+/// Where the shader finds the map's sampler: linear, clamped.
+const MAP_SAMPLER_BINDING: u32 = 7;
+
+/// The cover map as the shader reads it: two small textures and a linear
+/// sampler, so a cell's weather is read FILTERED — weather ask W18.
+///
+/// It was a packed uniform array read nearest-cell, and since W16 every
+/// share of the field steps at a cell's edge, so a rain cell beside a storm
+/// cell was a plane through the sky with the cloud cut along it. Bilinear
+/// between cell centres makes a front a gradient a cell wide, and the
+/// texture unit does the four fetches and the weights for the price of one.
+struct MapTextures {
+    cells: wgpu::Texture,
+    cells_view: wgpu::TextureView,
+    storm: wgpu::Texture,
+    storm_view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+}
+
+impl MapTextures {
+    fn new(gpu: &Gpu) -> Self {
+        let texture = |label: &str, format: wgpu::TextureFormat| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: MAP_TEXELS,
+                    height: MAP_TEXELS,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let cells = texture("cloud-map-cells", wgpu::TextureFormat::Rgba8Unorm);
+        let storm = texture("cloud-map-storm", wgpu::TextureFormat::R8Unorm);
+        let cells_view = cells.create_view(&wgpu::TextureViewDescriptor::default());
+        let storm_view = storm.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cloud-map-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            cells,
+            cells_view,
+            storm,
+            storm_view,
+            sampler,
+        }
+    }
+
+    fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+        let texture = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        [
+            texture(MAP_CELLS_BINDING),
+            texture(MAP_STORM_BINDING),
+            wgpu::BindGroupLayoutEntry {
+                binding: MAP_SAMPLER_BINDING,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ]
+    }
+
+    fn bind_entries(&self) -> [wgpu::BindGroupEntry<'_>; 3] {
+        [
+            wgpu::BindGroupEntry {
+                binding: MAP_CELLS_BINDING,
+                resource: wgpu::BindingResource::TextureView(&self.cells_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: MAP_STORM_BINDING,
+                resource: wgpu::BindingResource::TextureView(&self.storm_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: MAP_SAMPLER_BINDING,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            },
+        ]
+    }
+
+    /// Writes a map's cells into the textures' corner.
+    ///
+    /// Only the map's own `size` square: the shader never samples past it,
+    /// so what the rest of the texture holds does not matter.
+    fn upload(&self, gpu: &Gpu, map: &tiamat_core::atmosphere::CloudMap) {
+        let size = u32::from(map.size).clamp(1, MAP_TEXELS);
+        let count = (size * size) as usize;
+        let byte = |genus: &[u8], index: usize| genus.get(index).copied().unwrap_or(0);
+        let (cells, storm) = pack_map(map, count, byte);
+        let write = |texture: &wgpu::Texture, bytes: &[u8], per_texel: u32| {
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size * per_texel),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        write(&self.cells, &cells, 4);
+        write(&self.storm, &storm, 1);
+    }
+}
+
+/// A map's cells as the two textures carry them: four shares a texel, then
+/// the storm alone. A genus a mod left out is none anywhere.
+fn pack_map(
+    map: &tiamat_core::atmosphere::CloudMap,
+    count: usize,
+    byte: impl Fn(&[u8], usize) -> u8,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut cells = Vec::with_capacity(count * 4);
+    let mut storm = Vec::with_capacity(count);
+    for index in 0..count {
+        cells.extend_from_slice(&[
+            byte(&map.cover, index),
+            byte(&map.darkness, index),
+            byte(&map.stratocumulus, index),
+            byte(&map.altocumulus, index),
+        ]);
+        storm.push(byte(&map.cumulonimbus, index));
+    }
+    (cells, storm)
+}
 
 /// What the pass needs to know about the frame.
 #[derive(Debug, Clone, Copy)]
@@ -302,6 +449,8 @@ pub struct Pass {
     seconds: f32,
     /// The star catalog, sorted for the shader.
     starfield: Starfield,
+    /// The cover map, as textures the shader samples filtered.
+    map_textures: MapTextures,
 }
 
 impl Pass {
@@ -311,6 +460,8 @@ impl Pass {
         let shader = gpu
             .device
             .create_shader_module(wgpu::include_wgsl!("clouds.wgsl"));
+        let map_layout = MapTextures::layout_entries();
+        let map_textures = MapTextures::new(gpu);
         let layout = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -328,6 +479,9 @@ impl Pass {
                     },
                     star_layout_entry(STAR_BINS_BINDING),
                     star_layout_entry(STAR_LIST_BINDING),
+                    map_layout[0],
+                    map_layout[1],
+                    map_layout[2],
                 ],
             });
         let uniforms = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -337,6 +491,7 @@ impl Pass {
             mapped_at_creation: false,
         });
         let starfield = Starfield::new(gpu);
+        let map_entries = map_textures.bind_entries();
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("clouds"),
             layout: &layout,
@@ -347,6 +502,9 @@ impl Pass {
                 },
                 starfield.bind_entry(STAR_BINS_BINDING),
                 starfield.bind_entry(STAR_LIST_BINDING),
+                map_entries[0].clone(),
+                map_entries[1].clone(),
+                map_entries[2].clone(),
             ],
         });
         let (shadow_view, shadow_sampler) = shade_target(gpu);
@@ -376,6 +534,7 @@ impl Pass {
             map: None,
             seconds: 0.0,
             starfield,
+            map_textures,
         }
     }
 
@@ -410,7 +569,26 @@ impl Pass {
     }
 
     /// Lays a coarse cover map over the world, or takes it away — ask W10.
-    pub fn set_map(&mut self, map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>) {
+    ///
+    /// Uploaded when it is a different map from the one held — by pointer,
+    /// since the same `Arc` is handed over every frame and, while the client
+    /// eases a map, a fresh one is. Half a kilobyte either way.
+    pub fn set_map(
+        &mut self,
+        gpu: &Gpu,
+        map: Option<std::sync::Arc<tiamat_core::atmosphere::CloudMap>>,
+    ) {
+        let same = match (&self.map, &map) {
+            (Some(held), Some(new)) => std::sync::Arc::ptr_eq(held, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        if let Some(map) = &map {
+            self.map_textures.upload(gpu, map);
+        }
         self.map = map;
     }
 
@@ -469,7 +647,7 @@ impl Pass {
         )]
         let seed = (self.deck.seed & 0xFFFF) as f32;
         let shadow_origin = self.place_shade(camera, base, cell, frame.mode);
-        let (cells, descriptor, most) = self.map_cells();
+        let (descriptor, most) = self.map_descriptor();
         let reach = |own: f32, index: usize| own.max(most[index]);
         let uniforms = Uniforms {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
@@ -508,7 +686,6 @@ impl Pass {
             weather: [state.cover, state.darkness, layer.frequency, layer.towers],
             motion: [layer.drift[0], layer.drift[1], layer.evolve, seed],
             map: descriptor,
-            cells,
             genera: [
                 state.stratocumulus,
                 state.altocumulus,
@@ -576,23 +753,11 @@ impl Pass {
     /// tells the shader to use the single sky for the whole world. Returns the
     /// cells, the map's descriptor (corner x and z, cell, cells a side), and
     /// the highest share of each genus in any cell, for the slab.
-    fn map_cells(&self) -> ([[u32; 4]; MAP_VEC4S], [f32; 4], [f32; 3]) {
-        let mut cells = [[0_u32; 4]; MAP_VEC4S];
+    /// The map's corner, cell size and side for the shader, and the most of
+    /// each genus anywhere in it, which sizes the slab the march clips to.
+    fn map_descriptor(&self) -> ([f32; 4], [f32; 3]) {
         let mut most = [0.0_f32; 3];
         let descriptor = self.map.as_ref().map_or([0.0; 4], |map| {
-            let byte =
-                |genus: &[u8], index: usize| u32::from(genus.get(index).copied().unwrap_or(0));
-            for index in 0..map.cover.len().min(map.darkness.len()) {
-                let Some(slot) = cells.get_mut(index / 2) else {
-                    break;
-                };
-                let half = (index % 2) * 2;
-                slot[half] = byte(&map.cover, index)
-                    | byte(&map.darkness, index) << 8
-                    | byte(&map.stratocumulus, index) << 16
-                    | byte(&map.altocumulus, index) << 24;
-                slot[half + 1] = byte(&map.cumulonimbus, index);
-            }
             for (slot, genus) in
                 most.iter_mut()
                     .zip([&map.stratocumulus, &map.altocumulus, &map.cumulonimbus])
@@ -601,7 +766,7 @@ impl Pass {
             }
             [map.origin[0], map.origin[1], map.cell, f32::from(map.size)]
         });
-        (cells, descriptor, most)
+        (descriptor, most)
     }
 
     /// Decides where this frame's shade map lies and how much it shades by,

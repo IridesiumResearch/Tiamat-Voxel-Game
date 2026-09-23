@@ -12,6 +12,18 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
+Nothing open: W17 and W18 landed 2026-09-23, below.
+
+**For the sky's owner, 2026-09-23**, protocol v75 — not an ask, a
+capability that landed for the space work and is the sky mod's to use: a
+keyframe takes `stars` (0 to 1), how much of the star catalog shows at that
+hour. The engine draws none unless a keyframe says so, so the real sky sees
+no stars until `tiamat_weather` sets it — `stars = 1.0` on the night
+keyframes and `0.0` on the day ones is the whole change; `game/core_sky`
+does exactly that as the reference. The catalog wheels with the day as the
+sun does, sits behind cloud and behind the ground, and is per domain
+(`register_sky{ domain = ... }`). See `docs/engine-asks/tiamat_space.md`.
+
 **W13 landed 2026-09-23**, protocol v73: `stratocumulus`, `altocumulus` and
 `cumulonimbus` on `set_clouds`, a share each beside `cover`, with the ask's
 own shapes — the low sheet of rolls with grooves between, the mackerel layer
@@ -43,67 +55,29 @@ deck, the deck's own cost over a bare sky at 320 x 240, level / thirty
 degrees up / above the deck: 1.20 / 1.83 / 4.04 ms before any of W15, and
 the numbers after are in `how_long_the_deck_costs_from_three_views`.
 
-## W18. The cover map's cells show as seams, and nothing about the deck is eased (2026-09-23)
-
-**Seen.** Two of the designer's screenshots, beside this sheet.
-`map-seam-2026-09-23.webp` (Temperate Woodlands, light rain): a straight
-vertical seam through the whole deck, lighter sheet on one side, darker slab
-on the other, and a cloud cut along the line. `map-chopped-2026-09-23.webp`
-(Alpine Highlands): a slab with a flat vertical wall. "Some almost chunklike
-tone differences and chopped off clouds here and there."
-
-**Why.** The line is a cover-map cell edge, 256 blocks a cell. `weather_at`
-in `clouds.wgsl` reads the map **nearest-cell** — its own comment: "an
-interpolated boundary buys nothing a player could see and costs three more
-fetches on every step of every ray" — and since W16 all five shares vary per
-cell, so the field the march samples steps at the edge: a cell in rain
-(sheet 0.85, no towers) beside one in storm (sheet 0.70, towers 0.60,
-darkness 0.90) is a plane through the sky where the heaps, the sheet and the
-towers all change at once, and a genus a cell has and its neighbour has not
-ends in a wall. It reads as a chunk boundary because it is one.
-
-Weather's half of it is fixed on the mod's side (Weather plan 10.17): the
-player's own square used to answer its eased state while every other cell
-answered the weather function's value, which drew a lighter box round the
-player for the forty seconds a front took to arrive; every cell is eased now.
-What is left is a seam wherever two cells' weather truly differs — every
-front, every storm's edge — and that is the read.
-
-**A second thing found on the way, and it belongs here.** The client applies
-the deck's state as it arrives: `adopt_weather` does `self.clouds =
-*clouds` and `self.cloud_map.clone_from(map)`, the frame hands both to the
-renderer, and `Clouds::ease_ticks` is carried in the message and read by
-nothing in `render/clouds.rs`. So a change of cover, darkness, genus or
-floor is a step on the client, and the map — which replaces the player's
-own shares inside the grid — steps on every re-send. Weather eases its map
-cell by cell now, a twentieth per evaluation, so the steps are small; but
-the field says "eased on the client" and it is not.
-
-**The ask.**
-
-1. **Read the map filtered.** Bilinear between cell centres, so a front is a
-   gradient a cell wide rather than a plane. The cheap way is the texture
-   sampler's: upload the grid as a 16 x 16 texture (two RGBA8 texels a cell,
-   or one RGBA8 and one R8) with a linear sampler and clamp-to-edge, and
-   `weather_at` is one filtered fetch instead of an unpacked uniform read —
-   no more fetches per step than today, fewer instructions. The map is
-   re-uploaded when it arrives, which is at most every 40 ticks. The comment
-   above was right that a cell's WEATHER needs no interpolation to be
-   believed; it was written before the cell decided the deck's shape.
-2. **Ease the deck's state on the client**, as `ease_ticks` promises:
-   blend `cover`, `darkness`, the three genera and `base` from the last
-   state to the new over `ease_ticks`, and the map's cells likewise from the
-   previous map (same grid; a cell absent from one or the other blends from
-   the plain state). Weather sends `ease_ticks = 600` for a change of weather
-   and 0 for a newcomer's first sky, so both cases are already spoken for.
-
-**Acceptance.** A map with rain in one column of cells and storm in the
-next draws no vertical line: the darkness across the boundary, sampled in a
-row of pixels through the deck, changes monotonically over at least a
-quarter of a cell. A `set_clouds` from clear to storm with `ease_ticks =
-600` is not overcast on the next frame and is by the thirtieth second. A map
-re-sent with one cell darker does not step that cell in one frame. The two
-screenshots' views, for the eye.
+**W18 landed 2026-09-23.** Both halves. The map is read **filtered**: it
+travels to the shader as two small textures — cover, darkness, stratocumulus
+and altocumulus a byte each in one, cumulonimbus in the other — under a
+linear, clamped sampler, bilinear between cell centres, so a front is a
+gradient a cell wide and the texture unit does the four fetches for the
+price of one; the last half cell before the grid's edge fades into the plain
+state too, so the grid's own boundary is not a line either. The packed
+uniform array is gone. And the deck is **eased on the client** as
+`ease_ticks` promised: cover, darkness, the three genera and a floor blend
+from wherever they had got to over the ticks the new state names (a floor
+appearing steps, having nothing to ease from), a clearing takes as long as
+the weather took to arrive, and the map eases cell by cell over the same
+ticks — from the previous map on the same grid, up from the plain state
+where there was none, down to it when it goes, and at once when the grid
+moved or resized, since its cells are not the old ones. Gates: a map dark on
+one side, overcast on both, read straight up — the darkness across the seam
+crosses a fifth to four fifths over 132 px where a quarter cell is 54, and
+never rises back; a nearest read crossed in one grid column. Clear to storm
+with `ease_ticks = 600` is not overcast on the next frame, half way at
+fifteen seconds and exactly there at thirty; a map re-sent with one cell
+darker moves that cell by nothing in a frame and by half in fifteen seconds,
+and the cells that did not change do not move. The designer's two views are
+theirs to take again.
 
 **W17 landed 2026-09-23.** The deck's sun is the terrain's — the keyframe's
 colour times its intensity, as `world.wgsl` has it — and a sun under the
