@@ -12,84 +12,50 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-## W15. The deck is erased by the world's fog, and its bases are a crop (2026-09-22)
+## W15, what is left: `Normal` at half resolution (2026-09-23)
 
-**Seen, in game, by the designer.** "The fog is making it so they are only an
-outline. Not really any detail is seen." And: the bottoms are "such a sharp
-flat crop", and the shapes want more variation. And an optimisation pass.
+The rest of W15 landed 2026-09-23. A cloud pixel is not fogged as terrain:
+the pass marks its pixels and mode 3's post chain fogs them as the sky
+beside them, and the deck's own haze runs to its reach and takes at most 0.7
+of the contrast, with only the last stretch before the reach fading the rest
+so the edge is not a line. A base is flat per heap and lifts at its rim; a
+heap has its own axis, crown, height and floor, from one more hash. The
+self-shadow fades and stops past twice the detail reach, candidate cells are
+rejected before they are hashed, and the pixel target is nine. The crown is
+a blend of two square roots rather than `pow`, which is the same family of
+shapes for a fraction of the cost.
 
-**The first is a bug, and it is the whole of the "outline".** In mode 3 the
-post pass fogs every pixel by its DEPTH against `sky.w`, the terrain's view
-distance — a few hundred blocks. The deck stands hundreds of blocks up and
-runs to the horizon, so every cloud pixel is past that and `haze` saturates:
-the deck is replaced by flat sky, whatever it was. `clouds.wgsl` then fogs
-AGAIN on its own, against the same `sky.w`, so modes 1 and 2 wash out too.
-Rendered with the fog a player actually has (`set_sky(sky, 256)`), the sky
-is empty:
+`a_deck_past_the_terrains_fog_is_still_drawn_in_every_mode` is the gate for
+the bug: at a 256-block view distance, in every lighting mode, the deck
+keeps at least seven tenths of its pixels and half of its contrast. The rest
+of the acceptance is a person's to judge, so
+`pictures_of_the_deck_for_the_designers_eye` writes Weather's deck from the
+four views in every mode at that view distance:
 
-![the fog erases the deck](tiamat_weather/cloud-fog-2026-09-22.png)
+```
+TIAMAT_CLOUD_PICTURES=<dir> cargo test -p client --test screenshot \
+    pictures_of_the_deck -- --ignored --nocapture
+```
 
-Top and third rows: engine 9c4e120 at a 256-block view distance, fair and
-storm — the deck is gone. Second and fourth: the prototype. The harness's
-own default was `100_000`, which is why no cloud test has ever shown this.
+**What did not land.** `Quality::resolution_scale` is not wired to
+anything: the pass draws into the frame's own target at full size, so the
+prototype's "Normal at half resolution" changed a number nobody read, and
+the saving that step measured came from the pixel target beside it. Drawing
+the deck into a half-size target and resolving it — depth included, so
+fluid and particles still sort against it — is its own piece of work, and
+it is still owed. The constant's doc says so.
 
-### The ask
-
-1. **A cloud pixel is not fogged as terrain.** Cloud is seen through air, not
-   through the terrain's fog, and it carries its own aerial perspective. In
-   the prototype the cloud pass marks its hits (alpha 0 — the pass is opaque,
-   so it can write alpha and replace rather than blend) and the post pass
-   leaves those pixels alone. A stencil bit or a second target would do as
-   well; what matters is that the post fog can tell. **Its own haze**, in
-   `clouds.wgsl`, is then against the deck's own reach (`quality.x`) rather
-   than `sky.w`, and capped at 0.7 — cloud never loses all its contrast.
-2. **A base is flat per HEAP, not per deck.** One plane sheared through every
-   cloud in the sky is the crop. Each heap sits at its own level (a hash,
-   ±0.15 of the thickness), its underside lifts towards its own rim
-   (`0.10 * rim^2`), and the small scale ruffles it near the camera. None of
-   it is a function of the field, so the terracing W12 removed cannot return.
-3. **A heap is not a circle and not the same dome as its neighbour.** One
-   more hash per candidate gives a long axis (`stretch`, ±20 %), its own
-   crown exponent (`pow(1 - d^2, 0.34..0.64)`, so some are pancakes and some
-   are towers) and its own height. This is where the variation lives; another
-   octave of noise would not do it.
-
-### The optimisation pass
-
-Measured at 1920 x 1080, Beautiful, Normal quality, Weather's deck, in the
-same harness. A bare sky is 1.70 ms; the numbers below are the DECK's own
-cost above that, in the four views:
-
-| | level | up | side | above |
-|---|---|---|---|---|
-| prototype, as first written | 1.50 | 2.06 | 1.77 | 2.15 |
-| + shadow cull, + cell rejection | 1.35 | 1.78 | 1.58 | 1.90 |
-| + pixel target 9, + half-res Normal | 1.13 | 1.56 | 1.33 | 1.58 |
-
-- **The self-shadow is six field lookups per cloud pixel**, and it is depth
-  rather than detail: past a kilometre it moves a pixel or two of grey. Faded
-  with distance and skipped beyond twice the detail reach.
-- **A candidate cell that cannot reach the column is rejected before it is
-  hashed.** The nearest corner of the cell against the widest a heap can be:
-  two subtractions against a hash's four rounds, over nine cells, in both the
-  heap search and the detail search.
-- **The pixel target from 6 to 9** and **Normal at half resolution** are the
-  designer's own call ("I'd be fine with them being lower resolution too")
-  and are the biggest of the three. The pair is pictured — they are hard to
-  tell apart at a glance:
-
-  ![full against optimised](tiamat_weather/cloud-optimised-2026-09-22.png)
-
-The patch with all of it is
-`tiamat_weather/cloud-fog-shape-prototype-2026-09-22.patch`, against
-9c4e120. As always: a sketch to measure against, not a patch to merge. It
-does not touch W13's genera, which are still open and still wanted.
-
-**Acceptance.** At a 256-block view distance in every lighting mode, a
-screenshot of the deck shows cubes, shading and the sun's edge — not a
-silhouette. The bases of a bank sit at different levels and lift at their
-rims. Two heaps beside each other differ in outline and in crown. The deck's
-own cost does not rise over what it is today.
+**Cost, measured here, and not the last word.** On Mesa's llvmpipe at
+320 x 240, Beautiful, Normal quality, Weather's deck, median of five
+interleaved runs, the deck's own cost over a bare sky went from
+1.20 / 1.83 / 4.04 ms (level / 30 degrees up / above the deck) to
+1.85 / 3.14 / 8.83. The pixel target and the culls pay here too, but the
+slab the march clips to grew by the tallest heap and the highest floor —
+the prototype kept the old ceiling and clipped the tallest crowns flat from
+above; this does not — and a software rasteriser charges for the branches
+in the heap search in a way a GPU does not. The designer's own GPU numbers
+for this design showed a saving, so the acceptance is theirs to measure;
+the constants at the top of `clouds.wgsl` are where the trade sits.
 
 ## W13. Cloud genera: cumulus, stratocumulus, altocumulus, cumulonimbus (2026-09-19, revised)
 

@@ -341,7 +341,18 @@ fn graded(colour: vec3<f32>) -> vec3<f32> {
 // The last pass: scene plus bloom, fogged, exposed, tonemapped and graded.
 @fragment
 fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
-    let scene = textureSample(source, source_sampler, input.uv).rgb;
+    let source_texel = textureSample(source, source_sampler, input.uv);
+    let scene = source_texel.rgb;
+    // **A cloud pixel is not fogged as terrain** (weather ask W15). The cloud
+    // pass marks its pixels with an alpha of `CLOUD_MARK`, 0 — see
+    // `clouds.wgsl` — because fogged by its depth a cloud is hundreds of
+    // blocks up and kilometres out, past the terrain's fog, and every one
+    // came out flat sky. Cloud carries its own aerial perspective, so here it
+    // is fogged as the SKY beside it is: a place's fog along the sky's reach,
+    // and none of the distance fog. Something blended over a cloud pixel
+    // afterwards — a particle, a fluid's surface — raises the alpha and takes
+    // its share of the terrain's fog with it.
+    let is_cloud = 1.0 - clamp(source_texel.a, 0.0, 1.0);
     let glow = textureSample(bloom, source_sampler, input.uv).rgb;
     // Added rather than mixed: bloom is light that scattered on its way to the
     // eye, so it arrives IN ADDITION to what the surface sent. Mixing would
@@ -354,7 +365,12 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // shader skips its fog in this mode so the two do not stack.
     // A place's fog first, and the sky's over it — the order `world.wgsl`
     // applies them in, for the reason it gives.
-    let point = scene_point(vec2<i32>(input.clip.xy), input.uv);
+    let scene_at = scene_point(vec2<i32>(input.clip.xy), input.uv);
+    // A cloud's point is where the SKY's would be: as far along its ray as a
+    // place's fog is taken to reach. Selected rather than mixed, because the
+    // sky's point is a normalised direction and a pixel on the near plane has
+    // none to normalise.
+    let point = select(scene_at, normalize(scene_at) * SKY_FOG_REACH, is_cloud > 0.5);
     let misted = place_fog(lit, point, length(point));
     // The same ellipsoid and power curve `world.wgsl` uses, and it has to be
     // the same or a player switching lighting mode would watch the weather
@@ -365,7 +381,7 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     let vertical = abs(point.y) / max(post.fog_up, 0.001);
     let reach = sqrt(sideways * sideways + vertical * vertical);
     let haze = pow(clamp(reach, 0.0, 1.0), curve);
-    let fogged = mix(misted, scattered_fog(input.uv), haze);
+    let fogged = mix(mix(misted, scattered_fog(input.uv), haze), misted, is_cloud);
 
     // Graded last, on the display-referred result. The table's domain is 0..1
     // and this is where the frame first lives in it: grading before the tonemap

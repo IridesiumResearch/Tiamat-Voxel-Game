@@ -5845,6 +5845,217 @@ fn how_long_the_deck_costs_from_three_views() {
 }
 
 #[test]
+fn a_deck_past_the_terrains_fog_is_still_drawn_in_every_mode() {
+    // **Weather ask W15, the bug half.** A deck stands hundreds of blocks up
+    // and runs to the horizon, and the world's fog is total at the view
+    // distance — a few hundred blocks. Mode 3's post chain fogged every pixel
+    // by its depth against that, so every cloud past the terrain's fog was
+    // replaced with flat sky; and the cloud pass hazed against the same
+    // distance on its own, so modes 1 and 2 washed out too. The harness's own
+    // default view distance was 100 000, which is why no cloud test had ever
+    // shown it. Rendered with the fog a player actually has, the sky was
+    // empty — the designer's "only an outline".
+    //
+    // Cloud is seen through air, not through the terrain's fog: the deck
+    // carries its own aerial perspective at its own scale, and the post chain
+    // leaves its pixels alone. So the deck seen at a 256-block view distance
+    // must keep most of the cloud, and most of the contrast within it, that
+    // it has with the fog pushed past everything. The count says the deck is
+    // drawn; the contrast says it has faces and shading in it rather than
+    // being a silhouette.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let deck = client::render::clouds::Deck {
+            layer: Some(low_deck()),
+            clouds: Some(tiamat_core::atmosphere::Clouds {
+                cover: 0.55,
+                darkness: 0.0,
+                base: None,
+                ease_ticks: 0,
+            }),
+            quality: client::render::clouds::Quality::Normal,
+            seed: 4242,
+        };
+
+        // Each view distance twice, with the deck and without it: cloud is
+        // whatever the deck changed. `is_sky` cannot say, because from below
+        // the shaded undersides Classic and Beautiful draw are the sky's own
+        // tint, and a classifier that counted only the sunlit faces would
+        // call an honest picture empty.
+        let mut both = |far: f32| {
+            renderer.set_sky(client::render::sky_colour(), far);
+            renderer.set_clouds(deck.clone());
+            let with = target.capture(&mut renderer, &skyward()).expect("capture");
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer: None,
+                ..deck.clone()
+            });
+            let without = target.capture(&mut renderer, &skyward()).expect("capture");
+            cloud_in(&with, &without)
+        };
+        let (far_cloud, far_contrast) = both(100_000.0);
+        let (near_cloud, near_contrast) = both(256.0);
+        println!(
+            "{mode:?}: cloud pixels {far_cloud} with the fog past everything, {near_cloud} \
+             at 256 blocks; contrast {far_contrast:.3} against {near_contrast:.3}"
+        );
+        assert!(
+            far_cloud > 2000,
+            "in {mode:?} the frame with no fog has only {far_cloud} cloud pixels in it, so \
+             nothing below would be measuring the fog"
+        );
+        assert!(
+            near_cloud as f32 >= far_cloud as f32 * 0.7,
+            "in {mode:?} a 256-block view distance took the deck away: {near_cloud} cloud \
+             pixels against {far_cloud} with the fog past everything"
+        );
+        assert!(
+            near_contrast >= far_contrast * 0.5,
+            "in {mode:?} a 256-block view distance flattened the deck to a silhouette: a \
+             contrast of {near_contrast:.3} against {far_contrast:.3} with the fog past \
+             everything"
+        );
+    }
+}
+
+/// How many pixels of the upper half of a frame the deck changed, and how much
+/// those vary in brightness.
+///
+/// `with` and `without` are the same view with and without the deck, so cloud
+/// is every pixel that differs between them by more than a rounding step. The
+/// spread of brightness across those pixels is faces and shading; a
+/// silhouette has none.
+fn cloud_in(with: &Image, without: &Image) -> (usize, f32) {
+    let mut lumas = Vec::new();
+    for y in 0..HEIGHT / 2 {
+        for x in 0..WIDTH {
+            let (Some(pixel), Some(bare)) = (with.pixel(x, y), without.pixel(x, y)) else {
+                continue;
+            };
+            if (0..3).all(|channel| pixel[channel].abs_diff(bare[channel]) <= 2) {
+                continue;
+            }
+            let colour = [
+                f32::from(pixel[0]) / 255.0,
+                f32::from(pixel[1]) / 255.0,
+                f32::from(pixel[2]) / 255.0,
+            ];
+            lumas.push(0.2126 * colour[0] + 0.7152 * colour[1] + 0.0722 * colour[2]);
+        }
+    }
+    if lumas.is_empty() {
+        return (0, 0.0);
+    }
+    let count = lumas.len() as f32;
+    let mean = lumas.iter().sum::<f32>() / count;
+    let variance = lumas
+        .iter()
+        .map(|luma| (luma - mean) * (luma - mean))
+        .sum::<f32>()
+        / count;
+    (lumas.len(), variance.sqrt())
+}
+
+#[test]
+#[ignore = "pictures for a person to look at, not a gate; run with --ignored --nocapture"]
+fn pictures_of_the_deck_for_the_designers_eye() {
+    // **Weather ask W15's other half is perceptual.** That a bank's bases sit
+    // at different levels and lift at their rims, that two heaps beside each
+    // other differ in outline and crown, that the deck at a real view distance
+    // shows cubes and shading and the sun's edge — no assertion can pass
+    // those, and a test that claimed to would be a test that lied. What a
+    // test CAN do is put the pictures where a person can look: Weather's own
+    // deck, at the fog a player actually has, in every lighting mode, from the
+    // four views the designer's own harness used.
+    //
+    // Writes into `TIAMAT_CLOUD_PICTURES` and does nothing without it, so it
+    // never litters a checkout by accident.
+    let Some(dir) = std::env::var_os("TIAMAT_CLOUD_PICTURES") else {
+        println!("set TIAMAT_CLOUD_PICTURES to a directory to write the pictures");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("the pictures directory");
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let (width, height) = (960, 540);
+
+    let views: [(&str, f64, f32, f32); 4] = [
+        ("level", 40.0, 0.0, 0.0),
+        ("up", 40.0, 0.0, 0.52),
+        ("side", 40.0, 1.57, 0.0),
+        ("above", 640.0, 0.0, -0.6),
+    ];
+    let weathers = [("fair", 0.55, 0.0), ("storm", 0.85, 0.7)];
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        let mut renderer =
+            Renderer::new(gpu.clone(), RenderMode::Textured, width, height).expect("renderer");
+        renderer.set_atlas(&Atlas::build(&[
+            None,
+            None,
+            Some(Image::white_with_border()),
+        ]));
+        upload(&mut renderer, &chunks);
+        renderer.set_lighting_mode(mode);
+        renderer.set_sky(client::render::sky_colour(), 256.0);
+        let target = Offscreen::new(renderer.gpu(), width, height);
+        for (weather, cover, darkness) in weathers {
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer: Some(tuned_deck()),
+                clouds: Some(tiamat_core::atmosphere::Clouds {
+                    cover,
+                    darkness,
+                    base: None,
+                    ease_ticks: 0,
+                }),
+                quality: client::render::clouds::Quality::Normal,
+                seed: 4242,
+            });
+            for (view, camera_height, yaw, pitch) in views {
+                let mut camera = Camera {
+                    position: Position::from_world(24.0, camera_height, 20.0),
+                    ..Camera::default()
+                };
+                camera.look(yaw, pitch);
+                let frame = target.capture(&mut renderer, &camera).expect("capture");
+                let name = format!("{mode:?}-{weather}-{view}.png").to_lowercase();
+                write_png(&dir.join(&name), &frame);
+                println!("wrote {}", dir.join(name).display());
+            }
+        }
+    }
+}
+
+/// Writes a captured frame as a PNG, for a person rather than an assertion.
+fn write_png(path: &std::path::Path, image: &Image) {
+    let mut bytes = Vec::with_capacity((image.width * image.height * 4) as usize);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            bytes.extend_from_slice(&image.pixel(x, y).unwrap_or([0, 0, 0, 255]));
+        }
+    }
+    let file = std::fs::File::create(path).expect("create the picture");
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), image.width, image.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("png header");
+    writer.write_image_data(&bytes).expect("png data");
+}
+
+#[test]
 #[ignore = "a measurement, not a gate; run with --ignored --nocapture"]
 fn how_long_a_cloud_frame_takes() {
     // **A probe, not a gate.** This runs under llvmpipe, which is software

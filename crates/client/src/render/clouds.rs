@@ -19,6 +19,16 @@
 //! directions — high ground can reach into the deck, and a player above it
 //! looks down on the tops — and drawing it before the transparent things means
 //! those still sort against the clouds.
+//!
+//! # What it writes in alpha
+//!
+//! Not coverage: the pass is opaque. Its alpha is a MARK for the post chain —
+//! `CLOUD_MARK` on cloud, `SKY_MARK` on sky, in `clouds.wgsl` — so that mode
+//! 3's fog, which goes by depth against the terrain's view distance, can
+//! leave cloud alone: a deck is hundreds of blocks up and kilometres out, and
+//! fogged as terrain it was flat sky (weather ask W15). The float target
+//! keeps the mark and the surface pipeline masks it off, because a
+//! swapchain's alpha is the window's.
 
 use tiamat_core::atmosphere::{CloudLayer, Clouds};
 
@@ -90,6 +100,12 @@ impl Quality {
     /// decision before it is a cost one: a quarter-resolution deck scaled up
     /// softens and shimmers at exactly the edges the references are made of.
     /// Full resolution wherever the mode can show the difference.
+    ///
+    /// **Not yet wired.** The pass draws into the frame's own target at its
+    /// full size; this is the share a half-resolution target would take when
+    /// one is built. Weather ask W15 asked for `Normal` at half — the
+    /// designer's own call — and it is still owed: the saving that pass
+    /// measured came from the pixel target, which the march reads.
     #[must_use]
     pub const fn resolution_scale(self) -> f32 {
         match self {
@@ -242,8 +258,8 @@ impl Pass {
             }],
         });
         Self {
-            direct: pipeline(gpu, &shader, &layout, gpu.surface_format()),
-            hdr: pipeline(gpu, &shader, &layout, graph::HDR_FORMAT),
+            direct: pipeline(gpu, &shader, &layout, gpu.surface_format(), false),
+            hdr: pipeline(gpu, &shader, &layout, graph::HDR_FORMAT, true),
             uniforms,
             bind,
             draws: false,
@@ -394,11 +410,16 @@ impl Pass {
 /// Depth is TESTED and WRITTEN, unlike the particle pass: a cloud is a solid
 /// surface at a real distance, and everything drawn after it has to sort
 /// against it.
+///
+/// `marks` is whether alpha is written: the float target keeps the cloud mark
+/// for the post chain, and the surface — whose alpha is the window's — does
+/// not get it.
 fn pipeline(
     gpu: &Gpu,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    marks: bool,
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = gpu
         .device
@@ -423,8 +444,17 @@ fn pipeline(
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::COLOR,
+                    // **Opaque.** Every fragment the pass keeps replaces what
+                    // was under it — sky, cloud, or the fog inside one — so
+                    // there is nothing to blend, and its alpha is a mark
+                    // rather than coverage (see `clouds.wgsl`). Blending by
+                    // that mark would make every cloud invisible.
+                    blend: None,
+                    write_mask: if marks {
+                        wgpu::ColorWrites::ALL
+                    } else {
+                        wgpu::ColorWrites::COLOR
+                    },
                 })],
             }),
             primitive: wgpu::PrimitiveState {

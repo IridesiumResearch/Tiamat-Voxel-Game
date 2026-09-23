@@ -237,6 +237,37 @@ fn empty_column() -> Column {
     return column;
 }
 
+// What tells one heap from its neighbours — weather ask W15. A bank of
+// identical hemispheres on one plane reads as a crop with a flat bottom; the
+// numbers below come from one more hash per candidate heap and vary a bank
+// far more than another octave of noise would.
+//
+// How far a heap's long axis is stretched, as a share either way.
+const HEAP_STRETCH: f32 = 0.2;
+// The crown's shape, as a blend from the quarter power of `1 - d^2` — a
+// fuller, flatter-topped bun — to the three-quarter power, a pointed heap;
+// halfway is about a hemisphere. The blend alone makes one cloud a pancake
+// and the next a tower.
+const CROWN_FLATTEST: f32 = 0.18;
+const CROWN_RANGE: f32 = 0.6;
+// A heap's own height, as a share of what the deck would give it.
+const HEIGHT_LEAST: f32 = 0.78;
+const HEIGHT_RANGE: f32 = 0.44;
+// Where a heap's floor sits, as a share of the deck's thickness over its
+// base: `(hash - SIT_CENTRE) * SIT_RANGE`, a little under and rather more
+// over. Per HEAP rather than per column, which is what keeps the terracing
+// W12 removed from coming back: nothing here is a function of the field.
+const SIT_RANGE: f32 = 0.15;
+const SIT_CENTRE: f32 = 0.4;
+// How far the underside lifts towards a heap's own rim, as a share of the
+// thickness times the square of the distance from the crown, and how much a
+// strong heap's floor rises with it.
+const UNDER_LIFT: f32 = 0.10;
+const UNDER_SWELL: f32 = 0.03;
+// How deep the small cubes ruffle the underside where the camera is close
+// enough to see them, in small cubes.
+const UNDER_RUFFLE: f32 = 0.6;
+
 // The field at one column of the grid.
 //
 // # Heaps, not a thresholded height field
@@ -286,14 +317,27 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
 
     let spacing = 0.42;
     let home = floor(at / spacing);
+    let local = at / spacing;
     var crown = 0.0;
     var tall = 0.0;
+    var sits = 0.0;
+    var swell = 0.0;
+    // The widest a heap can be, in cells: its largest radius, stretched, less
+    // the margin its point keeps from its cell's edge. A candidate cell whose
+    // edge is further from this column than that cannot reach it whatever its
+    // hashes say, and finding that out is two subtractions against the four
+    // rounds a hash costs — in every column of every ray (ask W15).
+    let reach = (0.30 + 0.38) * (1.0 + HEAP_STRETCH) - 0.15;
     // The nine cells a heap could reach this column from. Three by three
     // because a heap's radius may exceed its own cell — which is what lets
     // neighbouring heaps merge into a bank rather than sitting in a grid.
     for (var j = -1; j <= 1; j = j + 1) {
         for (var i = -1; i <= 1; i = i + 1) {
             let id = home + vec2<f32>(f32(i), f32(j));
+            let gap = abs(local - (id + 0.5)) - 0.5;
+            if (max(gap.x, gap.y) > reach) {
+                continue;
+            }
             // **One hash for the roll, not a noise lookup.** A value noise
             // here is four hashes and an interpolation for a number that only
             // has to differ per heap, and the smooth field it would give is
@@ -319,16 +363,44 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
             let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
             let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
             let radius = spacing * (0.30 + 0.38 * sqrt(strength));
-            let d = length(at - point) / radius;
+            // The cheap question first: is this column within the widest the
+            // heap could be, stretched? Most candidates are not, and the hash
+            // below would be spent on a miss.
+            let offset = at - point;
+            let widest = radius * (1.0 + HEAP_STRETCH);
+            if (dot(offset, offset) > widest * widest) {
+                continue;
+            }
+            // A heap is not a circle and not the same dome as its neighbour.
+            // One more hash gives it a long axis, a crown of its own, a height
+            // of its own and a floor of its own — the constants above say how
+            // much of each.
+            let shape = hash4(id, seed + 67.0);
+            let stretch = vec2<f32>(
+                1.0 + 2.0 * HEAP_STRETCH * (shape.x - 0.5),
+                1.0 - 2.0 * HEAP_STRETCH * (shape.x - 0.5),
+            );
+            let d = length(offset / stretch) / radius;
             if (d < 1.0) {
-                let h = sqrt(1.0 - d * d);
+                // The crown, from flat bun to pointed heap. **Not `pow`**,
+                // which is a log and an exp for every candidate on every step
+                // of every ray, and measured at twice the deck's whole cost:
+                // two square roots give the quarter and three-quarter powers
+                // and the heap's own number blends between them.
+                let dome = 1.0 - d * d;
+                let root = sqrt(dome);
+                let quarter = sqrt(root);
+                let h = mix(quarter, root * quarter, CROWN_FLATTEST + CROWN_RANGE * shape.y);
                 if (h > crown) {
                     crown = h;
                     // Towers are a SHARE of heaps grown taller, not a second
                     // interval floating over a gap: the gap made shelves,
                     // which read as noise for the same reason the terraces
                     // did.
-                    tall = 0.45 + 0.55 * strength + towers * select(0.0, 1.2, roll.w > 0.7);
+                    tall = (0.45 + 0.55 * strength) * (HEIGHT_LEAST + HEIGHT_RANGE * shape.z)
+                        + towers * select(0.0, 1.2, roll.w > 0.7);
+                    sits = (shape.w - SIT_CENTRE) * SIT_RANGE;
+                    swell = strength;
                 }
             }
         }
@@ -347,10 +419,18 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     // that cannot move a cube.
     if (detail_mix * crown > 0.12) {
         let small = spacing * 0.25;
-        let near = floor(at / small);
+        let home_small = floor(at / small);
+        let local_small = at / small;
         for (var j = -1; j <= 1; j = j + 1) {
             for (var i = -1; i <= 1; i = i + 1) {
-                let id = near + vec2<f32>(f32(i), f32(j));
+                let id = home_small + vec2<f32>(f32(i), f32(j));
+                // The same rejection as the heap search, at this scale: a
+                // puff reaches three quarters of a cell from a point that
+                // keeps a fifth of a cell from its edge.
+                let gap = abs(local_small - (id + 0.5)) - 0.5;
+                if (max(gap.x, gap.y) > 0.75 - 0.2) {
+                    continue;
+                }
                 let jitter = hash4(id, seed + 21.0);
                 let point = (id + 0.2 + 0.6 * jitter.xy) * small;
                 let d = length(at - point) / (small * 0.75);
@@ -360,10 +440,24 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     }
 
     var column: Column;
-    // **The base is flat, always.** It is where players see the deck from, and
-    // a base that followed the field was the whole of the terracing.
-    let top = base + thickness * 0.55 * tall * (crown + 0.22 * puff * detail_mix * crown);
-    column.lower = vec2<f32>(base, max(top, base + clouds.colour.w));
+    // **A base is flat per HEAP, not per deck** (ask W15). One plane sheared
+    // through every cloud in the sky was the "sharp flat crop" the designer
+    // saw. Each heap sits at its own level, its underside lifts towards its
+    // own rim, and the small scale ruffles it where the camera is close
+    // enough to see; the constants say how much. None of it is a function of
+    // the FIELD, which is what terraced W12's undersides, so the terracing
+    // cannot come back.
+    let floor_y = base + thickness * sits;
+    let top = floor_y + thickness * 0.55 * tall * (crown + 0.22 * puff * detail_mix * crown);
+    let rim = 1.0 - crown;
+    let under = floor_y + thickness * (UNDER_LIFT * rim * rim + UNDER_SWELL * swell)
+        - clouds.shade.w * UNDER_RUFFLE * puff * detail_mix;
+    // Never thinner than one small cube, and never lower than one large cube
+    // over its own floor.
+    column.lower = vec2<f32>(
+        min(under, top - clouds.shade.w),
+        max(top, floor_y + clouds.colour.w),
+    );
     column.upper = vec2<f32>(0.0, -1.0);
     column.density = crown;
     column.darkness = weather.y;
@@ -515,15 +609,20 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     // The slab the whole deck lives in, so a ray that never reaches it costs
     // nothing.
     //
-    // **Tight against what the field can actually reach.** The base is flat,
-    // so nothing is below it at all; the tallest a column can rise is the
-    // tallest heap times the most the detail can add. The old bound allowed
-    // for an anvil floating above a gap, a shape this field no longer makes —
-    // and it left every ray marching two hundred blocks of empty slab, which
+    // **Tight against what the field can actually reach.** The lowest a
+    // heap's floor can sit, less the deepest a ruffle can bite, is the
+    // bottom; the highest a floor can sit, plus the tallest heap times the
+    // most the detail can add, is the top. An older bound allowed for an
+    // anvil floating above a gap, a shape this field no longer makes — and
+    // it left every ray marching two hundred blocks of empty slab, which
     // cost most in exactly the view that was already worst: from above the
-    // deck, where every pixel marches.
-    let deck_low = base;
-    let deck_high = base + thickness * 0.55 * (1.0 + towers * 1.2) * 1.25 + cell0;
+    // deck, where every pixel marches. `column_at` spends each of these
+    // terms.
+    let sits_low = thickness * SIT_RANGE * SIT_CENTRE + clouds.shade.w * UNDER_RUFFLE;
+    let sits_high = thickness * SIT_RANGE * (1.0 - SIT_CENTRE);
+    let tallest = HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2;
+    let deck_low = base - sits_low;
+    let deck_high = base + sits_high + thickness * 0.55 * tallest * 1.25 + cell0;
     var t_enter = 0.0;
     var t_leave = far;
     if (abs(direction.y) < 0.00001) {
@@ -560,10 +659,12 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     // drawn — only aliased, because neighbouring columns differ by a whole
     // cell wherever the detail bites.
     //
-    // **Six, not three.** Three was measured by nobody; six was, at 960 x 540,
-    // and nothing visible was lost. The difference is a factor of two in cells
-    // walked along every ray.
-    let want = 6.0;
+    // **Nine, from six, from three.** Three was measured by nobody; six was,
+    // at 960 x 540, and nothing visible was lost; nine is the designer's own
+    // call in ask W15 — pictured against six and hard to tell apart — and
+    // the largest saving of that pass, a third fewer cells walked along
+    // every ray.
+    let want = 9.0;
     var cell = grid_for(base_cell, t_enter, want);
     out.cell = cell;
 
@@ -714,6 +815,23 @@ fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     return colour;
 }
 
+// What the colour's alpha means: a MARK, not coverage. The pass is opaque —
+// every fragment it keeps replaces what was under it — and the alpha says
+// which of its two things a pixel is, for the post chain's sake (ask W15).
+// Mode 3 fogs every pixel by its depth against the terrain's view distance,
+// and a cloud is hundreds of blocks up and kilometres out, so fogged as
+// terrain every cloud past the view distance was flat sky. The cloud carries
+// its own aerial perspective below; marked, the post chain fogs it as the
+// sky beside it instead. The float target keeps the mark and the surface
+// pipeline masks it off, because a swapchain's alpha is the window's.
+const CLOUD_MARK: f32 = 0.0;
+const SKY_MARK: f32 = 1.0;
+
+// The most of a cloud's contrast its own haze may take. Cloud is seen
+// through air, and never loses all of it; only the last stretch before the
+// deck's reach fades the rest of the way, so the reach is not a line.
+const HAZE_MOST: f32 = 0.7;
+
 struct Painted {
     @location(0) colour: vec4<f32>,
     @builtin(frag_depth) depth: f32,
@@ -740,7 +858,7 @@ fn fragment_main(in: Varyings) -> Painted {
     let here = column_at(floor(origin.xz / cell) * cell + cell * 0.5, 1.0);
     if (inside(here, origin.y)) {
         let tint = mix(clouds.colour.xyz * clouds.sun.xyz, clouds.shade.xyz, 0.5);
-        out.colour = vec4<f32>(mix(tint, clouds.sky.xyz, 0.4), 0.92);
+        out.colour = vec4<f32>(mix(tint, clouds.sky.xyz, 0.4), CLOUD_MARK);
         // Far, so the haze never occludes the world: it is weather, not a
         // surface. Terrain seen from inside a cloud is not tinted by this and
         // that is a known gap rather than a decision.
@@ -759,7 +877,7 @@ fn fragment_main(in: Varyings) -> Painted {
         // **Painted, not discarded.** Half of each reference image is sky, and
         // a flat fill behind perfect cubes would not read like them. At the far
         // plane, so anything in the world is in front of it.
-        out.colour = vec4<f32>(sky_along(direction), 1.0);
+        out.colour = vec4<f32>(sky_along(direction), SKY_MARK);
         out.depth = 1.0;
         return out;
     }
@@ -789,8 +907,18 @@ fn fragment_main(in: Varyings) -> Painted {
     if (mode >= 2.0) {
         // Self-shadow: the inside of a heap is darker than its rim because
         // cloud above and sunward of it is in the way.
-        let shadow = sun_shadow(found.position, cell);
-        lit = lit * (1.0 - 0.55 * shadow);
+        //
+        // **Six more field lookups for every cloud pixel**, and it is depth
+        // rather than detail: past a kilometre it moves a pixel or two of
+        // grey (ask W15). Faded with distance and skipped beyond twice the
+        // detail's reach, which is most of the sky in the views that cost
+        // most.
+        let shadow_reach = max(clouds.quality.y * 2.0, 1.0);
+        if (found.t < shadow_reach) {
+            let near = 1.0 - found.t / shadow_reach;
+            let shadow = sun_shadow(found.position, cell);
+            lit = lit * (1.0 - 0.55 * shadow * near);
+        }
         // The low-sun rim. Grazing angles near the sun light up along a
         // silhouette, which is most of what reads as "golden hour".
         let grazing = 1.0 - abs(dot(normal, direction));
@@ -823,14 +951,28 @@ fn fragment_main(in: Varyings) -> Painted {
 
     // Aerial perspective: distant cloud loses contrast into the horizon. Free,
     // because the march already knows how far away the hit is.
-    let haze = clamp(found.t / max(clouds.sky.w, 1.0), 0.0, 1.0);
-    let painted = mix(lit, clouds.sky.xyz, haze * haze);
+    //
+    // **At the DECK's scale, not the terrain's** (ask W15). `sky.w` is where
+    // the world's fog is total — the view distance, a few hundred blocks —
+    // and the deck stands hundreds of blocks up and runs to the horizon, so
+    // measured against that every cloud past the terrain's fog was painted
+    // flat sky: from the ground the whole deck read as an outline with
+    // nothing inside it. Cloud is seen through air, not through fog. Its
+    // haze runs to the deck's own reach and takes at most `HAZE_MOST` of the
+    // contrast, so distant cloud still has faces in it.
+    let haze_far = max(reach, max(clouds.sky.w, 1.0) * 4.0);
+    let haze = clamp(found.t / haze_far, 0.0, 1.0);
+    let hazed = mix(lit, clouds.sky.xyz, HAZE_MOST * haze * haze);
+    // The last stretch before the reach fades the rest of the way, whatever
+    // the fog is doing, so the deck's edge is not a line across the sky.
+    let edge = smoothstep(0.85, 1.0, found.t / max(reach, 1.0));
+    let painted = mix(hazed, clouds.sky.xyz, edge);
 
     // The hit's depth, so clouds sort against terrain in BOTH directions. High
     // ground can reach into the deck and a player above it looks down on the
     // tops; a pass that only drew behind the world would be wrong at both.
     let clip = clouds.view_projection * vec4<f32>(found.position - origin, 1.0);
     out.depth = clamp(clip.z / max(clip.w, 0.0001), 0.0, 1.0);
-    out.colour = vec4<f32>(painted, 1.0);
+    out.colour = vec4<f32>(painted, CLOUD_MARK);
     return out;
 }
