@@ -18,6 +18,7 @@ use client::cache::ContentCache;
 use client::config::{Config, RenderMode};
 use client::net::Connection;
 use client::render::{Gpu, Renderer};
+use tiamat_core::ChunkPos;
 use tiamat_core::identity::{Allowlist, Identity};
 use tiamat_core::interest::ViewDistance;
 use tiamat_server::transport::Impairment;
@@ -112,6 +113,37 @@ fn client(name: &str, server: &ServerHandle, gpu: Gpu) -> App {
 /// unpaced loop runs the client far ahead of the server, the replay re-derives
 /// everything from the client's own intents, and the divergence reads zero
 /// however wrong the client is.
+/// The longest a frame may take before the correction bound stops being
+/// evidence, in seconds — see `abilities.rs`, which says why: past this the
+/// client is behind real time, the next server state is ahead of anything it
+/// predicted, and the correction that follows would be there whatever the
+/// client stepped with. Seen on macOS CI as 0.365 cells of correction on ice.
+const LONGEST_HONEST_FRAME: f32 = 0.25;
+
+/// The chunk columns within `radius` of the body that the client does not
+/// hold yet, at the body's own level and the one under its feet — taxicab, the
+/// interest set's own shape. An absent chunk reads as solid to prediction, so
+/// a slide that starts before the ice ahead has arrived is stopped by a wall
+/// the server does not have. See `abilities.rs`.
+fn missing_ground_around(app: &App, radius: i32) -> Vec<ChunkPos> {
+    let here = app.camera().position.chunk;
+    let mut missing = Vec::new();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx.abs() + dz.abs() > radius {
+                continue;
+            }
+            for dy in [0, -1] {
+                let pos = ChunkPos::new(here.x + dx, here.y + dy, here.z + dz);
+                if app.store().get(pos).is_none() {
+                    missing.push(pos);
+                }
+            }
+        }
+    }
+    missing
+}
+
 fn run_frames(app: &mut App, input: Input, seconds: f32, done: impl Fn(&App) -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs_f32(seconds);
     let mut last = Instant::now();
@@ -146,6 +178,15 @@ fn a_player_on_ice_predicts_the_slide_the_server_applies() {
         "expected to join; warnings: {:?}",
         app.warnings()
     );
+    // And the ice the slide will cross, before anything is measured.
+    assert!(
+        run_frames(&mut app, Input::default(), 30.0, |app| {
+            missing_ground_around(app, 1).is_empty()
+        }),
+        "the ice around the spawn never all arrived; the client holds {} and lacks {:?}",
+        app.store().len(),
+        missing_ground_around(&app, 1)
+    );
     // Stand through the join's own disagreement — the fixed spawn is a block
     // above this floor, see `abilities.rs` — and two pacing windows after it.
     run_frames(&mut app, Input::default(), 2.5, |_| false);
@@ -156,12 +197,30 @@ fn a_player_on_ice_predicts_the_slide_the_server_applies() {
     };
     let mut worst = 0.0f32;
     let mut corrected = 0.0f32;
+    // Read beside the two above — see `abilities.rs` for both: a correction
+    // with `unloaded` set is a wall the client invented, and one after a
+    // frame past `LONGEST_HONEST_FRAME` is the runner, not the ice.
+    let mut unloaded = false;
+    let mut longest = 0.0f32;
     let mut watch = |app: &mut App, input: Input, seconds: f32| {
         let deadline = Instant::now() + Duration::from_secs_f32(seconds);
+        let mut last = Instant::now();
         while Instant::now() < deadline {
-            run_frames(app, input, 0.1, |_| false);
+            assert!(
+                app.pump_network(),
+                "the connection ended: {:?}",
+                app.warnings()
+            );
+            app.remesh();
+            let now = Instant::now();
+            let dt = now.duration_since(last).as_secs_f32();
+            last = now;
+            longest = longest.max(dt);
+            app.advance(input, dt.min(0.1));
             worst = worst.max(app.pacing().worst_divergence_cells());
             corrected = corrected.max(app.pacing().worst_correction_cells());
+            unloaded |= app.pacing().predicted_into_unloaded();
+            std::thread::sleep(Duration::from_millis(16));
         }
     };
     // Push off, then let go and glide: the glide is where a client that did
@@ -172,7 +231,9 @@ fn a_player_on_ice_predicts_the_slide_the_server_applies() {
     let glided = app.server_travelled() - released;
     println!(
         "on ice: pushed {released:.2} blocks, glided {glided:.2} more; worst divergence \
-         {worst:.3} cells, worst correction {corrected:.3}"
+         {worst:.3} cells, worst correction {corrected:.3}, predicted into chunks it had \
+         not received: {unloaded}, longest frame {:.0} ms",
+        longest * 1000.0
     );
 
     // The server slid. On stone a body stops in about half a block.
@@ -180,6 +241,20 @@ fn a_player_on_ice_predicts_the_slide_the_server_applies() {
         glided > 1.5,
         "let go on ice, the server moved the body only {glided:.2} more blocks"
     );
+    // Printed whether it is checked or not, as `abilities.rs` does.
+    if longest > LONGEST_HONEST_FRAME {
+        println!(
+            "SKIPPING the correction bounds: a frame took {:.0} ms, past the {:.0} ms the \
+             client can catch up from, so the server got ahead of anything the client \
+             predicted and the correction says nothing about ice. The slide itself was \
+             asserted above.",
+            longest * 1000.0,
+            LONGEST_HONEST_FRAME * 1000.0
+        );
+        app.shutdown();
+        assert!(server.stop());
+        return;
+    }
     // And the client predicted it. Checked by breaking it: with the client's
     // table left empty, the same run read 1.674 cells of divergence and 0.463
     // of correction against 0.000 and 0.000 here, over the same 5.5-block

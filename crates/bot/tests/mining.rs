@@ -566,15 +566,22 @@ fn a_dig_takes_time_and_yields_the_block_it_broke() {
         );
 
         // Sub-Node Contract §9: a whole block of one material yields 27 units.
-        let carried = bot
-            .await_inventory(Duration::from_secs(10))
-            .await
-            .expect("the drop should be credited");
-        assert!(
-            carried
-                .iter()
-                .any(|stack| stack.material == stone && stack.units == 27),
-            "expected 27 units of stone, got {carried:?}"
+        // **Every unit, not the first update after the break.** The chips are
+        // credited as they come off, an inventory message a tick, and the
+        // message carrying the last of them can still be on its way when the
+        // block is seen to break — on a Windows runner it was, and the first
+        // update read 26 of 27. So this waits for the count the way `the
+        // miner gets it` above does: until it is all there, or too long.
+        for _ in 0..50 {
+            bot.await_inventory(Duration::from_millis(200)).await.ok();
+            if bot.units_of(stone) >= UNITS_PER_BLOCK {
+                break;
+            }
+        }
+        assert_eq!(
+            bot.units_of(stone),
+            UNITS_PER_BLOCK,
+            "expected the whole block's 27 units of stone"
         );
     });
 
