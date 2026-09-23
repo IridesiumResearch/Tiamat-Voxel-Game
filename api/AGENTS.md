@@ -531,7 +531,9 @@ of rain over the next valley.
 **A storm over the next valley is `map` on `set_clouds`** — a coarse grid of
 cover and darkness laid over the world rather than over the player, sampled
 where each ray of the deck passes, with the plain `cover` still answering
-outside the grid. Up to 16 cells a side; at the 256-block squares a weather mod
+outside the grid — and the three genera per cell beside them, each optional,
+so a storm over the next valley has its sheet and its anvil from the clear
+valley beside it. Up to 16 cells a side; at the 256-block squares a weather mod
 tends to evaluate that is four kilometres, which is further than the deck is
 drawn. Values are shares of one and travel as bytes. Without it, a front cannot
 be watched coming: the sky a player sees is overcast everywhere or nowhere.

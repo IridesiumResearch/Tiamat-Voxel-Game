@@ -2362,6 +2362,12 @@ function game.register_clouds(spec) end
 ---Storm light is darkest at a cloud's base and keeps the sun on its tops, so
 ---an anvil catches the light a sheet under it has lost.
 ---
+---The `map` carries the genera per cell too — `stratocumulus`, `altocumulus`
+---and `cumulonimbus` arrays beside `cover`, each optional — so a storm over the
+---next valley has its sheet and its anvil from the clear valley beside it.
+---Inside the grid a cell's five shares replace this player's own; outside it
+---the player's answer, as before.
+---
 ---Returns whether that player was there to tell.
 ---
 ---@param uuid string The player's UUID.
@@ -2387,6 +2393,9 @@ function game.set_clouds(uuid, spec) end
 ---@field size integer How many cells a side, 1 to 16. Sixteen 256-block cells is four kilometres, which is past any view distance the engine serves.
 ---@field cover number[] `size * size` shares of one, row-major by z: `cover[z * size + x + 1]`.
 ---@field darkness number[] The same, for how grey the storm is.
+---@field stratocumulus number[]? The same, for the low sheet; leave it out for none anywhere.
+---@field altocumulus number[]? The same, for the mid-level cloudlets; leave it out for none anywhere.
+---@field cumulonimbus number[]? The same, for towers under anvils; leave it out for none anywhere.
 
 ---There is no `game.register_theme`, and there cannot be.
 ---

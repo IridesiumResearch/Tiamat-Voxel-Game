@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 73;
+pub const PROTOCOL_VERSION: u32 = 74;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 73;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v74 (weather W16): `atmosphere::CloudMap` carries `stratocumulus`,
+// `altocumulus` and `cumulonimbus` per cell, a byte each and empty when a mod
+// sends none, so a storm over the next valley has its sheet and its anvil
+// from the clear valley beside it rather than heaps under a dark haze.
 // v73 (weather W13): `atmosphere::Clouds` carries `stratocumulus`,
 // `altocumulus` and `cumulonimbus`, a share of the sky each, so a mod can send
 // a low sheet, a mackerel sky or towers under anvils rather than more or fewer

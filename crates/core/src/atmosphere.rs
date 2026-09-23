@@ -508,6 +508,19 @@ pub struct CloudMap {
     pub cover: Vec<u8>,
     /// Darkness per cell, the same order. 0 is fair-weather white.
     pub darkness: Vec<u8>,
+    /// Stratocumulus per cell, the same order — or empty for none anywhere.
+    ///
+    /// **Appended for protocol v74, with the two below** — weather ask W16:
+    /// the three genera beside cumulus, so a storm over the next valley has
+    /// its sheet and its anvil from the clear valley beside it, rather than
+    /// forty percent of heaps under a dark haze. Empty rather than `size *
+    /// size` zeros when a mod leaves it out, so a mod that sends today's map
+    /// sends exactly today's sky and today's bytes.
+    pub stratocumulus: Vec<u8>,
+    /// Altocumulus per cell, the same order — or empty for none anywhere.
+    pub altocumulus: Vec<u8>,
+    /// Cumulonimbus per cell, the same order — or empty for none anywhere.
+    pub cumulonimbus: Vec<u8>,
 }
 
 impl CloudMap {
@@ -522,6 +535,9 @@ impl CloudMap {
             && self.cell > 0.0
             && self.cover.len() == cells
             && self.darkness.len() == cells
+            && [&self.stratocumulus, &self.altocumulus, &self.cumulonimbus]
+                .iter()
+                .all(|genus| genus.is_empty() || genus.len() == cells)
     }
 }
 
@@ -542,6 +558,14 @@ pub fn sanitise_cloud_map(mut map: CloudMap) -> Option<CloudMap> {
     }
     let cells = usize::from(map.size) * usize::from(map.size);
     if map.size == 0 || map.cover.len() != cells || map.darkness.len() != cells {
+        return None;
+    }
+    // A genus left out is none anywhere; one the wrong size is a miscount,
+    // like the cover's.
+    if [&map.stratocumulus, &map.altocumulus, &map.cumulonimbus]
+        .iter()
+        .any(|genus| !genus.is_empty() && genus.len() != cells)
+    {
         return None;
     }
     Some(map)
@@ -655,6 +679,9 @@ mod tests {
             size,
             cover: vec![0; cells],
             darkness: vec![0; cells],
+            stratocumulus: Vec::new(),
+            altocumulus: Vec::new(),
+            cumulonimbus: Vec::new(),
         };
         assert!(sanitise_cloud_map(grid(4, 16)).is_some(), "a square grid");
         assert!(sanitise_cloud_map(grid(4, 15)).is_none(), "one cell short");
@@ -676,6 +703,20 @@ mod tests {
         // And the shape the wire checks is the same one.
         assert!(grid(4, 16).is_valid());
         assert!(!grid(4, 15).is_valid());
+
+        // The genera (W16): left out is fine, the right count is fine, and a
+        // miscount is the same miscount as the cover's.
+        let mut stormy = grid(4, 16);
+        stormy.cumulonimbus = vec![255; 16];
+        assert!(stormy.is_valid());
+        assert!(sanitise_cloud_map(stormy).is_some());
+        let mut short = grid(4, 16);
+        short.stratocumulus = vec![0; 15];
+        assert!(!short.is_valid());
+        assert!(
+            sanitise_cloud_map(short).is_none(),
+            "a miscounted genus is dropped"
+        );
     }
 
     #[test]

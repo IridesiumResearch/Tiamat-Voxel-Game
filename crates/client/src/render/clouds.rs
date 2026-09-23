@@ -183,20 +183,27 @@ struct Uniforms {
     /// The three genera beside cumulus — stratocumulus, altocumulus and
     /// cumulonimbus, each a share of the sky — and a spare. Weather ask W13.
     genera: [f32; 4],
+    /// The most of each genus anywhere in the sky this frame — the player's
+    /// own share or the map's highest cell — for the slab the march clips to.
+    /// Weather ask W16.
+    genera_reach: [f32; 4],
     /// The shade map's corner x and z in world blocks, and its side — ask
     /// W11.
     shadow: [f32; 4],
     /// The cover map's corner x and z, its cell size in blocks, and how many
     /// cells a side — zero for "no map, use `weather` everywhere". Ask W10.
     map: [f32; 4],
-    /// Cover and darkness per cell, `[cover, darkness]` packed two cells to a
-    /// `vec4`, row-major by z.
+    /// The five shares per cell as bytes, two cells to a `vec4<u32>`,
+    /// row-major by z: a cell's first word is cover, darkness, stratocumulus
+    /// and altocumulus a byte each from the low end, its second word is
+    /// cumulonimbus. Weather ask W16 put the genera in; the packing is what
+    /// keeps the uniform at the 2 KiB it was.
     ///
     /// **A `vec4` array rather than a flat one**: WGSL's uniform address space
-    /// gives an array element a stride of at least sixteen bytes, so
-    /// `array<f32, N>` is not expressible there and a flat Rust array would
-    /// silently disagree with the shader's idea of it.
-    cells: [[f32; 4]; MAP_VEC4S],
+    /// gives an array element a stride of at least sixteen bytes, so a flat
+    /// array is not expressible there and a flat Rust array would silently
+    /// disagree with the shader's idea of it.
+    cells: [[u32; 4]; MAP_VEC4S],
 }
 
 /// How many `vec4`s the packed cover map takes: two cells each.
@@ -425,7 +432,8 @@ impl Pass {
         )]
         let seed = (self.deck.seed & 0xFFFF) as f32;
         let shadow_origin = self.place_shade(camera, base, cell, frame.mode);
-        let (cells, descriptor) = self.map_cells();
+        let (cells, descriptor, most) = self.map_cells();
+        let reach = |own: f32, index: usize| own.max(most[index]);
         let uniforms = Uniforms {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
             view_projection: frame.view_projection.to_cols_array_2d(),
@@ -457,6 +465,12 @@ impl Pass {
                 state.stratocumulus,
                 state.altocumulus,
                 state.cumulonimbus,
+                0.0,
+            ],
+            genera_reach: [
+                reach(state.stratocumulus, 0),
+                reach(state.altocumulus, 1),
+                reach(state.cumulonimbus, 2),
                 0.0,
             ],
             shadow: [shadow_origin[0], shadow_origin[1], SHADOW_EXTENT, 0.0],
@@ -496,25 +510,37 @@ impl Pass {
             })
     }
 
-    /// **The cover map, unpacked for the uniform.** Bytes on the wire, shares
-    /// of one here, and zero cells when a mod sent none — which is what tells
-    /// the shader to use the single cover for the whole sky. Returns the
-    /// cells and the map's descriptor: corner x and z, cell, cells a side.
-    fn map_cells(&self) -> ([[f32; 4]; MAP_VEC4S], [f32; 4]) {
-        let mut cells = [[0.0_f32; 4]; MAP_VEC4S];
+    /// **The cover map, packed for the uniform.** Bytes on the wire, bytes in
+    /// the words here, and zero cells when a mod sent none — which is what
+    /// tells the shader to use the single sky for the whole world. Returns the
+    /// cells, the map's descriptor (corner x and z, cell, cells a side), and
+    /// the highest share of each genus in any cell, for the slab.
+    fn map_cells(&self) -> ([[u32; 4]; MAP_VEC4S], [f32; 4], [f32; 3]) {
+        let mut cells = [[0_u32; 4]; MAP_VEC4S];
+        let mut most = [0.0_f32; 3];
         let descriptor = self.map.as_ref().map_or([0.0; 4], |map| {
-            for (index, (cover, darkness)) in map.cover.iter().zip(map.darkness.iter()).enumerate()
-            {
+            let byte =
+                |genus: &[u8], index: usize| u32::from(genus.get(index).copied().unwrap_or(0));
+            for index in 0..map.cover.len().min(map.darkness.len()) {
                 let Some(slot) = cells.get_mut(index / 2) else {
                     break;
                 };
                 let half = (index % 2) * 2;
-                slot[half] = f32::from(*cover) / 255.0;
-                slot[half + 1] = f32::from(*darkness) / 255.0;
+                slot[half] = byte(&map.cover, index)
+                    | byte(&map.darkness, index) << 8
+                    | byte(&map.stratocumulus, index) << 16
+                    | byte(&map.altocumulus, index) << 24;
+                slot[half + 1] = byte(&map.cumulonimbus, index);
+            }
+            for (slot, genus) in
+                most.iter_mut()
+                    .zip([&map.stratocumulus, &map.altocumulus, &map.cumulonimbus])
+            {
+                *slot = f32::from(genus.iter().copied().max().unwrap_or(0)) / 255.0;
             }
             [map.origin[0], map.origin[1], map.cell, f32::from(map.size)]
         });
-        (cells, descriptor)
+        (cells, descriptor, most)
     }
 
     /// Decides where this frame's shade map lies and how much it shades by,

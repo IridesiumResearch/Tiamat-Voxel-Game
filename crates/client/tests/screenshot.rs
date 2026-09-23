@@ -5720,6 +5720,9 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
             size: SIZE as u8,
             cover,
             darkness,
+            stratocumulus: Vec::new(),
+            altocumulus: Vec::new(),
+            cumulonimbus: Vec::new(),
         })
     };
     // Blue over red: open sky is blue, cloud is grey. The same measure the
@@ -6552,6 +6555,139 @@ fn a_deck_below_the_floor_stays_behind_it_at_every_quality() {
             "at {quality:?} a deck under the floor showed through it in {showing} pixels"
         );
     }
+}
+
+#[test]
+fn a_storm_cell_in_the_map_puts_an_anvil_over_it_and_not_its_neighbours() {
+    // **Weather ask W16's own acceptance**: a map with `cumulonimbus` 1 in one
+    // cell and 0 in the rest draws an anvil over that cell and none over its
+    // neighbours, seen from two cells away; and a map without the new arrays
+    // draws what it drew before. Asserted by MIRRORING, as W10's test is:
+    // which way round the halves land depends on the handedness of the view
+    // matrix, so the storm goes to one side of the camera and then the other,
+    // and the anvil has to follow it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    // Over the low deck's tops and under the anvils, looking level: without a
+    // storm the upper half of the frame is sky.
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 360.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, 0.0);
+    // No cloud but the storm's: no cumulus for this player, and none in any
+    // cell of the map.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(sky_of(0.0, 0.0, 0.0, 0.0)),
+        quality: client::render::clouds::Quality::Fine,
+        seed: 4242,
+    });
+    const SIZE: usize = 5;
+    const CELL: f32 = 1024.0;
+    // The camera's cell is the middle one and it looks along +z, so the storm
+    // sits two rows ahead and one cell to the side — the mirror puts it one
+    // cell to the other side.
+    let origin = [24.0 - CELL * 2.5, 20.0 - CELL * 2.5];
+    let storm_at = |x: usize, genera: bool| {
+        let mut cumulonimbus = vec![0_u8; SIZE * SIZE];
+        // `SIZE` is "every cell": the plumbing's own check.
+        if x == SIZE {
+            cumulonimbus = vec![255; SIZE * SIZE];
+        } else {
+            cumulonimbus[4 * SIZE + x] = 255;
+        }
+        #[expect(clippy::cast_possible_truncation, reason = "SIZE is 5")]
+        std::sync::Arc::new(tiamat_core::atmosphere::CloudMap {
+            origin,
+            cell: CELL,
+            size: SIZE as u8,
+            cover: vec![0; SIZE * SIZE],
+            darkness: vec![0; SIZE * SIZE],
+            stratocumulus: if genera {
+                vec![0; SIZE * SIZE]
+            } else {
+                Vec::new()
+            },
+            altocumulus: if genera {
+                vec![0; SIZE * SIZE]
+            } else {
+                Vec::new()
+            },
+            cumulonimbus: if genera { cumulonimbus } else { Vec::new() },
+        })
+    };
+    let above = |frame: &Image, bare: &Image| {
+        let (mut left, mut right) = (0usize, 0usize);
+        for y in 0..HEIGHT / 2 {
+            for x in 0..WIDTH {
+                if is_cloud(frame, bare, x, y) {
+                    if x < WIDTH / 2 {
+                        left += 1;
+                    } else {
+                        right += 1;
+                    }
+                }
+            }
+        }
+        (left, right)
+    };
+    renderer.set_cloud_map(None);
+    let bare = target.capture(&mut renderer, &camera).expect("capture");
+
+    // First the plumbing: a storm in every cell raises anvils on both sides.
+    renderer.set_cloud_map(Some(storm_at(SIZE, true)));
+    let everywhere = target.capture(&mut renderer, &camera).expect("capture");
+    let (all_left, all_right) = above(&everywhere, &bare);
+    println!("anvil pixels above the horizon with a storm in every cell: {all_left}/{all_right}");
+    assert!(
+        all_left > 300 && all_right > 300,
+        "a map with cumulonimbus in every cell should raise anvils on both sides: \
+         {all_left}/{all_right}"
+    );
+
+    renderer.set_cloud_map(Some(storm_at(3, true)));
+    let east = target.capture(&mut renderer, &camera).expect("capture");
+    renderer.set_cloud_map(Some(storm_at(1, true)));
+    let west = target.capture(&mut renderer, &camera).expect("capture");
+    let (east_left, east_right) = above(&east, &bare);
+    let (west_left, west_right) = above(&west, &bare);
+    println!(
+        "anvil pixels above the horizon: storm at +x {east_left}/{east_right}, at -x \
+         {west_left}/{west_right} (left/right of the frame)"
+    );
+    let (near_side, far_side) = if east_right > east_left {
+        (east_right, east_left)
+    } else {
+        (east_left, east_right)
+    };
+    assert!(
+        near_side > 200,
+        "a storm cell two rows out should raise an anvil over the horizon: {east_left} and \
+         {east_right}"
+    );
+    assert!(
+        far_side * 10 < near_side,
+        "and none over its neighbours on the other side: {east_left} and {east_right}"
+    );
+    assert!(
+        (east_right > east_left) != (west_right > west_left),
+        "mirroring the storm's cell should mirror the anvil: +x {east_left}/{east_right}, -x \
+         {west_left}/{west_right}"
+    );
+
+    // A map without the new arrays draws what it drew before, cell for cell:
+    // the same map with the genera left out is a map with none anywhere.
+    renderer.set_cloud_map(Some(storm_at(3, false)));
+    let without = target.capture(&mut renderer, &camera).expect("capture");
+    let (left, right) = above(&without, &bare);
+    assert_eq!(
+        (left, right),
+        (0, 0),
+        "a map that leaves the genera out has none anywhere"
+    );
 }
 
 #[test]

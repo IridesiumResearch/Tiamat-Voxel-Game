@@ -43,43 +43,15 @@ deck, the deck's own cost over a bare sky at 320 x 240, level / thirty
 degrees up / above the deck: 1.20 / 1.83 / 4.04 ms before any of W15, and
 the numbers after are in `how_long_the_deck_costs_from_three_views`.
 
-## W16. The cover map has no genera, so a storm over the next valley has no anvil (2026-09-23)
-
-**Seen.** With W13 landed, Weather sends a storm as stratocumulus 0.70 under
-cumulonimbus 0.60 at cumulus `cover` 0.40, darkness 0.90 — the sky its plan
-(10.10) asked for. From the clear valley beside it, the same storm is 40%
-cumulus heaps under a dark haze: `set_clouds{ map }` (W10) carries `cover` and
-`darkness` per cell and nothing else, and `weather_at` in `clouds.wgsl` reads
-the three genera from the per-player uniform alone, so the sheet and the
-towers stand only over the square the player is in. A front cannot be watched
-coming as the front it is; the anvil appears when you walk under it.
-
-**Why the mod cannot fix it.** The map is the only per-place channel and it
-has two bytes a cell. Sending the storm's whole cover as cumulus (`cover` 1.0
-in the cell) would make the distance read overcast — but inside the grid the
-cell REPLACES the per-player `cover`, which is what makes the cell overhead
-the sky overhead, so the same trick puts a full cumulus deck under the towers
-overhead: by W13's own figures (storm 1.5–1.6, supercell 2.9–3.7 of a cumulus
-deck) the two costliest genera at once, for nothing the eye can tell apart.
-Weather keeps the map cumulus and darkness until this lands.
-
-**The ask.** Three more arrays on `Tiamat.CloudMapSpec`, each optional:
-`stratocumulus`, `altocumulus`, `cumulonimbus`, `size * size` shares of one
-like `cover`, a byte each on the wire, so a cell is five bytes and a 16 x 16
-map 1,280. Left out, a genus is 0 in every cell — so a mod that sends today's
-map sends exactly today's sky. `weather_at` answers five shares in place of
-two, and each genus reads its share from the cell as cumulus does now, the
-per-player value answering outside the grid.
-
-**Acceptance.** A map with `cumulonimbus` 1 in one cell and 0 in the rest
-draws an anvil over that cell and none over its neighbours, from a camera two
-cells away; a map without the new arrays draws what it drew before, pixel for
-pixel; a mod sending the new arrays to an engine without them is refused with
-the field named, as a misspelt genus is.
-
-**What Weather does once it lands.** `map_around` sends the five shares per
-cell from the same `sky_of` that already computes them, and `/weather clouds`
-counts stormy squares by their towers rather than their darkness.
+**W16 landed 2026-09-23**, protocol v74: `map` carries `stratocumulus`,
+`altocumulus` and `cumulonimbus` per cell beside `cover` and `darkness`, each
+optional and a byte a cell; left out, a genus is none anywhere, so a map
+without them is today's map. Inside the grid a cell's five shares replace the
+player's own, as the cover did; the slab the march clips to is sized by the
+most of each genus anywhere in the sky. The uniform stays at 2 KiB, the five
+bytes packed into two words a cell. Gate: a `cumulonimbus` cell two cells out
+raises an anvil over the horizon on its side and none on the other, mirrored
+with the cell, and a map without the arrays raises none.
 
 ## Landed
 

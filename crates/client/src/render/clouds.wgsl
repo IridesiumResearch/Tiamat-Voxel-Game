@@ -79,6 +79,9 @@ struct Clouds {
     // W13: stratocumulus (x), altocumulus (y), cumulonimbus (z), and a spare.
     // `weather.x` is cumulus, and keeps being what every mod sends.
     genera: vec4<f32>,
+    // The most of each genus anywhere in this sky — the player's own share or
+    // the map's highest cell — for the slab the march clips to (ask W16).
+    genera_reach: vec4<f32>,
     // The shade map's corner x and z in world blocks, and its side — weather
     // ask W11: the deck seen from straight below, one texel a large cube,
     // drawn for the terrain pass to darken its sun by.
@@ -87,14 +90,17 @@ struct Clouds {
     // side — zero for "no map", which is every world until a mod sends one.
     // Weather ask W10.
     map: vec4<f32>,
-    // Cover and darkness per cell, two cells to a vec4, row-major by z.
+    // The five shares per cell as bytes, two cells to a vec4<u32>, row-major
+    // by z: a cell's first word holds cover, darkness, stratocumulus and
+    // altocumulus a byte each from the low end, its second cumulonimbus
+    // (ask W16).
     //
     // **A vec4 array, and that is not a preference**: WGSL gives a uniform
-    // array element a stride of at least sixteen bytes, so `array<f32, 512>`
-    // is not expressible here at all. The Rust side packs to match, and the
+    // array element a stride of at least sixteen bytes, so a flat array is
+    // not expressible here at all. The Rust side packs to match, and the
     // warning on `view` above applies double — a disagreement about this
     // layout empties the sky rather than failing to compile.
-    cells: array<vec4<f32>, 128>,
+    cells: array<vec4<u32>, 128>,
 }
 
 @group(0) @binding(0) var<uniform> clouds: Clouds;
@@ -103,15 +109,29 @@ struct Clouds {
 @group(0) @binding(1) var deck_colour: texture_2d<f32>;
 @group(0) @binding(2) var deck_depth: texture_depth_2d;
 
-// The weather over one place: cover and darkness, from the map where there is
-// one and from the single state everywhere else. Weather ask W10.
+// The weather over one place: the five shares — cumulus `cover`, darkness,
+// and the three genera beside them — from the map where there is one and from
+// the single per-player state everywhere else. Weather asks W10 and W16.
 //
 // **Nearest cell, not bilinear.** A cell is hundreds of blocks and the field
 // it feeds is heaps of cloud with their own edges, so an interpolated boundary
 // buys nothing a player could see and costs three more fetches on every step
 // of every ray. The mod's grid is the resolution of its own weather.
-fn weather_at(cell_xz: vec2<f32>) -> vec2<f32> {
-    let plain = vec2<f32>(clouds.weather.x, clouds.weather.y);
+struct Weather {
+    cover: f32,
+    darkness: f32,
+    stratocumulus: f32,
+    altocumulus: f32,
+    cumulonimbus: f32,
+};
+
+fn weather_at(cell_xz: vec2<f32>) -> Weather {
+    var plain: Weather;
+    plain.cover = clouds.weather.x;
+    plain.darkness = clouds.weather.y;
+    plain.stratocumulus = clouds.genera.x;
+    plain.altocumulus = clouds.genera.y;
+    plain.cumulonimbus = clouds.genera.z;
     let size = i32(clouds.map.w);
     if (size <= 0) {
         return plain;
@@ -128,10 +148,19 @@ fn weather_at(cell_xz: vec2<f32>) -> vec2<f32> {
     }
     let index = z * size + x;
     let packed = clouds.cells[index / 2];
-    if ((index & 1) == 0) {
-        return packed.xy;
+    var first = packed.x;
+    var second = packed.y;
+    if ((index & 1) == 1) {
+        first = packed.z;
+        second = packed.w;
     }
-    return packed.zw;
+    var here: Weather;
+    here.cover = f32(first & 255u) / 255.0;
+    here.darkness = f32((first >> 8u) & 255u) / 255.0;
+    here.stratocumulus = f32((first >> 16u) & 255u) / 255.0;
+    here.altocumulus = f32((first >> 24u) & 255u) / 255.0;
+    here.cumulonimbus = f32(second & 255u) / 255.0;
+    return here;
 }
 
 struct Varyings {
@@ -379,15 +408,17 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // sun's shadow and the fog inside the deck cannot disagree about where the
     // storm is.
     let weather = weather_at(cell_xz);
-    let cover = weather.x;
+    let cover = weather.cover;
     let frequency = clouds.weather.z;
     let towers = clouds.weather.w;
     let seed = clouds.motion.w;
     let cell = clouds.colour.w;
     let small = clouds.shade.w;
-    let strato = clouds.genera.x;
-    let alto = clouds.genera.y;
-    let cb = clouds.genera.z;
+    // The genera over THIS column too (ask W16): a storm over the next valley
+    // has its sheet and its anvil from here.
+    let strato = weather.stratocumulus;
+    let alto = weather.altocumulus;
+    let cb = weather.cumulonimbus;
 
     // Drift is a rigid translation of the whole deck and evolution is a slow
     // change of shape; both are an offset on where the field is sampled, which
@@ -398,7 +429,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     let at = (cell_xz - drift) * frequency + vec2<f32>(evolve, -evolve);
 
     var column = empty_column();
-    column.darkness = weather.y;
+    column.darkness = weather.darkness;
 
     // The rind: a cube or so of low-frequency noise on every top, near the
     // camera only — so a crown is not a perfect arc and a sheet is not a
@@ -1016,17 +1047,19 @@ fn deck_slab() -> vec2<f32> {
     let strato_high = select(
         0.0,
         thickness * STRATO_DEPTH + rind_high,
-        clouds.genera.x > 0.0,
+        clouds.genera_reach.x > 0.0,
     );
     let alto_high = select(
         0.0,
         thickness * (ALTO_LEVEL + ALTO_DEPTH) + clouds.shade.w,
-        clouds.genera.y > 0.0,
+        clouds.genera_reach.y > 0.0,
     );
     let cb_high = select(
         0.0,
-        thickness * CB_HEIGHT * mix(0.55, 1.0, clouds.genera.z) * 1.04 + thickness * 0.8 + rind_high,
-        clouds.genera.z > 0.0,
+        thickness * CB_HEIGHT * mix(0.55, 1.0, clouds.genera_reach.z) * 1.04
+            + thickness * 0.8
+            + rind_high,
+        clouds.genera_reach.z > 0.0,
     );
     return vec2<f32>(
         base - sits_low,

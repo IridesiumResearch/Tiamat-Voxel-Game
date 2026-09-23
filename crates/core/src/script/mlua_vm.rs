@@ -1671,6 +1671,16 @@ fn cloud_map_of(spec: &Table) -> mlua::Result<Option<crate::atmosphere::CloudMap
             })
             .collect())
     };
+    // A genus left out is none anywhere (W16), so a mod that sends today's
+    // map sends exactly today's sky; one that is there is counted like the
+    // cover.
+    let genus = |field: &str| -> mlua::Result<Vec<u8>> {
+        if map.contains_key(field)? {
+            share(field)
+        } else {
+            Ok(Vec::new())
+        }
+    };
     Ok(crate::atmosphere::sanitise_cloud_map(
         crate::atmosphere::CloudMap {
             origin: [origin.get("x")?, origin.get("z")?],
@@ -1678,6 +1688,9 @@ fn cloud_map_of(spec: &Table) -> mlua::Result<Option<crate::atmosphere::CloudMap
             size,
             cover: share("cover")?,
             darkness: share("darkness")?,
+            stratocumulus: genus("stratocumulus")?,
+            altocumulus: genus("altocumulus")?,
+            cumulonimbus: genus("cumulonimbus")?,
         },
     ))
 }
@@ -9054,7 +9067,16 @@ const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "defa
 const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator"];
 
 /// Fields the `map` of a `game.set_clouds` spec accepts — weather ask W10.
-const CLOUD_MAP_FIELDS: [&str; 5] = ["origin", "cell", "size", "cover", "darkness"];
+const CLOUD_MAP_FIELDS: [&str; 8] = [
+    "origin",
+    "cell",
+    "size",
+    "cover",
+    "darkness",
+    "stratocumulus",
+    "altocumulus",
+    "cumulonimbus",
+];
 
 /// Fields a `game.set_clouds` spec accepts.
 ///
@@ -11136,6 +11158,50 @@ mod tests {
         );
         assert_eq!(bare.burst.area, [16.0, 3.0, 16.0], "in a wide low box");
         assert_eq!(rained[2].1, None, "nil stops it");
+    }
+
+    #[test]
+    fn a_mods_map_carries_the_genera_per_cell_and_leaves_them_out_when_it_does() {
+        // **Weather ask W16.** A storm over the next valley has its sheet and
+        // its anvil from the clear valley beside it, so the map carries the
+        // three genera per cell like the cover — and a map without them is
+        // today's map, cell for cell.
+        let lua = Lua::new();
+        let spec: Table = lua
+            .load(
+                "return { map = { origin = { x = 0, z = 0 }, cell = 256, size = 2,\n\
+                 \x20 cover = { 0.4, 0.4, 0.4, 0.4 }, darkness = { 0.9, 0, 0, 0 },\n\
+                 \x20 stratocumulus = { 0.7, 0, 0, 0 }, cumulonimbus = { 0.6, 0, 0, 1.5 } } }",
+            )
+            .eval()
+            .expect("a table");
+        let map = cloud_map_of(&spec).expect("reads").expect("a grid");
+        assert_eq!(map.stratocumulus, vec![179, 0, 0, 0]);
+        assert_eq!(map.cumulonimbus, vec![153, 0, 0, 255], "clamped to a byte");
+        assert!(map.altocumulus.is_empty(), "left out is none anywhere");
+
+        let plain: Table = lua
+            .load(
+                "return { map = { origin = { x = 0, z = 0 }, cell = 256, size = 1,\n\
+                 \x20 cover = { 1 }, darkness = { 1 } } }",
+            )
+            .eval()
+            .expect("a table");
+        let map = cloud_map_of(&plain).expect("reads").expect("a grid");
+        assert!(map.stratocumulus.is_empty() && map.cumulonimbus.is_empty());
+
+        let short: Table = lua
+            .load(
+                "return { map = { origin = { x = 0, z = 0 }, cell = 256, size = 2,\n\
+                 \x20 cover = { 0, 0, 0, 0 }, darkness = { 0, 0, 0, 0 }, altocumulus = { 1 } } }",
+            )
+            .eval()
+            .expect("a table");
+        let err = cloud_map_of(&short).expect_err("a miscounted genus is an error");
+        assert!(
+            err.to_string().contains("altocumulus"),
+            "the error names the field: {err}"
+        );
     }
 
     #[test]
