@@ -29,6 +29,26 @@ use tiamat_server::{ServerHandle, Settings};
 /// ignoring it predicts well over twice as far as the server lets it go.
 const SPEED: f32 = 0.4;
 
+/// One test at a time in this binary.
+///
+/// Each test here starts a server and a GPU client and then measures the
+/// client against wall time. Run beside each other on a three-core CI runner
+/// they stall each other — a renderer being built compiles every pipeline,
+/// which on Metal is hundreds of milliseconds of driver time — and a stall is
+/// what the measurement below cannot tell from the thing it is measuring.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The longest a frame may take before the correction bound stops being
+/// evidence, in seconds.
+///
+/// `App::walk` simulates at most four ticks a frame and drops the rest, and a
+/// resynchronise simulates at most four more before it renumbers: past that
+/// the client is behind real time, the next server state is ahead of anything
+/// it predicted, and the correction that follows would be there whatever
+/// speed the client stepped with. Five ticks is inside that with the frame
+/// loop's own clamp of two ticks a frame counted in.
+const LONGEST_HONEST_FRAME: f32 = 0.25;
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
         .join("tiamat-client-abilities")
@@ -191,6 +211,9 @@ fn missing_ground_around(app: &App, radius: i32) -> Vec<ChunkPos> {
 
 #[test]
 fn a_slowed_player_predicts_the_speed_the_server_applies() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(gpu) = gpu() else { return };
     let server = embedded("slowed");
     let mut app = client("slowed", &server, gpu);
@@ -255,12 +278,28 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
     // the client invented, a correction without it is the two simulations
     // disagreeing, and they want opposite fixes.
     let mut unloaded = false;
+    // And the longest frame, for the same reason: see `LONGEST_HONEST_FRAME`.
+    // Seen on macOS CI as 0.215 cells of correction with 0.789 of divergence
+    // and no chunk missing — a stall, in a test that is about speed.
+    let mut longest = 0.0f32;
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = Instant::now();
     while Instant::now() < deadline {
-        run_frames(&mut app, forward, 0.1, |_| false);
+        assert!(
+            app.pump_network(),
+            "the connection ended: {:?}",
+            app.warnings()
+        );
+        app.remesh();
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f32();
+        last = now;
+        longest = longest.max(dt);
+        app.advance(forward, dt.min(0.1));
         worst = worst.max(app.pacing().worst_divergence_cells());
         corrected = corrected.max(app.pacing().worst_correction_cells());
         unloaded |= app.pacing().predicted_into_unloaded();
+        std::thread::sleep(Duration::from_millis(16));
     }
     let ended = app.camera().position.to_world();
     let (dx, dz) = (ended.0 - start.0, ended.2 - start.2);
@@ -269,13 +308,29 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
     println!(
         "slowed to {SPEED}: client {predicted:.2} blocks, server {served:.2} blocks, \
          worst divergence {worst:.3} cells, worst correction {corrected:.3}, predicted \
-         into chunks it had not received: {unloaded}"
+         into chunks it had not received: {unloaded}, longest frame {:.0} ms",
+        longest * 1000.0
     );
 
     assert!(
         predicted > 1.0,
         "held forward and barely moved: {predicted:.2}"
     );
+    // **Printed whether it is checked or not**, as `session.rs`'s chunk-plane
+    // test does: a skip nobody can see is a gate that sits green and inert.
+    if longest > LONGEST_HONEST_FRAME {
+        println!(
+            "SKIPPING the correction bound: a frame took {:.0} ms, past the {:.0} ms the \
+             client can catch up from, so the server got ahead of anything the client \
+             predicted and the correction says nothing about speed. The speed itself \
+             was heard and adopted, which was asserted above.",
+            longest * 1000.0,
+            LONGEST_HONEST_FRAME * 1000.0
+        );
+        app.shutdown();
+        assert!(server.stop());
+        return;
+    }
     // **Not the end position**: reconciliation pulls the client back to the
     // server, so the two end within a few hundredths of a block whether the
     // client applied the speed or not. The correction and the per-tick
@@ -299,6 +354,9 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
 
 #[test]
 fn a_player_refused_the_sky_keys_cannot_wind_their_own_clock() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Life ask 10a. Nothing on the server moves when a client scrubs its
     // clock, but the client draws stored sunlight scaled by the sky's
     // intensity — so winding to noon lights a player's night, which is seeing
