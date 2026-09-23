@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 72;
+pub const PROTOCOL_VERSION: u32 = 73;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 72;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v73 (weather W13): `atmosphere::Clouds` carries `stratocumulus`,
+// `altocumulus` and `cumulonimbus`, a share of the sky each, so a mod can send
+// a low sheet, a mackerel sky or towers under anvils rather than more or fewer
+// heaps. Numbers rather than a kind, so a front blends one sky into the next.
 // v72 (Life 15): appended `ServerMessage::ShowOver`, a row of pictures hung
 // over an entity and following it. The texture on a burst makes a heart one
 // particle; this makes a health bar one message, and is what an "!" over a

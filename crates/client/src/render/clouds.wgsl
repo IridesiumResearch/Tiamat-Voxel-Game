@@ -75,6 +75,14 @@ struct Clouds {
     // Classic, and the only sign was that two of the three pictures were
     // identical.
     quality: vec4<f32>,
+    // The three genera beside cumulus, each a share of the sky — weather ask
+    // W13: stratocumulus (x), altocumulus (y), cumulonimbus (z), and a spare.
+    // `weather.x` is cumulus, and keeps being what every mod sends.
+    genera: vec4<f32>,
+    // The shade map's corner x and z in world blocks, and its side — weather
+    // ask W11: the deck seen from straight below, one texel a large cube,
+    // drawn for the terrain pass to darken its sun by.
+    shadow: vec4<f32>,
     // The cover map's corner x and z, its cell in blocks, and how many cells a
     // side — zero for "no map", which is every world until a mod sends one.
     // Weather ask W10.
@@ -216,8 +224,15 @@ fn fbm(p: vec2<f32>, octaves: i32, seed: f32) -> f32 {
 // An empty interval has `top <= bottom`, which every test below reads as "no
 // cloud here".
 struct Column {
+    // The low cloud: heaps and sheets over the deck's floor, and a storm's
+    // tower.
     lower: vec2<f32>,
+    // A storm's anvil, spread over its tower.
     upper: vec2<f32>,
+    // A mid-level layer — altocumulus, weather ask W13 — which can sit under
+    // an anvil and over a heap in one column, so it is a third interval and
+    // not a case of the other two.
+    mid: vec2<f32>,
     // 0 at a heap's rim, 1 at its crown. The lighting reads it: thin cloud
     // passes light and thick cloud does not.
     density: f32,
@@ -232,10 +247,66 @@ fn empty_column() -> Column {
     var column: Column;
     column.lower = vec2<f32>(0.0, -1.0);
     column.upper = vec2<f32>(0.0, -1.0);
+    column.mid = vec2<f32>(0.0, -1.0);
     column.density = 0.0;
     column.darkness = 0.0;
     return column;
 }
+
+// Worley cells: the nearest and second-nearest feature point to `p`, and a
+// hash of the nearest's cell. `F2 - F1` is zero on a border between cells and
+// grows towards a cell's middle, which is rounded cells with grooves between
+// — the shape a sheet, a floret and a cloudlet all share (weather ask W13).
+//
+// Nine hashes, like the heap search, and worth the same care about when it
+// is asked: each genus asks only where that genus can be.
+fn cells(p: vec2<f32>, seed: f32) -> vec3<f32> {
+    let home = floor(p);
+    var f1 = 9.0;
+    var f2 = 9.0;
+    var tag = 0.0;
+    for (var j = -1; j <= 1; j = j + 1) {
+        for (var i = -1; i <= 1; i = i + 1) {
+            let id = home + vec2<f32>(f32(i), f32(j));
+            let r = hash4(id, seed);
+            let d = length(p - (id + 0.1 + 0.8 * r.xy));
+            if (d < f1) {
+                f2 = f1;
+                f1 = d;
+                tag = r.z;
+            } else if (d < f2) {
+                f2 = d;
+            }
+        }
+    }
+    return vec3<f32>(f1, f2, tag);
+}
+
+// The three genera beside cumulus — weather ask W13 — each a share of the sky
+// a mod sends per player, and each with its own scale in field units. A field
+// unit is `1 / frequency` blocks: 500 on Weather's deck.
+//
+// Stratocumulus: a low sheet `STRATO_DEPTH` of the deck's thickness, of
+// rounded cells drawn out into rolls across the wind. On Weather's deck a
+// cell is 230 by 135 blocks, a dozen cubes, which is what lets it be round:
+// at a quarter of this they were confetti.
+const STRATO_DEPTH: f32 = 0.32;
+const STRATO_CELL_X: f32 = 0.46;
+const STRATO_CELL_Z: f32 = 0.27;
+// Altocumulus: a mid-level layer `ALTO_LEVEL` thicknesses over the floor, of
+// cloudlets `ALTO_CELL` field units across — 70 blocks on Weather's deck —
+// lined up in wave bands, lens-shaped, and at most `ALTO_DEPTH` thick.
+const ALTO_LEVEL: f32 = 2.4;
+const ALTO_DEPTH: f32 = 0.2;
+const ALTO_CELL: f32 = 0.14;
+// Cumulonimbus: towers on a lattice `CB_LATTICE` heaps wide, `CB_HEIGHT`
+// thicknesses tall at their tallest, under anvils half a lattice cell wide.
+// At a share of 1 they are supercells; at less they are fewer and smaller.
+const CB_LATTICE: f32 = 7.0;
+const CB_HEIGHT: f32 = 5.5;
+// How far from its centre a storm can reach a column, in lattice cells: the
+// anvil's half width over its flattening, plus its shear.
+const CB_REACH: f32 = 0.9;
 
 // What tells one heap from its neighbours — weather ask W15. A bank of
 // identical hemispheres on one plane reads as a crop with a flat bottom; the
@@ -289,7 +360,14 @@ const UNDER_RUFFLE: f32 = 0.6;
 // `detail_mix` is how much of the smaller scale applies, which fades with
 // distance rather than switching off: a visible line where the detail starts
 // is worse than no detail at all.
-fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
+// `y_lo..y_hi` is the span of heights the caller can see in this column — a
+// ray's segment through the cell, or a point. **Each genus is asked only
+// where it can be.** A storm's anvil stands five thicknesses over the floor,
+// so the slab a ray marches is a kilometre tall wherever a mod has sent
+// cumulonimbus, and most of it is empty: without this every column on the
+// way up through it would run the heap search, the sheet's cells and the
+// lattice for cloud that could not be there.
+fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Column {
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
     // **The weather over THIS column**, not over the player — ask W10. Every
@@ -301,6 +379,11 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let frequency = clouds.weather.z;
     let towers = clouds.weather.w;
     let seed = clouds.motion.w;
+    let cell = clouds.colour.w;
+    let small = clouds.shade.w;
+    let strato = clouds.genera.x;
+    let alto = clouds.genera.y;
+    let cb = clouds.genera.z;
 
     // Drift is a rigid translation of the whole deck and evolution is a slow
     // change of shape; both are an offset on where the field is sampled, which
@@ -310,164 +393,305 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32) -> Column {
     let evolve = clouds.motion.z * seconds;
     let at = (cell_xz - drift) * frequency + vec2<f32>(evolve, -evolve);
 
-    // Cover raises the water line rather than scaling the field, so a clear
-    // sky is a few heaps and an overcast one is a ceiling with holes. The low
-    // end goes BELOW zero: overcast should leave almost nothing.
-    let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
+    var column = empty_column();
+    column.darkness = weather.y;
 
-    let spacing = 0.42;
-    let home = floor(at / spacing);
-    let local = at / spacing;
-    var crown = 0.0;
-    var tall = 0.0;
-    var sits = 0.0;
-    var swell = 0.0;
-    // The widest a heap can be, in cells: its largest radius, stretched, less
-    // the margin its point keeps from its cell's edge. A candidate cell whose
-    // edge is further from this column than that cannot reach it whatever its
-    // hashes say, and finding that out is two subtractions against the four
-    // rounds a hash costs — in every column of every ray (ask W15).
-    let reach = (0.30 + 0.38) * (1.0 + HEAP_STRETCH) - 0.15;
-    // The nine cells a heap could reach this column from. Three by three
-    // because a heap's radius may exceed its own cell — which is what lets
-    // neighbouring heaps merge into a bank rather than sitting in a grid.
-    for (var j = -1; j <= 1; j = j + 1) {
-        for (var i = -1; i <= 1; i = i + 1) {
-            let id = home + vec2<f32>(f32(i), f32(j));
-            let gap = abs(local - (id + 0.5)) - 0.5;
-            if (max(gap.x, gap.y) > reach) {
-                continue;
-            }
-            // **One hash for the roll, not a noise lookup.** A value noise
-            // here is four hashes and an interpolation for a number that only
-            // has to differ per heap, and the smooth field it would give is
-            // not wanted: a heap is kept or dropped whole.
-            let roll = hash4(id, seed);
-            // **Heaps come in clumps, so the roll is not independent.** An
-            // independent roll per heap scatters them evenly and the sky
-            // fills with a sheet; correlating neighbours gives clumps with
-            // clear sky between, which is what a fair-weather sky is.
-            //
-            // The correlation is one hash on a COARSER lattice rather than an
-            // interpolated field: a field is four hashes for a number whose
-            // only job is to make neighbours agree, and it cost more than the
-            // whole rest of the column. The lattice's edges fall between
-            // heaps rather than through them, because a heap is a disc and
-            // the lattice is two and a half heaps wide.
-            let clump = hash2(floor(id * 0.4), seed + 7.0);
-            let raw = 0.62 * clump + 0.38 * roll.x;
-            let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
-            if (stem <= threshold) {
-                continue;
-            }
-            let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
-            let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
-            let radius = spacing * (0.30 + 0.38 * sqrt(strength));
-            // The cheap question first: is this column within the widest the
-            // heap could be, stretched? Most candidates are not, and the hash
-            // below would be spent on a miss.
-            let offset = at - point;
-            let widest = radius * (1.0 + HEAP_STRETCH);
-            if (dot(offset, offset) > widest * widest) {
-                continue;
-            }
-            // A heap is not a circle and not the same dome as its neighbour.
-            // One more hash gives it a long axis, a crown of its own, a height
-            // of its own and a floor of its own — the constants above say how
-            // much of each.
-            let shape = hash4(id, seed + 67.0);
-            let stretch = vec2<f32>(
-                1.0 + 2.0 * HEAP_STRETCH * (shape.x - 0.5),
-                1.0 - 2.0 * HEAP_STRETCH * (shape.x - 0.5),
-            );
-            let d = length(offset / stretch) / radius;
-            if (d < 1.0) {
-                // The crown, from flat bun to pointed heap. **Not `pow`**,
-                // which is a log and an exp for every candidate on every step
-                // of every ray, and measured at twice the deck's whole cost:
-                // two square roots give the quarter and three-quarter powers
-                // and the heap's own number blends between them.
-                let dome = 1.0 - d * d;
-                let root = sqrt(dome);
-                let quarter = sqrt(root);
-                let h = mix(quarter, root * quarter, CROWN_FLATTEST + CROWN_RANGE * shape.y);
-                if (h > crown) {
-                    crown = h;
-                    // Towers are a SHARE of heaps grown taller, not a second
-                    // interval floating over a gap: the gap made shelves,
-                    // which read as noise for the same reason the terraces
-                    // did.
-                    tall = (0.45 + 0.55 * strength) * (HEIGHT_LEAST + HEIGHT_RANGE * shape.z)
-                        + towers * select(0.0, 1.2, roll.w > 0.7);
-                    sits = (shape.w - SIT_CENTRE) * SIT_RANGE;
-                    swell = strength;
-                }
-            }
-        }
-    }
-    if (crown <= 0.0) {
-        return empty_column();
+    // The rind: a cube or so of low-frequency noise on every top, near the
+    // camera only — so a crown is not a perfect arc and a sheet is not a
+    // plane (ask W13). Seven cycles per field unit; at twenty-two it turned
+    // every crown to confetti at sixteen-block cubes.
+    var rind = 0.0;
+    if (detail_mix > 0.0) {
+        rind = small * 1.2 * detail_mix * (value2(at * 7.0, seed + 91.0) - 0.4);
     }
 
-    // The cauliflower: a second, smaller scale of heaps riding the crowns.
-    // **Skipped outright when none of it applies**, which is most of a
-    // horizon ray's length — nine hashes for a number about to be multiplied
-    // by zero is the cheapest thing here to stop doing.
-    var puff = 0.0;
-    // Nothing to see on a heap's edge: the puff is worth at most `0.22 *
-    // crown` of the top, so under a low crown it is a search for a number
-    // that cannot move a cube.
-    if (detail_mix * crown > 0.12) {
-        let small = spacing * 0.25;
-        let home_small = floor(at / small);
-        let local_small = at / small;
+    // The low cloud — heaps, the sheet and a storm's tower — shares the lower
+    // interval: over the lowest floor any of them has, up to the tallest top.
+    var low_bottom = 1e30;
+    var low_top = -1e30;
+    var density = 0.0;
+
+    // ------------------------------------------------------------- cumulus
+    // The heaps of W12 and W15, where the ray can meet them: from the lowest
+    // a floor sits to the tallest heap with its florets on.
+    let sits_low = thickness * SIT_RANGE * SIT_CENTRE + small * UNDER_RUFFLE;
+    let heaps_high = base + thickness * SIT_RANGE * (1.0 - SIT_CENTRE)
+        + thickness * 0.55 * (HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2) * 1.3
+        + small * 1.2 + cell;
+    if (y_hi >= base - sits_low && y_lo <= heaps_high) {
+        // Cover raises the water line rather than scaling the field, so a clear
+        // sky is a few heaps and an overcast one is a ceiling with holes. The low
+        // end goes BELOW zero: overcast should leave almost nothing.
+        let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
+
+        let spacing = 0.42;
+        let home = floor(at / spacing);
+        let local = at / spacing;
+        var crown = 0.0;
+        var tall = 0.0;
+        var sits = 0.0;
+        var swell = 0.0;
+        // The widest a heap can be, in cells: its largest radius, stretched, less
+        // the margin its point keeps from its cell's edge. A candidate cell whose
+        // edge is further from this column than that cannot reach it whatever its
+        // hashes say, and finding that out is two subtractions against the four
+        // rounds a hash costs — in every column of every ray (ask W15).
+        let reach = (0.30 + 0.38) * (1.0 + HEAP_STRETCH) - 0.15;
+        // The nine cells a heap could reach this column from. Three by three
+        // because a heap's radius may exceed its own cell — which is what lets
+        // neighbouring heaps merge into a bank rather than sitting in a grid.
         for (var j = -1; j <= 1; j = j + 1) {
             for (var i = -1; i <= 1; i = i + 1) {
-                let id = home_small + vec2<f32>(f32(i), f32(j));
-                // The same rejection as the heap search, at this scale: a
-                // puff reaches three quarters of a cell from a point that
-                // keeps a fifth of a cell from its edge.
-                let gap = abs(local_small - (id + 0.5)) - 0.5;
-                if (max(gap.x, gap.y) > 0.75 - 0.2) {
+                let id = home + vec2<f32>(f32(i), f32(j));
+                let gap = abs(local - (id + 0.5)) - 0.5;
+                if (max(gap.x, gap.y) > reach) {
                     continue;
                 }
-                let jitter = hash4(id, seed + 21.0);
-                let point = (id + 0.2 + 0.6 * jitter.xy) * small;
-                let d = length(at - point) / (small * 0.75);
-                puff = max(puff, sqrt(clamp(1.0 - d * d, 0.0, 1.0)));
+                // **One hash for the roll, not a noise lookup.** A value noise
+                // here is four hashes and an interpolation for a number that only
+                // has to differ per heap, and the smooth field it would give is
+                // not wanted: a heap is kept or dropped whole.
+                let roll = hash4(id, seed);
+                // **Heaps come in clumps, so the roll is not independent.** An
+                // independent roll per heap scatters them evenly and the sky
+                // fills with a sheet; correlating neighbours gives clumps with
+                // clear sky between, which is what a fair-weather sky is.
+                //
+                // The correlation is one hash on a COARSER lattice rather than an
+                // interpolated field: a field is four hashes for a number whose
+                // only job is to make neighbours agree, and it cost more than the
+                // whole rest of the column. The lattice's edges fall between
+                // heaps rather than through them, because a heap is a disc and
+                // the lattice is two and a half heaps wide.
+                let clump = hash2(floor(id * 0.4), seed + 7.0);
+                let raw = 0.62 * clump + 0.38 * roll.x;
+                let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
+                if (stem <= threshold) {
+                    continue;
+                }
+                let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
+                let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
+                let radius = spacing * (0.30 + 0.38 * sqrt(strength));
+                // The cheap question first: is this column within the widest the
+                // heap could be, stretched? Most candidates are not, and the hash
+                // below would be spent on a miss.
+                let offset = at - point;
+                let widest = radius * (1.0 + HEAP_STRETCH);
+                if (dot(offset, offset) > widest * widest) {
+                    continue;
+                }
+                // A heap is not a circle and not the same dome as its neighbour.
+                // One more hash gives it a long axis, a crown of its own, a height
+                // of its own and a floor of its own — the constants above say how
+                // much of each.
+                let shape = hash4(id, seed + 67.0);
+                let stretch = vec2<f32>(
+                    1.0 + 2.0 * HEAP_STRETCH * (shape.x - 0.5),
+                    1.0 - 2.0 * HEAP_STRETCH * (shape.x - 0.5),
+                );
+                let d = length(offset / stretch) / radius;
+                if (d < 1.0) {
+                    // The crown, from flat bun to pointed heap. **Not `pow`**,
+                    // which is a log and an exp for every candidate on every step
+                    // of every ray, and measured at twice the deck's whole cost:
+                    // two square roots give the quarter and three-quarter powers
+                    // and the heap's own number blends between them.
+                    let dome = 1.0 - d * d;
+                    let root = sqrt(dome);
+                    let quarter = sqrt(root);
+                    let h = mix(quarter, root * quarter, CROWN_FLATTEST + CROWN_RANGE * shape.y);
+                    if (h > crown) {
+                        crown = h;
+                        // Towers are a SHARE of heaps grown taller, not a second
+                        // interval floating over a gap: the gap made shelves,
+                        // which read as noise for the same reason the terraces
+                        // did.
+                        tall = (0.45 + 0.55 * strength) * (HEIGHT_LEAST + HEIGHT_RANGE * shape.z)
+                            + towers * select(0.0, 1.2, roll.w > 0.7);
+                        sits = (shape.w - SIT_CENTRE) * SIT_RANGE;
+                        swell = strength;
+                    }
+                }
+            }
+        }
+        if (crown > 0.0) {
+            // Florets: lobes a third of a heap across, riding the crown and
+            // fading at the rim (ask W13). Worley cells rather than the small
+            // heaps that were here — rounded cells with grooves between them
+            // are what "lumpy rather than a smooth arc" is — and they do not
+            // fade with distance the way the small heaps did, so at a
+            // kilometre a crown still has its lobes.
+            var lobe = 0.0;
+            if (crown > 0.08) {
+                let florets = cells(at / (spacing * 0.3), seed + 41.0);
+                lobe = sqrt(clamp((florets.y - florets.x) * 2.2, 0.0, 1.0));
+            }
+            let shoulders = smoothstep(0.0, 0.5, crown);
+            // **A base is flat per HEAP, not per deck** (ask W15). Each heap
+            // sits at its own level, its underside lifts towards its own rim,
+            // and the rind ruffles it where the camera is close enough to
+            // see. None of it is a function of the FIELD, which is what
+            // terraced W12's undersides, so the terracing cannot come back.
+            let floor_y = base + thickness * sits;
+            let top = floor_y + thickness * 0.55 * tall * (crown + 0.3 * lobe * shoulders)
+                + rind * shoulders;
+            let rim = 1.0 - crown;
+            let under = floor_y + thickness * (UNDER_LIFT * rim * rim + UNDER_SWELL * swell)
+                - max(rind, 0.0) * UNDER_RUFFLE;
+            // Never thinner than one small cube, and never lower than one
+            // large cube over its own floor.
+            low_bottom = min(low_bottom, min(under, top - small));
+            low_top = max(low_top, max(top, floor_y + cell));
+            density = max(density, crown);
+        }
+    }
+
+    // ------------------------------------------------------- stratocumulus
+    // A low sheet of rounded cells drawn out into rolls across the wind, in
+    // patches, with grooves of sky between the cells that close as the share
+    // rises. Thin: a third of the deck's thickness at most.
+    let strato_high = base + thickness * STRATO_DEPTH + small * 1.2 + cell;
+    if (strato > 0.0 && y_hi >= base && y_lo <= strato_high) {
+        let area = value2(at * 0.9, seed + 13.0);
+        if (area < strato * 1.15) {
+            let v = cells(at / vec2<f32>(STRATO_CELL_X, STRATO_CELL_Z), seed + 17.0);
+            let groove = mix(0.22, 0.06, strato);
+            let edge = v.y - v.x;
+            if (edge > groove && v.z < 0.55 + 0.5 * strato) {
+                let t = smoothstep(groove, groove + 0.45, edge);
+                let fade = smoothstep(strato * 1.15, strato * 1.15 - 0.15, area);
+                let top = base
+                    + thickness * STRATO_DEPTH * (0.3 + 0.7 * sqrt(t)) * (0.5 + 0.5 * fade)
+                    + rind;
+                low_bottom = min(low_bottom, base);
+                low_top = max(low_top, max(top, base + cell));
+                density = max(density, t * 0.7);
             }
         }
     }
 
-    var column: Column;
-    // **A base is flat per HEAP, not per deck** (ask W15). One plane sheared
-    // through every cloud in the sky was the "sharp flat crop" the designer
-    // saw. Each heap sits at its own level, its underside lifts towards its
-    // own rim, and the small scale ruffles it where the camera is close
-    // enough to see; the constants say how much. None of it is a function of
-    // the FIELD, which is what terraced W12's undersides, so the terracing
-    // cannot come back.
-    let floor_y = base + thickness * sits;
-    let top = floor_y + thickness * 0.55 * tall * (crown + 0.22 * puff * detail_mix * crown);
-    let rim = 1.0 - crown;
-    let under = floor_y + thickness * (UNDER_LIFT * rim * rim + UNDER_SWELL * swell)
-        - clouds.shade.w * UNDER_RUFFLE * puff * detail_mix;
-    // Never thinner than one small cube, and never lower than one large cube
-    // over its own floor.
-    column.lower = vec2<f32>(
-        min(under, top - clouds.shade.w),
-        max(top, floor_y + clouds.colour.w),
-    );
-    column.upper = vec2<f32>(0.0, -1.0);
-    column.density = crown;
-    column.darkness = weather.y;
+    // -------------------------------------------------------- cumulonimbus
+    // Towers under spreading anvils, on a lattice seven heaps wide. More of
+    // the lattice holds a storm as the share rises, and each is taller and
+    // wider; at 1 they are supercells, with mammatus under the anvil.
+    if (cb > 0.0) {
+        let scale = mix(0.55, 1.0, cb);
+        let tallest = thickness * CB_HEIGHT * scale;
+        if (y_hi >= base && y_lo <= base + tallest * 1.04 + thickness * 0.8 + small * 1.2) {
+            let big = 0.42 * CB_LATTICE;
+            let home_b = floor(at / big);
+            // Florets on a tower's flanks and the mammatus under an anvil are
+            // the same Worley cells, larger: asked once, and only once a
+            // storm turns out to reach this column.
+            var lobe = -1.0;
+            for (var j = -1; j <= 1; j = j + 1) {
+                for (var i = -1; i <= 1; i = i + 1) {
+                    let id = home_b + vec2<f32>(f32(i), f32(j));
+                    let r = hash4(id, seed + 31.0);
+                    if (r.x > 0.15 + 0.3 * cb) {
+                        continue;
+                    }
+                    let centre = (id + 0.3 + 0.4 * r.yz) * big;
+                    let from_centre = length(at - centre);
+                    if (from_centre > big * CB_REACH * scale) {
+                        continue;
+                    }
+                    if (lobe < 0.0) {
+                        let florets = cells(at / (big * 0.05), seed + 43.0);
+                        lobe = sqrt(clamp((florets.y - florets.x) * 2.2, 0.0, 1.0));
+                    }
+                    let height = thickness * CB_HEIGHT * (0.8 + 0.2 * r.w) * scale;
+                    let tower_r = big * 0.24 * scale;
+                    let d_t = from_centre / tower_r;
+                    if (d_t < 1.0) {
+                        // A tower is a tall, flat-topped heap: the same two
+                        // square roots as a cumulus crown, blended nearer the
+                        // flat end.
+                        let dome = 1.0 - d_t * d_t;
+                        let root = sqrt(dome);
+                        let body = mix(sqrt(root), root, 0.28);
+                        let top = base + height * 0.88 * body
+                            + thickness * 0.8 * lobe * body * (1.0 - body * 0.6) + rind;
+                        if (top > low_top) {
+                            low_top = top;
+                            density = max(density, body);
+                        }
+                        low_bottom = min(low_bottom, base);
+                    }
+                    // The anvil: sheared downwind of the tower, flattened
+                    // across it, its top thinning to nothing at the rim
+                    // rather than ending in a sheer edge, and flaring down
+                    // into the tower that holds it up.
+                    let shear = vec2<f32>(big * 0.16, big * 0.04) * scale;
+                    let d_a = length((at - centre - shear) * vec2<f32>(0.75, 1.1)) / (big * 0.5 * scale);
+                    if (d_a < 1.0) {
+                        let edge = sqrt(1.0 - d_a * d_a);
+                        let ceiling = base + height * 0.9;
+                        let crest = height * 0.1 * sqrt(clamp(1.0 - d_t * d_t * 2.2, 0.0, 1.0));
+                        let top = ceiling + height * 0.04 * edge + crest - height * 0.03 * (1.0 - edge);
+                        let from_tower = clamp(from_centre / (big * 0.5 * scale), 0.0, 1.0);
+                        let flare = height * 0.42 * (1.0 - from_tower) * (1.0 - from_tower);
+                        let mammatus = thickness * 0.4 * cb * cb * lobe * edge * smoothstep(0.35, 0.8, d_a);
+                        let bottom = ceiling - height * 0.08 * edge - flare - mammatus;
+                        if (top - bottom > cell * 0.5) {
+                            if (column.upper.y <= column.upper.x) {
+                                column.upper = vec2<f32>(bottom, top);
+                            } else {
+                                column.upper = vec2<f32>(
+                                    min(column.upper.x, bottom),
+                                    max(column.upper.y, top),
+                                );
+                            }
+                            density = max(density, edge * 0.8);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------------- altocumulus
+    // A mid-level layer of small cloudlets, in patches, lined up in bands the
+    // way a mackerel sky is. Thin, lens-shaped, and its own interval, since
+    // it can sit under an anvil and over a heap in one column.
+    if (alto > 0.0) {
+        let level = base + thickness * ALTO_LEVEL;
+        let deepest = thickness * ALTO_DEPTH;
+        if (y_hi >= level - deepest * 0.35 - small && y_lo <= level + deepest + small) {
+            let area = value2(at * 0.6 + vec2<f32>(5.0, 9.0), seed + 57.0);
+            if (area < alto * 1.1) {
+                // A sine across the field, bent by a little noise so the
+                // bands are waves rather than rulings.
+                let band = 0.5 + 0.5 * sin(dot(at, vec2<f32>(0.82, 0.57)) * 16.0
+                    + value2(at * 2.0, seed + 3.0) * 4.0);
+                if (band > 0.55 - 0.3 * alto) {
+                    let v = cells(at / ALTO_CELL, seed + 61.0);
+                    let edge = v.y - v.x;
+                    if (edge > 0.22) {
+                        let t = smoothstep(0.22, 0.5, edge);
+                        let fade = smoothstep(alto * 1.1, alto * 1.1 - 0.12, area);
+                        // Lens-shaped: it grows up more than down.
+                        let depth = max(deepest * t * (0.4 + 0.6 * fade), cell);
+                        column.mid = vec2<f32>(level - depth * 0.35, level + depth);
+                        density = max(density, t * 0.5);
+                    }
+                }
+            }
+        }
+    }
+
+    if (low_top > low_bottom) {
+        column.lower = vec2<f32>(low_bottom, low_top);
+    }
+    column.density = density;
     return column;
 }
 
-// Whether a height is inside either interval.
+// Whether a height is inside any of the three intervals.
 fn inside(column: Column, y: f32) -> bool {
     return (y >= column.lower.x && y <= column.lower.y)
-        || (y >= column.upper.x && y <= column.upper.y);
+        || (y >= column.upper.x && y <= column.upper.y)
+        || (y >= column.mid.x && y <= column.mid.y);
 }
 
 // Where a ray segment first enters solid cloud in one column, as a `t`, or a
@@ -476,10 +700,12 @@ fn inside(column: Column, y: f32) -> bool {
 fn enter_column(column: Column, origin_y: f32, dir_y: f32, t0: f32, t1: f32) -> vec2<f32> {
     var best = -1.0;
     var face = 0.0;
-    for (var which = 0; which < 2; which = which + 1) {
+    for (var which = 0; which < 3; which = which + 1) {
         var span = column.lower;
         if (which == 1) {
             span = column.upper;
+        } else if (which == 2) {
+            span = column.mid;
         }
         if (span.y <= span.x) {
             continue;
@@ -525,7 +751,7 @@ fn sun_shadow(hit: vec3<f32>, step_len: f32) -> f32 {
     for (var i = 1; i <= 6; i = i + 1) {
         let at = hit + toward_sun * step_len * f32(i) * 2.0;
         let cell = clouds.colour.w;
-        let column = column_at(floor(at.xz / cell) * cell + cell * 0.5, 0.0);
+        let column = column_at(floor(at.xz / cell) * cell + cell * 0.5, 0.0, at.y, at.y);
         if (inside(column, at.y)) {
             blocked = blocked + 1.0;
         }
@@ -607,22 +833,10 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     let detail_reach = clouds.quality.y;
 
     // The slab the whole deck lives in, so a ray that never reaches it costs
-    // nothing.
-    //
-    // **Tight against what the field can actually reach.** The lowest a
-    // heap's floor can sit, less the deepest a ruffle can bite, is the
-    // bottom; the highest a floor can sit, plus the tallest heap times the
-    // most the detail can add, is the top. An older bound allowed for an
-    // anvil floating above a gap, a shape this field no longer makes — and
-    // it left every ray marching two hundred blocks of empty slab, which
-    // cost most in exactly the view that was already worst: from above the
-    // deck, where every pixel marches. `column_at` spends each of these
-    // terms.
-    let sits_low = thickness * SIT_RANGE * SIT_CENTRE + clouds.shade.w * UNDER_RUFFLE;
-    let sits_high = thickness * SIT_RANGE * (1.0 - SIT_CENTRE);
-    let tallest = HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2;
-    let deck_low = base - sits_low;
-    let deck_high = base + sits_high + thickness * 0.55 * tallest * 1.25 + cell0;
+    // nothing — see `deck_slab` for how tight it is and why.
+    let slab = deck_slab();
+    let deck_low = slab.x;
+    let deck_high = slab.y;
     var t_enter = 0.0;
     var t_leave = far;
     if (abs(direction.y) < 0.00001) {
@@ -703,7 +917,11 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
         let leave = min(min(next.x, next.y), t_leave);
         let detail_mix = clamp(1.0 - t / max(detail_reach, 1.0), 0.0, 1.0);
         let cell_xz = cell_index * cell + cell * 0.5;
-        let column = column_at(cell_xz, detail_mix);
+        // The heights this segment of the ray passes through, so the column
+        // asks only the genera that can be there.
+        let y_from = origin.y + direction.y * t;
+        let y_to = origin.y + direction.y * leave;
+        let column = column_at(cell_xz, detail_mix, min(y_from, y_to), max(y_from, y_to));
         let found = enter_column(column, origin.y, direction.y, t, leave);
         if (found.x >= 0.0) {
             out.hit = true;
@@ -766,6 +984,50 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
         }
     }
     return out;
+}
+
+// The slab the whole deck lives in, as the lowest and highest a column can
+// reach, in world y — so a ray that never meets it costs nothing, and the
+// shade map asks every genus at once.
+//
+// **Tight against what the field can actually reach.** The lowest a heap's
+// floor can sit, less the deepest a ruffle can bite, is the bottom; the
+// highest a floor can sit, plus the tallest heap times the most its florets
+// can add, is the top of the heaps. **The slab grows with the genera a
+// player is under** (ask W13), and only with those: a sky with no storm in
+// it is marched no taller than it was. Where there is one the slab is a
+// kilometre tall, and `column_at` asks each genus only at the heights it can
+// be, so the empty part of it costs a lattice test per cell and not the
+// whole field.
+fn deck_slab() -> vec2<f32> {
+    let base = clouds.sun_direction.w;
+    let thickness = clouds.sun.w;
+    let towers = clouds.weather.w;
+    let cell0 = clouds.colour.w;
+    let sits_low = thickness * SIT_RANGE * SIT_CENTRE + clouds.shade.w * UNDER_RUFFLE;
+    let sits_high = thickness * SIT_RANGE * (1.0 - SIT_CENTRE);
+    let tallest = HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2;
+    let rind_high = clouds.shade.w * 1.2;
+    let heaps_high = sits_high + thickness * 0.55 * tallest * 1.3 + rind_high;
+    let strato_high = select(
+        0.0,
+        thickness * STRATO_DEPTH + rind_high,
+        clouds.genera.x > 0.0,
+    );
+    let alto_high = select(
+        0.0,
+        thickness * (ALTO_LEVEL + ALTO_DEPTH) + clouds.shade.w,
+        clouds.genera.y > 0.0,
+    );
+    let cb_high = select(
+        0.0,
+        thickness * CB_HEIGHT * mix(0.55, 1.0, clouds.genera.z) * 1.04 + thickness * 0.8 + rind_high,
+        clouds.genera.z > 0.0,
+    );
+    return vec2<f32>(
+        base - sits_low,
+        base + max(max(heaps_high, strato_high), max(alto_high, cb_high)) + cell0,
+    );
 }
 
 // The sky along one view ray: a gradient, the sun's glow, and its disc.
@@ -855,7 +1117,7 @@ fn fragment_main(in: Varyings) -> Painted {
     // **Inside the deck is fog**, not the inside face of a cube. A player can
     // fly up through this, and the moment the camera enters a filled cell the
     // honest picture is that they cannot see.
-    let here = column_at(floor(origin.xz / cell) * cell + cell * 0.5, 1.0);
+    let here = column_at(floor(origin.xz / cell) * cell + cell * 0.5, 1.0, origin.y, origin.y);
     if (inside(here, origin.y)) {
         let tint = mix(clouds.colour.xyz * clouds.sun.xyz, clouds.shade.xyz, 0.5);
         out.colour = vec4<f32>(mix(tint, clouds.sky.xyz, 0.4), CLOUD_MARK);
@@ -947,7 +1209,15 @@ fn fragment_main(in: Varyings) -> Painted {
     // the fair sky overhead alone, which is the whole of what a front looks
     // like from outside it.
     let darkness = found.darkness;
-    lit = mix(lit, lit * vec3<f32>(0.30, 0.31, 0.38), darkness);
+    // **Darkest at a cloud's base and least on its tops** (ask W13), so an
+    // anvil keeps its sun over the sheet that has lost it, and a storm read
+    // from outside is a bright top over a dark floor rather than a grey slab.
+    let rel = clamp(
+        (found.position.y - clouds.sun_direction.w) / max(clouds.sun.w * 1.6, 1.0),
+        0.0,
+        1.0,
+    );
+    lit = mix(lit, lit * vec3<f32>(0.30, 0.31, 0.38), darkness * (1.0 - 0.6 * rel));
 
     // Aerial perspective: distant cloud loses contrast into the horizon. Free,
     // because the march already knows how far away the hit is.
@@ -975,4 +1245,31 @@ fn fragment_main(in: Varyings) -> Painted {
     out.depth = clamp(clip.z / max(clip.w, 0.0001), 0.0, 1.0);
     out.colour = vec4<f32>(painted, CLOUD_MARK);
     return out;
+}
+
+// The deck seen from straight below, for the terrain's sake — weather ask
+// W11. One texel per large cube over `shadow.z` blocks around the camera,
+// each how much cloud stands over that column, so the world pass can darken
+// its sun term by the deck along the sun's direction with ONE sample rather
+// than the whole field per fragment. Drawn once a frame into a small
+// texture, which is also what keeps the field in this file alone.
+@fragment
+fn shadow_main(in: Varyings) -> @location(0) vec4<f32> {
+    // Y flips because clip space counts up and texture coordinates count
+    // down; `world.wgsl` turns a position into the same uv.
+    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+    let xz = clouds.shadow.xy + uv * clouds.shadow.z;
+    let cell = clouds.colour.w;
+    if (cell <= 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let slab = deck_slab();
+    let column = column_at(floor(xz / cell) * cell + cell * 0.5, 0.0, slab.x, slab.y);
+    let some = column.lower.y > column.lower.x
+        || column.upper.y > column.upper.x
+        || column.mid.y > column.mid.x;
+    // Cubes are opaque, so a heap throws its whole shadow; the density is
+    // what lightens its rim, where the cloud is one cube thick.
+    let shade = select(0.0, 0.45 + 0.55 * column.density, some);
+    return vec4<f32>(shade, 0.0, 0.0, 1.0);
 }

@@ -228,6 +228,14 @@ struct Globals {
     /// **Appended**, for the reason `light_view_projection` documents. Three
     /// `vec4`s, 48 bytes, rewritten with the rest once a frame.
     place_fog: place_fog::Uniforms,
+    /// The deck's shade map — weather ask W11: its corner relative to the
+    /// camera in xy, one over its side in z, the deck's floor relative to the
+    /// camera in w. See [`clouds::Pass::shadow_frame`].
+    ///
+    /// **Appended**, for the reason `light_view_projection` documents.
+    cloud_shadow: [f32; 4],
+    /// How much of the sun the deck takes in x, zero for none; three spare.
+    cloud_shadow_light: [f32; 4],
 }
 
 /// How far a view of the sky is taken to cross a place's fog, in blocks.
@@ -1119,7 +1127,7 @@ impl Renderer {
         let particles = particle::Pass::new(&gpu);
         let clouds = clouds::Pass::new(&gpu);
         let (view, grid, side, tints, bind_group) =
-            build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, place_fog.buffer());
+            build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, &place_fog, &clouds);
 
         let instances = build_instance_buffer(&gpu, 64);
 
@@ -1515,8 +1523,11 @@ impl Renderer {
             &self.gpu,
             &self.bind_layout,
             &self.globals,
-            &self.atlas_view,
-            &self.sampler,
+            &WorldTextures {
+                atlas: &self.atlas_view,
+                sampler: &self.sampler,
+                shade: self.clouds.shade(),
+            },
             &self.tints.buffer,
             self.place_fog.buffer(),
         );
@@ -1549,8 +1560,11 @@ impl Renderer {
             &self.gpu,
             &self.bind_layout,
             &self.globals,
-            &self.atlas_view,
-            &self.sampler,
+            &WorldTextures {
+                atlas: &self.atlas_view,
+                sampler: &self.sampler,
+                shade: self.clouds.shade(),
+            },
             &self.tints.buffer,
             self.place_fog.buffer(),
         );
@@ -1568,8 +1582,11 @@ impl Renderer {
             &self.gpu,
             &self.bind_layout,
             &self.globals,
-            &view,
-            &self.sampler,
+            &WorldTextures {
+                atlas: &view,
+                sampler: &self.sampler,
+                shade: self.clouds.shade(),
+            },
             &self.tints.buffer,
             self.place_fog.buffer(),
         );
@@ -2253,6 +2270,8 @@ impl Renderer {
             fluid: [self.elapsed, 0.0, 0.0, 0.0],
             camera_right: self.camera_right,
             place_fog: self.fog_here,
+            cloud_shadow: self.clouds.shadow_frame(),
+            cloud_shadow_light: [self.clouds.shadow_strength(), 0.0, 0.0, 0.0],
         }
     }
 
@@ -2925,6 +2944,10 @@ impl Renderer {
         let daylight = self.sun_intensity.max(AMBIENT_FLOOR);
         self.fog_here = self.place_fog.prepare(&self.gpu, camera, daylight);
 
+        // Before the globals: they carry where the deck's shade map is this
+        // frame, which the cloud pass decides — ask W11.
+        self.prepare_clouds(camera, view_projection);
+
         self.gpu.queue.write_buffer(
             &self.globals,
             0,
@@ -2939,7 +2962,6 @@ impl Renderer {
         self.hands_at = hands;
 
         self.prepare_particles(camera, view_projection);
-        self.prepare_clouds(camera, view_projection);
 
         let culled = self.cull_and_upload(camera, view_projection);
         self.upload_chunk_borders(camera, &culled.visible);
@@ -2958,6 +2980,8 @@ impl Renderer {
             });
 
         self.fill_cascades(&mut encoder, &culled);
+        // The deck from below, for the terrain to shade by — ask W11.
+        self.clouds.render_shadow(&mut encoder);
 
         let pass_targets = self.world_pass_target(target);
 
@@ -3825,6 +3849,26 @@ fn build_bind_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
                     },
                     count: None,
                 },
+                // The deck's shade map and its sampler — weather ask W11.
+                // In the world's own group, since it is the world's lighting
+                // that reads them; the cloud pass that draws the map binds
+                // nothing of this.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         })
 }
@@ -4488,7 +4532,8 @@ fn build_atlas_bindings(
     layout: &wgpu::BindGroupLayout,
     globals: &wgpu::Buffer,
     sampler: &wgpu::Sampler,
-    fog: &wgpu::Buffer,
+    place_fog: &place_fog::PlaceFog,
+    clouds: &clouds::Pass,
 ) -> (wgpu::TextureView, u32, u32, TintTable, wgpu::BindGroup) {
     let placeholder = Atlas::build(&[None]);
     let (view, grid, side) = upload_atlas(gpu, &placeholder);
@@ -4499,7 +4544,18 @@ fn build_atlas_bindings(
         swaying: 0,
         any: 0,
     };
-    let bind_group = make_bind_group(gpu, layout, globals, &view, sampler, &tints.buffer, fog);
+    let bind_group = make_bind_group(
+        gpu,
+        layout,
+        globals,
+        &WorldTextures {
+            atlas: &view,
+            sampler,
+            shade: clouds.shade(),
+        },
+        &tints.buffer,
+        place_fog.buffer(),
+    );
     (view, grid, side, tints, bind_group)
 }
 
@@ -4592,12 +4648,19 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (wgpu::TextureView, u32, u32) {
     )
 }
 
+/// The pictures the world's bind group samples: the atlas with its sampler,
+/// and the deck's shade map with its own.
+struct WorldTextures<'a> {
+    atlas: &'a wgpu::TextureView,
+    sampler: &'a wgpu::Sampler,
+    shade: (&'a wgpu::TextureView, &'a wgpu::Sampler),
+}
+
 fn make_bind_group(
     gpu: &Gpu,
     layout: &wgpu::BindGroupLayout,
     globals: &wgpu::Buffer,
-    atlas: &wgpu::TextureView,
-    sampler: &wgpu::Sampler,
+    textures: &WorldTextures<'_>,
     tints: &wgpu::Buffer,
     fog: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
@@ -4611,11 +4674,11 @@ fn make_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(atlas),
+                resource: wgpu::BindingResource::TextureView(textures.atlas),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::Sampler(textures.sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -4624,6 +4687,14 @@ fn make_bind_group(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: fog.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(textures.shade.0),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::Sampler(textures.shade.1),
             },
         ],
     })

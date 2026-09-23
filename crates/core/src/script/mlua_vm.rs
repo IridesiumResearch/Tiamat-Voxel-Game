@@ -1680,12 +1680,30 @@ fn cloud_map_of(spec: &Table) -> mlua::Result<Option<crate::atmosphere::CloudMap
 }
 
 fn cloud_state_of(spec: &Table) -> mlua::Result<crate::atmosphere::Clouds> {
+    for pair in spec.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        if let Value::String(name) = key
+            && !CLOUD_STATE_FIELDS.contains(&name.to_string_lossy().as_ref())
+        {
+            return Err(mlua::Error::external(format!(
+                "set_clouds: unknown field `{}`. The fields are {CLOUD_STATE_FIELDS:?}.",
+                name.to_string_lossy()
+            )));
+        }
+    }
+    // A genus left out is none of it, so a mod written for the first deck —
+    // `cover` and `darkness` alone — sends exactly the sky it always did.
+    let share =
+        |name: &str| -> mlua::Result<f32> { Ok(spec.get::<Option<f32>>(name)?.unwrap_or(0.0)) };
     Ok(crate::atmosphere::sanitise_cloud_state(
         crate::atmosphere::Clouds {
-            cover: spec.get::<Option<f32>>("cover")?.unwrap_or(0.0),
-            darkness: spec.get::<Option<f32>>("darkness")?.unwrap_or(0.0),
+            cover: share("cover")?,
+            darkness: share("darkness")?,
             base: spec.get::<Option<f32>>("base")?,
             ease_ticks: spec.get::<Option<u32>>("ease_ticks")?.unwrap_or(0),
+            stratocumulus: share("stratocumulus")?,
+            altocumulus: share("altocumulus")?,
+            cumulonimbus: share("cumulonimbus")?,
         },
     ))
 }
@@ -9022,6 +9040,21 @@ const DOMAIN_FIELDS: [&str; 5] = ["id", "kind", "scale", "instanced", "generator
 /// Fields the `map` of a `game.set_clouds` spec accepts — weather ask W10.
 const CLOUD_MAP_FIELDS: [&str; 5] = ["origin", "cell", "size", "cover", "darkness"];
 
+/// Fields a `game.set_clouds` spec accepts.
+///
+/// Checked for the reason every registration is: `stratocumulos` is a mod
+/// that thinks it sent a sheet, and a clear sky says nothing about why.
+const CLOUD_STATE_FIELDS: [&str; 8] = [
+    "cover",
+    "darkness",
+    "base",
+    "ease_ticks",
+    "map",
+    "stratocumulus",
+    "altocumulus",
+    "cumulonimbus",
+];
+
 /// Fields `game.set_player_abilities` accepts.
 ///
 /// Checked so a typo is an error rather than a silent default, for the reason
@@ -11087,6 +11120,66 @@ mod tests {
         );
         assert_eq!(bare.burst.area, [16.0, 3.0, 16.0], "in a wide low box");
         assert_eq!(rained[2].1, None, "nil stops it");
+    }
+
+    #[test]
+    fn a_mod_sets_a_players_sky_by_genus_and_a_misspelt_genus_is_refused() {
+        // **Weather ask W13.** Four genera, a share of the sky each. `cover`
+        // keeps meaning cumulus, so a mod written for the first deck is
+        // unchanged, and the sheets and towers ride beside it as numbers
+        // rather than a kind — a front arriving blends one sky into the next.
+        // Clamped like every other number a mod hands the engine.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([9; 32]).to_hex();
+        load(
+            &mut host,
+            "fronts",
+            &format!(
+                "told = game.set_clouds('{uuid}', {{ cover = 0.2, stratocumulus = 0.85,\n\
+                 \x20   altocumulus = 0.0, cumulonimbus = 0.6, darkness = 0.7, ease_ticks = 600 }})\n\
+                 game.set_clouds('{uuid}', {{ cover = 0.5, cumulonimbus = 7 }})\n\
+                 game.set_clouds('{uuid}', {{ cover = 0.5 }})"
+            ),
+        )
+        .expect("load");
+        let env = host.environment("fronts").expect("env");
+        assert!(env.get::<bool>("told").expect("told"));
+        let clouded = weather.clouded.lock().expect("lock").clone();
+        assert_eq!(clouded.len(), 3);
+        let storm = clouded[0].1.expect("a sky");
+        assert_eq!(clouded[0].0, uuid);
+        assert!((storm.cover - 0.2).abs() < 1e-6);
+        assert!((storm.stratocumulus - 0.85).abs() < 1e-6);
+        assert!(storm.altocumulus.abs() < 1e-6);
+        assert!((storm.cumulonimbus - 0.6).abs() < 1e-6);
+        assert!((storm.darkness - 0.7).abs() < 1e-6);
+        let wild = clouded[1].1.expect("a sky");
+        assert!(
+            (wild.cumulonimbus - 1.0).abs() < 1e-6,
+            "a share past one is clamped, got {}",
+            wild.cumulonimbus
+        );
+        let plain = clouded[2].1.expect("a sky");
+        assert!(
+            plain.stratocumulus.abs() < 1e-6
+                && plain.altocumulus.abs() < 1e-6
+                && plain.cumulonimbus.abs() < 1e-6,
+            "a genus left out is none of it: {plain:?}"
+        );
+
+        // A misspelt genus is an error that names it, not a clear sky.
+        let err = host
+            .eval_in(
+                "fronts",
+                &format!("game.set_clouds('{uuid}', {{ stratocumulos = 1 }})"),
+            )
+            .expect_err("a misspelt field is an error");
+        assert!(
+            format!("{err:?}").contains("stratocumulos"),
+            "the error should name the field: {err:?}"
+        );
     }
 
     #[test]

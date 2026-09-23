@@ -77,6 +77,14 @@ struct Globals {
     fog_frame: vec4<f32>,
     // Cells per side in x; whether any place has fog in y; daylight in z.
     fog_grid: vec4<f32>,
+    // The deck's shade map — weather ask W11: its corner relative to the
+    // camera in xy, one over its side in z, the deck's floor relative to the
+    // camera in w. **Appended**, for the reason `light_view_projection`
+    // documents.
+    cloud_shadow: vec4<f32>,
+    // How much of the sun the deck takes in x: zero when there is no deck,
+    // in Simple, or with clouds off, and then no sample is taken at all.
+    cloud_shadow_light: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -103,6 +111,11 @@ struct MaterialTint {
 // `render::place_fog`, whose `sample` and `amount` are this file's
 // `place_fog_at` and `place_fog` written once more in Rust for the tests.
 @group(0) @binding(4) var<storage, read> fog_cells: array<vec4<f32>>;
+// The deck seen from straight below, drawn by the cloud pass once a frame —
+// weather ask W11. One channel, how much cloud stands over each column of a
+// square around the camera.
+@group(0) @binding(5) var cloud_shadow_map: texture_2d<f32>;
+@group(0) @binding(6) var cloud_shadow_sampler: sampler;
 
 // How many blocks above its top a place's fog thins by a factor of e. Must
 // match `place_fog::FALLOFF`.
@@ -673,6 +686,42 @@ const CLASSIC_AMBIENT: f32 = 1.0 / 3.0;
 // place from walking on the surface, light enough that geometry still reads.
 const SIMPLE_FLOOR: f32 = 1.0 / 12.0;
 
+// The deck's shadow on a surface — weather ask W11: a patch of shade
+// moving over a hillside is most of what makes a drifting sky read as
+// drifting from the ground. One sample of the map the cloud pass drew from
+// below, where this fragment's line to the sun crosses the deck's floor, and
+// the sun term is darkened by what stands there. The sky's own light is
+// untouched, as it is under the shadow map's shade.
+//
+// `textureSampleLevel` rather than `textureSample`: a cut-out fragment
+// reaches here after a `discard` it may or may not have taken, which is not
+// uniform control flow, and an implicit level of detail needs one.
+fn cloud_shade(world: vec3<f32>) -> f32 {
+    let strength = globals.cloud_shadow_light.x;
+    if (strength <= 0.0) {
+        return 1.0;
+    }
+    let toward_sun = -globals.sun_direction.xyz;
+    // A sun at the horizon throws the deck's shadow to nowhere in
+    // particular; this low, the deck shades nothing.
+    if (toward_sun.y < 0.05) {
+        return 1.0;
+    }
+    let climb = (globals.cloud_shadow.w - world.y) / toward_sun.y;
+    // Above the deck's floor there is no deck between this surface and the
+    // sun that the map could know about.
+    if (climb < 0.0) {
+        return 1.0;
+    }
+    let at = world.xz + toward_sun.xz * climb;
+    let uv = (at - globals.cloud_shadow.xy) * globals.cloud_shadow.z;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return 1.0;
+    }
+    let cover = textureSampleLevel(cloud_shadow_map, cloud_shadow_sampler, uv, 0.0).r;
+    return 1.0 - strength * cover;
+}
+
 fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     // **Mode 1: one brightness, no hue, no sky.**
     //
@@ -724,7 +773,7 @@ fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     // every outdoor surface washes the world out. The sky is the floor the sun
     // is measured against, so full sun is exactly full sun.
     let sky_reach = input.sun * globals.sun_intensity;
-    let direct = sky_reach * globals.sun_colour.rgb * shadow;
+    let direct = sky_reach * globals.sun_colour.rgb * shadow * cloud_shade(input.world);
     let skylight = sky_reach * sky_hue * SKY_FLOOR;
     let daylight = max(direct, skylight);
 

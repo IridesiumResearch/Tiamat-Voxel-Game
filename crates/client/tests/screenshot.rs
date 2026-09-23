@@ -5402,6 +5402,9 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         darkness: 0.0,
         base: None,
         ease_ticks: 600,
+        stratocumulus: 0.0,
+        altocumulus: 0.0,
+        cumulonimbus: 0.0,
     };
     let frame = client::render::clouds::Frame {
         view_projection: glam::camera::rh::proj::directx::perspective(1.0, 16.0 / 9.0, 0.1, 4000.0),
@@ -5502,6 +5505,9 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
         }),
         quality: client::render::clouds::Quality::Normal,
         seed: 4242,
@@ -5518,6 +5524,9 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
         }),
         quality: client::render::clouds::Quality::Normal,
         seed: 4242,
@@ -5547,6 +5556,9 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
         darkness: 0.0,
         base: None,
         ease_ticks: 0,
+        stratocumulus: 0.0,
+        altocumulus: 0.0,
+        cumulonimbus: 0.0,
     };
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
@@ -5611,6 +5623,9 @@ fn a_half_covered_sky_has_cloud_and_sky_in_it_rather_than_one_flat_fill() {
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
         }),
         quality: client::render::clouds::Quality::Normal,
         seed: 4242,
@@ -5664,6 +5679,9 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
         }),
         quality: client::render::clouds::Quality::Normal,
         seed: 4242,
@@ -5734,8 +5752,14 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
     // The half the storm is over greys; the half it is not over stays as
     // clear as it was. Both halves of that, both ways round — which is what
     // says the grid is read per ray rather than per frame.
+    // **Four hundredths, from five.** Storm light is weighted by height since
+    // weather ask W13 — darkest at a cloud's base, and its tops keep their
+    // sun — so the walls of a low deck seen from underneath grey a little
+    // less than they did, and the side of this frame with less cloud in it
+    // fell from 0.0485 of greying to just under the old line. Still a fifth
+    // of that side's blue, and still nothing on the other side.
     assert!(
-        clear_left - left_a > 0.05,
+        clear_left - left_a > 0.04,
         "a storm over +x should grey that side: {clear_left:.4} clear, {left_a:.4} stormy"
     );
     assert!(
@@ -5743,7 +5767,7 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
         "a storm over +x greyed the other side too: {clear_right:.4} clear, {right_a:.4} with it"
     );
     assert!(
-        clear_right - right_b > 0.05,
+        clear_right - right_b > 0.04,
         "a storm over -x should grey that side: {clear_right:.4} clear, {right_b:.4} stormy"
     );
     assert!(
@@ -5796,6 +5820,9 @@ fn how_long_the_deck_costs_from_three_views() {
         darkness: 0.0,
         base: None,
         ease_ticks: 0,
+        stratocumulus: 0.0,
+        altocumulus: 0.0,
+        cumulonimbus: 0.0,
     };
 
     // The deck sits at 400; the third view is above it looking down, which is
@@ -5881,6 +5908,9 @@ fn a_deck_past_the_terrains_fog_is_still_drawn_in_every_mode() {
                 darkness: 0.0,
                 base: None,
                 ease_ticks: 0,
+                stratocumulus: 0.0,
+                altocumulus: 0.0,
+                cumulonimbus: 0.0,
             }),
             quality: client::render::clouds::Quality::Normal,
             seed: 4242,
@@ -5965,6 +5995,416 @@ fn cloud_in(with: &Image, without: &Image) -> (usize, f32) {
     (lumas.len(), variance.sqrt())
 }
 
+/// A sky of the given genera, for the tests below: cumulus is `cover`, and
+/// the three beside it by name — weather ask W13.
+fn sky_of(
+    cover: f32,
+    stratocumulus: f32,
+    altocumulus: f32,
+    cumulonimbus: f32,
+) -> tiamat_core::atmosphere::Clouds {
+    tiamat_core::atmosphere::Clouds {
+        cover,
+        darkness: 0.0,
+        base: None,
+        ease_ticks: 0,
+        stratocumulus,
+        altocumulus,
+        cumulonimbus,
+    }
+}
+
+/// The frame with the low deck under `state` and the same frame with no deck,
+/// so cloud is whatever the deck changed — see `cloud_in`.
+fn with_and_without(
+    renderer: &mut Renderer,
+    target: &Offscreen,
+    camera: &Camera,
+    state: tiamat_core::atmosphere::Clouds,
+) -> (Image, Image) {
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(state),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let with = target.capture(renderer, camera).expect("capture");
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: Some(state),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let without = target.capture(renderer, camera).expect("capture");
+    (with, without)
+}
+
+/// Whether the deck changed this pixel.
+fn is_cloud(with: &Image, without: &Image, x: u32, y: u32) -> bool {
+    match (with.pixel(x, y), without.pixel(x, y)) {
+        (Some(pixel), Some(bare)) => (0..3).any(|c| pixel[c].abs_diff(bare[c]) > 2),
+        _ => false,
+    }
+}
+
+/// How many times a row of the upper half crosses from cloud to sky or back,
+/// summed over the rows: how BUSY the sky is. A few big heaps make a few
+/// crossings a row; many small cloudlets make many.
+fn crossings_in(with: &Image, without: &Image) -> usize {
+    let mut crossings = 0;
+    for y in 0..HEIGHT / 2 {
+        let mut last = is_cloud(with, without, 0, y);
+        for x in 1..WIDTH {
+            let now = is_cloud(with, without, x, y);
+            if now != last {
+                crossings += 1;
+                last = now;
+            }
+        }
+    }
+    crossings
+}
+
+/// Cloud pixels in every row of the frame, top first.
+fn cloud_per_row(with: &Image, without: &Image) -> Vec<usize> {
+    (0..HEIGHT)
+        .map(|y| {
+            (0..WIDTH)
+                .filter(|&x| is_cloud(with, without, x, y))
+                .count()
+        })
+        .collect()
+}
+
+#[test]
+fn a_stratocumulus_sheet_is_rounded_cells_with_sky_between() {
+    // **Weather ask W13's own acceptance**, the first line: "a stratocumulus
+    // sheet of rounded cells with sky between". A sheet at three quarters
+    // covers most of the sky from underneath and leaves grooves of sky
+    // between its cells — so it must be neither sparse nor a plane, and the
+    // grooves make every row of it cross from cloud to sky and back many
+    // times, which a plane would not do at all.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    // Steeper than `skyward`: a sheet seen along its own plane closes its
+    // grooves, the way a colonnade seen end-on has no gaps in it. Thirty
+    // degrees up looks through them.
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, 0.52);
+
+    let (with, without) =
+        with_and_without(&mut renderer, &target, &camera, sky_of(0.0, 0.75, 0.0, 0.0));
+    let (cloud, _) = cloud_in(&with, &without);
+    let half = (WIDTH * HEIGHT / 2) as usize;
+    let crossings = crossings_in(&with, &without);
+    println!("stratocumulus at 0.75: {cloud} cloud pixels of {half}, {crossings} crossings");
+    assert!(
+        cloud > half / 4,
+        "a sheet at three quarters should cover much of the sky: {cloud} of {half}"
+    );
+    // Measured at 93.5% with 433 crossings: the grooves are narrow, as a
+    // sheet's are, but there are many of them. A plane would be all cloud
+    // and cross nowhere.
+    assert!(
+        cloud < half * 97 / 100,
+        "and leave sky between its cells: {cloud} of {half}"
+    );
+    assert!(
+        crossings > 250,
+        "a sheet of cells with grooves between them crosses from cloud to sky many times a \
+         frame, got {crossings}"
+    );
+}
+
+#[test]
+fn an_altocumulus_layer_is_many_small_cloudlets_from_the_ground() {
+    // **W13's second line**: "altocumulus as banded cloudlets from the
+    // ground". What tells a mackerel sky from a sky of heaps is that its
+    // pieces are small and many — so measured from the same place, the
+    // layer crosses from cloud to sky far more often per row than the heaps
+    // do, while still being a good deal of cloud.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    let (alto, alto_bare) = with_and_without(
+        &mut renderer,
+        &target,
+        &skyward(),
+        sky_of(0.0, 0.0, 0.8, 0.0),
+    );
+    let (heaps, heaps_bare) = with_and_without(
+        &mut renderer,
+        &target,
+        &skyward(),
+        sky_of(0.55, 0.0, 0.0, 0.0),
+    );
+    let (alto_cloud, _) = cloud_in(&alto, &alto_bare);
+    let (heap_cloud, _) = cloud_in(&heaps, &heaps_bare);
+    let alto_crossings = crossings_in(&alto, &alto_bare);
+    let heap_crossings = crossings_in(&heaps, &heaps_bare);
+    let half = (WIDTH * HEIGHT / 2) as usize;
+    println!(
+        "altocumulus at 0.8: {alto_cloud} cloud pixels, {alto_crossings} crossings; heaps at \
+         0.55: {heap_cloud} pixels, {heap_crossings} crossings; half a frame is {half}"
+    );
+    assert!(
+        alto_cloud > half / 10,
+        "the layer should be a good deal of cloud: {alto_cloud} of {half}"
+    );
+    assert!(
+        alto_crossings > heap_crossings * 2,
+        "cloudlets are many and small, so the layer should cross from cloud to sky far more \
+         often than heaps do: {alto_crossings} against {heap_crossings}"
+    );
+}
+
+#[test]
+fn a_cumulonimbus_is_a_tower_under_a_spreading_anvil() {
+    // **W13's third line**: "a cumulonimbus reading as a tower under a
+    // spreading anvil". Seen from between the low deck's tops and the
+    // anvils, looking level: without a storm nothing stands above the low
+    // cloud and the upper half of the frame is sky; with one, a tower rises
+    // through it under an anvil wider than itself — so above the horizon the
+    // widest row of cloud lies ABOVE a narrower one, which is what
+    // "spreading" is as a number.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 360.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, 0.0);
+
+    let (calm, calm_bare) =
+        with_and_without(&mut renderer, &target, &camera, sky_of(0.3, 0.0, 0.0, 0.0));
+    let (storm, storm_bare) =
+        with_and_without(&mut renderer, &target, &camera, sky_of(0.0, 0.0, 0.0, 1.0));
+    let calm_rows = cloud_per_row(&calm, &calm_bare);
+    let storm_rows = cloud_per_row(&storm, &storm_bare);
+    let horizon = (HEIGHT / 2) as usize;
+    let calm_above: usize = calm_rows[..horizon].iter().sum();
+    let storm_above: usize = storm_rows[..horizon].iter().sum();
+    println!("above the horizon: calm {calm_above} cloud pixels, storm {storm_above}");
+    println!(
+        "storm rows above the horizon, top down: {:?}",
+        &storm_rows[..horizon]
+    );
+    println!("storm rows below it: {:?}", &storm_rows[horizon..]);
+    assert_eq!(
+        calm_above, 0,
+        "from over the low deck's tops nothing but sky should stand above the horizon without a \
+         storm"
+    );
+    assert!(
+        storm_above > 300,
+        "a storm's tower and anvil should stand above the horizon: {storm_above} pixels"
+    );
+    // Spreading: the anvils stand above the horizon and the towers under
+    // them cross it, so the widest row of cloud above the horizon is at
+    // least twice as wide as the narrowest row below it that still has
+    // cloud in it — the tower's own width. Storms alone in this sky, so
+    // nothing but towers is below the horizon.
+    let widest_above = storm_rows[..horizon].iter().copied().max().unwrap_or(0);
+    let narrowest_below = storm_rows[horizon..]
+        .iter()
+        .copied()
+        .filter(|&n| n > 0)
+        .min()
+        .unwrap_or(0);
+    println!(
+        "widest row above the horizon {widest_above}, narrowest with cloud below it \
+         {narrowest_below}"
+    );
+    assert!(
+        narrowest_below > 0,
+        "a tower should cross the horizon under its anvil, but no row below it had cloud"
+    );
+    assert!(
+        widest_above >= narrowest_below * 2 + 8,
+        "an anvil should spread wider than the tower under it: the widest row above the \
+         horizon is {widest_above} pixels against {narrowest_below} below it"
+    );
+}
+
+#[test]
+#[ignore = "a measurement, not a gate; run with --ignored --nocapture"]
+fn how_long_each_genus_costs_from_the_ground() {
+    // **W13's cost line: "from the ground no genus costs more than twice
+    // today's deck."** Weather's deck, level and thirty degrees up, the
+    // designer's five skies against a sky of cumulus alone, as the deck's own
+    // cost over a bare sky. A probe under llvmpipe, like the measurements
+    // beside it: the ratio is what survives the move to real hardware.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    let skies: [(&str, f32, f32, f32, f32); 5] = [
+        ("cumulus", 0.45, 0.0, 0.0, 0.0),
+        ("stratocumulus", 0.0, 0.75, 0.0, 0.0),
+        ("altocumulus", 0.2, 0.0, 0.8, 0.0),
+        ("storm", 0.2, 0.85, 0.0, 0.6),
+        ("mega storm", 0.3, 0.3, 0.3, 1.0),
+    ];
+    let views: [(&str, f32); 2] = [("level", 0.0), ("30 degrees up", 0.52)];
+    for (label, pitch) in views {
+        let mut camera = Camera {
+            position: Position::from_world(24.0, 40.0, 20.0),
+            ..Camera::default()
+        };
+        camera.look(0.0, pitch);
+        let time = |renderer: &mut Renderer| {
+            let _ = target.capture(renderer, &camera);
+            let start = std::time::Instant::now();
+            for _ in 0..8 {
+                let _ = target.capture(renderer, &camera);
+            }
+            start.elapsed().as_secs_f64() * 1000.0 / 8.0
+        };
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: None,
+            clouds: None,
+            quality: client::render::clouds::Quality::Normal,
+            seed: 4242,
+        });
+        let bare = time(&mut renderer);
+        let mut plain = 0.0;
+        for (sky, cover, stratocumulus, altocumulus, cumulonimbus) in skies {
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer: Some(tuned_deck()),
+                clouds: Some(sky_of(cover, stratocumulus, altocumulus, cumulonimbus)),
+                quality: client::render::clouds::Quality::Normal,
+                seed: 4242,
+            });
+            let added = time(&mut renderer) - bare;
+            if sky == "cumulus" {
+                plain = added;
+            }
+            println!(
+                "{label:>14} {sky:>14}: deck {added:6.2} ms over a bare {bare:5.2}, x{:.2} of cumulus",
+                added / plain.max(0.001)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deck_overhead_shades_the_ground_in_every_mode_but_simple() {
+    // **Weather ask W11.** The deck drifted overhead and the ground under a
+    // cloud was lit exactly as the ground under clear sky. Now the cloud pass
+    // draws the deck from below once a frame and the terrain darkens its sun
+    // term by what stands where its line to the sun crosses the deck's
+    // floor — in Classic and Beautiful. Simple skips it, as it skips the rest
+    // of the lighting.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
+        // A sun high enough that the deck's shadow lands on the floor under
+        // it rather than kilometres away.
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], [-0.25, -0.9, 0.35]);
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let floor = |renderer: &mut Renderer, layer| {
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer,
+                clouds: Some(sky_of(1.0, 0.0, 0.0, 0.0)),
+                quality: client::render::clouds::Quality::Normal,
+                seed: 4242,
+            });
+            let frame = target.capture(renderer, &viewpoint()).expect("capture");
+            // The ground fills the bottom of the frame.
+            average(&frame, 0, HEIGHT * 3 / 4, WIDTH, HEIGHT)
+        };
+        let clear = floor(&mut renderer, None);
+        let overcast = floor(&mut renderer, Some(low_deck()));
+        println!(
+            "{mode:?}: the floor is {clear:?} under a clear sky and {overcast:?} under an \
+             overcast deck"
+        );
+        if mode == LightingMode::Simple {
+            assert!(
+                (luma(overcast) - luma(clear)).abs() < 0.01,
+                "Simple skips the deck's shadow as it skips the rest of the lighting: {clear:?} \
+                 against {overcast:?}"
+            );
+        } else {
+            assert!(
+                luma(overcast) < luma(clear) * 0.85,
+                "in {mode:?} an overcast deck should shade the floor under it: {clear:?} clear \
+                 against {overcast:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_decks_shade_moves_over_the_ground_as_the_deck_drifts() {
+    // **The other half of W11**: "a patch of shade moving over a hillside is
+    // most of what makes a drifting sky read as drifting from the ground".
+    // The shade map is redrawn every frame from the field the deck is
+    // marched from, drift included, so a minute later the shade is somewhere
+    // else. Small fast heaps, so that the minute carries several across the
+    // fixed scene's floor whatever the seed put over it to begin with.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Classic);
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [-0.25, -0.9, 0.35]);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(tiamat_core::atmosphere::CloudLayer {
+            frequency: 1.0 / 60.0,
+            drift: [4.0, 0.0],
+            ..low_deck()
+        }),
+        clouds: Some(sky_of(0.5, 0.0, 0.0, 0.0)),
+        quality: client::render::clouds::Quality::Normal,
+        seed: 4242,
+    });
+    let before = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+    renderer.advance_clouds(60.0);
+    let after = target
+        .capture(&mut renderer, &viewpoint())
+        .expect("capture");
+
+    let mut moved = 0usize;
+    let mut counted = 0usize;
+    for y in HEIGHT * 3 / 4..HEIGHT {
+        for x in 0..WIDTH {
+            if let (Some(a), Some(b)) = (before.pixel(x, y), after.pixel(x, y)) {
+                counted += 1;
+                if (0..3).any(|c| a[c].abs_diff(b[c]) > 8) {
+                    moved += 1;
+                }
+            }
+        }
+    }
+    println!("a minute of drift changed {moved} of {counted} floor pixels");
+    assert!(
+        moved * 20 > counted,
+        "a minute of drift should move the shade over the floor: {moved} of {counted} pixels \
+         changed"
+    );
+}
+
 #[test]
 #[ignore = "pictures for a person to look at, not a gate; run with --ignored --nocapture"]
 fn pictures_of_the_deck_for_the_designers_eye() {
@@ -5995,7 +6435,15 @@ fn pictures_of_the_deck_for_the_designers_eye() {
         ("side", 40.0, 1.57, 0.0),
         ("above", 640.0, 0.0, -0.6),
     ];
-    let weathers = [("fair", 0.55, 0.0), ("storm", 0.85, 0.7)];
+    // The designer's five skies, W13's own harness: cover (cumulus),
+    // stratocumulus, altocumulus, cumulonimbus, darkness.
+    let weathers: [(&str, f32, f32, f32, f32, f32); 5] = [
+        ("cumulus", 0.45, 0.0, 0.0, 0.0, 0.0),
+        ("stratocumulus", 0.0, 0.75, 0.0, 0.0, 0.15),
+        ("altocumulus", 0.2, 0.0, 0.8, 0.0, 0.0),
+        ("storm", 0.2, 0.85, 0.0, 0.6, 0.7),
+        ("mega", 0.3, 0.3, 0.3, 1.0, 0.6),
+    ];
     for mode in [
         LightingMode::Simple,
         LightingMode::Classic,
@@ -6012,7 +6460,7 @@ fn pictures_of_the_deck_for_the_designers_eye() {
         renderer.set_lighting_mode(mode);
         renderer.set_sky(client::render::sky_colour(), 256.0);
         let target = Offscreen::new(renderer.gpu(), width, height);
-        for (weather, cover, darkness) in weathers {
+        for (weather, cover, stratocumulus, altocumulus, cumulonimbus, darkness) in weathers {
             renderer.set_clouds(client::render::clouds::Deck {
                 layer: Some(tuned_deck()),
                 clouds: Some(tiamat_core::atmosphere::Clouds {
@@ -6020,6 +6468,9 @@ fn pictures_of_the_deck_for_the_designers_eye() {
                     darkness,
                     base: None,
                     ease_ticks: 0,
+                    stratocumulus,
+                    altocumulus,
+                    cumulonimbus,
                 }),
                 quality: client::render::clouds::Quality::Normal,
                 seed: 4242,
@@ -6073,6 +6524,9 @@ fn how_long_a_cloud_frame_takes() {
         darkness: 0.0,
         base: None,
         ease_ticks: 0,
+        stratocumulus: 0.0,
+        altocumulus: 0.0,
+        cumulonimbus: 0.0,
     };
     let time = |renderer: &mut Renderer| {
         // One to warm the pipeline, then a handful timed.
@@ -6265,6 +6719,9 @@ fn dump_the_golden_hour() {
                     darkness,
                     base: None,
                     ease_ticks: 0,
+                    stratocumulus: 0.0,
+                    altocumulus: 0.0,
+                    cumulonimbus: 0.0,
                 }),
                 quality: client::render::clouds::Quality::Fine,
                 seed: 4242,

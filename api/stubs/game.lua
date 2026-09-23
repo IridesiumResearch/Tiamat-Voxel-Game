@@ -2242,7 +2242,9 @@ function game.register_model(spec) end
 ---The client draws it by marching a ray through a FIELD rather than by
 ---building cubes, which is why a deck can reach the horizon and drift and
 ---change shape without costing anything to rebuild. Every field below is
----optional; the defaults are an ordinary fair-weather deck.
+---optional; the defaults are an ordinary fair-weather deck. In the Classic
+---and Beautiful lighting modes the deck also shades the ground under it
+---along the sun, drift included, so a moving sky reads as moving from below.
 ---
 ---```lua
 ---game.register_clouds{
@@ -2339,6 +2341,27 @@ function game.register_clouds(spec) end
 ---edges, so keep the cells at the resolution of your own weather and let the
 ---clouds do the rest.
 ---
+---**Four genera, a share of the sky each.** `cover` is cumulus, the heaps, and
+---the three beside it are shapes the heaps cannot make: `stratocumulus` is a
+---low sheet of rounded cells drawn out into rolls with grooves of sky between,
+---`altocumulus` a mid-level mackerel sky of small cloudlets in wave bands well
+---above the floor, and `cumulonimbus` towers under spreading anvils — at 1,
+---supercells. Numbers rather than a kind, so a front arriving blends one sky
+---into the next with the same `ease_ticks`. A genus left out is none of it.
+---
+---```lua
+---game.set_clouds(uuid, {
+---    cover = 0.2,            -- a few cumulus
+---    stratocumulus = 0.85,   -- under a sheet
+---    cumulonimbus = 0.6,     -- with towers coming
+---    darkness = 0.7,
+---    ease_ticks = 600,
+---})
+---```
+---
+---Storm light is darkest at a cloud's base and keeps the sun on its tops, so
+---an anvil catches the light a sheet under it has lost.
+---
 ---Returns whether that player was there to tell.
 ---
 ---@param uuid string The player's UUID.
@@ -2353,6 +2376,9 @@ function game.set_clouds(uuid, spec) end
 ---@field base number? Overrides the registered floor for this player.
 ---@field ease_ticks integer? How long the client takes to get there. Default 0, at most 2400.
 ---@field map Tiamat.CloudMapSpec? A coarse grid of weather over the world, for a storm that can be seen coming. Omit it for one sky everywhere; a call that omits it clears the last one.
+---@field stratocumulus number? A low sheet of rounded cells with grooves of sky between, 0 to 1. Default 0.
+---@field altocumulus number? A mid-level mackerel sky of small cloudlets in bands, 0 to 1. Default 0.
+---@field cumulonimbus number? Towers under anvils, 0 to 1; at 1, supercells. Default 0.
 
 ---A coarse grid of cloud cover over the world — one cell is hundreds of blocks.
 ---@class Tiamat.CloudMapSpec

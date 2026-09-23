@@ -493,11 +493,21 @@ under. The client draws it by marching a ray through a **field**, not by
 building cubes — which is why a deck can reach the horizon, drift and change
 shape without anything being rebuilt, and why you can fly up through one.
 
+**The sky has four genera, a share each.** `cover` is cumulus, the heaps over
+the floor. `stratocumulus` is a low sheet of rounded cells with grooves of sky
+between them, `altocumulus` a mid-level mackerel sky of small cloudlets in wave
+bands, and `cumulonimbus` towers under spreading anvils, supercells at 1. They
+are numbers rather than a kind so that a front arriving blends one sky into the
+next, and a genus you leave out is none of it — a mod that only ever sent
+`cover` sends exactly the sky it always did.
+
 Two things follow that are worth knowing before you design around them. A
-column of the deck is up to **two** intervals, which gives stepped undersides
-and a tower that mushrooms over its waist, but not a third lobe. And `darkness`
-hangs a dark haze under the deck as well as greying it: that, rather than
-`set_precipitation`, is what makes a storm read from outside it, because
+column of the deck is up to **three** intervals — the low cloud, an anvil over
+it, and a mid-level layer between — which is what lets a mackerel sky sit under
+a storm's anvil and over a heap in one column, and is also the limit: a fourth
+lobe cannot be drawn. And `darkness` hangs a dark haze under the deck as well
+as greying it, darkest at a cloud's base and least on its tops: that, rather
+than `set_precipitation`, is what makes a storm read from outside it, because
 precipitation spawns around the player's own camera and cannot draw a curtain
 of rain over the next valley.
 
@@ -508,6 +518,10 @@ outside the grid. Up to 16 cells a side; at the 256-block squares a weather mod
 tends to evaluate that is four kilometres, which is further than the deck is
 drawn. Values are shares of one and travel as bytes. Without it, a front cannot
 be watched coming: the sky a player sees is overcast everywhere or nowhere.
+
+The deck shades the ground under it along the sun, in the Classic and
+Beautiful lighting modes, so a drifting sky reads as drifting from the ground.
+Figures are not shaded by it yet.
 
 The player owns the quality: a cloud setting in their own graphics options
 scales the deck's resolution and draw distance, down to off. The server is

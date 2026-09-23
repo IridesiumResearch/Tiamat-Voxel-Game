@@ -34,6 +34,32 @@ use tiamat_core::atmosphere::{CloudLayer, Clouds};
 
 use super::{DEPTH_FORMAT, Gpu, graph};
 
+/// How many texels a side the deck's shade map has — weather ask W11.
+///
+/// The map covers [`SHADOW_EXTENT`] blocks a side around the camera, so a
+/// texel is sixteen blocks: one large cube on Weather's deck, which is the
+/// finest thing the deck has to shade by. Sixty-five thousand columns of the
+/// field a frame, against the millions the march asks.
+pub const SHADOW_TEXELS: u32 = 256;
+
+/// How wide the shade map is, in blocks.
+///
+/// Four kilometres: a deck four hundred blocks up throws its shadow past a
+/// low sun by that much before the sun is too low to shade anything at all,
+/// and the map is centred on the camera and snapped to its own texels, so a
+/// player walking under it sees the shade stay where the cloud is.
+pub const SHADOW_EXTENT: f32 = 4096.0;
+
+/// How much of the sun a deck takes from the ground under it.
+///
+/// Not all: the sky still lights what the deck shades, and a floor gone
+/// black under a cloud is a cave, not a shadow.
+const SHADOW_STRENGTH: f32 = 0.85;
+
+/// The shade map's format: one channel, filterable, so the sample a fragment
+/// takes is blended across its texel and a heap's edge is soft on the ground.
+const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
 /// How far the deck is drawn at each quality, in blocks, and how far the
 /// small-cube rind reaches.
 ///
@@ -155,6 +181,12 @@ struct Uniforms {
     weather: [f32; 4],
     motion: [f32; 4],
     quality: [f32; 4],
+    /// The three genera beside cumulus — stratocumulus, altocumulus and
+    /// cumulonimbus, each a share of the sky — and a spare. Weather ask W13.
+    genera: [f32; 4],
+    /// The shade map's corner x and z in world blocks, and its side — ask
+    /// W11.
+    shadow: [f32; 4],
     /// The cover map's corner x and z, its cell size in blocks, and how many
     /// cells a side — zero for "no map, use `weather` everywhere". Ask W10.
     map: [f32; 4],
@@ -200,6 +232,17 @@ pub struct Frame {
 pub struct Pass {
     direct: wgpu::RenderPipeline,
     hdr: wgpu::RenderPipeline,
+    /// Draws the shade map — weather ask W11.
+    shadow: wgpu::RenderPipeline,
+    shadow_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    /// Where the shade map is this frame, for the world pass: its corner
+    /// relative to the camera in xy, one over its side in z, and the deck's
+    /// floor relative to the camera in w.
+    shadow_frame: [f32; 4],
+    /// How much of the sun the deck takes this frame: zero with no deck, in
+    /// Simple, or with clouds turned off, and then the map is not drawn.
+    shadow_strength: f32,
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
     /// Whether this frame has a deck to draw.
@@ -257,9 +300,41 @@ impl Pass {
                 resource: uniforms.as_entire_binding(),
             }],
         });
+        let shadow_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud-shade"),
+            size: wgpu::Extent3d {
+                width: SHADOW_TEXELS,
+                height: SHADOW_TEXELS,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cloud-shade"),
+            // Clamped: past the map's edge the world pass has already
+            // answered "lit", and a repeat would lay the far side's clouds
+            // over the near.
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
             direct: pipeline(gpu, &shader, &layout, gpu.surface_format(), false),
             hdr: pipeline(gpu, &shader, &layout, graph::HDR_FORMAT, true),
+            shadow: shadow_pipeline(gpu, &shader, &layout),
+            shadow_view,
+            shadow_sampler,
+            shadow_frame: [0.0, 0.0, 0.0, 0.0],
+            shadow_strength: 0.0,
             uniforms,
             bind,
             draws: false,
@@ -320,6 +395,9 @@ impl Pass {
             darkness: 0.0,
             base: None,
             ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
         });
         // Zero stays zero: it is the shader's "no deck".
         let cell = if layer.cell > 0.0 {
@@ -344,22 +422,8 @@ impl Pass {
             reason = "the seed only has to pick a field, not be read back"
         )]
         let seed = (self.deck.seed & 0xFFFF) as f32;
-        // **The map, unpacked into the uniform.** Bytes on the wire, shares
-        // of one here, and zero cells when a mod sent none — which is what
-        // tells the shader to use the single cover for the whole sky.
-        let mut cells = [[0.0_f32; 4]; MAP_VEC4S];
-        let descriptor = self.map.as_ref().map_or([0.0; 4], |map| {
-            for (index, (cover, darkness)) in map.cover.iter().zip(map.darkness.iter()).enumerate()
-            {
-                let Some(slot) = cells.get_mut(index / 2) else {
-                    break;
-                };
-                let half = (index % 2) * 2;
-                slot[half] = f32::from(*cover) / 255.0;
-                slot[half + 1] = f32::from(*darkness) / 255.0;
-            }
-            [map.origin[0], map.origin[1], map.cell, f32::from(map.size)]
-        });
+        let shadow_origin = self.place_shade(camera, base, cell, frame.mode);
+        let (cells, descriptor) = self.map_cells();
         let uniforms = Uniforms {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
             view_projection: frame.view_projection.to_cols_array_2d(),
@@ -379,6 +443,13 @@ impl Pass {
             motion: [layer.drift[0], layer.drift[1], layer.evolve, seed],
             map: descriptor,
             cells,
+            genera: [
+                state.stratocumulus,
+                state.altocumulus,
+                state.cumulonimbus,
+                0.0,
+            ],
+            shadow: [shadow_origin[0], shadow_origin[1], SHADOW_EXTENT, 0.0],
             quality: [
                 quality.reach(),
                 quality.detail_reach(),
@@ -391,6 +462,111 @@ impl Pass {
         };
         gpu.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+    }
+
+    /// **The cover map, unpacked for the uniform.** Bytes on the wire, shares
+    /// of one here, and zero cells when a mod sent none — which is what tells
+    /// the shader to use the single cover for the whole sky. Returns the
+    /// cells and the map's descriptor: corner x and z, cell, cells a side.
+    fn map_cells(&self) -> ([[f32; 4]; MAP_VEC4S], [f32; 4]) {
+        let mut cells = [[0.0_f32; 4]; MAP_VEC4S];
+        let descriptor = self.map.as_ref().map_or([0.0; 4], |map| {
+            for (index, (cover, darkness)) in map.cover.iter().zip(map.darkness.iter()).enumerate()
+            {
+                let Some(slot) = cells.get_mut(index / 2) else {
+                    break;
+                };
+                let half = (index % 2) * 2;
+                slot[half] = f32::from(*cover) / 255.0;
+                slot[half + 1] = f32::from(*darkness) / 255.0;
+            }
+            [map.origin[0], map.origin[1], map.cell, f32::from(map.size)]
+        });
+        (cells, descriptor)
+    }
+
+    /// Decides where this frame's shade map lies and how much it shades by,
+    /// and returns the map's corner in world blocks — ask W11.
+    ///
+    /// The corner is snapped to the map's own texels so that a walking camera
+    /// does not slide the sample points under the field: the map is redrawn
+    /// each frame, but a shadow that swam by a fraction of a texel as the
+    /// player moved would read as the ground shimmering. Simple skips the
+    /// shade as it skips the rest of the lighting, and a sky with nothing in
+    /// it shades nothing.
+    fn place_shade(&mut self, camera: [f32; 3], base: f32, cell: f32, mode: u32) -> [f32; 2] {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a count of sixteen-block texels across the world, far inside f32"
+        )]
+        let corner = |along: f32| {
+            let texel = SHADOW_EXTENT / SHADOW_TEXELS as f32;
+            let steps = tiamat_core::detgen::floor_to_i32((along - SHADOW_EXTENT * 0.5) / texel);
+            steps as f32 * texel
+        };
+        let origin = [corner(camera[0]), corner(camera[2])];
+        self.shadow_frame = [
+            origin[0] - camera[0],
+            origin[1] - camera[2],
+            1.0 / SHADOW_EXTENT,
+            base - camera[1],
+        ];
+        self.shadow_strength = if cell > 0.0 && mode >= 1 {
+            SHADOW_STRENGTH
+        } else {
+            0.0
+        };
+        origin
+    }
+
+    /// The shade map and the sampler the world pass reads it with, for its
+    /// bind group.
+    #[must_use]
+    pub const fn shade(&self) -> (&wgpu::TextureView, &wgpu::Sampler) {
+        (&self.shadow_view, &self.shadow_sampler)
+    }
+
+    /// Draws the deck's shade map, if there is a deck to shade by — ask W11.
+    ///
+    /// Its own small pass, before the world's, into the texture the world
+    /// pass samples. Nothing to draw is the ordinary case and costs nothing.
+    pub fn render_shadow(&self, encoder: &mut wgpu::CommandEncoder) {
+        if self.shadow_strength <= 0.0 {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("cloud-shade"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.shadow_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.shadow);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Where the shade map is this frame, as the world pass's globals carry
+    /// it: the corner relative to the camera in xy, one over the side in z,
+    /// the deck's floor relative to the camera in w.
+    #[must_use]
+    pub const fn shadow_frame(&self) -> [f32; 4] {
+        self.shadow_frame
+    }
+
+    /// How much of the sun the deck takes this frame, 0 for none.
+    #[must_use]
+    pub const fn shadow_strength(&self) -> f32 {
+        self.shadow_strength
     }
 
     /// Draws the deck into a pass whose target is the float scene texture
@@ -476,6 +652,57 @@ fn pipeline(
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+/// The shade map's pipeline: the same triangle and uniform, `shadow_main`
+/// into one channel, with no depth to test — the map is a picture of the
+/// deck from below, not a surface in the world.
+fn shadow_pipeline(
+    gpu: &Gpu,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cloud-shade-pipeline-layout"),
+            bind_group_layouts: &[Some(layout)],
+            immediate_size: 0,
+        });
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cloud-shade"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("shadow_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SHADOW_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,

@@ -399,9 +399,18 @@ pub fn sanitise_clouds(mut layer: CloudLayer) -> CloudLayer {
 /// eased client-side. Per player rather than per domain for the reason the
 /// sky modifier is — two players in one domain can stand under different
 /// weather. Weather ask W2.
+///
+/// # Four genera, a share of the sky each
+///
+/// Weather ask W13. `cover` is cumulus — the heaps over the deck's floor, and
+/// what every mod written for the first deck already sends. The three below
+/// it are a low sheet, a mid-level mackerel sky and towers under anvils, each
+/// its own share so a sky can hold several at once. **Numbers rather than a
+/// kind**, so a front arriving blends one sky into the next by the same
+/// easing the rest has.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Clouds {
-    /// 0 is clear, 1 is overcast.
+    /// 0 is clear, 1 is overcast — of cumulus, the heaps.
     pub cover: f32,
     /// 0 is fair-weather white, 1 is storm grey.
     ///
@@ -415,6 +424,17 @@ pub struct Clouds {
     pub base: Option<f32>,
     /// How long the client takes to get there, in ticks.
     pub ease_ticks: u32,
+    /// A low sheet of rounded cells drawn out into rolls, with grooves of sky
+    /// between them that close as this rises: 0 is none, 1 is a ceiling.
+    ///
+    /// **Appended for protocol v73**, with the two below.
+    pub stratocumulus: f32,
+    /// A mid-level layer of small cloudlets lined up in wave bands — a
+    /// mackerel sky — well above the deck's floor: 0 is none, 1 is a sheet.
+    pub altocumulus: f32,
+    /// Towers under spreading anvils, on a lattice a few heaps wide: 0 is
+    /// none, 1 is supercells.
+    pub cumulonimbus: f32,
 }
 
 impl Clouds {
@@ -425,6 +445,9 @@ impl Clouds {
             && (0.0..=1.0).contains(&self.darkness)
             && self.base.is_none_or(f32::is_finite)
             && self.ease_ticks <= MAX_EASE_TICKS
+            && (0.0..=1.0).contains(&self.stratocumulus)
+            && (0.0..=1.0).contains(&self.altocumulus)
+            && (0.0..=1.0).contains(&self.cumulonimbus)
     }
 }
 
@@ -442,6 +465,9 @@ pub fn sanitise_cloud_state(mut clouds: Clouds) -> Clouds {
     clouds.darkness = clamp(clouds.darkness, 0.0, 1.0, 0.0);
     clouds.base = clouds.base.filter(|base| base.is_finite());
     clouds.ease_ticks = clouds.ease_ticks.min(MAX_EASE_TICKS);
+    clouds.stratocumulus = clamp(clouds.stratocumulus, 0.0, 1.0, 0.0);
+    clouds.altocumulus = clamp(clouds.altocumulus, 0.0, 1.0, 0.0);
+    clouds.cumulonimbus = clamp(clouds.cumulonimbus, 0.0, 1.0, 0.0);
     clouds
 }
 
@@ -659,6 +685,9 @@ mod tests {
             darkness: f32::NAN,
             base: Some(f32::INFINITY),
             ease_ticks: u32::MAX,
+            stratocumulus: -3.0,
+            altocumulus: f32::NAN,
+            cumulonimbus: 7.0,
         };
         assert!(!wild.is_valid());
         let tame = sanitise_cloud_state(wild);
@@ -667,12 +696,19 @@ mod tests {
             tame.base, None,
             "a base that is not a number is no override, not an override of nothing"
         );
+        // The genera clamp like the cover does, and a NaN share is no cloud.
+        assert!(tame.stratocumulus.abs() < f32::EPSILON);
+        assert!(tame.altocumulus.abs() < f32::EPSILON);
+        assert!((tame.cumulonimbus - 1.0).abs() < f32::EPSILON);
 
         let fine = Clouds {
             cover: 0.55,
             darkness: 0.0,
             base: Some(380.0),
             ease_ticks: 600,
+            stratocumulus: 0.85,
+            altocumulus: 0.0,
+            cumulonimbus: 0.6,
         };
         assert!(fine.is_valid());
         assert_eq!(sanitise_cloud_state(fine), fine);
