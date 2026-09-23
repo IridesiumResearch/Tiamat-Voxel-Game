@@ -43,6 +43,57 @@ deck, the deck's own cost over a bare sky at 320 x 240, level / thirty
 degrees up / above the deck: 1.20 / 1.83 / 4.04 ms before any of W15, and
 the numbers after are in `how_long_the_deck_costs_from_three_views`.
 
+## W17. The deck glows from underneath at night (2026-09-23)
+
+**Seen.** The designer, in game: "clouds at night time seem to glow from the
+underside. they kind of just need to be dark." With Core Sky's keyframes the
+night deck is a blue-lit slab seen from below, over ground that is nearly
+black.
+
+**Why.** Two things in the client, and they compound.
+
+1. `prepare_clouds` (`crates/client/src/render/mod.rs`, `clouds::Frame`)
+   hands the deck `self.sun_colour` as it is. The terrain is drawn as stored
+   sunlight times `sun_intensity` (`world.wgsl`: `input.sun *
+   globals.sun_intensity`), and the deck never sees that number. Core Sky's
+   night frames are `sun = {0.35, 0.45, 0.80}` at `intensity = 0.08`: the
+   ground stands at eight percent and the deck's lit side at a hundred, in
+   moonlight blue.
+2. At night the sun is UNDER the horizon, and `clouds.wgsl` lights by
+   geometry alone: `facing = dot(normal, toward_sun)` is largest on the
+   deck's underside, so the warm term (`colour * sun`), the low-sun rim
+   (`sun * rim * 0.9`) and the in-scatter (`colour * sun * scatter * 0.55`)
+   all land there. Golden hour is backlit on purpose — the sun at the horizon
+   lights bases — but nothing stops the same rule once the sun has set.
+
+Nothing on the mod's side reaches either: `register_clouds`'s `colour` and
+`shade` are constants for the life of the deck, and `set_sky_modifier`'s
+`intensity` multiplies a number the deck does not read.
+
+**The ask**, two lines and a factor —
+`tiamat_weather/night-deck-prototype-2026-09-23.patch` beside this sheet (it
+is the diff of the two files and has not been run by the mod's author):
+
+- In `prepare_clouds`, `sun: self.sun_colour * self.sun_intensity`,
+  component-wise, exactly as the terrain has it. This alone takes the night
+  deck from a hundred percent to eight.
+- In `fragment_main`, `let horizon = smoothstep(-0.15, 0.0, toward_sun.y);
+  let sun_lit = clouds.sun.xyz * horizon;` and the three sun terms read
+  `sun_lit` in place of `clouds.sun.xyz`, with the `warm`/`cool` mix also
+  scaled by `horizon`. Full at the horizon, so dusk keeps its lit bases; gone
+  once the sun is about eight degrees under, so midnight has none. What is
+  left at night is `shade * sky`: with Core Sky's `{0.02, 0.03, 0.08}` that is
+  dark, which is what was asked for.
+
+Neither changes a daytime frame: `horizon` is 1 whenever the sun is up, and
+`sun_intensity` is 0.95–1.0 through the day.
+
+**Acceptance.** At `time = 0.0` with Core Sky, Beautiful, a camera under an
+overcast deck: the deck's mean luminance from below is no more than twice the
+sky's and no more than its own top's seen from above at the same time. At
+`time = 0.73` (golden hour) the bases are still lit warmer than the tops, as
+today. The three picture views at `time = 0.0` and `0.73` for the eye.
+
 **W16 landed 2026-09-23**, protocol v74: `map` carries `stratocumulus`,
 `altocumulus` and `cumulonimbus` per cell beside `cover` and `darkness`, each
 optional and a byte a cell; left out, a genus is none anywhere, so a map
