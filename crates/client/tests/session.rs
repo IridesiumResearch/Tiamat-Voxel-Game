@@ -384,10 +384,24 @@ fn singleplayer_joins_its_own_server_and_draws_the_world() {
     let server = embedded("singleplayer");
     let mut app = client("singleplayer", &server, gpu);
 
+    // **The ground, meshed — not any four chunks.** A renderer counts every
+    // mesh it was handed, empty air included, and on CI's Windows runner the
+    // first four to arrive were sky: the frame was captured with nothing in
+    // it and read as "joined but drew nothing" (run 35902731993, 2026-09-23).
+    // So this waits for the columns under and beside the body, with nothing
+    // left to mesh, which is what "the world is on screen" means.
     assert!(
-        run_frames(&mut app, |app| app.joined() && app.meshed_chunks() >= 4),
-        "expected to join and mesh chunks; warnings: {:?}",
-        app.warnings()
+        run_frames(&mut app, |app| {
+            app.joined()
+                && app.meshed_chunks() >= 4
+                && missing_ground_around(app, 1).is_empty()
+                && app.pending_chunks() == 0
+        }),
+        "expected to join and mesh the ground; warnings: {:?}, {} meshed, {} pending, missing {:?}",
+        app.warnings(),
+        app.meshed_chunks(),
+        app.pending_chunks(),
+        missing_ground_around(&app, 1)
     );
 
     let target = Offscreen::new(app.renderer().gpu(), WIDTH, HEIGHT);
