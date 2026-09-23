@@ -32,6 +32,13 @@ cannot move a sheet itself.
 No open asks. Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
 
+- **13**, `conflicts` in `mod.toml` (engine, 2026-09-23): a mod that replaces
+  another names it, and a set with both present is refused at resolution —
+  the server does not start and `--check-mods` fails, naming both mods and
+  the way out (`enabled_mods`, or the mod list when a world is made). Through
+  `provides` aliases too. The mod's manifest wants `conflicts = ["core_ui"]`;
+  until then a local game with no `enabled_mods` still loads both.
+
 - **12**, descriptions a size down (engine 990bf8a): the start screen's
   secondary lines are `TextStyle::Small`, 85% of body, and a theme changes
   faces but never sizes.

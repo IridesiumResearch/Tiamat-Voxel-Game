@@ -71,6 +71,21 @@ impl ResolvedSet {
 /// Resolution failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
+    /// A mod declared it cannot load beside another, and both are here.
+    #[error(
+        "mod `{declarer}` cannot load beside `{conflict}`, and `{found}` is here as well; \
+         enable one or the other (`enabled_mods` in the server's config, or the mod list \
+         when a world is made)"
+    )]
+    Conflict {
+        /// The mod that declared the conflict.
+        declarer: String,
+        /// The id it named.
+        conflict: String,
+        /// The mod that answers to that id, itself or through an alias.
+        found: String,
+    },
+
     /// Two mods claim the same id.
     #[error("mod id `{id}` is claimed by both `{first}` and `{second}`")]
     DuplicateId {
@@ -145,6 +160,33 @@ pub enum ResolveError {
 /// # Errors
 ///
 /// [`ResolveError`] naming the mod, the requirement, and what was found.
+/// Refuses a set in which a mod declared it cannot load beside another that
+/// is here — UI ask 13.
+///
+/// A mod that replaces another says so in its manifest — a second inventory
+/// screen is a mistake, not a feature — and which of the two the player
+/// wanted is not the engine's to guess. Through the aliases too: a mod that
+/// stands in for the one named is the one named.
+fn refuse_conflicts<'a>(
+    mods: &'a [DiscoveredMod],
+    lookup: impl Fn(&str) -> Option<&'a DiscoveredMod>,
+) -> Result<(), ResolveError> {
+    for found in mods {
+        for conflict in &found.manifest.conflicts {
+            if let Some(other) = lookup(conflict)
+                && other.manifest.id != found.manifest.id
+            {
+                return Err(ResolveError::Conflict {
+                    declarer: found.manifest.id.clone(),
+                    conflict: conflict.clone(),
+                    found: other.manifest.id.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
     // -- 1. one mod per id -------------------------------------------------
     let mut by_id: BTreeMap<&str, &DiscoveredMod> = BTreeMap::new();
@@ -182,6 +224,8 @@ pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
     };
 
     // -- 3. edges, with version checks -------------------------------------
+    refuse_conflicts(mods, &lookup)?;
+
     let mut edges: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for found in mods {
         let entry = edges.entry(found.manifest.id.as_str()).or_default();
@@ -394,6 +438,7 @@ mod tests {
                 version: version.to_owned(),
                 depends: depends.iter().map(|d| (*d).to_owned()).collect(),
                 optional_depends: Vec::new(),
+                conflicts: Vec::new(),
                 provides: Vec::new(),
                 description: String::new(),
                 license: String::new(),
@@ -412,6 +457,60 @@ mod tests {
     fn with_optional(mut found: DiscoveredMod, optional: &[&str]) -> DiscoveredMod {
         found.manifest.optional_depends = optional.iter().map(|o| (*o).to_owned()).collect();
         found
+    }
+
+    fn with_conflicts(mut found: DiscoveredMod, conflicts: &[&str]) -> DiscoveredMod {
+        found.manifest.conflicts = conflicts.iter().map(|c| (*c).to_owned()).collect();
+        found
+    }
+
+    #[test]
+    fn a_declared_conflict_refuses_the_set_and_names_both() {
+        // UI ask 13. Two inventories loaded side by side are a mistake the
+        // manifest can name; the error names both mods and what to do.
+        let err = resolve(&[
+            with_conflicts(make("replacer", "0.4.0", &[]), &["reference"]),
+            make("reference", "0.1.0", &[]),
+        ])
+        .expect_err("both present is refused");
+        let text = err.to_string();
+        assert!(
+            matches!(
+                &err,
+                ResolveError::Conflict { declarer, conflict, found }
+                    if declarer == "replacer" && conflict == "reference" && found == "reference"
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            text.contains("enabled_mods"),
+            "the message should say where to choose: {text}"
+        );
+    }
+
+    #[test]
+    fn a_conflict_with_a_mod_that_is_not_here_is_nothing() {
+        let set = resolve(&[with_conflicts(
+            make("replacer", "0.4.0", &[]),
+            &["reference"],
+        )])
+        .expect("a conflict names a mod that is absent, which is the point");
+        assert_eq!(set.ids(), vec!["replacer"]);
+    }
+
+    #[test]
+    fn a_conflict_reaches_the_mod_standing_in_through_an_alias() {
+        // A fork that `provides` the reference's id IS the reference as far
+        // as a dependant is concerned, so it is as far as a conflict is.
+        let err = resolve(&[
+            with_conflicts(make("replacer", "0.4.0", &[]), &["reference"]),
+            with_provides(make("fork", "0.2.0", &[]), &["reference"]),
+        ])
+        .expect_err("the fork stands in for the reference");
+        assert!(
+            matches!(&err, ResolveError::Conflict { found, .. } if found == "fork"),
+            "got {err:?}"
+        );
     }
 
     #[test]

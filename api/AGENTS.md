@@ -36,9 +36,16 @@ id = "my_mod"           # letters, digits, underscore. Your namespace.
 name = "My Mod"
 version = "0.1.0"       # semver
 depends = ["core >=0.1"]
+conflicts = ["core_ui"] # mods this one replaces: the engine refuses to load both
 description = "One line."
 license = "MIT"
 ```
+
+`conflicts` is for a mod that replaces another outright — an inventory screen
+beside the reference one is two hotbars, not two features. With both present
+the server refuses to start and `--check-mods` fails, naming both and the way
+out: `enabled_mods` in the server's config, or the mod list when a world is
+made. It reaches a mod through an alias it `provides` as well.
 
 Validate without launching the game — this is the fast loop, and it catches
 typos, namespace errors and load-order problems in seconds:

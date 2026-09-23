@@ -452,6 +452,17 @@ pub struct ModManifest {
     #[serde(default)]
     pub provides: Vec<String>,
 
+    /// Mods this one cannot load beside — the engine refuses the whole set.
+    ///
+    /// For a mod that replaces another outright. A second inventory screen
+    /// and a second hotbar are not two features, they are a mistake nobody
+    /// asked for, and the manifest is where it is caught rather than the
+    /// player's screen — UI ask 13. Ids, or aliases another mod `provides`.
+    /// **Refused rather than resolved**: which of the two the player wanted
+    /// is not the engine's to guess, and `enabled_mods` is where they say.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+
     /// One-line description.
     #[serde(default)]
     pub description: String,
@@ -472,6 +483,13 @@ pub struct ModManifest {
 /// A manifest could not be read or is not valid.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    /// A mod lists itself in `conflicts`.
+    #[error("mod `{id}` lists itself in `conflicts`")]
+    ConflictsWithItself {
+        /// The mod.
+        id: String,
+    },
+
     /// The manifest file could not be read.
     #[error("could not read `{path}`")]
     Read {
@@ -632,6 +650,20 @@ impl ModManifest {
                 return Err(ManifestError::BadId {
                     path: dir.to_path_buf(),
                     id: alias.clone(),
+                });
+            }
+        }
+
+        for conflict in &self.conflicts {
+            if !is_valid_id(conflict) {
+                return Err(ManifestError::BadId {
+                    path: dir.to_path_buf(),
+                    id: conflict.clone(),
+                });
+            }
+            if *conflict == self.id {
+                return Err(ManifestError::ConflictsWithItself {
+                    id: self.id.clone(),
                 });
             }
         }
@@ -967,6 +999,44 @@ name = "Rivers"
                 "{reason} should be refused"
             );
         }
+    }
+
+    #[test]
+    fn a_conflict_parses_and_a_mod_cannot_conflict_with_itself() {
+        // UI ask 13: a mod that replaces another says so, and the set is
+        // refused rather than a player being handed two hotbars. The field
+        // is ids, checked like `provides`, and a mod naming itself is a mod
+        // that has not understood the field.
+        let dir = std::env::temp_dir().join("tiamat-manifest-conflicts");
+        let manifest: ModManifest = toml::from_str(
+            "id = \"replacer\"\nname = \"Replacer\"\nversion = \"0.4.0\"\n\
+             conflicts = [\"core_ui\"]\n",
+        )
+        .expect("parses");
+        assert_eq!(manifest.conflicts, vec!["core_ui".to_owned()]);
+
+        let selfish: ModManifest = toml::from_str(
+            "id = \"replacer\"\nname = \"Replacer\"\nversion = \"0.4.0\"\n\
+             conflicts = [\"replacer\"]\n",
+        )
+        .expect("parses");
+        let err = selfish
+            .validate(&dir)
+            .expect_err("a self-conflict is refused");
+        assert!(
+            matches!(err, ManifestError::ConflictsWithItself { ref id } if id == "replacer"),
+            "got {err:?}"
+        );
+
+        let odd: ModManifest = toml::from_str(
+            "id = \"replacer\"\nname = \"Replacer\"\nversion = \"0.4.0\"\n\
+             conflicts = [\"Not An Id\"]\n",
+        )
+        .expect("parses");
+        assert!(
+            matches!(odd.validate(&dir), Err(ManifestError::BadId { .. })),
+            "a conflict must be a valid id"
+        );
     }
 
     #[test]

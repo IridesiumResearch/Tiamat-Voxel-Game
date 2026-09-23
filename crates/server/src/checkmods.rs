@@ -215,12 +215,37 @@ mod tests {
         std::fs::write(dir.join("init.lua"), source).expect("script");
     }
 
+    /// Copies a directory tree, for a mod set assembled from parts.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("copy dir");
+        for entry in std::fs::read_dir(from).expect("read dir") {
+            let entry = entry.expect("dir entry");
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy file");
+            }
+        }
+    }
+
     #[test]
     fn the_repository_reference_mods_check_clean() {
-        // `game/` is what CI runs this against from Task 07 onward. If the
-        // reference mods stop checking clean, the public mod API has broken.
+        // **The reference mods, not whatever is in `game/`.** A developer keeps
+        // their own mods there — `.gitignore` says so — and one of those may
+        // well declare it `conflicts` with a reference mod it replaces, which
+        // is exactly the set this command must refuse. Copied out by id, as
+        // `bot::fixture::enabled_mods_for` selects them for a test server.
         let repo_game = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../game");
-        let report = check(&repo_game).expect("game/ should resolve");
+        let reference = scratch("reference-mods");
+        for entry in std::fs::read_dir(&repo_game).expect("game/") {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("core_") && entry.path().join("mod.toml").is_file() {
+                copy_tree(&entry.path(), &reference.join(&name));
+            }
+        }
+        let report = check(&reference).expect("the reference mods should resolve");
 
         assert!(
             report.is_ok(),
@@ -248,6 +273,22 @@ mod tests {
         assert!(
             err.contains("absent"),
             "the message must name the missing dependency: {err}"
+        );
+    }
+
+    #[test]
+    fn a_declared_conflict_fails_the_check_and_names_both_mods() {
+        // UI ask 13: what a modder sees when their replacement for a
+        // reference mod is checked beside it — the two names and the way out,
+        // not a server that quietly loads both.
+        let dir = scratch("conflict");
+        write_mod(&dir, "replacer", "conflicts = [\"reference\"]", "");
+        write_mod(&dir, "reference", "", "");
+
+        let err = check(&dir).expect_err("both present must fail");
+        assert!(
+            err.contains("replacer") && err.contains("reference") && err.contains("enabled_mods"),
+            "the message must name both mods and the way out: {err}"
         );
     }
 
