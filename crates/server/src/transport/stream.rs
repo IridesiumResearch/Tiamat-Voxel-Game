@@ -87,6 +87,19 @@ pub struct Streamer {
     /// already held, and starting over each time would spend the whole scan
     /// re-testing the same held entries. Wraps, so everything gets a turn.
     horizon_cursor: usize,
+    /// How far out the detail has got: the streaming distance of the nearest
+    /// chunk still needed, or `None` when nothing is.
+    ///
+    /// **The horizon waits behind this.** It had its own allowance and ran
+    /// on it from the first pass, so its nearest band — a ring of summaries
+    /// just past the detail radius — arrived while the detail was still
+    /// filling in from the player's feet outward. Reported from the window
+    /// as a ring of chunks far out loading with the spawn chunk, with a gap
+    /// between. A summary is now asked for only when it is no further, in
+    /// [`interest::stream_distance`]'s order, than the nearest chunk the
+    /// detail has yet to send, so the two fill together and the horizon
+    /// never shows past a hole. See [`Streamer::next_summaries`].
+    frontier: Option<i64>,
     /// Chunks the client holds that are one opaque, unlit material through and
     /// through: a wall nothing behind can be seen past. See [`Self::sealed`].
     sealed: BTreeSet<ChunkPos>,
@@ -128,6 +141,7 @@ impl Streamer {
             summaries: BTreeMap::new(),
             horizon_order: Vec::new(),
             horizon_cursor: 0,
+            frontier: None,
             sealed: BTreeSet::new(),
             shadowed: BTreeSet::new(),
         };
@@ -320,6 +334,12 @@ impl Streamer {
                 break;
             }
         }
+        // The nearest of what is still needed is where the detail has got
+        // to, and the horizon waits behind it. Nothing needed is a frontier
+        // at infinity: the horizon has the sky to itself.
+        self.frontier = needed
+            .first()
+            .map(|pos| interest::stream_distance(self.centre, *pos));
         needed
     }
 
@@ -560,6 +580,17 @@ impl Streamer {
         for step in 0..HORIZON_SCAN.min(total) {
             let index = (self.horizon_cursor + step) % total;
             let pos = self.horizon_order[index];
+            // **Behind the detail, never ahead of it.** The order is nearest
+            // first, so a position past the frontier means every position
+            // after it is too: the pass stops here and starts here next
+            // time, once the detail has moved on.
+            if self
+                .frontier
+                .is_some_and(|frontier| interest::stream_distance(self.centre, pos) > frontier)
+            {
+                self.horizon_cursor = index;
+                return found;
+            }
             if self.in_flight.contains(&pos) {
                 continue;
             }
@@ -590,6 +621,14 @@ impl Streamer {
     /// Recomputes the horizon's order around the current centre.
     ///
     /// Called when the centre, the view or the domain moves — never per pass.
+    /// The streaming distance the horizon may reach up to: the nearest chunk
+    /// the detail still needs, or `None` for no limit. Set by
+    /// [`Streamer::next_needed`], which the connection calls every pass.
+    #[must_use]
+    pub const fn frontier(&self) -> Option<i64> {
+        self.frontier
+    }
+
     fn reorder_horizon(&mut self) {
         // **Without the detail radius in it.** Those positions can never be a
         // summary, and they are the NEAREST ones — so a scan that included them
@@ -1390,6 +1429,67 @@ mod tests {
     }
 
     #[test]
+    fn the_horizon_waits_behind_the_detail_and_fills_in_step_with_it() {
+        // Reported from the window: a ring of chunks far out loading with the
+        // spawn chunk, and a gap between. The ring was the horizon's nearest
+        // band, asked for on its own allowance from the first pass while the
+        // detail was still filling in from the player's feet outward. The
+        // horizon may ask only for what is no further, in streaming order,
+        // than the nearest chunk the detail has yet to send.
+        let mut streamer = Streamer::new(
+            tiamat_core::domain::OVERWORLD,
+            ORIGIN,
+            ViewDistance::DEFAULT,
+        );
+        // The first pass asks for the chunks under the player and nothing
+        // of the horizon.
+        assert!(!streamer.next_needed(16).is_empty());
+        assert_eq!(streamer.frontier(), Some(0));
+        assert!(
+            streamer.next_summaries(8).is_empty(),
+            "the horizon ran ahead of the detail"
+        );
+
+        // Deliver the detail out to a hundred in streaming order — the band
+        // the player looks along, to the radius, and a little of what is
+        // above and below — leaving the rest needed.
+        while let Some(pos) = streamer.next_needed(1).into_iter().next() {
+            if interest::stream_distance(ORIGIN, pos) > 100 {
+                break;
+            }
+            streamer.delivered(pos);
+        }
+        let frontier = streamer.frontier().expect("the detail is not complete");
+        assert!(frontier > 100, "frontier {frontier}");
+
+        // Now the horizon flows, but only up to the frontier: the summaries
+        // just past the detail radius on the player's own layer, and nothing
+        // further out than a chunk the detail still owes.
+        let asked = streamer.next_summaries(64);
+        assert!(
+            !asked.is_empty(),
+            "the horizon was held back past the frontier"
+        );
+        for (pos, _) in &asked {
+            let distance = interest::stream_distance(ORIGIN, *pos);
+            assert!(
+                distance <= frontier,
+                "a summary at {pos:?} (streaming distance {distance}) was asked for past \
+                 the detail's frontier at {frontier}"
+            );
+        }
+
+        // With the detail complete the horizon has the sky to itself.
+        deliver_all(&mut streamer);
+        assert_eq!(streamer.frontier(), None);
+        let rest = drain_horizon(&mut streamer);
+        assert!(
+            rest.len() > asked.len(),
+            "the horizon stopped filling once the detail was complete"
+        );
+    }
+
+    #[test]
     fn walking_forward_turns_a_summary_into_a_chunk_and_back_without_an_unload() {
         // The transition a player actually experiences. Neither direction is an
         // unload: a summary replaced by a chunk, and a chunk replaced by a
@@ -1532,16 +1632,30 @@ mod tests {
         // Priority is still the point — the ground under somebody's feet is not
         // scenery — so this asserts only that the horizon is not starved to
         // zero, not that it competes.
+        //
+        // **And since 2026-09-23, not before the detail has reached it.** It
+        // used to start with nothing delivered at all, and that was the ring
+        // of summaries far out that loaded with the spawn chunk. So: the
+        // player's own layer delivered out to the radius, most of the detail
+        // — the sky above and the rock below — still to come, and the horizon
+        // must flow anyway. See `the_horizon_waits_behind_the_detail...`.
         let mut streamer = Streamer::new(
             tiamat_core::domain::OVERWORLD,
             ORIGIN,
             ViewDistance::DEFAULT,
         );
-        // Nothing delivered: every chunk of the detail radius is still to come,
-        // which is exactly the state a joining player is in for minutes.
+        while let Some(pos) = streamer.next_needed(1).into_iter().next() {
+            // The first ring of the horizon is nine out on the player's own
+            // layer, a streaming distance of 81.
+            if interest::stream_distance(ORIGIN, pos) > 81 {
+                break;
+            }
+            streamer.delivered(pos);
+        }
+        let outstanding = streamer.next_needed(usize::MAX).len();
         assert!(
-            !streamer.next_needed(usize::MAX).is_empty(),
-            "the detail radius should still be outstanding"
+            outstanding > 1000,
+            "the detail radius should still be mostly outstanding, {outstanding} left"
         );
         assert!(
             !streamer.next_summaries(1).is_empty(),
