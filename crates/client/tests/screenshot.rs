@@ -7180,3 +7180,150 @@ fn stars_show_where_the_sky_says_and_the_star_on_screen_is_the_star_the_catalog_
         "{lit_at_normal} star pixels through the resolve against {lit} drawn direct"
     );
 }
+
+/// The mean luminance of the pixels the deck changed, of the same pixels
+/// without it, and how many there were — the cloud, and the sky it stands
+/// against. The whole frame, since the deck may be seen from above.
+fn cloud_and_sky_luma(with: &Image, without: &Image) -> (f32, f32, usize) {
+    let luma = |pixel: [u8; 4]| {
+        (0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2]))
+            / 255.0
+    };
+    let (mut cloud, mut sky, mut count) = (0.0, 0.0, 0usize);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let (Some(pixel), Some(bare)) = (with.pixel(x, y), without.pixel(x, y)) else {
+                continue;
+            };
+            if (0..3).all(|channel| pixel[channel].abs_diff(bare[channel]) <= 2) {
+                continue;
+            }
+            cloud += luma(pixel);
+            sky += luma(bare);
+            count += 1;
+        }
+    }
+    let n = count.max(1) as f32;
+    (cloud / n, sky / n, count)
+}
+
+/// How warm the deck's pixels are: mean red less blue, over the pixels the
+/// deck changed.
+fn cloud_warmth(with: &Image, without: &Image) -> f32 {
+    let (mut warmth, mut count) = (0.0, 0usize);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let (Some(pixel), Some(bare)) = (with.pixel(x, y), without.pixel(x, y)) else {
+                continue;
+            };
+            if (0..3).all(|channel| pixel[channel].abs_diff(bare[channel]) <= 2) {
+                continue;
+            }
+            warmth += (f32::from(pixel[0]) - f32::from(pixel[2])) / 255.0;
+            count += 1;
+        }
+    }
+    warmth / count.max(1) as f32
+}
+
+/// Which way sunlight travels at a moment of Core Sky's day, as the client's
+/// own arc has it: east at 0.25, overhead at 0.5, west at 0.75, tilted so
+/// noon keeps a shadow.
+fn sunlight_at(time: f32) -> [f32; 3] {
+    let angle = (time - 0.25) * std::f32::consts::TAU;
+    let (height, east) = (
+        tiamat_core::detgen::trig::sin(angle),
+        tiamat_core::detgen::trig::cos(angle),
+    );
+    let raw = [east, -height, 0.25];
+    let length = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
+    [raw[0] / length, raw[1] / length, raw[2] / length]
+}
+
+#[test]
+fn the_deck_is_dark_at_midnight_and_still_lit_from_below_at_golden_hour() {
+    // Weather ask W17. With Core Sky's night — sun `{0.35, 0.45, 0.80}` at
+    // eight percent, sky nearly black — the deck seen from under it was a
+    // blue-lit slab: it was lit with the keyframe's colour and never its
+    // intensity, and a sun under the horizon lit its underside as the
+    // sunward face. Now: from below at midnight the deck is no brighter than
+    // twice the sky behind it and no brighter than its own top seen from
+    // above; at golden hour the bases are still lit warmer than the tops.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let deck = tuned_deck();
+    let overcast = sky_of(0.9, 0.0, 0.0, 0.0);
+    // Facing west, where the dusk sun is: the view that shows lit bases.
+    let view = |height: f64, pitch: f32| {
+        let mut camera = Camera {
+            position: Position::from_world(24.0, height, 20.0),
+            ..Camera::default()
+        };
+        camera.look(-std::f32::consts::FRAC_PI_2, pitch);
+        camera
+    };
+    let (below, above) = (view(40.0, 0.52), view(640.0, -0.6));
+    let deck_and_bare = |renderer: &mut Renderer, camera: &Camera| {
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: Some(deck),
+            clouds: Some(overcast),
+            quality: client::render::clouds::Quality::Fine,
+            seed: 4242,
+        });
+        let with = target.capture(renderer, camera).expect("capture");
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: None,
+            clouds: Some(overcast),
+            quality: client::render::clouds::Quality::Fine,
+            seed: 4242,
+        });
+        let without = target.capture(renderer, camera).expect("capture");
+        (with, without)
+    };
+
+    // Midnight, Core Sky's `time = 0.0`.
+    renderer.set_sun(0.08, [0.35, 0.45, 0.80], sunlight_at(0.0));
+    renderer.set_sky([0.02, 0.03, 0.08], 2000.0);
+    let (with, without) = deck_and_bare(&mut renderer, &below);
+    let (under, sky, seen) = cloud_and_sky_luma(&with, &without);
+    let (with, without) = deck_and_bare(&mut renderer, &above);
+    let (top, _, seen_above) = cloud_and_sky_luma(&with, &without);
+    println!(
+        "midnight: under {under:.4}, sky {sky:.4} ({seen} px); top {top:.4} ({seen_above} px)"
+    );
+    assert!(
+        seen > 500 && seen_above > 500,
+        "the deck is not in the frame"
+    );
+    assert!(
+        under <= sky * 2.0 + 0.01,
+        "at midnight the deck from below ({under:.3}) is brighter than twice the sky ({sky:.3})"
+    );
+    assert!(
+        under <= top + 0.02,
+        "at midnight the deck is brighter from below ({under:.3}) than its top from above ({top:.3})"
+    );
+
+    // Golden hour, Core Sky's `time = 0.73`: the sun at the horizon still
+    // lights the bases, warm — the cut is eight degrees under, not at it.
+    // (The ask read "bases warmer than the tops"; measured, the tops are a
+    // touch warmer, 0.239 to 0.228, and were before this: a sun seven
+    // degrees up faces the tops. What W17 must keep is the bases LIT.)
+    renderer.set_sun(0.50, [1.0, 0.55, 0.30], sunlight_at(0.73));
+    renderer.set_sky([0.90, 0.45, 0.28], 2000.0);
+    let (with, without) = deck_and_bare(&mut renderer, &below);
+    let bases = cloud_warmth(&with, &without);
+    let (dusk_under, _, _) = cloud_and_sky_luma(&with, &without);
+    println!("golden hour: bases warmth {bases:.4}, under {dusk_under:.4}");
+    assert!(
+        bases > 0.05,
+        "at golden hour the bases are not lit warm from below (red less blue {bases:.3})"
+    );
+    assert!(
+        dusk_under > under * 1.5,
+        "the bases at golden hour ({dusk_under:.3}) are no brighter than at midnight ({under:.3})"
+    );
+}

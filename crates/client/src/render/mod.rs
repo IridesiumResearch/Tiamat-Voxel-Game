@@ -1793,7 +1793,17 @@ impl Renderer {
             sun_direction: self.sun_direction,
             stars: self.stars.0,
             star_turn: self.stars.1,
-            sun: [self.sun_colour[0], self.sun_colour[1], self.sun_colour[2]],
+            // **Times the intensity, as the terrain is** (`world.wgsl`:
+            // `input.sun * globals.sun_intensity`). The deck was lit with the
+            // keyframe's colour alone, so at night — Core Sky's `{0.35,
+            // 0.45, 0.80}` at 0.08 — it stood at full moonlight blue over
+            // ground at eight percent, and from underneath, since a sun under
+            // the horizon lights bases. Weather ask W17.
+            sun: [
+                self.sun_colour[0] * self.sun_intensity,
+                self.sun_colour[1] * self.sun_intensity,
+                self.sun_colour[2] * self.sun_intensity,
+            ],
             sky: self.sky_colour,
             fog_end: self.fog_end,
             // Vertical field of view over the frame's height: how much sky one

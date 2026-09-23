@@ -1257,6 +1257,15 @@ fn fragment_main(in: Varyings) -> Painted {
     let toward_sun = -clouds.sun_direction.xyz;
     let facing = dot(normal, toward_sun);
     var lit = clouds.colour.xyz * (0.72 + 0.28 * max(normal.y, 0.0));
+    // **A sun under the horizon lights nothing** (weather ask W17). Golden
+    // hour is backlit on purpose — the sun AT the horizon lights bases — but
+    // the same geometry carried on into the night: once the sun was under
+    // the horizon the deck's underside was its sunward face, and the warm
+    // term, the rim and the in-scatter all landed there. Full at the
+    // horizon, gone once the sun is about eight degrees under it, so dusk
+    // keeps its lit bases and midnight has none.
+    let horizon = smoothstep(-0.15, 0.0, toward_sun.y);
+    let sun_lit = clouds.sun.xyz * horizon;
 
     if (mode >= 1.0) {
         // **Golden hour is BACKLIT.** The sun is at the horizon, so it lights
@@ -1267,9 +1276,9 @@ fn fragment_main(in: Varyings) -> Painted {
         // at its terminator. Cloud is not opaque and a hard terminator is the
         // main thing that makes it read as rock.
         let sunward = clamp((facing + 0.6) / 1.6, 0.0, 1.0);
-        let warm = clouds.colour.xyz * clouds.sun.xyz;
+        let warm = clouds.colour.xyz * sun_lit;
         let cool = clouds.shade.xyz * clouds.sky.xyz;
-        lit = mix(cool, warm, sunward * sunward);
+        lit = mix(cool, warm, sunward * sunward * horizon);
     }
 
     if (mode >= 2.0) {
@@ -1291,7 +1300,7 @@ fn fragment_main(in: Varyings) -> Painted {
         // silhouette, which is most of what reads as "golden hour".
         let grazing = 1.0 - abs(dot(normal, direction));
         let rim = pow(clamp(facing * 0.5 + 0.5, 0.0, 1.0), 6.0) * grazing;
-        lit = lit + clouds.sun.xyz * rim * 0.9;
+        lit = lit + sun_lit * rim * 0.9;
     }
 
     if (mode >= 1.0) {
@@ -1304,7 +1313,7 @@ fn fragment_main(in: Varyings) -> Painted {
         let thin = 1.0 - found.density;
         let behind = pow(clamp(dot(direction, toward_sun), 0.0, 1.0), 3.0);
         let scatter = thin * (0.25 + 0.75 * behind) + 0.12;
-        lit = lit + clouds.colour.xyz * clouds.sun.xyz * scatter * 0.55;
+        lit = lit + clouds.colour.xyz * sun_lit * scatter * 0.55;
     }
 
     // Storm grey, and a dark haze under the deck — which is what makes a storm
