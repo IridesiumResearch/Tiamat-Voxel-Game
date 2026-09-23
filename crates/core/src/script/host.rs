@@ -149,6 +149,13 @@ impl<V: ScriptVm> ModHost<V> {
             discovered.retain(|found| only.contains(&found.manifest.id));
         }
         let resolved = resolve(&discovered).map_err(Box::new)?;
+        for aside in &resolved.aside {
+            tracing::info!(
+                reference = %aside.reference,
+                replaced_by = %aside.replaced_by,
+                "a reference mod stood aside for the mod that replaces it"
+            );
+        }
 
         // Resolved in LOAD ORDER, so the list is the same on every VM that
         // loads this set — a worker and the tick must agree on it as they do
@@ -183,6 +190,7 @@ impl<V: ScriptVm> ModHost<V> {
             })?;
 
             // What this mod may read from — see `game.exports`.
+            vm.note_reference(&entry.id, entry.reference);
             vm.note_dependencies(&entry.id, &entry.after);
             if let Err(err) = vm.load_mod(&entry.id, &source, &entry.dir) {
                 tracing::error!(

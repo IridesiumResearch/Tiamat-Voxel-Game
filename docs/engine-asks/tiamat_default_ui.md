@@ -32,12 +32,18 @@ cannot move a sheet itself.
 No open asks. Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
 
-- **13**, `conflicts` in `mod.toml` (engine 57e5d6f): a mod that replaces
-  another names it, and a set with both present is refused at resolution —
-  the server does not start and `--check-mods` fails, naming both mods and
-  the way out (`enabled_mods`, or the mod list when a world is made). Through
-  `provides` aliases too. The manifest declares `conflicts = ["core_ui"]`, and
-  the native check runs the engine's resolver on it beside the real `core_ui`.
+- **13**, `conflicts` in `mod.toml` (engine 57e5d6f), and the engine's mods
+  made secondary the same day: a mod that replaces another names it. Against
+  an ordinary mod the set is refused, naming both and the way out; against
+  one of the engine's reference mods — every `game/core_*` manifest now
+  carries `reference = true` — the fixture stands aside and the replacement
+  loads alone, so `--check-mods game` and a local game with no
+  `enabled_mods` both work with `core_ui` present, and the check says which
+  stood aside for which. Reference mods also load first, lose any lowest-id
+  tie, and sit folded away under "Engine reference mods" on the start
+  screen. Through `provides` aliases too. The manifest declares
+  `conflicts = ["core_ui"]`, and the native check runs the engine's resolver
+  on it beside the real `core_ui`.
 
 - **12**, descriptions a size down (engine 990bf8a): the start screen's
   secondary lines are `TextStyle::Small`, 85% of body, and a theme changes

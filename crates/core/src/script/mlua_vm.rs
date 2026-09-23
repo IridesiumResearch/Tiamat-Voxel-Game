@@ -1054,6 +1054,9 @@ pub struct MluaVm {
     /// (`game.exports`), which record a fault from inside a Lua call where
     /// `self` is not to be had — see [`Self::fault`].
     faulted: std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
+    /// The engine's reference mods among those loaded, which lose any tie
+    /// the lowest id would otherwise win — see `ScriptVm::note_reference`.
+    reference_mods: BTreeSet<String>,
     /// Per-mod sandbox environments, by mod id.
     environments: BTreeMap<String, Table>,
     /// Next numeric id to hand out. 0 and 1 are reserved (charter rule 8).
@@ -2219,6 +2222,7 @@ impl ScriptVm for MluaVm {
             limits,
             frozen: false,
             faulted: std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new())),
+            reference_mods: BTreeSet::new(),
             environments: BTreeMap::new(),
             next_material: 2,
             light: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -2501,6 +2505,14 @@ impl ScriptVm for MluaVm {
         }
         if let Err(err) = self.lua.set_named_registry_value("tiamat.fluid_ids", table) {
             tracing::error!("could not install the fluid ids: {err}");
+        }
+    }
+
+    fn note_reference(&mut self, mod_id: &str, reference: bool) {
+        if reference {
+            self.reference_mods.insert(mod_id.to_owned());
+        } else {
+            self.reference_mods.remove(mod_id);
         }
     }
 
@@ -3524,7 +3536,9 @@ impl ScriptVm for MluaVm {
             .pairs::<String, Table>()
             .filter_map(Result::ok)
             .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        // **The lowest mod id wins — among mods that are not reference mods.**
+        // The engine's own fixture loses to any real mod, whatever the ids.
+        entries.sort_by_key(|(id, _)| (self.reference_mods.contains(id), id.clone()));
         let (_, entry) = entries.into_iter().next()?;
         let number = |name: &str| entry.get::<f32>(name).ok();
         Some(crate::atmosphere::CloudLayer {
@@ -3554,7 +3568,9 @@ impl ScriptVm for MluaVm {
             .pairs::<String, Table>()
             .filter_map(Result::ok)
             .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        // **The lowest mod id wins — among mods that are not reference mods.**
+        // The engine's own fixture loses to any real mod, whatever the ids.
+        entries.sort_by_key(|(id, _)| (self.reference_mods.contains(id), id.clone()));
         let (mod_id, entry) = entries.into_iter().next()?;
 
         let frames: Table = entry.get("keyframes").ok()?;
@@ -13466,6 +13482,27 @@ mod dig_rules_tests {
         let mut vm = vm();
         load(&mut vm, "core", r#"game.register_block{ id = "plain" }"#).expect("load");
         assert!(vm.registered_sky().is_none());
+    }
+
+    #[test]
+    fn a_reference_mods_sky_loses_to_any_other_mods() {
+        // A reference mod is always secondary: `core_sky` is the engine's
+        // fixture, and a world mod's sky must win however the ids sort.
+        let mut vm = vm();
+        vm.note_reference("aaa_core_sky", true);
+        let sky_of = |length: u32| {
+            format!(
+                "game.register_sky{{ day_length_ticks = {length}, keyframes = {{\n\
+                 \x20 {{ time = 0.5, sky = {{0.5, 0.7, 1.0}}, sun = {{1, 1, 1}}, intensity = 1.0 }},\n\
+                 \x20 {{ time = 0.0, sky = {{0.0, 0.0, 0.05}}, sun = {{0.2, 0.2, 0.4}}, intensity = 0.05 }},\n\
+                 }} }}"
+            )
+        };
+        load(&mut vm, "aaa_core_sky", &sky_of(24_000)).expect("load");
+        load(&mut vm, "zzz_world", &sky_of(12_000)).expect("load");
+        let sky = vm.registered_sky().expect("a sky");
+        assert_eq!(sky.mod_id, "zzz_world");
+        assert_eq!(sky.day_length_ticks, 12_000);
     }
 
     #[test]

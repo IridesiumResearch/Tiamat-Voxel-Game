@@ -10,3 +10,8 @@ name = "Core Mimic"
 version = "0.1.0"
 description = "The blank-white mimic of the first player to join. A test fixture, not a game."
 license = "GPL-3.0-only"
+# A reference implementation and test fixture, not content: it loads before
+# every other mod, loses a tie the lowest id would win, steps aside for a mod
+# that declares it replaces this one, and the client lists it apart. See
+# game/README.md.
+reference = true

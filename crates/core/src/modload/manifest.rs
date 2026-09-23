@@ -463,6 +463,19 @@ pub struct ModManifest {
     #[serde(default)]
     pub conflicts: Vec<String>,
 
+    /// Whether this is one of the engine's own reference mods: a fixture that
+    /// proves a mechanism, not content to rely on.
+    ///
+    /// **Always secondary.** A reference mod loads before any mod that is not
+    /// one, so whatever a content mod registers after it wins where the last
+    /// registration does; it loses a tie the lowest id would otherwise win,
+    /// such as the sky or the cloud deck; it stands aside — is left out of
+    /// the set — for any mod that declares it `conflicts` with it or
+    /// `provides` its id; and the client lists it apart, folded away. The
+    /// mods under `game/core_*` carry it, and a mod of yours must not.
+    #[serde(default)]
+    pub reference: bool,
+
     /// One-line description.
     #[serde(default)]
     pub description: String,
@@ -1037,6 +1050,22 @@ name = "Rivers"
             matches!(odd.validate(&dir), Err(ManifestError::BadId { .. })),
             "a conflict must be a valid id"
         );
+    }
+
+    #[test]
+    fn a_reference_mod_says_so_and_a_mod_is_not_one_unless_it_does() {
+        // The engine's own fixtures carry the flag; everything else defaults
+        // to being a real mod, which is what a manifest that never heard of
+        // the field must mean.
+        let fixture: ModManifest = toml::from_str(
+            "id = \"core_ui\"\nname = \"Core UI\"\nversion = \"0.1.0\"\nreference = true\n",
+        )
+        .expect("parses");
+        assert!(fixture.reference);
+        let plain: ModManifest =
+            toml::from_str("id = \"mine\"\nname = \"Mine\"\nversion = \"0.1.0\"\n")
+                .expect("parses");
+        assert!(!plain.reference);
     }
 
     #[test]

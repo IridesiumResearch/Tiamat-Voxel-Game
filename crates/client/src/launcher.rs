@@ -300,6 +300,9 @@ pub struct Listing {
     pub description: String,
     /// Whether it loads.
     pub enabled: bool,
+    /// Whether it is one of the engine's reference mods: a fixture, listed
+    /// apart and after the rest — see `tiamat_core::modload::ModManifest`.
+    pub reference: bool,
     /// The choices it offers when a world is made — see
     /// `tiamat_core::modload::WorldOption`. Drawn beside the seed box, and
     /// only for mods that are on.
@@ -364,21 +367,23 @@ impl Catalogue {
             Err(_) if !mods_dir.is_dir() => (Vec::new(), None),
             Err(err) => (Vec::new(), Some(err.to_string())),
         };
-        Self {
-            problem,
-            mods: found
-                .into_iter()
-                .map(|discovered| Listing {
-                    enabled: !off.contains(&discovered.manifest.id),
-                    id: discovered.manifest.id,
-                    name: discovered.manifest.name,
-                    description: discovered.manifest.description,
-                    world_options: discovered.manifest.world_options,
-                    theme: discovered.manifest.theme,
-                    dir: discovered.dir,
-                })
-                .collect(),
-        }
+        let mut mods: Vec<Listing> = found
+            .into_iter()
+            .map(|discovered| Listing {
+                enabled: !off.contains(&discovered.manifest.id),
+                reference: discovered.manifest.reference,
+                id: discovered.manifest.id,
+                name: discovered.manifest.name,
+                description: discovered.manifest.description,
+                world_options: discovered.manifest.world_options,
+                theme: discovered.manifest.theme,
+                dir: discovered.dir,
+            })
+            .collect();
+        // Real mods first, then the engine's reference mods, each by id: a
+        // fixture is always secondary, and the list says so by where it is.
+        mods.sort_by(|a, b| (a.reference, &a.id).cmp(&(b.reference, &b.id)));
+        Self { mods, problem }
     }
 
     /// Writes which mods are off.
@@ -688,6 +693,30 @@ local = { path = \"worlds/home\" }
             last_played: 0,
         };
         assert_eq!(Library::mismatch(&server, &["core_ui".to_owned()]), None);
+    }
+
+    #[test]
+    fn reference_mods_are_listed_after_the_rest_whatever_their_ids() {
+        // The engine's fixtures are secondary, and the list says so by where
+        // they are: after every real mod, however the ids sort.
+        let dir = scratch("reference-last");
+        let mods = dir.join("game");
+        write_mod(&mods, "zzz_mine");
+        let fixture = mods.join("aaa_core");
+        std::fs::create_dir_all(&fixture).expect("mod dir");
+        std::fs::write(
+            fixture.join("mod.toml"),
+            "id = \"aaa_core\"\nname = \"Core\"\nversion = \"0.1.0\"\nreference = true\n",
+        )
+        .expect("manifest");
+        std::fs::write(fixture.join("init.lua"), "").expect("entry");
+
+        let catalogue = Catalogue::scan(&mods, &dir.join("mods.toml"));
+        let ids: Vec<&str> = catalogue.mods.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, vec!["zzz_mine", "aaa_core"]);
+        assert!(catalogue.mods[1].reference && !catalogue.mods[0].reference);
+        // Still on: a bare engine has nothing else to play with.
+        assert!(catalogue.mods[1].enabled);
     }
 
     #[test]

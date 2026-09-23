@@ -30,6 +30,8 @@ use tiamat_core::script::{MluaVm, ModHost, ScriptVm as _, VmLimits};
 /// What a dry run found.
 #[derive(Debug, Default)]
 pub struct CheckReport {
+    /// Reference mods that stood aside for a mod replacing them.
+    pub aside: Vec<String>,
     /// Mods that loaded, in resolved order.
     pub loaded: Vec<String>,
     /// Mods that failed to load, with the reason.
@@ -82,6 +84,12 @@ pub fn check(dir: &Path) -> Result<CheckReport, String> {
         report
             .loaded
             .push(format!("{} {}", entry.id, entry.version));
+    }
+    for aside in &host.resolved().aside {
+        report.aside.push(format!(
+            "`{}` stood aside for `{}`",
+            aside.reference, aside.replaced_by
+        ));
     }
     for (mod_id, err) in host.failed() {
         report.failed.push((mod_id.clone(), err.to_string()));
@@ -158,6 +166,9 @@ pub fn report_and_code(dir: &Path, report: &CheckReport) -> u8 {
         }
     }
 
+    for aside in &report.aside {
+        println!("  reference mod {aside}");
+    }
     if !report.blocks.is_empty() {
         println!("  {} block(s) registered:", report.blocks.len());
         for (index, name) in report.blocks.iter().enumerate() {
@@ -289,6 +300,24 @@ mod tests {
         assert!(
             err.contains("replacer") && err.contains("reference") && err.contains("enabled_mods"),
             "the message must name both mods and the way out: {err}"
+        );
+    }
+
+    #[test]
+    fn a_replacement_puts_a_reference_mod_aside_rather_than_failing() {
+        // The engine's own `game/` holds `core_ui` beside the mod that
+        // replaces it, and a developer's does too: the fixture steps aside,
+        // the check passes, and the report says which for which.
+        let dir = scratch("aside");
+        write_mod(&dir, "reference", "reference = true", "");
+        write_mod(&dir, "replacer", "conflicts = [\"reference\"]", "");
+
+        let report = check(&dir).expect("the fixture steps aside");
+        assert!(report.is_ok(), "{:?}", report.failed);
+        assert_eq!(report.loaded, vec!["replacer 0.1.0".to_owned()]);
+        assert_eq!(
+            report.aside,
+            vec!["`reference` stood aside for `replacer`".to_owned()]
         );
     }
 

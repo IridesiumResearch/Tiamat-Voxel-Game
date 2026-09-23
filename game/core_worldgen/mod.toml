@@ -5,3 +5,8 @@ version = "0.1.0"
 depends = ["core >=0.1"]
 description = "Reference generator: solid below y=0, air above. A test fixture."
 license = "GPL-3.0-only"
+# A reference implementation and test fixture, not content: it loads before
+# every other mod, loses a tie the lowest id would win, steps aside for a mod
+# that declares it replaces this one, and the client lists it apart. See
+# game/README.md.
+reference = true

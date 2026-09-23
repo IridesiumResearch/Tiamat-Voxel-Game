@@ -538,6 +538,7 @@ mod tests {
             name: id.to_owned(),
             description: String::new(),
             enabled: true,
+            reference: false,
             world_options: Vec::new(),
             theme: parsed.theme,
             dir: mod_dir,

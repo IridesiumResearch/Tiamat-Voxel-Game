@@ -28,6 +28,24 @@ how it gets caught.
 A real default game is a later phase, built as mods on top of a finished engine.
 It is not part of the 18-task build plan in [`../voxel-prompts/`](../voxel-prompts/).
 
+## `reference = true`
+
+Every manifest in this directory carries it, and it is what makes "not the
+game" a mechanism rather than a sentence in a README. A reference mod:
+
+- **loads before every other mod**, so whatever a real mod registers after it
+  wins where the last registration does;
+- **loses a tie** the lowest mod id would otherwise win — the sky, the cloud
+  deck — to any mod that is not one;
+- **stands aside** for a mod that declares it `conflicts` with it or
+  `provides` its id, rather than the set being refused: `tiamat_default_ui`
+  beside `core_ui` loads alone, with nothing disabled by hand, and
+  `--check-mods` says which stood aside for which;
+- **is listed apart** on the start screen, folded away under "Engine
+  reference mods", so a player choosing mods is choosing among the real ones.
+
+A mod that is not one of these must not set it.
+
 ## What that means in practice
 
 **Do not** add content here, tune game feel, or design progression. If a task

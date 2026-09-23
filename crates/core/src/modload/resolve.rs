@@ -11,6 +11,9 @@ use crate::modload::manifest::{DiscoveredMod, parse_requirement};
 /// A mod in the resolved set, with everything the loader needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMod {
+    /// Whether it is one of the engine's reference mods — see
+    /// [`crate::modload::ModManifest::reference`].
+    pub reference: bool,
     /// The mod's id.
     pub id: String,
     /// Its version.
@@ -28,9 +31,20 @@ pub struct ResolvedMod {
     pub theme: Option<crate::modload::Theme>,
 }
 
+/// A reference mod left out of the set, and the mod it stood aside for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aside {
+    /// The reference mod.
+    pub reference: String,
+    /// The mod that declared it conflicts with it, or provides its id.
+    pub replaced_by: String,
+}
+
 /// The resolved mod set, in load order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSet {
+    /// Reference mods left out because another mod replaces them.
+    pub aside: Vec<Aside>,
     /// Mods in the order they must be loaded.
     pub order: Vec<ResolvedMod>,
 }
@@ -161,6 +175,62 @@ pub enum ResolveError {
 ///
 /// [`ResolveError`] naming the mod, the requirement, and what was found.
 pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
+    let (kept, aside) = stand_aside(mods);
+    let mut set = resolve_kept(&kept)?;
+    set.aside = aside;
+    Ok(set)
+}
+
+/// Leaves out every reference mod that another mod replaces.
+///
+/// **A reference mod is always secondary.** It is the engine's fixture for a
+/// mechanism, and a mod that declares it `conflicts` with one, or `provides`
+/// its id, is the real thing the player installed to have instead: the
+/// fixture stands aside rather than the set being refused, and nothing has
+/// to be disabled by hand. Between two mods that are not reference mods a
+/// conflict is still refused — see `refuse_conflicts`. The lowest replacer id
+/// is recorded when several replace the same one, so the answer is fixed
+/// whatever the input's order.
+fn stand_aside(mods: &[DiscoveredMod]) -> (Vec<DiscoveredMod>, Vec<Aside>) {
+    let mut aside: BTreeMap<&str, &str> = BTreeMap::new();
+    for reference in mods.iter().filter(|found| found.manifest.reference) {
+        let names: Vec<&str> = std::iter::once(reference.manifest.id.as_str())
+            .chain(reference.manifest.provides.iter().map(String::as_str))
+            .collect();
+        let replacer = mods
+            .iter()
+            .filter(|found| !found.manifest.reference)
+            .filter(|found| {
+                found
+                    .manifest
+                    .conflicts
+                    .iter()
+                    .chain(&found.manifest.provides)
+                    .any(|named| names.contains(&named.as_str()))
+            })
+            .map(|found| found.manifest.id.as_str())
+            .min();
+        if let Some(replacer) = replacer {
+            aside.insert(reference.manifest.id.as_str(), replacer);
+        }
+    }
+    let kept = mods
+        .iter()
+        .filter(|found| !aside.contains_key(found.manifest.id.as_str()))
+        .cloned()
+        .collect();
+    let aside = aside
+        .into_iter()
+        .map(|(reference, replaced_by)| Aside {
+            reference: reference.to_owned(),
+            replaced_by: replaced_by.to_owned(),
+        })
+        .collect();
+    (kept, aside)
+}
+
+/// Resolves a set nothing has stood aside from.
+fn resolve_kept(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
     // -- 1. one mod per id -------------------------------------------------
     let mut by_id: BTreeMap<&str, &DiscoveredMod> = BTreeMap::new();
     for found in mods {
@@ -266,13 +336,23 @@ pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
 
     // -- 4 & 5. topological order, alphabetical tiebreak -------------------
     let order = topological_order(&by_id, &edges)?;
+    Ok(assemble(&by_id, &edges, order))
+}
 
-    Ok(ResolvedSet {
+/// The resolved set in load order, from the order the sort decided.
+fn assemble(
+    by_id: &BTreeMap<&str, &DiscoveredMod>,
+    edges: &BTreeMap<&str, BTreeSet<String>>,
+    order: Vec<String>,
+) -> ResolvedSet {
+    ResolvedSet {
+        aside: Vec::new(),
         order: order
             .into_iter()
             .map(|id| {
                 let found = by_id[id.as_str()];
                 ResolvedMod {
+                    reference: found.manifest.reference,
                     id: id.clone(),
                     version: found
                         .manifest
@@ -287,7 +367,7 @@ pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
                 }
             })
             .collect(),
-    })
+    }
 }
 
 /// Refuses a set in which a mod declared it cannot load beside another that
@@ -349,7 +429,15 @@ fn topological_order(
         .map(|(id, _)| *id)
         .collect();
 
-    while let Some(&next) = ready.iter().next() {
+    // **Reference mods first, then alphabetical**, among what is ready. A
+    // reference mod is always secondary: whatever a content mod registers
+    // after it wins where the last registration does. Fixed whatever the
+    // input's order, which is what a tiebreak is for.
+    while let Some(next) = ready
+        .iter()
+        .copied()
+        .min_by_key(|id| (!by_id[id].manifest.reference, *id))
+    {
         ready.remove(next);
         order.push(next.to_owned());
 
@@ -439,6 +527,7 @@ mod tests {
                 depends: depends.iter().map(|d| (*d).to_owned()).collect(),
                 optional_depends: Vec::new(),
                 conflicts: Vec::new(),
+                reference: false,
                 provides: Vec::new(),
                 description: String::new(),
                 license: String::new(),
@@ -462,6 +551,70 @@ mod tests {
     fn with_conflicts(mut found: DiscoveredMod, conflicts: &[&str]) -> DiscoveredMod {
         found.manifest.conflicts = conflicts.iter().map(|c| (*c).to_owned()).collect();
         found
+    }
+
+    fn with_reference(mut found: DiscoveredMod) -> DiscoveredMod {
+        found.manifest.reference = true;
+        found
+    }
+
+    #[test]
+    fn a_reference_mod_stands_aside_for_a_mod_that_conflicts_with_it() {
+        // The engine's fixture yields to the real thing: nothing to disable
+        // by hand, and the set is not refused.
+        let set = resolve(&[
+            with_reference(make("core_ui", "0.1.0", &[])),
+            with_conflicts(make("replacer", "0.4.0", &[]), &["core_ui"]),
+        ])
+        .expect("the fixture steps aside");
+        assert_eq!(set.ids(), vec!["replacer"]);
+        assert_eq!(
+            set.aside,
+            vec![Aside {
+                reference: "core_ui".to_owned(),
+                replaced_by: "replacer".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_reference_mod_stands_aside_for_a_mod_that_provides_its_id() {
+        let set = resolve(&[
+            with_reference(make("core_ui", "0.1.0", &[])),
+            with_provides(make("replacer", "0.4.0", &[]), &["core_ui"]),
+        ])
+        .expect("the fixture steps aside");
+        assert_eq!(set.ids(), vec!["replacer"]);
+        assert_eq!(set.aside.len(), 1);
+    }
+
+    #[test]
+    fn a_dependant_of_a_reference_mod_that_stood_aside_gets_its_replacement() {
+        // With the fixture gone, the replacement's alias is what a dependant
+        // resolves to — which is the point of providing the id.
+        let set = resolve(&[
+            with_reference(make("core_ui", "0.1.0", &[])),
+            with_provides(make("replacer", "0.4.0", &[]), &["core_ui"]),
+            make("addon", "1.0.0", &["core_ui"]),
+        ])
+        .expect("resolves through the alias");
+        let addon = set
+            .order
+            .iter()
+            .find(|entry| entry.id == "addon")
+            .expect("addon");
+        assert_eq!(addon.after, vec!["replacer".to_owned()]);
+    }
+
+    #[test]
+    fn reference_mods_load_before_ordinary_mods_whatever_their_ids() {
+        let set = resolve(&[
+            make("aaa_content", "1.0.0", &[]),
+            with_reference(make("zzz_core", "0.1.0", &[])),
+        ])
+        .expect("resolves");
+        assert_eq!(set.ids(), vec!["zzz_core", "aaa_content"]);
+        assert!(set.order[0].reference);
     }
 
     #[test]

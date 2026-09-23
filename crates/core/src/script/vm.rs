@@ -1147,6 +1147,14 @@ pub trait ScriptVm: Sized {
     /// else, so load order always guarantees the table exists when read.
     fn note_dependencies(&mut self, _mod_id: &str, _after: &[String]) {}
 
+    /// Tells the VM whether `mod_id` is one of the engine's reference mods.
+    ///
+    /// **Called before `load_mod`, by the loader, from the manifest.** A
+    /// reference mod is always secondary: where two mods register the one
+    /// thing a world has one of — the sky, the cloud deck — and the lowest id
+    /// would decide, a reference mod loses to any mod that is not one.
+    fn note_reference(&mut self, _mod_id: &str, _reference: bool) {}
+
     /// Closes the registration window and freezes the registries.
     ///
     /// Charter rule 9's lifecycle: after this, `register_*` is a hard error.

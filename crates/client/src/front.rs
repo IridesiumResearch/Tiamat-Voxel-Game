@@ -531,16 +531,38 @@ impl Front {
             if self.catalogue.mods.is_empty() {
                 ui.label("No mods installed. A client with none can still join servers.");
             }
-            for listing in &mut self.catalogue.mods {
-                ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut listing.enabled, &listing.name).changed();
-                    crate::theme::secondary(ui, &listing.id);
-                });
-                if !listing.description.is_empty() {
-                    ui.indent(&listing.id, |ui| {
-                        crate::theme::secondary(ui, &listing.description)
+            for listing in self
+                .catalogue
+                .mods
+                .iter_mut()
+                .filter(|listing| !listing.reference)
+            {
+                changed |= listing_row(ui, listing);
+            }
+            // **The engine's own mods, folded away.** Reference mods are
+            // fixtures that prove a mechanism, not content to rely on: they
+            // load first, step aside for any mod that replaces them, and sit
+            // here closed, so a player choosing mods is choosing among the
+            // real ones.
+            if self.catalogue.mods.iter().any(|listing| listing.reference) {
+                egui::CollapsingHeader::new("Engine reference mods")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        crate::theme::secondary(
+                            ui,
+                            "Test fixtures the engine ships to prove its mechanisms. They load \
+                             before everything else and step aside for any mod that replaces \
+                             them; nothing here is content to rely on.",
+                        );
+                        for listing in self
+                            .catalogue
+                            .mods
+                            .iter_mut()
+                            .filter(|listing| listing.reference)
+                        {
+                            changed |= listing_row(ui, listing);
+                        }
                     });
-                }
             }
         }
         // Reported from the window: unticking a mod did nothing — the world
@@ -960,6 +982,22 @@ fn megabytes(bytes: u64) -> String {
     format!("{} MB", bytes.div_ceil(1024 * 1024))
 }
 
+/// One mod's row on the mods tab: its box, its id beside, its description
+/// under. Returns whether the box changed.
+fn listing_row(ui: &mut egui::Ui, listing: &mut crate::launcher::Listing) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut listing.enabled, &listing.name).changed();
+        crate::theme::secondary(ui, &listing.id);
+    });
+    if !listing.description.is_empty() {
+        ui.indent(&listing.id, |ui| {
+            crate::theme::secondary(ui, &listing.description)
+        });
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,6 +1032,7 @@ mod tests {
             name: id.to_owned(),
             description: String::new(),
             enabled: true,
+            reference: false,
             theme: None,
             dir: std::path::PathBuf::new(),
         }
