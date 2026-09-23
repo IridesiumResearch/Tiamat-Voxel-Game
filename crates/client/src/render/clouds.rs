@@ -381,23 +381,7 @@ impl Pass {
         // march nothing and paint the gradient alone.
         self.draws = true;
         let quality = self.deck.quality;
-        let layer = self
-            .deck
-            .layer
-            .filter(|_| quality.draws())
-            .unwrap_or(CloudLayer {
-                base: 0.0,
-                thickness: 0.0,
-                cell: 0.0,
-                detail: 1,
-                frequency: 1.0,
-                octaves: 1,
-                towers: 0.0,
-                drift: [0.0; 2],
-                evolve: 0.0,
-                colour: [1.0; 3],
-                shade: [0.5; 3],
-            });
+        let layer = self.layer_to_draw(quality);
         let state = self.deck.clouds.unwrap_or(Clouds {
             cover: 0.0,
             darkness: 0.0,
@@ -488,6 +472,28 @@ impl Pass {
         };
         gpu.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+    }
+
+    /// The deck to draw at this quality: the registered one, or an empty one
+    /// with a `cell` of zero — the shader's "march nothing, paint the sky" —
+    /// for a world with no deck or a player who turned clouds off.
+    fn layer_to_draw(&self, quality: Quality) -> CloudLayer {
+        self.deck
+            .layer
+            .filter(|_| quality.draws())
+            .unwrap_or(CloudLayer {
+                base: 0.0,
+                thickness: 0.0,
+                cell: 0.0,
+                detail: 1,
+                frequency: 1.0,
+                octaves: 1,
+                towers: 0.0,
+                drift: [0.0; 2],
+                evolve: 0.0,
+                colour: [1.0; 3],
+                shade: [0.5; 3],
+            })
     }
 
     /// **The cover map, unpacked for the uniform.** Bytes on the wire, shares

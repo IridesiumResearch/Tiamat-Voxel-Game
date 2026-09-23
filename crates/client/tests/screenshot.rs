@@ -6470,7 +6470,7 @@ fn normal_quality_draws_the_deck_at_half_resolution_and_fine_at_full() {
     let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
     let mut share_at = |quality| {
-        let mut deck = |layer| client::render::clouds::Deck {
+        let deck = |layer| client::render::clouds::Deck {
             layer,
             clouds: Some(sky_of(0.55, 0.0, 0.0, 0.0)),
             quality,
@@ -6524,7 +6524,7 @@ fn a_deck_below_the_floor_stays_behind_it_at_every_quality() {
         client::render::clouds::Quality::Fine,
         client::render::clouds::Quality::Normal,
     ] {
-        let mut deck = |layer| client::render::clouds::Deck {
+        let deck = |layer| client::render::clouds::Deck {
             layer,
             clouds: Some(sky_of(0.95, 0.0, 0.0, 0.0)),
             quality,

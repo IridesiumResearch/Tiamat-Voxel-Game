@@ -160,33 +160,6 @@ pub enum ResolveError {
 /// # Errors
 ///
 /// [`ResolveError`] naming the mod, the requirement, and what was found.
-/// Refuses a set in which a mod declared it cannot load beside another that
-/// is here — UI ask 13.
-///
-/// A mod that replaces another says so in its manifest — a second inventory
-/// screen is a mistake, not a feature — and which of the two the player
-/// wanted is not the engine's to guess. Through the aliases too: a mod that
-/// stands in for the one named is the one named.
-fn refuse_conflicts<'a>(
-    mods: &'a [DiscoveredMod],
-    lookup: impl Fn(&str) -> Option<&'a DiscoveredMod>,
-) -> Result<(), ResolveError> {
-    for found in mods {
-        for conflict in &found.manifest.conflicts {
-            if let Some(other) = lookup(conflict)
-                && other.manifest.id != found.manifest.id
-            {
-                return Err(ResolveError::Conflict {
-                    declarer: found.manifest.id.clone(),
-                    conflict: conflict.clone(),
-                    found: other.manifest.id.clone(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
     // -- 1. one mod per id -------------------------------------------------
     let mut by_id: BTreeMap<&str, &DiscoveredMod> = BTreeMap::new();
@@ -224,7 +197,7 @@ pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
     };
 
     // -- 3. edges, with version checks -------------------------------------
-    refuse_conflicts(mods, &lookup)?;
+    refuse_conflicts(mods, lookup)?;
 
     let mut edges: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for found in mods {
@@ -315,6 +288,33 @@ pub fn resolve(mods: &[DiscoveredMod]) -> Result<ResolvedSet, ResolveError> {
             })
             .collect(),
     })
+}
+
+/// Refuses a set in which a mod declared it cannot load beside another that
+/// is here — UI ask 13.
+///
+/// A mod that replaces another says so in its manifest — a second inventory
+/// screen is a mistake, not a feature — and which of the two the player
+/// wanted is not the engine's to guess. Through the aliases too: a mod that
+/// stands in for the one named is the one named.
+fn refuse_conflicts<'a>(
+    mods: &'a [DiscoveredMod],
+    lookup: impl Fn(&str) -> Option<&'a DiscoveredMod>,
+) -> Result<(), ResolveError> {
+    for found in mods {
+        for conflict in &found.manifest.conflicts {
+            if let Some(other) = lookup(conflict)
+                && other.manifest.id != found.manifest.id
+            {
+                return Err(ResolveError::Conflict {
+                    declarer: found.manifest.id.clone(),
+                    conflict: conflict.clone(),
+                    found: other.manifest.id.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Kahn's algorithm with a sorted ready set.
