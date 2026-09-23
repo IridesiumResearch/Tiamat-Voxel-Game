@@ -71,9 +71,9 @@ const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 pub enum Quality {
     /// No clouds at all.
     Off,
-    /// Coarse cubes, to the horizon. Quarter resolution.
+    /// Coarse cubes, to the horizon. Half resolution.
     Coarse,
-    /// The registered cube size.
+    /// The registered cube size. Half resolution.
     #[default]
     Normal,
     /// Finer cubes, nearer. Full resolution.
@@ -120,23 +120,22 @@ impl Quality {
         }
     }
 
-    /// What share of the screen's resolution the pass is drawn at.
+    /// How many of the frame's pixels one of the deck's covers, per axis.
     ///
     /// **Crisp cube edges are the whole aesthetic**, so this is a look
-    /// decision before it is a cost one: a quarter-resolution deck scaled up
-    /// softens and shimmers at exactly the edges the references are made of.
-    /// Full resolution wherever the mode can show the difference.
-    ///
-    /// **Not yet wired.** The pass draws into the frame's own target at its
-    /// full size; this is the share a half-resolution target would take when
-    /// one is built. Weather ask W15 asked for `Normal` at half — the
-    /// designer's own call — and it is still owed: the saving that pass
-    /// measured came from the pixel target, which the march reads.
+    /// decision before it is a cost one, and the deck is lifted into the frame
+    /// one of its texels to a block of pixels rather than filtered — an edge is
+    /// a step and not a smear. Full resolution on `Fine`, where the cubes are
+    /// small enough to show the difference; `Normal` and `Coarse` at half,
+    /// which is a quarter of the pixels marched. `Normal` at half is weather
+    /// ask W15's last step, the designer's own call, pictured against full to
+    /// make it. `Off` marches nothing and paints the sky alone, which is not
+    /// worth making smaller.
     #[must_use]
-    pub const fn resolution_scale(self) -> f32 {
+    pub const fn resolution_divisor(self) -> u32 {
         match self {
-            Self::Off | Self::Coarse => 0.5,
-            Self::Normal | Self::Fine => 1.0,
+            Self::Off | Self::Fine => 1,
+            Self::Coarse | Self::Normal => 2,
         }
     }
 
@@ -226,6 +225,23 @@ pub struct Frame {
     /// How wide one pixel is, in radians. The LOD is decided against this
     /// rather than a distance in blocks — see `clouds.wgsl`.
     pub pixel_angle: f32,
+    /// The frame's size in pixels, which the deck's own target is a share of.
+    pub size: (u32, u32),
+}
+
+/// The deck drawn smaller than the frame, for the resolve to lift — weather
+/// ask W15's last step.
+///
+/// Its own colour and depth: the deck is marched into these against nothing,
+/// and `resolve_main` lifts colour and depth into the frame, where the depth
+/// test against the terrain already drawn decides who is in front and the
+/// glass, the fluid and the particles drawn after still sort against the deck.
+struct HalfTarget {
+    colour: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    size: (u32, u32),
+    /// The uniform and the two textures, for the resolve pipeline.
+    bind: wgpu::BindGroup,
 }
 
 /// The pipelines, buffer and binding.
@@ -243,6 +259,13 @@ pub struct Pass {
     /// How much of the sun the deck takes this frame: zero with no deck, in
     /// Simple, or with clouds turned off, and then the map is not drawn.
     shadow_strength: f32,
+    /// Lifts the smaller target into the frame, for the surface and for the
+    /// float scene texture.
+    resolve_direct: wgpu::RenderPipeline,
+    resolve_hdr: wgpu::RenderPipeline,
+    resolve_layout: wgpu::BindGroupLayout,
+    /// The smaller target, when the quality asks for one.
+    half: Option<HalfTarget>,
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
     /// Whether this frame has a deck to draw.
@@ -300,33 +323,8 @@ impl Pass {
                 resource: uniforms.as_entire_binding(),
             }],
         });
-        let shadow_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cloud-shade"),
-            size: wgpu::Extent3d {
-                width: SHADOW_TEXELS,
-                height: SHADOW_TEXELS,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: SHADOW_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let shadow_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("cloud-shade"),
-            // Clamped: past the map's edge the world pass has already
-            // answered "lit", and a repeat would lay the far side's clouds
-            // over the near.
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let (shadow_view, shadow_sampler) = shade_target(gpu);
+        let resolve_layout = resolve_layout(gpu);
         Self {
             direct: pipeline(gpu, &shader, &layout, gpu.surface_format(), false),
             hdr: pipeline(gpu, &shader, &layout, graph::HDR_FORMAT, true),
@@ -335,6 +333,16 @@ impl Pass {
             shadow_sampler,
             shadow_frame: [0.0, 0.0, 0.0, 0.0],
             shadow_strength: 0.0,
+            resolve_direct: resolve_pipeline(
+                gpu,
+                &shader,
+                &resolve_layout,
+                gpu.surface_format(),
+                false,
+            ),
+            resolve_hdr: resolve_pipeline(gpu, &shader, &resolve_layout, graph::HDR_FORMAT, true),
+            resolve_layout,
+            half: None,
             uniforms,
             bind,
             draws: false,
@@ -406,6 +414,16 @@ impl Pass {
             0.0
         };
         let small = (cell / f32::from(layer.detail.max(1))).max(0.5);
+        // The deck's own target, a share of the frame — or none, and the
+        // deck is marched straight into the frame. Keyed on the deck rather
+        // than the quality: a world with no deck paints the sky alone, which
+        // has nothing to save on and every reason to stay sharp.
+        let divisor = if cell > 0.0 {
+            quality.resolution_divisor()
+        } else {
+            1
+        };
+        self.fit_half_target(gpu, frame.size, divisor);
         let base = state.base.unwrap_or(layer.base);
         #[expect(
             clippy::cast_possible_truncation,
@@ -428,7 +446,15 @@ impl Pass {
             inverse_view_projection: frame.view_projection.inverse().to_cols_array_2d(),
             view_projection: frame.view_projection.to_cols_array_2d(),
             camera: [camera[0], camera[1], camera[2], self.seconds],
-            view: [frame.pixel_angle.max(1e-6), 0.0, 0.0, 0.0],
+            view: [
+                #[expect(clippy::cast_precision_loss, reason = "one or two")]
+                {
+                    frame.pixel_angle.max(1e-6) * divisor as f32
+                },
+                0.0,
+                0.0,
+                0.0,
+            ],
             sun_direction: [
                 frame.sun_direction[0],
                 frame.sun_direction[1],
@@ -575,9 +601,124 @@ impl Pass {
         if !self.draws {
             return;
         }
+        // Drawn already, smaller, by `render_half`: lift it. The resolve
+        // writes the deck's depth, so the terrain already in the frame keeps
+        // its place and what is drawn after still sorts against the deck.
+        if let Some(half) = &self.half {
+            pass.set_pipeline(if hdr {
+                &self.resolve_hdr
+            } else {
+                &self.resolve_direct
+            });
+            pass.set_bind_group(0, &half.bind, &[]);
+            pass.draw(0..3, 0..1);
+            return;
+        }
         pass.set_pipeline(if hdr { &self.hdr } else { &self.direct });
         pass.set_bind_group(0, &self.bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Draws the deck into its smaller target, when the quality asks for one
+    /// — before the world pass, which lifts it with [`Self::draw`].
+    ///
+    /// The float pipeline, whatever the frame's own format: the target is a
+    /// float texture either way, and lifting it into an sRGB surface encodes
+    /// it on the way.
+    pub fn render_half(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(half) = &self.half else {
+            return;
+        };
+        if !self.draws {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clouds-half"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &half.colour,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &half.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.hdr);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Makes the smaller target the frame's size over `divisor`, drops it for
+    /// a divisor of one, and keeps it when nothing changed.
+    fn fit_half_target(&mut self, gpu: &Gpu, size: (u32, u32), divisor: u32) {
+        if divisor <= 1 || size.0 == 0 || size.1 == 0 {
+            self.half = None;
+            return;
+        }
+        let want = (
+            size.0.div_ceil(divisor).max(1),
+            size.1.div_ceil(divisor).max(1),
+        );
+        if self.half.as_ref().is_some_and(|half| half.size == want) {
+            return;
+        }
+        let texture = |label: &str, format: wgpu::TextureFormat| {
+            gpu.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: want.0,
+                        height: want.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let colour = texture("clouds-half-colour", graph::HDR_FORMAT);
+        let depth = texture("clouds-half-depth", DEPTH_FORMAT);
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("clouds-resolve"),
+            layout: &self.resolve_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&colour),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&depth),
+                },
+            ],
+        });
+        self.half = Some(HalfTarget {
+            colour,
+            depth,
+            size: want,
+            bind,
+        });
     }
 }
 
@@ -648,6 +789,142 @@ fn pipeline(
                 // **`LessEqual`, not `Less`.** The depth buffer is cleared to
                 // 1.0 and the sky is painted AT 1.0, so `Less` would throw
                 // away every sky pixel — the one thing this pass must not do.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+/// The shade map's texture and the sampler the world pass reads it with.
+fn shade_target(gpu: &Gpu) -> (wgpu::TextureView, wgpu::Sampler) {
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cloud-shade"),
+        size: wgpu::Extent3d {
+            width: SHADOW_TEXELS,
+            height: SHADOW_TEXELS,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SHADOW_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("cloud-shade"),
+        // Clamped: past the map's edge the world pass has already answered
+        // "lit", and a repeat would lay the far side's clouds over the near.
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    (view, sampler)
+}
+
+/// What the resolve reads: the uniform, and the smaller target's colour and
+/// depth. Loaded by texel rather than sampled, so no sampler.
+fn resolve_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
+    gpu.device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("clouds-resolve-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        })
+}
+
+/// The resolve's pipeline for one target format: `resolve_main` lifting the
+/// smaller target's colour and depth into the frame, depth tested and
+/// written like the direct draw, so the frame sorts it as if it had been
+/// marched there.
+fn resolve_pipeline(
+    gpu: &Gpu,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    marks: bool,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("clouds-resolve-pipeline-layout"),
+            bind_group_layouts: &[Some(layout)],
+            immediate_size: 0,
+        });
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clouds-resolve"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("resolve_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: if marks {
+                        wgpu::ColorWrites::ALL
+                    } else {
+                        wgpu::ColorWrites::COLOR
+                    },
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -730,13 +1007,15 @@ mod tests {
     }
 
     #[test]
-    fn the_modes_that_show_crisp_edges_get_full_resolution() {
+    fn only_the_finest_setting_draws_the_deck_at_the_frames_own_resolution() {
         // Crisp cube edges are the aesthetic, so resolution is a look decision
-        // before it is a cost one: scaling a quarter-resolution deck up softens
-        // and shimmers at exactly the edges the references are made of.
-        assert!((Quality::Fine.resolution_scale() - 1.0).abs() < f32::EPSILON);
-        assert!((Quality::Normal.resolution_scale() - 1.0).abs() < f32::EPSILON);
-        assert!(Quality::Coarse.resolution_scale() < 1.0);
+        // before it is a cost one — and `Fine` is where the cubes are small
+        // enough for it to show. `Normal` at half is weather ask W15's last
+        // step, the designer's call; `Off` has nothing to make smaller.
+        assert_eq!(Quality::Fine.resolution_divisor(), 1);
+        assert_eq!(Quality::Normal.resolution_divisor(), 2);
+        assert_eq!(Quality::Coarse.resolution_divisor(), 2);
+        assert_eq!(Quality::Off.resolution_divisor(), 1);
     }
 
     #[test]

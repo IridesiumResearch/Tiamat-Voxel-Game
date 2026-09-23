@@ -5415,6 +5415,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         fog_end: 3000.0,
         pixel_angle: 1.0 / f32::from(u16::try_from(HEIGHT).unwrap_or(240)),
         mode: 2,
+        size: (WIDTH, HEIGHT),
     };
 
     // A deck and a cover: the pass has something to draw.
@@ -6022,17 +6023,35 @@ fn with_and_without(
     camera: &Camera,
     state: tiamat_core::atmosphere::Clouds,
 ) -> (Image, Image) {
+    with_and_without_at(
+        renderer,
+        target,
+        camera,
+        state,
+        client::render::clouds::Quality::Normal,
+    )
+}
+
+/// The same, at a chosen quality: `Fine` marches every pixel, which is what a
+/// test about the field's own shape wants under it.
+fn with_and_without_at(
+    renderer: &mut Renderer,
+    target: &Offscreen,
+    camera: &Camera,
+    state: tiamat_core::atmosphere::Clouds,
+    quality: client::render::clouds::Quality,
+) -> (Image, Image) {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
         clouds: Some(state),
-        quality: client::render::clouds::Quality::Normal,
+        quality,
         seed: 4242,
     });
     let with = target.capture(renderer, camera).expect("capture");
     renderer.set_clouds(client::render::clouds::Deck {
         layer: None,
         clouds: Some(state),
-        quality: client::render::clouds::Quality::Normal,
+        quality,
         seed: 4242,
     });
     let without = target.capture(renderer, camera).expect("capture");
@@ -6132,18 +6151,23 @@ fn an_altocumulus_layer_is_many_small_cloudlets_from_the_ground() {
     let chunks = scene();
     let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    // At `Fine`, marched per pixel: this is a claim about the field's shape,
+    // and the half-resolution lift `Normal` does merges the smallest
+    // cloudlets into pairs of pixels, which halves the crossings it counts.
 
-    let (alto, alto_bare) = with_and_without(
+    let (alto, alto_bare) = with_and_without_at(
         &mut renderer,
         &target,
         &skyward(),
         sky_of(0.0, 0.0, 0.8, 0.0),
+        client::render::clouds::Quality::Fine,
     );
-    let (heaps, heaps_bare) = with_and_without(
+    let (heaps, heaps_bare) = with_and_without_at(
         &mut renderer,
         &target,
         &skyward(),
         sky_of(0.55, 0.0, 0.0, 0.0),
+        client::render::clouds::Quality::Fine,
     );
     let (alto_cloud, _) = cloud_in(&alto, &alto_bare);
     let (heap_cloud, _) = cloud_in(&heaps, &heaps_bare);
@@ -6405,6 +6429,131 @@ fn the_decks_shade_moves_over_the_ground_as_the_deck_drifts() {
     );
 }
 
+/// The share of aligned two-by-two blocks of cloud in the upper half whose
+/// four pixels are all the same colour.
+///
+/// A deck drawn at half resolution and lifted one texel to a block of pixels
+/// has every such block uniform; a deck marched per pixel has its cube edges
+/// and shading running through them.
+fn uniform_cloud_blocks(with: &Image, without: &Image) -> f32 {
+    let mut blocks = 0usize;
+    let mut uniform = 0usize;
+    for y in (0..HEIGHT / 2 - 1).step_by(2) {
+        for x in (0..WIDTH - 1).step_by(2) {
+            let corners = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)];
+            if !corners
+                .iter()
+                .all(|&(cx, cy)| is_cloud(with, without, cx, cy))
+            {
+                continue;
+            }
+            blocks += 1;
+            let first = with.pixel(x, y);
+            if corners.iter().all(|&(cx, cy)| with.pixel(cx, cy) == first) {
+                uniform += 1;
+            }
+        }
+    }
+    uniform as f32 / blocks.max(1) as f32
+}
+
+#[test]
+fn normal_quality_draws_the_deck_at_half_resolution_and_fine_at_full() {
+    // **Weather ask W15's last step**: `Normal` at half resolution, the
+    // designer's own call. The deck is marched into a target half the frame's
+    // size on each axis and lifted one texel to a block of two-by-two pixels,
+    // nearest rather than filtered, so at `Normal` every such block of cloud
+    // is one colour, and at `Fine` — marched per pixel — the cube edges and
+    // shading run through them.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let mut share_at = |quality| {
+        let mut deck = |layer| client::render::clouds::Deck {
+            layer,
+            clouds: Some(sky_of(0.55, 0.0, 0.0, 0.0)),
+            quality,
+            seed: 4242,
+        };
+        renderer.set_clouds(deck(Some(low_deck())));
+        let with = target.capture(&mut renderer, &skyward()).expect("capture");
+        renderer.set_clouds(deck(None));
+        let without = target.capture(&mut renderer, &skyward()).expect("capture");
+        let (cloud, _) = cloud_in(&with, &without);
+        (uniform_cloud_blocks(&with, &without), cloud)
+    };
+    let (normal, normal_cloud) = share_at(client::render::clouds::Quality::Normal);
+    let (fine, fine_cloud) = share_at(client::render::clouds::Quality::Fine);
+    println!(
+        "uniform two-by-two blocks of cloud: {normal:.3} at Normal ({normal_cloud} cloud \
+         pixels), {fine:.3} at Fine ({fine_cloud})"
+    );
+    assert!(
+        normal_cloud > 2000 && fine_cloud > 2000,
+        "both qualities should draw the deck: {normal_cloud} and {fine_cloud} cloud pixels"
+    );
+    assert!(
+        normal > 0.98,
+        "at Normal the deck is lifted one texel to a block of pixels, so its blocks should \
+         be uniform: {normal:.3}"
+    );
+    assert!(
+        fine < normal - 0.2,
+        "at Fine the deck is marched per pixel, so far fewer of its blocks should be \
+         uniform: {fine:.3} against {normal:.3} at Normal"
+    );
+}
+
+#[test]
+fn a_deck_below_the_floor_stays_behind_it_at_every_quality() {
+    // **The resolve writes depth**, which is what lets a deck drawn smaller
+    // still sort against the world: a deck under the floor, seen from above
+    // it, must not show through — not at `Fine`, where it is marched into
+    // the frame against the floor's depth, and not at `Normal`, where it is
+    // lifted from its own target and the depth test has to do the same job.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let buried = tiamat_core::atmosphere::CloudLayer {
+        base: -300.0,
+        ..low_deck()
+    };
+    for quality in [
+        client::render::clouds::Quality::Fine,
+        client::render::clouds::Quality::Normal,
+    ] {
+        let mut deck = |layer| client::render::clouds::Deck {
+            layer,
+            clouds: Some(sky_of(0.95, 0.0, 0.0, 0.0)),
+            quality,
+            seed: 4242,
+        };
+        renderer.set_clouds(deck(Some(buried)));
+        let with = target
+            .capture(&mut renderer, &viewpoint())
+            .expect("capture");
+        renderer.set_clouds(deck(None));
+        let without = target
+            .capture(&mut renderer, &viewpoint())
+            .expect("capture");
+        let mut showing = 0usize;
+        for y in HEIGHT / 2..HEIGHT {
+            for x in 0..WIDTH {
+                if is_cloud(&with, &without, x, y) {
+                    showing += 1;
+                }
+            }
+        }
+        println!("{quality:?}: {showing} floor pixels changed by a deck under the floor");
+        assert_eq!(
+            showing, 0,
+            "at {quality:?} a deck under the floor showed through it in {showing} pixels"
+        );
+    }
+}
+
 #[test]
 #[ignore = "pictures for a person to look at, not a gate; run with --ignored --nocapture"]
 fn pictures_of_the_deck_for_the_designers_eye() {
@@ -6418,10 +6567,17 @@ fn pictures_of_the_deck_for_the_designers_eye() {
     // four views the designer's own harness used.
     //
     // Writes into `TIAMAT_CLOUD_PICTURES` and does nothing without it, so it
-    // never litters a checkout by accident.
+    // never litters a checkout by accident. `TIAMAT_CLOUD_QUALITY` picks the
+    // setting — `fine`, `normal` or `coarse`, `normal` when unset — since a
+    // deck at half resolution is a look a person has to judge too.
     let Some(dir) = std::env::var_os("TIAMAT_CLOUD_PICTURES") else {
         println!("set TIAMAT_CLOUD_PICTURES to a directory to write the pictures");
         return;
+    };
+    let quality = match std::env::var("TIAMAT_CLOUD_QUALITY").as_deref() {
+        Ok("fine") => client::render::clouds::Quality::Fine,
+        Ok("coarse") => client::render::clouds::Quality::Coarse,
+        _ => client::render::clouds::Quality::Normal,
     };
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).expect("the pictures directory");
@@ -6472,7 +6628,7 @@ fn pictures_of_the_deck_for_the_designers_eye() {
                     altocumulus,
                     cumulonimbus,
                 }),
-                quality: client::render::clouds::Quality::Normal,
+                quality,
                 seed: 4242,
             });
             for (view, camera_height, yaw, pitch) in views {
@@ -6482,7 +6638,7 @@ fn pictures_of_the_deck_for_the_designers_eye() {
                 };
                 camera.look(yaw, pitch);
                 let frame = target.capture(&mut renderer, &camera).expect("capture");
-                let name = format!("{mode:?}-{weather}-{view}.png").to_lowercase();
+                let name = format!("{mode:?}-{weather}-{view}-{quality:?}.png").to_lowercase();
                 write_png(&dir.join(&name), &frame);
                 println!("wrote {}", dir.join(name).display());
             }

@@ -98,6 +98,10 @@ struct Clouds {
 }
 
 @group(0) @binding(0) var<uniform> clouds: Clouds;
+// The deck drawn at a lower resolution, for `resolve_main` to lift into the
+// frame — weather ask W15's last step. Bound by the resolve pipeline alone.
+@group(0) @binding(1) var deck_colour: texture_2d<f32>;
+@group(0) @binding(2) var deck_depth: texture_depth_2d;
 
 // The weather over one place: cover and darkness, from the map where there is
 // one and from the single state everywhere else. Weather ask W10.
@@ -1272,4 +1276,27 @@ fn shadow_main(in: Varyings) -> @location(0) vec4<f32> {
     // what lightens its rim, where the cloud is one cube thick.
     let shade = select(0.0, 0.45 + 0.55 * column.density, some);
     return vec4<f32>(shade, 0.0, 0.0, 1.0);
+}
+
+struct Resolved {
+    @location(0) colour: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+// Lifts the deck from its smaller target into the frame, one texel to a
+// block of pixels — nearest, not filtered, because a cube's edge blurred
+// across two pixels is the smear the aesthetic exists to avoid, and a depth
+// averaged across an edge is a distance nothing is at. The depth is written,
+// so the terrain already drawn keeps its place where it is nearer, and the
+// glass, the fluid and the particles drawn after still sort against the
+// deck. The mark in alpha comes along with the colour.
+@fragment
+fn resolve_main(in: Varyings) -> Resolved {
+    let size = vec2<f32>(textureDimensions(deck_colour));
+    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+    let at = vec2<i32>(clamp(uv * size, vec2<f32>(0.0), size - vec2<f32>(1.0)));
+    var out: Resolved;
+    out.colour = textureLoad(deck_colour, at, 0);
+    out.depth = textureLoad(deck_depth, at, 0);
+    return out;
 }

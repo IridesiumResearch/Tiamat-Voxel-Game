@@ -1771,6 +1771,7 @@ impl Renderer {
             // worth drawing.
             pixel_angle: camera.fov_y / f32::from(u16::try_from(self.depth_size.1).unwrap_or(1080)),
             mode: self.lighting_mode().code(),
+            size: self.depth_size,
         };
         let gpu = self.gpu.clone();
         self.clouds.prepare(&gpu, &frame);
@@ -2982,6 +2983,9 @@ impl Renderer {
         self.fill_cascades(&mut encoder, &culled);
         // The deck from below, for the terrain to shade by — ask W11.
         self.clouds.render_shadow(&mut encoder);
+        // And the deck itself, smaller than the frame when the quality says
+        // so, for the world pass to lift into place — ask W15.
+        self.clouds.render_half(&mut encoder);
 
         let pass_targets = self.world_pass_target(target);
 
