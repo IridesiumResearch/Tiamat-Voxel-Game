@@ -92,7 +92,20 @@ fn embedded(name: &str) -> ServerHandle {
     .expect("the embedded server must start")
 }
 
-fn client(name: &str, server: &ServerHandle, gpu: Gpu, impairment: Impairment) -> App {
+/// A renderer on its own, so a test can build it BEFORE it starts a clock.
+///
+/// `Renderer::new` compiles every pipeline, which is slow on some adapters, and
+/// a connection opened before it is already joining while it compiles. See
+/// `the_impairment_is_actually_applied_to_the_client` for what that measured.
+fn renderer(gpu: Gpu) -> Renderer {
+    Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer")
+}
+
+/// Opens the connection and builds the app around a renderer already made.
+///
+/// The session task writes its hello the moment the connection is up, so a
+/// test timing the join starts its clock immediately before calling this.
+fn connect(name: &str, server: &ServerHandle, renderer: Renderer, impairment: Impairment) -> App {
     let home = scratch(&format!("{name}-home"));
     let config = Config {
         display_name: format!("Predictor-{name}"),
@@ -107,9 +120,11 @@ fn client(name: &str, server: &ServerHandle, gpu: Gpu, impairment: Impairment) -
         impairment,
     )
     .expect("connect");
-
-    let renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
     App::new(config, connection, renderer)
+}
+
+fn client(name: &str, server: &ServerHandle, gpu: Gpu, impairment: Impairment) -> App {
+    connect(name, server, renderer(gpu), impairment)
 }
 
 /// Runs the real frame loop until `done`, or gives up.
@@ -273,13 +288,36 @@ fn walking_over_a_bad_link_keeps_the_correction_small() {
 fn the_impairment_is_actually_applied_to_the_client() {
     // The counter-example. Everything above would pass identically on a clean
     // link, which is exactly the failure mode this whole file exists to avoid —
-    // so prove the link really is slow by measuring how long the join takes
-    // against an unimpaired one.
-    let Some(clean_gpu) = gpu() else { return };
+    // so prove the link really is slow by timing the join.
+    //
+    // **The clock starts before the connection opens, and the renderer is
+    // built before the clock starts.** The session task writes its hello the
+    // moment the connection is up, and every message it writes waits the
+    // impairment's latency first — so from that moment a join over a 200 ms
+    // link cannot finish in under 200 ms, on any machine. The first version
+    // timed the frames after `client()` returned, and `client()` opened the
+    // connection BEFORE building the renderer: on Windows CI the rest of the
+    // construction took long enough that the delayed join had already
+    // happened, both joins were over by the first frame (4.8 ms clean, 1.4 ms
+    // "slow"), and "slow was slower" failed six pushes in seven. With the
+    // clock in the right place it reads 465 µs clean against 777 ms slow.
+    //
+    // **A floor rather than a comparison.** "Slower than the clean join" is a
+    // race between two measurements on a loaded runner; "no faster than the
+    // latency being added" is arithmetic. The clean join is still measured
+    // and printed, so the two orders of magnitude are there to be read.
+    const ONE_WAY_MS: u64 = 200;
 
+    let Some(clean_gpu) = gpu() else { return };
     let clean_server = embedded("clean");
-    let mut clean = client("clean", &clean_server, clean_gpu, Impairment::default());
+    let clean_renderer = renderer(clean_gpu);
     let clean_started = Instant::now();
+    let mut clean = connect(
+        "clean",
+        &clean_server,
+        clean_renderer,
+        Impairment::default(),
+    );
     assert!(run_frames(&mut clean, Input::default(), 30.0, |app| app.joined()));
     let clean_join = clean_started.elapsed();
     clean.shutdown();
@@ -289,27 +327,30 @@ fn the_impairment_is_actually_applied_to_the_client() {
     // is deliberately not `Clone`.
     let Some(slow_gpu) = gpu() else { return };
     let slow_server = embedded("slow");
-    let mut slow = client(
+    let slow_renderer = renderer(slow_gpu);
+    let slow_started = Instant::now();
+    let mut slow = connect(
         "slow",
         &slow_server,
-        slow_gpu,
+        slow_renderer,
         Impairment {
-            latency_ms: 200,
+            latency_ms: ONE_WAY_MS,
             loss_percent: 0,
             seed: 1,
         },
     );
-    let slow_started = Instant::now();
     assert!(run_frames(&mut slow, Input::default(), 30.0, |app| app.joined()));
     let slow_join = slow_started.elapsed();
     slow.shutdown();
     assert!(slow_server.stop());
 
-    println!("join: {clean_join:?} clean, {slow_join:?} at 200 ms one way");
+    println!("join: {clean_join:?} clean, {slow_join:?} at {ONE_WAY_MS} ms one way");
+    let floor = Duration::from_millis(ONE_WAY_MS);
     assert!(
-        slow_join > clean_join,
-        "joining over a 200 ms link ({slow_join:?}) was no slower than over loopback \
-         ({clean_join:?}), so the impairment is not reaching the client and every \
-         reconciliation number above was measured on a clean network"
+        slow_join >= floor,
+        "joining over a {ONE_WAY_MS} ms one-way link took {slow_join:?}, less than the \
+         {ONE_WAY_MS} ms the hello alone has to wait — so the impairment is not reaching \
+         the client, and every reconciliation number above was measured on a clean \
+         network (the clean join took {clean_join:?})"
     );
 }

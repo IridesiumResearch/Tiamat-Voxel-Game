@@ -644,19 +644,41 @@ fn a_mod_can_move_a_player_and_the_client_is_told() {
         // the test failed on whichever runner happened to be slow — ubuntu
         // once, then windows. The same mistake the swarm load test made, which
         // is what `Bot::settle` exists for.
-        bot.settle().await.expect("settle before shoving");
+        let settled = bot.settle().await.expect("settle before shoving");
+        let rest = world_y_of(&settled.chunk, &settled.local);
         let already = bot.received().len();
         let mut left_the_ground = false;
         bot.chat("up").await.expect("chat");
+        // **Any state that shows the body off the ground, not only one that
+        // shows it going up.** The connection task sends the NEWEST state on
+        // each beat of a tick-long interval that delays rather than bursts
+        // after a stall, so a task starved for a few hundred milliseconds —
+        // ten of these tests share a three-core macOS runner — sends one state
+        // for the whole stall and the ticks between are gone. An upward
+        // velocity over 0.5 lasts six ticks under gravity and was missed that
+        // way twice on macOS CI; the body is off the ground and above where it
+        // rested for the whole arc, about sixteen, so that is looked for too.
+        // Still counted from BEFORE the request, so nothing earlier in this
+        // test can satisfy it.
         let deadline = tokio::time::Instant::now() + PATIENCE;
         while tokio::time::Instant::now() < deadline {
-            if bot.received().into_iter().skip(already).any(|message| {
-                matches!(
-                    message,
-                    tiamat_core::proto::ServerMessage::PlayerState { velocity, .. }
-                        if velocity[1] > 0.5
-                )
-            }) {
+            if bot
+                .received()
+                .into_iter()
+                .skip(already)
+                .any(|message| match message {
+                    tiamat_core::proto::ServerMessage::PlayerState {
+                        chunk,
+                        local,
+                        velocity,
+                        on_ground,
+                        ..
+                    } => {
+                        velocity[1] > 0.5 || (!on_ground && world_y_of(&chunk, &local) > rest + 0.1)
+                    }
+                    _ => false,
+                })
+            {
                 left_the_ground = true;
                 break;
             }
@@ -664,7 +686,9 @@ fn a_mod_can_move_a_player_and_the_client_is_told() {
         }
         assert!(
             left_the_ground,
-            "a mod pushed the player upward and the body never moved"
+            "a mod pushed the player upward and the body never moved: no state since the \
+             request had an upward velocity or showed the body off the ground above where \
+             it rested ({rest:.3} blocks)"
         );
     });
 }
@@ -678,6 +702,13 @@ fn a_mod_can_move_a_player_and_the_client_is_told() {
 fn world_x(at: &bot::client::PlayerPosition) -> f64 {
     let cells =
         f64::from(at.chunk.x) * f64::from(tiamat_core::CHUNK_SUBNODES) + f64::from(at.local[0]);
+    cells / f64::from(tiamat_core::SUBNODES_PER_AXIS)
+}
+
+/// A reported height in BLOCKS, from the chunk and cell offset the wire
+/// carries — the same arithmetic as `world_x`, on the vertical axis.
+fn world_y_of(chunk: &tiamat_core::ChunkPos, local: &[f32; 3]) -> f64 {
+    let cells = f64::from(chunk.y) * f64::from(tiamat_core::CHUNK_SUBNODES) + f64::from(local[1]);
     cells / f64::from(tiamat_core::SUBNODES_PER_AXIS)
 }
 

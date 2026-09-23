@@ -31,6 +31,7 @@ use client::config::{Config, LightingMode, RenderMode};
 use client::net::Connection;
 use client::render::offscreen::perceptual_hash;
 use client::render::{Gpu, Offscreen, Renderer};
+use tiamat_core::ChunkPos;
 use tiamat_core::identity::{Allowlist, Identity};
 use tiamat_core::interest::ViewDistance;
 use tiamat_server::{ServerHandle, Settings};
@@ -226,6 +227,35 @@ fn run_frames(app: &mut App, done: impl Fn(&App) -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(16));
     }
     false
+}
+
+/// The chunk columns within `radius` of the body that the client does not
+/// hold yet, at the body's own level and the one under its feet.
+///
+/// Prediction reads an absent chunk as solid (`phys::Voxels::touched_absent`
+/// says why), so a measurement that starts before the terrain ahead has
+/// arrived measures the streaming rather than the thing it is about.
+///
+/// `radius` is taxicab distance, which is the interest set's own shape: at
+/// `ViewDistance::MINIMUM` the server sends the column the body is in and the
+/// four beside it, and a wait for the corners of a square never ends.
+fn missing_ground_around(app: &App, radius: i32) -> Vec<ChunkPos> {
+    let here = app.camera().position.chunk;
+    let mut missing = Vec::new();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx.abs() + dz.abs() > radius {
+                continue;
+            }
+            for dy in [0, -1] {
+                let pos = ChunkPos::new(here.x + dx, here.y + dy, here.z + dz);
+                if app.store().get(pos).is_none() {
+                    missing.push(pos);
+                }
+            }
+        }
+    }
+    missing
 }
 
 /// Whether a frame has anything other than sky in it.
@@ -2031,6 +2061,19 @@ fn jumping_across_a_chunk_plane_does_not_replay_against_the_wrong_chunk() {
     assert!(run_frames(&mut app, |app| app.joined()
         && app.predicting()
         && app.meshed_chunks() >= 4));
+    // **And the ground the hops will cross.** An absent chunk reads as solid
+    // to prediction, and this body sprints for six seconds — two or three
+    // columns — so a column that has not arrived when the body reaches it is
+    // a wall the server does not have. Seen on Windows CI as 2.76 cells of
+    // divergence over 272 healthy 22 ms frames, which the frame-rate guard
+    // below rightly did not excuse. Three columns out, at the body's level and
+    // the one under it; the streamer sends nearest first, so this is quick.
+    assert!(
+        run_frames(&mut app, |app| missing_ground_around(app, 3).is_empty()),
+        "the ground around the spawn never all arrived; the client holds {} chunks and lacks {:?}",
+        app.store().len(),
+        missing_ground_around(&app, 3)
+    );
     // **Two seconds, not one, and the second one is not padding.** `Pacing`
     // publishes the worst of each one-second window, so a reading taken at the
     // end of the first window still carries the join in it — the client holds no
@@ -2091,6 +2134,9 @@ fn jumping_across_a_chunk_plane_does_not_replay_against_the_wrong_chunk() {
     // coarser than the thing it is being compared against.
     const TICK_MS: f32 = 1000.0 / 20.0;
     let mut frames = 0u32;
+    // Whether any window's prediction ran into a chunk that had not arrived:
+    // the number that tells a streaming disagreement from a replay one.
+    let mut unloaded = false;
     let loop_started = Instant::now();
 
     while Instant::now() < deadline {
@@ -2101,13 +2147,15 @@ fn jumping_across_a_chunk_plane_does_not_replay_against_the_wrong_chunk() {
         last = now;
         frames += 1;
         diverged = diverged.max(app.pacing().worst_divergence_cells());
+        unloaded |= app.pacing().predicted_into_unloaded();
         crossed = app.camera().position.chunk;
         std::thread::sleep(frame);
     }
 
     let mean_ms = loop_started.elapsed().as_secs_f32() * 1000.0 / frames.max(1) as f32;
     println!(
-        "chunk-plane run: {frames} frames, mean {mean_ms:.1} ms, worst divergence {diverged:.2} cells"
+        "chunk-plane run: {frames} frames, mean {mean_ms:.1} ms, worst divergence \
+         {diverged:.2} cells, predicted into chunks it had not received: {unloaded}"
     );
 
     assert_ne!(
@@ -2141,7 +2189,8 @@ fn jumping_across_a_chunk_plane_does_not_replay_against_the_wrong_chunk() {
     assert!(
         diverged < 1.0,
         "the two simulations disagreed by {diverged} cells while jumping across chunk \
-         planes, over {frames} frames averaging {mean_ms:.1} ms. Trace: {}",
+         planes, over {frames} frames averaging {mean_ms:.1} ms (predicted into chunks it \
+         had not received: {unloaded} — true is streaming, not a replay). Trace: {}",
         trace.display()
     );
 

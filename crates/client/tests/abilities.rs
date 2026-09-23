@@ -19,6 +19,7 @@ use client::cache::ContentCache;
 use client::config::{Config, RenderMode};
 use client::net::Connection;
 use client::render::{Gpu, Renderer};
+use tiamat_core::ChunkPos;
 use tiamat_core::identity::{Allowlist, Identity};
 use tiamat_core::interest::ViewDistance;
 use tiamat_server::transport::Impairment;
@@ -159,6 +160,35 @@ fn run_frames(app: &mut App, input: Input, seconds: f32, done: impl Fn(&App) -> 
     done(app)
 }
 
+/// The chunk columns within `radius` of the body that the client does not
+/// hold yet, at the body's own level and the one under its feet.
+///
+/// Prediction reads an absent chunk as solid (`phys::Voxels::touched_absent`
+/// says why), so a measurement that starts before the terrain ahead has
+/// arrived measures the streaming rather than the thing it is about.
+///
+/// `radius` is taxicab distance, which is the interest set's own shape: at
+/// `ViewDistance::MINIMUM` the server sends the column the body is in and the
+/// four beside it, and a wait for the corners of a square never ends.
+fn missing_ground_around(app: &App, radius: i32) -> Vec<ChunkPos> {
+    let here = app.camera().position.chunk;
+    let mut missing = Vec::new();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx.abs() + dz.abs() > radius {
+                continue;
+            }
+            for dy in [0, -1] {
+                let pos = ChunkPos::new(here.x + dx, here.y + dy, here.z + dz);
+                if app.store().get(pos).is_none() {
+                    missing.push(pos);
+                }
+            }
+        }
+    }
+    missing
+}
+
 #[test]
 fn a_slowed_player_predicts_the_speed_the_server_applies() {
     let Some(gpu) = gpu() else { return };
@@ -171,6 +201,21 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
             && app.meshed_chunks() >= 1),
         "expected to join; warnings: {:?}",
         app.warnings()
+    );
+    // **And the ground the walk will cross, before anything is measured.** An
+    // absent chunk reads as solid to prediction, so a client that sets off
+    // before the column ahead has arrived walks into a wall the server does
+    // not have, stops, and is pulled forward when the chunk lands. Seen on
+    // macOS CI as 0.442 cells of correction with 1.497 cells of divergence,
+    // under a client that had travelled 6.80 blocks to the server's 7.01 —
+    // streaming, in a test that is about speed.
+    assert!(
+        run_frames(&mut app, Input::default(), 30.0, |app| {
+            missing_ground_around(app, 1).is_empty()
+        }),
+        "the chunks around the spawn never all arrived; the client holds {} and lacks {:?}",
+        app.store().len(),
+        missing_ground_around(&app, 1)
     );
     // The message arrived, and was adopted as sent.
     assert!(
@@ -206,11 +251,16 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
     let server_start = app.server_travelled();
     let mut worst = 0.0f32;
     let mut corrected = 0.0f32;
+    // Read beside the two numbers above: a correction WITH this set is a wall
+    // the client invented, a correction without it is the two simulations
+    // disagreeing, and they want opposite fixes.
+    let mut unloaded = false;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         run_frames(&mut app, forward, 0.1, |_| false);
         worst = worst.max(app.pacing().worst_divergence_cells());
         corrected = corrected.max(app.pacing().worst_correction_cells());
+        unloaded |= app.pacing().predicted_into_unloaded();
     }
     let ended = app.camera().position.to_world();
     let (dx, dz) = (ended.0 - start.0, ended.2 - start.2);
@@ -218,7 +268,8 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
     let served = app.server_travelled() - server_start;
     println!(
         "slowed to {SPEED}: client {predicted:.2} blocks, server {served:.2} blocks, \
-         worst divergence {worst:.3} cells, worst correction {corrected:.3}"
+         worst divergence {worst:.3} cells, worst correction {corrected:.3}, predicted \
+         into chunks it had not received: {unloaded}"
     );
 
     assert!(
@@ -233,11 +284,13 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
     assert!(
         corrected < 0.05,
         "the client was corrected by up to {corrected:.3} cells: it is not predicting the \
-         speed the server applies"
+         speed the server applies (predicted into chunks it had not received: {unloaded} — \
+         true means streaming, not speed)"
     );
     assert!(
         worst < 0.05,
-        "the client disagreed with the server by up to {worst:.3} cells a tick"
+        "the client disagreed with the server by up to {worst:.3} cells a tick (predicted \
+         into chunks it had not received: {unloaded})"
     );
 
     app.shutdown();
