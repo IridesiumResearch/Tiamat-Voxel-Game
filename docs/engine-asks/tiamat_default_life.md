@@ -90,33 +90,43 @@ fire). And `game.looking_at` answering an entity when that is what the
 crosshair is on, as `{ entity = id }`, so the between-events question has
 the same answer.
 
-## 16. A mod's model is drawn matte white though its skin arrives (2026-09-23): OPEN, a BUG
+## 16. A mod's model is drawn matte white though its skin arrives (2026-09-23, cause found 2026-09-24): OPEN, a BUG in the client
 
-**Seen.** In play, every animal (cow, pig, sheep, horse, bear, crow, bat)
-is drawn matte white. A screenshot of the bear shows the rig lit and
-shadowed and no colour at all.
+**Seen.** In play, every animal is drawn matte white: the rig lit and
+shadowed and no colour at all. "Again": they can be right on a first visit
+and white after that.
 
-**What was checked, from this side.** Each kind calls
-`register_model{ id, file = "models/<kind>.glb", texture =
-"models/<kind>.png" }`. The skins are 128x128 8-bit RGB PNGs with no white
-in them anywhere, so any sampling at all, even with the wrong UVs, would be
-brown; they decode cleanly with png 0.18.1 and
-`normalize_to_color8`, the client's own decoder and settings. Every model
-and every skin is in the player's content cache under its
-`tiamat:content:v1` hash, so the bytes reached the client. The engine's
-reader keeps the UVs (`model_check`'s pose dump carries them, and
-`tools/render_model.py` paints the rig correctly from them). The client
-build was from 2026-09-23, after adf6547.
+**Cause, reproduced.** The renderer outlives a connection, and
+`Renderer::clear_models` ("a model belongs to the server that pushed it")
+has no caller. So on a second join (a new world, or back in after the menu)
+the renderer still holds last visit's passes. The cache is warm now, and a
+warm cache hands the skins over BEFORE the models (every skin first, in a
+real server-and-client run on this mod set). Each skin therefore lands on
+the OLD pass (`set_model_texture` finds it and sets it there); then the
+model arrives and `add_model` builds a fresh pass and inserts it over the
+old one, with no skin waiting in `figures.skins` because none was held. A
+white pass, for every model, for the rest of the session.
 
-Reading the engine: `registered_models` keeps `texture`, the server hashes
-it by the same `hash_of` as the `.glb`, `offer_model_texture` decodes it
-and `set_model_texture` either sets it on the pass or holds it for
-`add_model`, and `fragment_main` multiplies by the sample. Nothing wrong
-is visible; what is missing is a test. `connection.rs` proves a skin
-ARRIVES, and nothing proves one is DRAWN.
+Checked from this side, through the engine's own crates (a scratch program
+outside the engine repo, `client` and `server` as path dependencies):
 
-**Smallest change.** A screenshot test that pushes a model with a
-one-colour skin and reads the colour back off the frame, which will find
-where it goes white. If the client printed "has a texture that would not
-decode" the player did not see it; if that warning is the cause, it wants
-to be louder.
+- the client's renderer draws the horse brown with its skin, white without,
+  in Simple, Classic and Beautiful, skin-then-model or model-then-skin;
+- a real `ServerHandle` on the real mod set, with a real `Connection`, cold
+  cache and warm, delivers all eight models and all eight skins with the
+  right colours;
+- the same renderer given a first visit (model, skin) and then a rejoin
+  (skin, model) draws the horse white in every lighting mode: the bug.
+
+**Smallest change.** Call `renderer.clear_models()` when a connection ends
+or a new one begins, which is what its own doc says should happen. And, so
+a re-sent table can never do this either, have `add_model` keep a skin the
+pass it replaces was wearing when none is waiting (or have
+`set_model_texture` always remember the last skin per id, rather than
+remembering it only while no pass exists). A screenshot test of the rejoin
+order would have caught it; `connection.rs` proves a skin arrives, and
+nothing proved it is drawn.
+
+**Until then.** Quit the game fully between worlds: the first world after
+launch draws its animals painted.
+
