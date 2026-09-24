@@ -436,6 +436,10 @@ pub struct Atlas {
     slots: Vec<u32>,
     /// How many slots hold a real texture rather than the chequer.
     filled: usize,
+    /// Which tiles are alpha-TESTED rather than opaque or blended: foliage
+    /// and sprites, the materials `cut_out` discards under 0.5. Their mips
+    /// keep the artist's coverage — see [`Atlas::mips`].
+    alpha_tested: Vec<bool>,
 }
 
 impl Atlas {
@@ -467,11 +471,27 @@ impl Atlas {
             slots.push(slot);
         }
 
+        let alpha_tested = vec![false; textures.len()];
         Self {
             grid,
             image,
             slots,
             filled,
+            alpha_tested,
+        }
+    }
+
+    /// Marks one material's tile as alpha-tested: drawn through the cutout
+    /// or billboard path, where a texel either passes the 0.5 test or does
+    /// not exist.
+    ///
+    /// [`Atlas::mips`] rescales a marked tile's alpha per level so the share
+    /// of texels that pass stays the share the artist drew. Unmarked tiles —
+    /// opaque blocks, and glass, whose partial alpha is BLENDED and is its
+    /// appearance — are left exactly as the box filter made them.
+    pub fn mark_alpha_tested(&mut self, material: u16) {
+        if let Some(tested) = self.alpha_tested.get_mut(usize::from(material)) {
+            *tested = true;
         }
     }
 
@@ -519,12 +539,38 @@ impl Atlas {
         TILE_PITCH.trailing_zeros() + 1
     }
 
-    /// The mip levels the renderer uploads: box-filtered, and truncated to
-    /// [`Atlas::mip_levels`].
+    /// The mip levels the renderer uploads: box-filtered, truncated to
+    /// [`Atlas::mip_levels`] — and with every alpha-tested tile's coverage
+    /// put back.
+    ///
+    /// **Why coverage needs putting back.** The cutout shader discards under
+    /// a constant 0.5, and a box filter averages alpha: a leaf texture that
+    /// is sparse dots — most foliage is — averages below the threshold
+    /// almost everywhere a level or two down, so a canopy thinned to speckle
+    /// with distance and a forest against fog read as dissolving. The
+    /// classic fix is applied per tile, per level: scale the level's alpha
+    /// up until the share of texels passing the test is back to what level 0
+    /// has. Never down — a dense tile that kept its coverage is right
+    /// already — and a texel the artist made fully clear has alpha 0, which
+    /// no scale can raise, so holes stay holes.
     #[must_use]
     pub fn mips(&self) -> Vec<Image> {
         let mut levels = mip_chain(&self.image);
         levels.truncate(self.mip_levels() as usize);
+        for (index, tested) in self.alpha_tested.iter().enumerate() {
+            if !tested {
+                continue;
+            }
+            let slot = self.slots.get(index).copied().unwrap_or(0);
+            let (column, row) = (slot % self.grid, slot / self.grid);
+            let want = tile_coverage(&levels[0], column, row, 0);
+            if want <= 0.0 {
+                continue;
+            }
+            for (level, image) in levels.iter_mut().enumerate().skip(1) {
+                restore_tile_coverage(image, column, row, level as u32, want);
+            }
+        }
         levels
     }
 
@@ -651,6 +697,82 @@ pub fn mip_chain(image: &Image) -> Vec<Image> {
         });
     }
     levels
+}
+
+/// The alpha-test threshold as the mip build counts it: 0.5 of 255, the same
+/// constant `cut_out` in `world.wgsl` discards under.
+const ALPHA_TEST: u8 = 128;
+
+/// One tile's rectangle at one mip level: `(x, y, pitch)` in that level's
+/// pixels, padding included.
+///
+/// The padding scheme is what makes this exact: [`TILE_PITCH`] is a power of
+/// two, so at every level a tile occupies its own `TILE_PITCH >> level`
+/// square and the box filter never mixed two tiles into one texel. The rect
+/// takes the padding with it on purpose — the padding is a copy of the
+/// tile's own edge, and rescaling the interior without it would put a seam
+/// where the sampler reads across the boundary.
+const fn tile_rect(column: u32, row: u32, level: u32) -> (u32, u32, u32) {
+    let pitch = TILE_PITCH >> level;
+    let pitch = if pitch == 0 { 1 } else { pitch };
+    (column * pitch, row * pitch, pitch)
+}
+
+/// The share of one tile's texels that pass the alpha test at one level.
+fn tile_coverage(image: &Image, column: u32, row: u32, level: u32) -> f32 {
+    coverage_scaled(image, column, row, level, 1.0)
+}
+
+/// The share that would pass if the tile's alpha were multiplied by `scale`.
+fn coverage_scaled(image: &Image, column: u32, row: u32, level: u32, scale: f32) -> f32 {
+    let (x0, y0, pitch) = tile_rect(column, row, level);
+    let mut passing = 0u32;
+    for y in y0..y0 + pitch {
+        for x in x0..x0 + pitch {
+            if let Some(pixel) = image.pixel(x, y) {
+                let alpha = (f32::from(pixel[3]) * scale).min(255.0);
+                passing += u32::from(alpha >= f32::from(ALPHA_TEST));
+            }
+        }
+    }
+    passing as f32 / (pitch * pitch) as f32
+}
+
+/// Scales one tile's alpha up until its coverage is back to `want`.
+///
+/// The smallest such scale, found by bisection — coverage is monotone in the
+/// scale, so eight rounds pin it well past the 1/255 the alpha can express.
+/// A tile already at or over `want` is left alone, and a tile whose faded
+/// alpha cannot reach it at the cap takes the cap: at the deepest level a
+/// tile is one averaged texel, and a distant tree drawn solid is right where
+/// a distant tree missing is a hole in the forest.
+fn restore_tile_coverage(image: &mut Image, column: u32, row: u32, level: u32, want: f32) {
+    const CAP: f32 = 32.0;
+    if coverage_scaled(image, column, row, level, 1.0) >= want {
+        return;
+    }
+    let mut scale = CAP;
+    if coverage_scaled(image, column, row, level, CAP) >= want {
+        let (mut low, mut high) = (1.0f32, CAP);
+        for _ in 0..8 {
+            let middle = (low + high) * 0.5;
+            if coverage_scaled(image, column, row, level, middle) >= want {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        scale = high;
+    }
+    let (x0, y0, pitch) = tile_rect(column, row, level);
+    for y in y0..y0 + pitch {
+        for x in x0..x0 + pitch {
+            let index = ((y * image.width + x) as usize) * 4 + 3;
+            if let Some(alpha) = image.rgba.get_mut(index) {
+                *alpha = (f32::from(*alpha) * scale).min(255.0) as u8;
+            }
+        }
+    }
 }
 
 /// Copies a tile into the atlas, extending its edge pixels into the padding.
@@ -1044,6 +1166,55 @@ mod tests {
                 "a uniform white image must stay white at every mip level"
             );
         }
+    }
+
+    #[test]
+    fn a_cutout_tiles_coverage_survives_the_whole_mip_chain() {
+        // A leaf texture is sparse dots, and a box filter averages alpha:
+        // left alone, the deeper levels fail the 0.5 test almost everywhere
+        // and a distant canopy dissolves into speckle against the fog.
+        // First reported as a forest of firs gone ghostly in a blizzard.
+        let mut leaves = Image::solid(TILE, TILE, [40, 90, 40, 0]);
+        for y in 0..TILE {
+            for x in 0..TILE {
+                if (x * 7 + y * 13) % 10 < 3 {
+                    leaves.rgba[((y * TILE + x) as usize) * 4 + 3] = 255;
+                }
+            }
+        }
+        let mut atlas = Atlas::build(&[Some(leaves)]);
+
+        // The defect, demonstrated, so this test cannot go vacuous: unmarked,
+        // the chain loses most of the dots by the third level.
+        let plain = atlas.mips();
+        let want = tile_coverage(&plain[0], 0, 0, 0);
+        assert!(want > 0.2, "the dot pattern should cover about a third");
+        let faded = tile_coverage(&plain[3], 0, 0, 3);
+        assert!(
+            faded < want * 0.5,
+            "the box filter alone kept {faded} of {want}, so this test has stopped biting"
+        );
+
+        atlas.mark_alpha_tested(0);
+        for (level, image) in atlas.mips().iter().enumerate() {
+            let kept = tile_coverage(image, 0, 0, level as u32);
+            assert!(
+                kept >= want - 1e-6,
+                "level {level} kept {kept} of the artist's {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmarked_tile_is_left_exactly_as_the_box_filter_made_it() {
+        // Glass is BLENDED: its partial alpha is what a window looks like,
+        // and "restoring" its coverage would darken every distant pane. Only
+        // marked tiles are touched, byte for byte.
+        let pane = Image::solid(TILE, TILE, [200, 220, 255, 96]);
+        let atlas = Atlas::build(&[Some(pane)]);
+        let mut expected = mip_chain(&atlas.image);
+        expected.truncate(atlas.mip_levels() as usize);
+        assert_eq!(atlas.mips(), expected);
     }
 
     #[test]

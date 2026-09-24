@@ -6618,7 +6618,17 @@ pub fn build_atlas(
         }
     }
 
-    Atlas::build(&slots)
+    let mut atlas = Atlas::build(&slots);
+    // Foliage and sprites are drawn through the alpha TEST, and a
+    // box-filtered mip of a sparse leaf texture fails it almost everywhere —
+    // distant canopies dissolved into speckle against the fog. A marked
+    // tile's mips keep the artist's coverage instead; see `Atlas::mips`.
+    for entry in table {
+        if entry.cutout || entry.billboard {
+            atlas.mark_alpha_tested(entry.id);
+        }
+    }
+    atlas
 }
 
 /// What a client's tick counter should do about the server's.
