@@ -55,6 +55,69 @@ deck, the deck's own cost over a bare sky at 320 x 240, level / thirty
 degrees up / above the deck: 1.20 / 1.83 / 4.04 ms before any of W15, and
 the numbers after are in `how_long_the_deck_costs_from_three_views`.
 
+## W21. A cloud is decided by the column it is seen from, so a gradient cuts it in half (2026-09-24)
+
+**Seen.** The designer, after W20: "especially the big clouds seem to get cut
+in half quite often." Two screenshots beside this sheet:
+`cut-heap-2026-09-24.png`, a domed heap sliced by a vertical plane, and
+`cut-tower-2026-09-24.png`, a tower with a sheared vertical face and its
+neighbours cut the same way.
+
+**Why.** In `column_at` every genus decides whether a cloud is there, and how
+big, from the weather at the COLUMN being marched, not at the cloud:
+
+- cumulus: `threshold = mix(0.95, -0.10, cover)`, `if (stem <= threshold)
+  continue`, and `strength` — the heap's radius and height — from the same
+  threshold;
+- cumulonimbus: `if (r.x > 0.15 + 0.3 * cb) continue`, and `scale =
+  mix(0.55, 1.0, cb)` sizing the tower and its anvil;
+- stratocumulus: `area < strato * 1.15` for the patch, `groove = mix(0.22,
+  0.06, strato)` for the cells; altocumulus on the same pattern.
+
+"A heap is kept or dropped whole" — per column. So wherever the sky has a
+gradient, the same heap is kept from the columns on one side of the share's
+iso-line and dropped from the columns on the other, and its radius shrinks
+toward the line as `strength` falls: a vertical plane through the heap,
+curved along the iso-line. Before W16 that gradient was only a front's;
+since W16 it is every cell of the map; W18 made the read smooth, which
+turned the planes from the cell edges into curves through the cells but did
+not remove them; and W20 made the strong heaps wide enough to straddle more
+of them, which is the designer seeing it now. The tower in the second
+picture is `scale` changing across it.
+
+**Not the mod's.** The gradient IS the weather — a storm beside a clear
+valley — and the map's cells are the resolution of the mod's own weather. A
+map with no gradients is one sky everywhere.
+
+**The ask.** Decide each cloud from the weather at ITS OWN centre, and use
+the column's weather for the darkness alone.
+
+- Cumulus: after the cheap reach test and before the shape hash, `let w =
+  weather_at(point / frequency + drift)` — the inverse of the `at` mapping
+  at the top of `column_at` — and `threshold`/`strength` from `w.cover`. A
+  heap is then one heap from every column, and across a front the heaps
+  thin out one by one instead of being cut.
+- Cumulonimbus: `weather_at(centre / frequency + drift).cumulonimbus` for
+  the keep test and for `scale`, so a tower is whole or absent and its anvil
+  one size.
+- Stratocumulus: the patch test at the `area` noise's own anchor — the
+  lattice point of `at * 0.9` — and the groove at the Worley cell's feature
+  point if `cells` can hand it back, else the same anchor. Altocumulus the
+  same way.
+
+Cost: since W18 `weather_at` is two `textureSampleLevel`s of a sixteen-texel
+texture, and it runs once per candidate that passes the reach test — a
+handful per column, most columns none. If that shows, sample once per
+lattice id and keep it across the nine.
+
+**Acceptance.** A map with `cover` 0.9 in one column of cells and 0.1 in
+the next, seed 4242, seen from 2,200 blocks straight down: no heap's
+silhouette has a straight edge longer than one cube along the boundary, and
+each heap's width across ten rows through it rises and falls once (a cut
+heap is flat-sided on one row after another). The same with `cumulonimbus`
+1.0 beside 0.0: every tower and anvil whole or absent, none with a vertical
+face. The two pictures' views, for the eye.
+
 **W20 landed 2026-09-24.** The heap curve's top is 0.53: `radius = spacing *
 (0.30 + 0.53 * sqrt(strength))`, the floor untouched, the search's reach
 `(0.30 + 0.53) * (1 + HEAP_STRETCH) - 0.15 = 0.85` cells, under one — and a
