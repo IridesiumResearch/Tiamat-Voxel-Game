@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Iridesium
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# The default mods a release bundles, each pinned to the commit it is taken
+# at. Written by scripts/bundle-lock.sh from the repositories beside this
+# checkout; read by scripts/package.sh, which packages a mod from this commit
+# and never from a working tree. docs/distribution.md §6 and §7.
+
+[[mod]]
+id = "tiamat_default_life"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_Life.git"
+path = "mods/tiamat_default_life"
+commit = "b56ce0c9d31c14c05e92f34cdbfac722de98a4df"
+
+[[mod]]
+id = "tiamat_default_ui"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_UI.git"
+path = "mods/tiamat_default_ui"
+commit = "c2e1957f5b9c85162975a1bcf2e2934e481ae83c"
+
+[[mod]]
+id = "tiamat_default_world"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_World.git"
+path = "mods/tiamat_default_world"
+commit = "42fd408a50943ff04b9c36b2dd14731eb0499fd8"
+
+[[mod]]
+id = "tiamat_weather"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_Weather.git"
+path = "mods/tiamat_weather"
+commit = "051eb2667ae3670fcd380e5f65978799cdd8e95a"

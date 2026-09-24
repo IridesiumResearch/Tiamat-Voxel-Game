@@ -97,6 +97,26 @@ jobs:
           fi
           scripts/package.sh --target ${{ matrix.target }} --channel "$channel"
 
+      # Counsel's rule: look inside the archive a tester will download, rather
+      # than trusting the configuration that produced it. Every licence file,
+      # the release record, the bundled mods and the file manifest.
+      - name: The archive carries what a release has to carry
+        shell: bash
+        run: |
+          for archive in dist/tiamat-*.tar.gz dist/tiamat-*.zip; do
+            [ -f "$archive" ] || continue
+            case "$archive" in *-source.tar.gz) continue ;; esac
+            scripts/check-archive.sh "$archive"
+          done
+
+      # The corresponding source, once, from the Linux leg: the engine at this
+      # commit and every bundled mod at the commit bundle.toml pins, so an
+      # older binary has a source that does not move.
+      - name: Source archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/source-archive.sh --out dist
+
       # Kept whatever happens, so a dispatch run with no tag still produces
       # something to download and try.
       - uses: actions/upload-artifact@v4

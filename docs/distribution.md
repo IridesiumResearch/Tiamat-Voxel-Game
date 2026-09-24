@@ -155,11 +155,20 @@ the server they join.
 
 The mods **in** this repository carry the repository's licence and its SPDX
 headers, and need nothing else. A mod from **outside** it — the default world,
-life, weather and inventory mods live in their own repositories, and appear
-here as symlinks — is only bundled if it carries its own `LICENSE`, and the
-packaging tool refuses one that does not. A symlink that cannot be read at all
-is a loud failure rather than a quiet omission: an archive missing the mod that
-makes the game a game is worse than no archive.
+life, weather and UI mods live in their own repositories, and appear here as
+symlinks for development — is bundled **at the commit `bundle.toml` pins**,
+never from a working tree. `scripts/bundle-lock.sh` writes that file from the
+repositories beside the checkout (refusing a commit nobody has pushed), it is
+committed with the version bump before a release is tagged, and the packager
+takes each mod from the checkout beside it when that has the commit and from
+the repository otherwise, so CI and a maintainer's machine build the same
+archive. A bundled mod is only taken if it carries its own `LICENSE` inside
+its mod directory (and its own `LICENSE.EXCEPTION`, warned about if absent —
+see `docs/licensing/mod-repo-checklist.md`); the packager refuses one that
+does not, loudly, because an archive quietly missing the notice for the mod
+that makes the game a game is worse than no archive. `--allow-missing-mods`,
+for a bare test build, leaves such a mod out rather than shipping it without
+its notice: the mod goes, not the rule.
 
 ## 7. Licences, and why this section is not optional
 
@@ -171,15 +180,42 @@ download makes real:
   `LICENSE` ships inside every archive.
 - **`LICENSE.EXCEPTION` ships too**, because the Additional Permission under
   §7 is what tells a mod author their work is not derivative.
-- **Third-party notices.** The dependency tree is MIT, Apache-2.0, BSD and ISC,
-  and the client embeds a font under its own licence. A generated
-  `THIRD-PARTY.md` ships in every archive; `cargo deny` already gates which
-  licences may enter the tree at all.
+- **Third-party notices, as notices.** `cargo deny` gates which licences may
+  enter the tree, but a list of names and SPDX identifiers preserves nobody's
+  notice, and MIT, BSD and Apache-2.0 each require theirs preserved in every
+  copy. So every archive carries `licenses/<crate>-<version>/` for every crate
+  compiled into its binaries, holding that crate's own licence and notice files
+  copied from the published package; where a package ships none, the canonical
+  text of each licence it names (from `scripts/licenses/`) and its authors as
+  copyright holders, and the index says so. `THIRD-PARTY.md` is the index. The
+  embedded font's licence is in `licenses/go-font/`. Each bundled mod's notices
+  are inside its own directory. `scripts/third-party-notices.py` produces all of
+  it, per target, since the dependency set differs by platform.
+- **The release record.** `RELEASE.md` in every archive names the engine commit
+  and every bundled mod's repository and commit, says where the corresponding
+  source is, and lists the licence files; `MANIFEST.txt` lists every file in
+  the archive with its SHA-256. A moving `main` is not a reference for an
+  older binary; these are.
+- **The corresponding source ships beside the binaries.** The release workflow
+  publishes `tiamat-<version>-source.tar.gz`: the engine at the tag and every
+  bundled mod's repository at its pinned commit, with a `SOURCE.md` that says
+  how to build. That is the GPL's offer made good on the same page the
+  binaries are downloaded from, not a promise that a repository will still be
+  there. `relman` leaves it out of the update manifest, since no client fetches
+  it.
+- **Checked by opening the archive, not by trusting the configuration.**
+  `scripts/check-archive.sh` unpacks a built archive and verifies every item
+  above — the licence files, the notice directories against the index, each
+  bundled mod's licence and commit, the record, the manifest, no `.git` and no
+  symlinks. The release workflow runs it on every archive it produces.
 
 ## 8. Releasing
 
-1. Tag the commit. CI builds all four targets, packages them, and uploads the
-   archives to a **draft** GitHub Release along with their hashes.
+1. Run `scripts/bundle-lock.sh` and commit `bundle.toml` with the version
+   bump, so the tag records which commit of each default mod it carries. Then
+   tag the commit. CI builds all four targets, packages them, checks each
+   archive, builds the source archive, and uploads all of it to a **draft**
+   GitHub Release.
 2. **Sign locally.** `cargo run -p relman -- sign` reads the draft's hashes,
    writes the manifest and signs it with the release key, which lives on the
    maintainer's machine and **never** in CI. A private key in a CI secret is a

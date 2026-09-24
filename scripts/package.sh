@@ -36,6 +36,9 @@ if [ -z "$target" ]; then
     exit 2
 fi
 
+# shellcheck source=scripts/lib/bundle.sh
+source scripts/lib/bundle.sh
+
 version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
 commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
 name="tiamat-${version}-${target}"
@@ -82,82 +85,129 @@ fi
 
 # --- mods ------------------------------------------------------------------
 #
-# A mod inside this repository carries the repository's licence. A mod from
-# outside it is a symlink, and must carry its own — §6. A symlink that cannot
-# be read at all stops the build: an archive quietly missing the mod that makes
-# the game a game is worse than no archive.
+# Two kinds. The reference mods are tracked in this repository and ship as
+# they are. The default mods come from repositories of their own and ship at
+# the commit `bundle.toml` pins — never from a working tree, so a release
+# records exactly what it carries and CI builds the same archive as a
+# maintainer's machine (docs/distribution.md §6 and §7). Each bundled mod
+# must carry its own LICENSE inside its directory; an archive quietly missing
+# the notice for the mod that makes the game a game is worse than no archive.
 mkdir -p "$stage/current/game"
 cp game/README.md "$stage/current/game/"
-missing=()
-# `game/*` rather than `game/*/`: a trailing slash makes the glob skip a
-# symlink whose target is not there, which is precisely the case this loop
-# exists to catch. It silently shipped an archive with no content mods in it
-# once, which is how this comment came to be written.
-for entry in game/*; do
-    mod_name="$(basename "$entry")"
-    [ "$mod_name" = "README.md" ] && continue
-    if [ -L "$entry" ]; then
-        if [ ! -r "$entry/mod.toml" ]; then
-            missing+=("$mod_name")
-            continue
-        fi
-        if [ ! -f "$entry/LICENSE" ] && [ ! -f "$entry/LICENSE.md" ]; then
-            echo "error: ${mod_name} comes from outside this repository and carries no LICENSE." >&2
-            echo "       Add one to that mod, or drop the symlink before packaging." >&2
-            exit 1
-        fi
-    elif [ ! -d "$entry" ]; then
-        continue
-    fi
-    # `-L` follows the symlink and copies what it points at, so the archive
-    # holds files rather than links into somebody's home directory.
-    cp -RL "$entry" "$stage/current/game/"
-    rm -rf "$stage/current/game/${mod_name}/.git"
+
+echo "==> reference mods"
+for manifest in $(git ls-files 'game/*/mod.toml'); do
+    mod_dir="$(dirname "$manifest")"
+    [ -L "$mod_dir" ] && continue
+    cp -R "$mod_dir" "$stage/current/game/"
 done
 
-if [ ${#missing[@]} -gt 0 ]; then
-    echo "error: these mods are symlinks this machine cannot read: ${missing[*]}" >&2
-    echo "       Mount the drive they live on, or pass --allow-missing-mods to" >&2
-    echo "       build an archive without them (singleplayer will be bare)." >&2
-    if [ "$allow_missing_mods" -eq 1 ]; then
-        echo "       --allow-missing-mods given; continuing without them." >&2
-    else
-        exit 1
-    fi
+echo "==> bundled mods"
+bundled=()
+if [ -f bundle.toml ]; then
+    while IFS=$'\t' read -r id repo path modcommit; do
+        if ! bundle_extract "$id" "$repo" "$modcommit" "$path" "$stage/current/game/$id"; then
+            echo "error: could not take ${id} at ${modcommit:0:7} from a checkout beside this one or from ${repo}." >&2
+            if [ "$allow_missing_mods" -eq 1 ]; then
+                echo "       --allow-missing-mods given; continuing without it (singleplayer will be bare)." >&2
+                rm -rf "$stage/current/game/$id"
+                continue
+            fi
+            exit 1
+        fi
+        if [ ! -f "$stage/current/game/$id/LICENSE" ] && [ ! -f "$stage/current/game/$id/LICENSE.md" ]; then
+            echo "error: ${id} at ${modcommit:0:7} carries no LICENSE inside ${path}." >&2
+            echo "       Every bundled mod ships its licence in its own directory (docs/licensing/mod-repo-checklist.md)." >&2
+            if [ "$allow_missing_mods" -eq 1 ]; then
+                # A bare archive is honest; an archive with the mod and no
+                # notice is not. So the mod goes, not the rule.
+                echo "       --allow-missing-mods given; leaving it out (singleplayer will be bare)." >&2
+                rm -rf "$stage/current/game/$id"
+                continue
+            fi
+            exit 1
+        fi
+        if [ ! -f "$stage/current/game/$id/LICENSE.EXCEPTION" ]; then
+            echo "warning: ${id} at ${modcommit:0:7} carries no LICENSE.EXCEPTION; its own permission is missing from the archive." >&2
+        fi
+        if [ -L "game/$id" ]; then
+            head="$(bundle_git -C "$(readlink -f "game/$id")" rev-parse HEAD 2>/dev/null || true)"
+            [ "$head" = "$modcommit" ] || echo "note: game/$id's working tree is at ${head:0:7}; the archive carries ${modcommit:0:7} from bundle.toml." >&2
+        fi
+        bundled+=("$id	$repo	$path	$modcommit")
+        echo "    $id at ${modcommit:0:7}"
+    done < <(bundle_mods)
+elif [ "$allow_missing_mods" -eq 1 ]; then
+    echo "warning: no bundle.toml; packaging the reference mods only." >&2
+else
+    echo "error: no bundle.toml. Run scripts/bundle-lock.sh, or pass --allow-missing-mods for a bare build." >&2
+    exit 1
 fi
 
 # --- licences (§7) ---------------------------------------------------------
 cp LICENSE LICENSE.EXCEPTION "$stage/current/"
 
+# Not a list of names: every crate's own licence and notice files, copied into
+# the archive, and an index that says where each is. MIT wants its notice
+# preserved in every copy; a name and an SPDX identifier preserve nothing.
 echo "==> third-party notices"
+python3 scripts/third-party-notices.py \
+    --target "$target" \
+    --out "$stage/current/licenses" \
+    --index "$stage/current/THIRD-PARTY.md" \
+    --version "$version"
+
+# --- the release record (§7) ----------------------------------------------
+#
+# What this archive is built from, exactly: the engine's commit and every
+# bundled mod's, and where the matching source is. A moving branch is not a
+# reference for an older binary; this file and the source archive are.
+echo "==> release record"
 {
-    echo "# Third-party licences"
+    echo "# Tiamat ${version} — release record"
     echo
-    echo "Tiamat ${version} is GPL-3.0-only; see LICENSE. It is built with the"
-    echo "crates below, under the licences named. Where a crate offers a choice,"
-    echo "every option it offers is listed and we take one compatible with"
-    echo "GPL-3.0-only."
+    echo "Channel \`${channel}\`, target \`${target}\`, packaged $(date -u +%Y-%m-%dT%H:%M:%SZ)."
     echo
-    echo "Source for any MPL-2.0 crate is available from its own repository, and"
-    echo "the corresponding source for Tiamat itself is at"
-    echo "https://github.com/IridesiumResearch/Tiamat-Voxel-Game"
-    [ -n "$commit" ] && echo "at commit ${commit}."
+    echo "## Engine"
     echo
-    echo "The client embeds the Go Mono font; see"
-    echo "crates/client/assets/third-party/go-font for its licence."
+    if [ -n "$commit" ]; then
+        echo "commit ${commit}"
+        echo "https://github.com/IridesiumResearch/Tiamat-Voxel-Game/tree/${commit}"
+    else
+        echo "Built from a working copy with no commit; this is not a release."
+    fi
     echo
-    cargo deny list -f tsv 2>/dev/null | awk -F'\t' '
-        NR == 1 { for (i = 2; i <= NF; i++) heading[i] = $i; next }
-        {
-            licences = ""
-            for (i = 2; i <= NF; i++) {
-                if ($i == "X") {
-                    licences = (licences == "" ? heading[i] : licences " OR " heading[i])
-                }
-            }
-            if (licences != "") printf "- %s: %s\n", $1, licences
-        }' | sort
-} > "$stage/current/THIRD-PARTY.md"
+    echo "## Bundled mods"
+    echo
+    if [ "${#bundled[@]}" -gt 0 ]; then
+        echo "| mod | repository | commit |"
+        echo "|---|---|---|"
+        for entry in "${bundled[@]}"; do
+            IFS=$'\t' read -r id repo path modcommit <<< "$entry"
+            tree="${repo%.git}/tree/${modcommit}/${path}"
+            echo "| \`game/${id}\` | ${repo} | [\`${modcommit}\`](${tree}) |"
+        done
+    else
+        echo "None: the reference mods only."
+    fi
+    echo
+    echo "## Corresponding source"
+    echo
+    echo "The source these binaries were built from is the engine at the commit above"
+    echo "and each bundled mod at the commit named beside it. It is published as one"
+    echo "archive, \`tiamat-${version}-source.tar.gz\`, on the same release page this"
+    echo "archive came from, for as long as the release is published, and it is the"
+    echo "same source that the repositories hold at those commits. That archive's"
+    echo "SOURCE.md says how to build."
+    echo
+    echo "## Licences"
+    echo
+    echo "- \`LICENSE\` — GPL-3.0-only, the engine and the reference mods under \`game/\`."
+    echo "- \`LICENSE.EXCEPTION\` — the Additional Permission for mods, version 1.0."
+    echo "- \`THIRD-PARTY.md\` and \`licenses/\` — every crate compiled in, with its own notice files."
+    echo "- \`game/<mod>/LICENSE\` — each bundled mod's licence, and its own \`LICENSE.EXCEPTION\`."
+    echo "- \`MANIFEST.txt\` — every file in this archive with its SHA-256."
+} > "$stage/current/RELEASE.md"
 
 # --- how to run it ---------------------------------------------------------
 cat > "$stage/README.txt" <<EOF
@@ -185,9 +235,18 @@ What is in here
 Your worlds, settings and identity key are kept outside this folder, so
 deleting it loses nothing but the program.
 
-Source: https://github.com/IridesiumResearch/Tiamat-Voxel-Game
-Licence: GPL-3.0-only (LICENSE), with a mod exception (LICENSE.EXCEPTION).
+Source and licences
+  current/RELEASE.md         exactly what this was built from, and where the source is
+  current/LICENSE            GPL-3.0-only
+  current/LICENSE.EXCEPTION  the permission that lets mods be licensed as their authors like
+  current/THIRD-PARTY.md     every crate compiled in, with its notices under current/licenses/
+  current/game/*/LICENSE     each bundled mod's own licence
 EOF
+
+# --- the file manifest (§7) -------------------------------------------------
+# Last, because it hashes everything above it.
+echo "==> file manifest"
+python3 scripts/file-manifest.py "$stage" "$stage/current/MANIFEST.txt"
 
 # --- archive ---------------------------------------------------------------
 echo "==> archiving"

@@ -234,7 +234,7 @@ fn manifest(build: &Build) -> Result<(), String> {
         .map(|entry| entry.path())
         .filter(|path| {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            name.ends_with(".tar.gz") || name.ends_with(".zip")
+            (name.ends_with(".tar.gz") || name.ends_with(".zip")) && !is_source_archive(&name)
         })
         .collect();
     files.sort();
@@ -380,6 +380,14 @@ fn verify(check: &Check) -> Result<(), String> {
 }
 
 /// `tiamat-0.2.0-x86_64-unknown-linux-gnu.tar.gz` -> the triple.
+/// Whether an archive is the release's corresponding source rather than a
+/// build: `tiamat-<version>-source.tar.gz`, published beside the binaries
+/// (`docs/distribution.md` §7). It sits in the same `dist/` and is not an
+/// artefact any client fetches, so the manifest leaves it out.
+fn is_source_archive(name: &str) -> bool {
+    name.ends_with("-source.tar.gz")
+}
+
 fn target_of(name: &str) -> Option<String> {
     let stem = name
         .strip_suffix(".tar.gz")
@@ -474,4 +482,30 @@ fn write_secret(path: &Path, contents: &str) -> Result<(), String> {
             .map_err(|err| format!("cannot restrict {}: {err}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_source_archive_is_not_an_artefact() {
+        assert!(is_source_archive("tiamat-0.2.0-source.tar.gz"));
+        assert!(!is_source_archive(
+            "tiamat-0.2.0-x86_64-unknown-linux-gnu.tar.gz"
+        ));
+        assert!(!is_source_archive(
+            "tiamat-0.2.0-x86_64-pc-windows-msvc.zip"
+        ));
+        // And a build's name still yields its target, while the source
+        // archive would have parsed as one for a target called `source`.
+        assert_eq!(
+            target_of("tiamat-0.2.0-x86_64-unknown-linux-gnu.tar.gz").as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            target_of("tiamat-0.2.0-source.tar.gz").as_deref(),
+            Some("source")
+        );
+    }
 }

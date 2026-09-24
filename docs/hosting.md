@@ -266,16 +266,27 @@ existed asks nobody, and the release workflow says so in a warning.
 
 Then, for each release (`0.2.0` here):
 
-1. **Tag.** Set `version = "0.2.0"` in the workspace `Cargo.toml`, commit, tag
-   `v0.2.0`, push the tag. The `release` workflow builds the four targets and
-   attaches the archives to a **draft** GitHub Release. Nothing is signed yet.
+1. **Pin the mods, then tag.** Every default mod's repository must have its
+   release commit pushed. Then, in the engine checkout with the mod symlinks
+   beside it:
+
+   ```sh
+   scripts/bundle-lock.sh          # writes bundle.toml; refuses an unpushed commit
+   ```
+
+   Set `version = "0.2.0"` in the workspace `Cargo.toml`, commit `bundle.toml`
+   with it, tag `v0.2.0`, push the tag. The `release` workflow builds the four
+   targets, checks each archive with `scripts/check-archive.sh`, builds
+   `tiamat-0.2.0-source.tar.gz`, and attaches all of it to a **draft** GitHub
+   Release. Nothing is signed yet.
 2. **Fetch the archives** to the machine that holds the key:
 
    ```sh
    gh release download v0.2.0 --dir dist
    ```
 
-   (or from the draft release page in a browser, into `dist/`).
+   (or from the draft release page in a browser, into `dist/`). The source
+   archive comes down too; `relman` ignores it, so leave it there.
 3. **Write the manifest.** `--protocol` is `PROTOCOL_VERSION` in
    `crates/core/src/proto/mod.rs` at the tagged commit.
 

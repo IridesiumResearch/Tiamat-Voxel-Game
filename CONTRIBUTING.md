@@ -76,6 +76,10 @@ cargo test --workspace
 cargo deny check
 ```
 
+A change to `scripts/package.sh` or to what an archive must carry is checked by
+packaging and opening the result: `scripts/package.sh --target <triple>` then
+`scripts/check-archive.sh dist/tiamat-*.tar.gz`.
+
 ## Changing the wire protocol
 
 `postcard` encodes an enum variant as its **ordinal**. Inserting a variant
