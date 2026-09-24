@@ -204,14 +204,22 @@ fn the_horizon_arrives_while_the_detail_radius_is_still_streaming() {
     // window at view 17 as "horizon 32: 0 held" after a thousand ticks, on a
     // client that was otherwise streaming perfectly well.
     //
-    // At the DEFAULT view the detail radius cannot possibly finish inside this
-    // test, which is what makes the assertion mean something: any summary at
-    // all proves the horizon is not waiting for it.
+    // **And since 2026-09-23 the horizon waits behind the detail**, in
+    // streaming order: it starts once the player's own layers are in — about
+    // fifteen hundred of the default view's 4,925 chunks — while the sky above
+    // and the rock below are still streaming. It used to start with nothing
+    // but the spawn chunk delivered, which was a ring of summaries far out
+    // with a gap inside it. So the first summary is waited for, as long as a
+    // slow runner needs (CI's macOS delivered thirty chunks a second), and
+    // when it comes the detail radius must still be incomplete: a horizon
+    // that waited for all of it would be the starvation this guards against.
     let server = start_wide("horizon-not-starved");
+    let radius =
+        tiamat_core::interest::chunks_around(ChunkPos::new(0, 0, 0), ViewDistance::DEFAULT).len();
 
     block_on(async {
         let mut alice = join(&server, "Alice").await;
-        let seen = watch(&mut alice, Duration::from_secs(30), 4).await;
+        let seen = watch(&mut alice, Duration::from_secs(150), 1).await;
 
         assert!(
             !seen.chunks.is_empty(),
@@ -222,6 +230,11 @@ fn the_horizon_arrives_while_the_detail_radius_is_still_streaming() {
             "{} chunks arrived and not one summary: the horizon is starved by the \
              detail radius",
             seen.chunks.len()
+        );
+        assert!(
+            seen.chunks.len() < radius,
+            "the first summary came only after all {radius} chunks of the detail radius: \
+             the horizon waited for the whole of it rather than for the player's own layers"
         );
         // And the ground still comes first. Not a ratio — that would be a bet
         // on how fast the machine is — just the ordering that matters.

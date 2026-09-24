@@ -146,6 +146,17 @@ fn expensive_terrain_is_generated_by_the_workers_and_the_tick_keeps_its_budget()
         // **The mechanism, not the machine.** Every chunk was generated off the
         // tick; had they been generated on it, every tick with a request in it
         // would have run over — which is every tick until the world filled.
+        //
+        // The tick records the count AFTER the chunks it served have gone out
+        // to the connections, so this bot can hold the last chunk a moment
+        // before the counter moves — CI's Ubuntu runner read 64 for 65 (run
+        // 35923601461). A short wait for the counter, not a looser bound.
+        let counted = tokio::time::Instant::now() + Duration::from_secs(5);
+        while (control.generated_off_tick() as usize) < expected
+            && tokio::time::Instant::now() < counted
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(
             control.generated_off_tick() as usize >= expected,
             "{} chunks came from the workers for {expected} served",
