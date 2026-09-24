@@ -24,7 +24,7 @@ pub enum Backend {
     Lua54,
     /// `LuaJIT` — Lua 5.1 semantics, tracing JIT.
     LuaJit,
-    /// Luau — Roblox's Lua 5.1 derivative, built for untrusted code.
+    /// Luau — a Lua 5.1 derivative, built for untrusted code.
     Luau,
 }
 

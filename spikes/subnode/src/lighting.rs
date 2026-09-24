@@ -24,7 +24,7 @@ use tiamat_core::chunk::Chunk;
 use tiamat_core::coords::LocalBlock;
 use tiamat_core::{BLOCKS_PER_CHUNK, CHUNK_BLOCKS};
 
-/// Maximum light level, as Minecraft-style voxel lighting uses.
+/// Maximum light level, as classic voxel lighting uses.
 const MAX_LIGHT: u8 = 15;
 
 const BLOCKS: usize = CHUNK_BLOCKS as usize;

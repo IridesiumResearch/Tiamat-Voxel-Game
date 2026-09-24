@@ -20,7 +20,7 @@ mod-visible language semantics differ between the candidates. Decide here, with 
   (no integer type, different `require`/FFI norms), effectively frozen upstream, and needs
   interpreter-only mode on some Apple-silicon configurations. Its FFI must be disabled
   outright for untrusted mods — it is an arbitrary-memory-access primitive.
-- **Luau** — Roblox's Lua 5.1 derivative, built specifically for running untrusted
+- **Luau** — a Lua 5.1 derivative, built specifically for running untrusted
   user-generated code at scale. Interpreter performance is roughly on par with LuaJIT's
   interpreter; with partial native compilation it lands within ~1.6× of LuaJIT's JIT.
   It ships sandboxing as a first-class feature (`mlua`'s built-in `sandbox` mode is
