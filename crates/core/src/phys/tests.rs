@@ -987,7 +987,7 @@ fn step_down_does_not_cancel_the_jump_that_started_this_tick() {
 fn a_body_caught_inside_geometry_stays_inside_it() {
     // **Requested from the window: "when i glitch into a block the softly push
     // out thing does not work. lets just keep me glitched inside the blocks and
-    // later that will cause damage and kill me just like in minecraft."**
+    // later that will cause damage and kill me just like in the classic game."**
     //
     // The engine used to shove an overlapping body out along the shortest axis.
     // Contract §2 withdrew that: the escape could not be computed in any of the

@@ -13,7 +13,7 @@
 //
 // So this is not an approximation of a sun shadow and does not try to be. It is
 // a grounding cue, it works in all three lighting modes, and it is what
-// Minecraft has been doing since before shadow maps were affordable.
+// blocky games have been doing since before shadow maps were affordable.
 //
 // # A disc is a GRID of quads, not one
 //

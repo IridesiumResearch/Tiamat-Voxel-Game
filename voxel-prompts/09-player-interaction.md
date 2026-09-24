@@ -9,7 +9,7 @@ drop-accounting and carve-overlay roles; every other section stands unchanged. C
 recorded collision cost forward as the regression baseline either way.
 
 ## Objective
-Minecraft-grade first-person feel: smooth movement, swept-AABB collision, block targeting,
+Polished first-person voxel feel: smooth movement, swept-AABB collision, block targeting,
 break/place through the mod API, with client-side prediction and server reconciliation.
 
 ## Design
@@ -72,5 +72,5 @@ break/place through the mod API, with client-side prediction and server reconcil
 - [A] Chisel scenario proves subnode brushes + spare-unit arithmetic end to end over the network.
 - [A] Digging/placing rules demonstrably live in `game/` Lua (delete the mod dir ⇒ you can no
       longer dig — verify in a test).
-- [H] Movement FEELS like Minecraft-grade first person (your judgment; the checklist above
+- [H] Movement FEELS like polished first-person voxel play (your judgment; the checklist above
       is the rubric).

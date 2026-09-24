@@ -1,11 +1,11 @@
-# TASK 11 — Fluid: milk. Simple Minecraft-style flow, done well
+# TASK 11 — Fluid: milk. Simple classic-voxel flow, done well
 
 Depends on: 09, 10. Solver in `crates/core::fluid`; registered from `game/core_milk/`;
 smooth-surface rendering in `crates/client`.
 
 ## Scope decision (settled — read first, do not re-open)
 We deliberately DO NOT build a conserved / pressure-equalizing fluid sim. Milk uses the
-classic Minecraft model — source blocks + finite-distance flow decay, no conservation — with
+classic source-block model — source blocks + finite-distance flow decay, no conservation — with
 the presentation and feel upgrades of the well-known "better water" mods: smooth surfaces,
 real flow direction, good swimming. This keeps fluid at BLOCK resolution (not sub-node),
 which removes fluid entirely from the sub-node risk surface. A fancier sim can be a future
@@ -20,7 +20,7 @@ the update rule is swappable).
   - A source block sustains level 7 and spreads.
   - Flow-down: any fluid above a fluid-accepting block becomes falling flow (level 7 column).
   - Lateral: level `n` spreads to open orthogonal neighbors at `n-1`, min level 1; standard
-    Minecraft shortest-path-to-drop preference (flows toward nearby holes within 4 blocks).
+    the classic shortest-path-to-drop preference (flows toward nearby holes within 4 blocks).
   - Decay: flow blocks with no valid parent (source or higher neighbor) drain by 1 level per
     fluid tick until gone. Two adjacent sources do NOT create new sources (no infinite-milk
     duplication; keep it simple, revisit as game design later in `game/`).
@@ -69,5 +69,5 @@ the update rule is swappable).
 - [A] Settled-world zero-cost assertion holds; processing cap prevents tick overrun in the
       spring-field scenario.
 - [A] Fluid semantics for partial blocks enforced and covered by proptest.
-- [H] Milk looks and feels like "Minecraft water but nicer" — smooth surface, directional
+- [H] Milk looks and feels like "the water you know, but nicer" — smooth surface, directional
       flow, decent swimming — verified by you in-game.

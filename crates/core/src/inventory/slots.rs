@@ -214,7 +214,7 @@ impl View {
 
 /// What the player is holding on the cursor, between clicking and clicking again.
 ///
-/// Minecraft's model, and it is the right one: a move is two half-gestures, so
+/// The classic model, and it is the right one: a move is two half-gestures, so
 /// the intermediate state has to live somewhere, and a client holding it would
 /// be a client that could invent items by lying about what it picked up.
 /// **This lives on the server.**

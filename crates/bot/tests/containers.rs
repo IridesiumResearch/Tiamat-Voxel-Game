@@ -3,7 +3,7 @@
 
 //! Inventories that belong to the world, over a real server.
 //!
-//! **A chest is the thing a Minecraft-like mod could not build.**
+//! **A chest is the thing a classic-voxel mod could not build.**
 //! `register_view` gives every player one of something — an armour rack, a tool
 //! belt — and that is the wrong shape for a box in the ground: there is one of
 //! it, and whoever opens it sees the same contents.

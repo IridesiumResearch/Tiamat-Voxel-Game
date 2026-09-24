@@ -4,7 +4,7 @@
 //! Bodies making room for each other.
 //!
 //! **Reported from the window**: "players should very subtly collide with mobs
-//! and each other, just like in Minecraft."
+//! and each other, just like in the classic game."
 //!
 //! # Why this is a nudge and not a collision
 //!

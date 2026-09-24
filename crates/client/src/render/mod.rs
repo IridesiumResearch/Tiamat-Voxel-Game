@@ -3407,7 +3407,7 @@ const DROP_HALF: f32 = 0.16;
 /// constants would drift, and a sword that was a picture in one view and a
 /// slab of a different thickness in the other is worse than either.
 ///
-/// **Minecraft's number, near enough**, and for the reason Minecraft has one at
+/// **The classic eighth, near enough**, and for the reason the old games chose it at
 /// all: a picture with no thickness disappears edge-on, and one with a block's
 /// thickness is not a picture any more. An eighth reads as a sword rather than
 /// as a slab.

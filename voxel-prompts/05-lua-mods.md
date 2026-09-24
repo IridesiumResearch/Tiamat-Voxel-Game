@@ -15,7 +15,7 @@ mod-visible language semantics differ between the candidates. Decide here, with 
 
 `mlua` binds all three candidates behind one Rust API:
 - **Lua 5.4** — the reference implementation. Integers, goto, current semantics. Familiar to
-  Luanti/Minetest modders. Slowest of the three.
+  the established Lua voxel engines' modders. Slowest of the three.
 - **LuaJIT** — much faster on numeric code when traces compile, but it is Lua 5.1 semantics
   (no integer type, different `require`/FFI norms), effectively frozen upstream, and needs
   interpreter-only mode on some Apple-silicon configurations. Its FFI must be disabled

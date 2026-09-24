@@ -105,7 +105,7 @@ that is not a nicety.
 
 Secondary points, in descending order of weight:
 
-- **Familiarity.** Luanti/Minetest modders — the closest existing population to
+- **Familiarity.** Modders of the established Lua voxel engines — the closest existing population to
   this project's — write Lua 5.1-era code, but current-semantics Lua 5.4 is what
   the wider ecosystem and every current tutorial teach. Luau's divergences
   (type annotations, different standard library corners) are a second dialect to

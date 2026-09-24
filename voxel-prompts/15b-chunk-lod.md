@@ -27,7 +27,7 @@ Transvoxel and dual contouring — the algorithms usually cited for this problem
 be drawn into them by search results.
 
 For blocky voxels, skirts are the standard answer and what shipped LOD implementations for
-Minecraft-like worlds use. They cost a small amount of overdraw and a few extra quads per
+blocky worlds of this kind use. They cost a small amount of overdraw and a few extra quads per
 chunk border. Stitching costs a combinatorial transition-cell implementation and a permanent
 maintenance burden for a marginal fill-rate gain. **Implement skirts.** Record the reasoning
 in module docs so it is not relitigated.

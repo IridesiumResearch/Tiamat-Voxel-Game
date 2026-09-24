@@ -291,7 +291,7 @@ engine (charter rule 5) — and it is **conserved**.
 
 ### 4.1 Why cells of 27, and what it retires
 
-This section used to run levels `1..=7`, Minecraft's number, and carried two
+This section used to run levels `1..=7`, the classic voxel count, and carried two
 apologies for it. Both are now gone.
 
 **The volume lie is retired.** The old text said, on purpose, that "a block that
@@ -1063,7 +1063,7 @@ corners are the top because it built them.
 
 **Crossed cards.** `billboard = "cross"` is the same run of cells, found the
 same way, drawn as TWO cards on the diagonals of the run's column at fixed
-headings — the X that Minecraft and Minetest draw. A card that turns reads,
+headings — the crossed X the classic voxel games draw. A card that turns reads,
 from the window, as a sticker that swivels as the player walks round it; the
 X reads as a plant and holds still. Each card is the square a turning sprite
 would be, so the tile is whole across it; both sides are drawn, and sway

@@ -324,7 +324,7 @@ fn scooping_a_shallow_puddle_gives_back_a_partial_bucket() {
     // concept to say so — milk in an inventory is units of a material like
     // anything else (charter rule 5), so "half a bucket" is just fewer units.
     //
-    // The rejected alternative was Minecraft's, where a bucket tops itself up
+    // The rejected alternative was the classic one, where a bucket tops itself up
     // out of neighbouring blocks until it is full. That makes scooping one
     // block drain water the player never pointed at.
     let server = start("partial-bucket");

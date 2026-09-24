@@ -16,8 +16,8 @@
 //!
 //! # Why these numbers
 //!
-//! They are Minecraft's, converted. The task asks for "Minecraft-grade first
-//! person feel", and the numbers that produce it are known rather than worth
+//! They are the classic game's, converted. The task asks for "polished first-
+//! person voxel feel", and the numbers that produce it are known rather than worth
 //! rediscovering by taste. They are a starting point for the [H] feel gate, not
 //! a result — the gate is a human's judgment, and this is the dial they turn.
 //!

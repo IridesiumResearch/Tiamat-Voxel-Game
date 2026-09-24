@@ -30,7 +30,7 @@ use crate::detgen::StreamRng;
 
 /// How many blocks of each chunk get a turn per tick.
 ///
-/// **Three, which is Minecraft's number for a 16³ section**, and the shape of
+/// **Three, the classic count for a 16³ section**, and the shape of
 /// the thing is the same: a chunk here is 16³ blocks. It is low on purpose —
 /// what makes a crop grow in a minute rather than a second is how rarely its
 /// block comes up, and a mod cannot slow the engine down but can always decide

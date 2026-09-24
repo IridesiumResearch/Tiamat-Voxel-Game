@@ -4,7 +4,7 @@
 //! Bodies make room for each other.
 //!
 //! **Reported from the window**: "players should very subtly collide with mobs
-//! and each other, just like in Minecraft."
+//! and each other, just like in the classic game."
 //!
 //! Two players join the same world and stand still on the same spot. What the
 //! test asserts is that they end up apart, that they got there gently, and that

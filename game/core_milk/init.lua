@@ -232,7 +232,7 @@ game.register_on_place(function(event)
     -- inventory is units of a material like anything else, so "a bucket" is
     -- just 27 of them and "half a bucket" is 13.
     --
-    -- The alternative the design considered was Minecraft's — top the bucket up
+    -- The alternative the design considered was the classic one — top the bucket up
     -- out of neighbouring blocks until it is full — and it was rejected because
     -- it makes scooping one block drain water the player never pointed at.
     if there.volume > 0 then
