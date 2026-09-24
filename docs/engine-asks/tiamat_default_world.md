@@ -9,6 +9,46 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
+Filed 2026-09-24, found taking up Weather ask W7 (soil that drinks the
+rain) in the world mod.
+
+## 43. `absorbs.becomes` cannot name another mod's block
+
+**Seen.** Weather's exports contract (`Tiamat_Default_Weather/docs/
+exports-contract.md`, the W7 paragraph) proposes the Spindle declare
+`absorbs = { rate = 3, becomes = "tiamat_weather:damp_dirt", fluid =
+"tiamat_weather:rainwater" }` on its dirt — the engine's own saturation
+chain in place of Weather's material swap. Registration refuses it:
+`becomes` goes through `qualify_id` (`mlua_vm.rs`, `block_absorbs`),
+which errors on any namespace but the registrant's own, so the contract's
+line is a load-time error that disables the whole world mod. The `fluid`
+one field over already crosses namespaces — kept as written, resolved at
+freeze, and a name nobody registered drinks nothing.
+
+**Why the mod cannot.** The damp materials are Weather's — its textures,
+its drying sampler and random tick, its aliases back to the dry ids — and
+dampness is weather. The soils are the Spindle's, which is the W7 row's
+own reasoning for putting the declaration here. Neither mod can hold both
+halves of the chain, and the Spindle registering damp twins of its own
+would duplicate the set and leave nothing that dries them.
+
+**Ask.** Give `becomes` the treatment `fluid` already has: a name with a
+namespace kept as written and resolved at freeze against the world
+material table. The machinery is in place — `absorbency_from_rules`
+(`server/src/fluid.rs`) already keys by world id and drops a `becomes`
+nobody registered to `None`, ending the chain, which is exactly right for
+a world running without the other mod.
+
+**For whoever lands it, one warning.** The soak swap keeps a partial
+block's shape (`handle.rs`, "a chiselled step that soaks is still a
+step"), and Weather's drying — sampler and random tick both — skips any
+block that is not FULL. On sub-node-smoothed terrain a cross-mod
+`becomes` will therefore strand permanently damp partial blocks down
+every slope rainwater runs, until Weather also dries partial blocks
+shape-kept. Worth a line in the contract when this lands. Meanwhile the
+Spindle declares its soils as drains (rate and fluid, no `becomes`),
+which soaks the puddles and changes no material.
+
 Filed 2026-09-23, from the designer's fly-round (giant summary slabs beside
 the player, a dry river, a water sheet over the Obsidian Barrens) and the
 investigation behind the world's performance pass.
