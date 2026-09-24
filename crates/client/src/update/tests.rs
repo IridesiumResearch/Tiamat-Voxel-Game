@@ -152,7 +152,7 @@ fn the_fetch_layer_reaches_a_real_https_server_and_holds_its_cap() {
     // The URL is a file that has existed for years and is a few kilobytes.
     const URL: &str = "https://raw.githubusercontent.com/rust-lang/rust/master/LICENSE-MIT";
 
-    let body = get(URL, 64 * 1024, |_| {}).expect("a real https server answers");
+    let body = get(URL, 64 * 1024, Budget::Check, |_| {}).expect("a real https server answers");
     println!("fetched {} bytes", body.len());
     println!(
         "starts: {:?}",
@@ -165,10 +165,63 @@ fn the_fetch_layer_reaches_a_real_https_server_and_holds_its_cap() {
 
     // And the cap is what stops a server that keeps talking: the same file,
     // with room for a hundred bytes.
-    let err = get(URL, 100, |_| {}).expect_err("the cap must hold");
+    let err = get(URL, 100, Budget::Check, |_| {}).expect_err("the cap must hold");
     assert!(matches!(err, UpdateError::Refused(_)), "{err}");
 
+    // The download budget reaches the same server: phase timeouts and a body
+    // budget, rather than one global one, still make a request that works.
+    let budget = Budget::Download { bytes: 64 * 1024 };
+    let again = get(URL, 64 * 1024, budget, |_| {}).expect("the download budget fetches too");
+    assert_eq!(again, body, "the same bytes, whichever budget fetched them");
+
     // Plain http never leaves the building at all.
-    let err = get("http://example.invalid/x", 100, |_| {}).expect_err("http");
+    let err = get("http://example.invalid/x", 100, Budget::Check, |_| {}).expect_err("http");
     assert!(matches!(err, UpdateError::Refused(_)), "{err}");
+}
+
+#[test]
+fn a_download_is_given_as_long_as_a_slow_link_needs_and_never_less_than_the_floor() {
+    use std::time::Duration;
+
+    // A check has no body budget of its own: the global fifteen seconds is
+    // the whole exchange.
+    assert_eq!(Budget::Check.body(), None);
+
+    // A small archive gets the floor, not the few seconds its size works out
+    // to — one hiccup on a home connection is longer than that.
+    let small = Budget::Download { bytes: 1024 * 1024 };
+    assert_eq!(small.body(), Some(LEAST_BODY_BUDGET));
+
+    // A real archive gets what the slowest link worth waiting for would need:
+    // 150 MB at 128 KiB/s is twenty minutes, not fifteen seconds.
+    let archive = Budget::Download {
+        bytes: 150 * 1024 * 1024,
+    };
+    let body = archive.body().expect("a download has a body budget");
+    assert_eq!(body, Duration::from_mins(20));
+    assert!(
+        body > STEP_TIMEOUT * 10,
+        "the bug this pins: a download had a check's budget"
+    );
+
+    // And the largest artefact the manifest may name is bounded too: a worker
+    // fetching nothing is noticed in hours, not left for good.
+    let largest = Budget::Download {
+        bytes: tiamat_core::release::MAX_ARTIFACT_BYTES,
+    };
+    let body = largest.body().expect("bounded");
+    assert_eq!(body, Duration::from_secs(8192));
+    assert!(body < Duration::from_hours(3));
+}
+
+#[test]
+fn both_budgets_build_an_agent() {
+    // The agent is built per request, so a builder that panicked on one
+    // combination of timeouts would panic on a worker mid-download. Neither
+    // does.
+    let _check = Budget::Check.agent();
+    let _download = Budget::Download {
+        bytes: 200 * 1024 * 1024,
+    }
+    .agent();
 }

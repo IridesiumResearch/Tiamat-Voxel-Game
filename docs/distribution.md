@@ -11,6 +11,7 @@ Decided 2026-09-21, for the first round of outside testing: a launcher applies
 updates, builds are unsigned for now, GitHub Releases holds the artefacts and
 the website mirrors them, and the targets are `x86_64-pc-windows-msvc`,
 `aarch64-apple-darwin`, `x86_64-apple-darwin` and `x86_64-unknown-linux-gnu`.
+Where the manifest is served from, and how, is [`hosting.md`](hosting.md).
 
 ---
 
@@ -183,8 +184,9 @@ download makes real:
    writes the manifest and signs it with the release key, which lives on the
    maintainer's machine and **never** in CI. A private key in a CI secret is a
    private key in everybody's pull request workflow.
-3. Publish the release, upload the manifest and its signature, mirror to the
-   website.
+3. Publish the release, then publish the manifest and its signature at the
+   update host. Where that is, how it is run, and the release steps with their
+   exact commands are in [`hosting.md`](hosting.md).
 4. Older manifests stay published: they are the record of what was signed, and
    a client that has been offline for three versions verifies against the
    current one regardless.

@@ -38,12 +38,83 @@ use tiamat_core::release::Manifest;
 /// the same rule the launcher follows.
 const RELEASE_KEY: Option<&str> = option_env!("TIAMAT_RELEASE_KEY");
 
-/// How long any single request may take before it is given up on.
+/// How long a check, or any single step of a download, may take.
 ///
-/// **Generous for a download and short for a check.** The manifest is a few
-/// hundred bytes and should arrive at once; an archive is a hundred megabytes
-/// on whatever connection a tester has.
-const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// A manifest is a few hundred bytes and either arrives at once or is not
+/// coming. The same budget bounds each step of a download that is not the
+/// bytes themselves — the lookup, the connection, the request, the headers —
+/// because a server that takes longer than this to *start* answering is not
+/// going to answer.
+const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The slowest link a download waits for, in bytes per second.
+///
+/// An archive is a hundred megabytes on whatever connection a tester has, so
+/// its body budget is sized from the archive rather than fixed: as long as a
+/// link this slow would need, and no longer. Slower than a megabit is a link
+/// the download was never going to finish on, and a link that has stalled
+/// looks the same as one that is slow — the budget is what tells them apart.
+const SLOWEST_LINK: u64 = 128 * 1024;
+
+/// The least a download body is given, whatever its size.
+///
+/// The tail of a budget sized purely from the size would be a few seconds for
+/// a small archive, which is less than one hiccup on a home connection.
+const LEAST_BODY_BUDGET: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// How long one request has, in total or by phase.
+///
+/// **The download was timing out at fifteen seconds** while this was one
+/// number for both: the manifest's budget applied to the archive, and any
+/// tester on a real connection saw "the download stopped" at the first
+/// fifteen seconds of a two-minute download. So a check is a single short
+/// budget, and a download is short budgets for every phase up to the first
+/// byte of the body, then a body budget sized from what is being fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Budget {
+    /// A manifest or a signature: the whole exchange in [`STEP_TIMEOUT`].
+    Check,
+    /// An archive of this many bytes.
+    Download {
+        /// The size the signed manifest declares.
+        bytes: u64,
+    },
+}
+
+impl Budget {
+    /// How long the body of a download this size is given.
+    ///
+    /// Bounded above by construction: the manifest's caps keep `bytes` under
+    /// [`tiamat_core::release::MAX_ARTIFACT_BYTES`], so the longest body
+    /// budget is a little over two hours, and a worker that is fetching
+    /// nothing at all is noticed rather than left for good.
+    fn body(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Check => None,
+            Self::Download { bytes } => {
+                let by_size = std::time::Duration::from_secs(bytes.div_ceil(SLOWEST_LINK));
+                Some(by_size.max(LEAST_BODY_BUDGET))
+            }
+        }
+    }
+
+    /// An agent configured for this budget.
+    fn agent(self) -> ureq::Agent {
+        let builder = ureq::Agent::config_builder()
+            .user_agent(format!("Tiamat/{}", tiamat_core::build::VERSION));
+        let builder = match self {
+            Self::Check => builder.timeout_global(Some(STEP_TIMEOUT)),
+            Self::Download { .. } => builder
+                .timeout_global(None)
+                .timeout_resolve(Some(STEP_TIMEOUT))
+                .timeout_connect(Some(STEP_TIMEOUT))
+                .timeout_send_request(Some(STEP_TIMEOUT))
+                .timeout_recv_response(Some(STEP_TIMEOUT))
+                .timeout_recv_body(self.body()),
+        };
+        builder.build().into()
+    }
+}
 
 /// What the front screen is showing about updates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -331,10 +402,15 @@ fn verify(bytes: &[u8], signature: &[u8]) -> Result<Manifest, UpdateError> {
 /// The manifest and its detached signature.
 fn fetch_manifest() -> Result<(Vec<u8>, Vec<u8>), UpdateError> {
     let url = tiamat_core::build::MANIFEST_URL.ok_or(UpdateError::NotConfigured)?;
-    let manifest = get(url, tiamat_core::release::MAX_MANIFEST_BYTES as u64, |_| {})?;
+    let manifest = get(
+        url,
+        tiamat_core::release::MAX_MANIFEST_BYTES as u64,
+        Budget::Check,
+        |_| {},
+    )?;
     // The signature sits beside the manifest, which is one fewer thing to
     // configure and one fewer thing to get wrong.
-    let signature = get(&format!("{url}.sig"), 64, |_| {})?;
+    let signature = get(&format!("{url}.sig"), 64, Budget::Check, |_| {})?;
     Ok((manifest, signature))
 }
 
@@ -345,7 +421,10 @@ fn fetch_artifact(
 ) -> Result<Vec<u8>, UpdateError> {
     let mut last = None;
     for url in &artifact.urls {
-        match get(url, artifact.size, &mut progress) {
+        let budget = Budget::Download {
+            bytes: artifact.size,
+        };
+        match get(url, artifact.size, budget, &mut progress) {
             Ok(bytes) => return Ok(bytes),
             // **Every URL is untrusted, so a failure is just a failure.** The
             // next one is tried, and the hash decides whichever answers.
@@ -356,18 +435,19 @@ fn fetch_artifact(
         .unwrap_or_else(|| UpdateError::Fetch("the release names nowhere to fetch it from".into())))
 }
 
-/// One HTTPS GET, capped at `limit` bytes.
-fn get(url: &str, limit: u64, mut progress: impl FnMut(u64)) -> Result<Vec<u8>, UpdateError> {
+/// One HTTPS GET, capped at `limit` bytes and given `budget` to finish in.
+fn get(
+    url: &str,
+    limit: u64,
+    budget: Budget,
+    mut progress: impl FnMut(u64),
+) -> Result<Vec<u8>, UpdateError> {
     use std::io::Read as _;
 
     if !url.starts_with("https://") {
         return Err(UpdateError::Refused(format!("`{url}` is not an https URL")));
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(CHECK_TIMEOUT))
-        .user_agent(format!("Tiamat/{}", tiamat_core::build::VERSION))
-        .build()
-        .into();
+    let agent = budget.agent();
     let response = agent
         .get(url)
         .call()

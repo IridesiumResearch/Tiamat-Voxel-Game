@@ -68,6 +68,17 @@
 # Criterion benchmark output
 /target/criterion/
 
+# The release signing key, and a local packaging run. `relman keygen` writes
+# `release-key.hex` into the working directory by default, and `git add -A`
+# is how a secret ends up in history — the PUBLIC half is `release-key.pub`
+# and that one IS committed (docs/distribution.md §2). `dist/` is where
+# `scripts/package.sh` and `relman` leave archives and manifests, which are a
+# hundred megabytes a target and belong on a release, not in the history.
+# See docs/hosting.md.
+/release-key.hex
+/*-key.hex
+/dist/
+
 # Local server state
 /server.toml
 /world/
