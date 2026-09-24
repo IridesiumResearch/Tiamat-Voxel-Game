@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# Python's compile cache, from the release scripts under scripts/.
+__pycache__/
+
 # Cargo.lock IS committed. This workspace ships binaries (server, client, bot),
 # and reproducible builds of a binary need a pinned dependency graph — doubly so
 # for a project whose CI gate is a cross-platform determinism hash.

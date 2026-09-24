@@ -122,10 +122,11 @@ Everything else is copied verbatim.
     `AGENTS.md`, and the README.
 
 11. **One commit**, `chore(licence): unify with the engine (exception v1.0)`,
-    signed off, and a report back listing: the files added or replaced; the
-    header count as "N of N source files carry both lines"; the exports
-    document's path; every third-party asset and where its licence is; and
-    the answer to step 9.
+    signed off **and pushed** — the engine's `scripts/bundle-lock.sh` pins the
+    commit a release bundles and refuses one nobody can fetch — and a report
+    back listing: the files added or replaced; the header count as "N of N
+    source files carry both lines"; the exports document's path; every
+    third-party asset and where its licence is; and the answer to step 9.
 
 ## What not to do
 
