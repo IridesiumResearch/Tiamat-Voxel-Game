@@ -133,8 +133,14 @@ Additional Permission under GPLv3 §7, granted by Iridesium in
 [`LICENSE.EXCEPTION`](LICENSE.EXCEPTION). See
 [`MOD-LICENSING.md`](MOD-LICENSING.md) for what that means in practice.
 
+The default game mods — Life, World, Weather, UI — are separate works in
+repositories of their own under the same terms: GPL-3.0-only with an Additional
+Permission of their own over their exports. The matrix in `MOD-LICENSING.md`
+says what needs which permission.
+
 Contributions are taken under the Developer Certificate of Origin with authors
-retaining copyright — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+retaining copyright and licensing their code under the GPL **together with** the
+Additional Permission — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Project charter
 

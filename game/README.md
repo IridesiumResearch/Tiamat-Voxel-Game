@@ -60,7 +60,10 @@ be fun.
 ## Licensing
 
 Mods in this directory are part of the engine distribution and carry the
-engine's licence, **GPL-3.0-only**.
+engine's licence, **GPL-3.0-only** — and they are part of "the Engine" as
+[`../LICENSE.EXCEPTION`](../LICENSE.EXCEPTION) defines it: calling them through
+the scripting API, including the tables they `game.export`, is interaction with
+the engine and independent; copying their code is copying the engine.
 
 That is not the situation for *your* mods. Anything interacting with the engine
 solely through the Lua scripting API or the network protocol is an independent

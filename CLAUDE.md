@@ -172,7 +172,13 @@ X," the answer is that a future mod needs X, and the engine's job is to make X e
     exception, so contributions are taken under DCO with copyright retained by their authors
     and licensed under GPLv3; if a future relicense or exception change is ever wanted, it
     needs either contributor sign-off or a CLA. Decide that before accepting outside PRs, not
-    after.
+    after. **A contribution is licensed under GPL-3.0-only *together with* the Additional
+    Permission** (identified by version and date; 1.0 is 24 September 2026), never under the
+    bare GPL — `CONTRIBUTING.md` carries that sentence and it is the grant downstream users
+    rely on. The default mods in their own repositories use the same structure: GPL-3.0-only
+    plus their own Additional Permission over their exports, from the template in
+    `docs/licensing/`; `docs/licensing/mod-repo-checklist.md` is what keeps the five
+    repositories identical, and a licensing change starts in the engine and is mirrored out.
 
 18. **Performance targets are set, and speed is the stated priority.**
     [`docs/performance-targets.md`](docs/performance-targets.md) is authoritative. The

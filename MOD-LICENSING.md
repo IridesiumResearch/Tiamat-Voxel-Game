@@ -62,6 +62,47 @@ Extending the API keeps you on the clean side of the line and everyone else
 benefits. Patching the engine to get around it puts your work under the GPL and
 leaves you maintaining a fork.
 
+## The default mods have the same shape
+
+The default game — Life, World, Weather and UI — is not part of the engine. Each
+is a separate work in its own repository, and each is licensed the same way the
+engine is: **GPL-3.0-only, with an Additional Permission of its own** granted by
+Iridesium over the mod's *exports* — the tables it publishes with `game.export`,
+the events and hooks it offers, and the block, item, creature and sound
+identifiers it registers. A mod that adds a screen to UI's interface, gives Life
+a creature, or reads Weather's climate is interacting with those mods through
+their exports and is independent, whatever licence it chooses.
+
+What the mods' permissions do not cover is the same as for the engine: copying.
+Copy a function out of Life, adapt World's terrain generator, lift UI's textures,
+and your work contains GPL-covered material and is under the GPL. Write your own
+creature system that happens to do something similar, and no permission is
+needed at all, because the GPL governs copies, not ideas.
+
+Each mod's `LICENSE.EXCEPTION` names the document that lists its exports. The
+engine's own permission does not cover the default mods and theirs do not cover
+the engine; a mod that touches both relies on both, and both say yes.
+
+## The matrix
+
+What you want to do, and what governs it. "Independent" means the Additional
+Permission applies and your work's licence is your own choice.
+
+| You want to… | Engine (`crates/`, `game/core_*`) | `api/` stubs and docs | A default mod's exports | A default mod's code or assets |
+|---|---|---|---|---|
+| Call it from your mod through the scripting API or its exports | Independent (engine permission) | MIT | Independent (that mod's permission) | — |
+| Depend on it in `mod.toml`, ship your mod alongside it, run in the same process | Independent | MIT | Independent | Independent, as long as nothing of it is inside your mod |
+| Copy or adapt its source, scripts, shaders or textures into your work | GPL-3.0-only | MIT: copy freely | — | GPL-3.0-only |
+| Modify it and distribute the result | GPL-3.0-only | MIT | — | GPL-3.0-only |
+| Reach past the public surface: private interfaces, a Rust plugin, a native library, another mod's local state | GPL-3.0-only | — | GPL-3.0-only | GPL-3.0-only |
+| Implement similar functionality yourself, without copying | No permission needed | — | No permission needed | No permission needed |
+| Reuse a bundled third-party asset (a font under the OFL, say) | Its own licence | — | — | Its own licence, named in that mod's assets register |
+
+The exception text itself is identified by a version and date — 1.0, 24
+September 2026 — and every contribution to the engine or to a default mod is
+licensed under the GPL *together with* that permission, so the promise above is
+made by every copyright holder in the tree, not by Iridesium alone.
+
 ## The `api/` directory is MIT
 
 Everything under [`api/`](api/) — the Lua stubs, type definitions, mod template,
@@ -72,6 +113,7 @@ into your own project freely, including a closed-source one. See
 ## Contributing back
 
 Contributions to the engine are taken under the Developer Certificate of Origin;
-you keep your copyright and license your contribution under GPLv3. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md). Note that only Iridesium can grant or amend
-the section 7 exception.
+you keep your copyright and license your contribution under GPLv3 **together
+with the Additional Permission**, so the promise to mod authors holds for your
+code too. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Iridesium maintains the text
+of the permission; a change to it gets a new version and date.

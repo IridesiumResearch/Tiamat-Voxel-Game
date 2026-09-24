@@ -2,6 +2,8 @@
                   Granted under GNU General Public License version 3,
                                    section 7
 
+                         Version 1.0, 24 September 2026
+
 Copyright (C) 2026 Iridesium
 
 
@@ -16,15 +18,29 @@ Copyright (C) 2026 Iridesium
    condition and imposes no further restriction.  It forms part of the
    licensing terms under which the Engine is distributed.
 
-   This grant is made by Iridesium, the copyright holder of the Engine.  Only
-   Iridesium may grant or amend it.
+   This grant is made by Iridesium, the copyright holder of the Engine.  Each
+   contributor to the Engine licenses their contribution under the GPL
+   together with this Additional Permission, as CONTRIBUTING.md records, so
+   that the permission covers the whole of the Engine as distributed.
+   Iridesium alone maintains the text of this document.  A change to it is
+   identified by a new version number and date above; a contribution is
+   licensed under the version current when it was made, unless its author
+   agrees otherwise.
 
 
 1. DEFINITIONS
 
-   "the Engine" means the Tiamat voxel engine, including the contents of the
-   crates/ directory and any other portion of this distribution carrying the
-   SPDX identifier GPL-3.0-only.
+   "the Engine" means the Tiamat voxel engine as published by Iridesium in
+   the repository that carries this document: the contents of the crates/
+   directory, the reference mods under the game/ directory, and every other
+   file of that repository carrying the SPDX identifier GPL-3.0-only.
+
+   "a Bundled Work" means a separately licensed work that is distributed
+   together with the Engine, such as one of the default game mods that
+   Iridesium publishes in repositories of their own.  A Bundled Work is not
+   part of the Engine.  Its own LICENSE, together with any Additional
+   Permission its copyright holder grants with it, governs it; this document
+   neither extends nor limits those terms.
 
    "the Scripting API" means the Lua-callable interface the Engine exposes to
    mods, together with the Lua stubs, type definitions, and documentation
@@ -52,6 +68,10 @@ Copyright (C) 2026 Iridesium
    Work is loaded into a process running Engine code, and whether the Engine
    and the Independent Work are distributed together.
 
+   Interaction with the reference mods under game/ through the Scripting
+   API, including through the tables they publish with game.export, is
+   interaction with the Engine for the purposes of this permission.
+
    This permission extends to the output of an Independent Work and to any
    data, assets, or world content it produces.
 
@@ -75,6 +95,14 @@ Copyright (C) 2026 Iridesium
    A work of that kind remains subject to the GPL in full.  Modifications to
    the Engine itself must be released under the GPL, whether or not they are
    made in order to support an Independent Work.
+
+   Whether a work is an Independent Work is decided by what it contains and
+   how it interacts, not by how it is distributed.  Being distributed
+   together with the Engine, or depending on it, makes no work a derivative
+   work; and independently implementing functionality similar to the
+   Engine's requires no permission at all.  Copying is what the GPL governs:
+   a work that contains a copy or an adaptation of any part of the Engine is
+   covered by the GPL whatever else it does.
 
 
 4. NO EFFECT ON THE ENGINE'S OWN TERMS

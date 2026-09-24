@@ -1,0 +1,137 @@
+                     ADDITIONAL PERMISSION FOR {{MOD_NAME}}
+                  Granted under GNU General Public License version 3,
+                                   section 7
+
+                         Version 1.0, 24 September 2026
+
+Copyright (C) 2026 Iridesium
+
+
+0. STATUS OF THIS DOCUMENT
+
+   {{MOD_NAME}} ("the Mod"), the Tiamat mod with the identifier
+   "{{MOD_ID}}", is licensed under the GNU General Public License, version 3
+   only ("the GPL"), a copy of which is distributed with the Mod as the file
+   LICENSE.
+
+   This document is an Additional Permission within the meaning of GPL section
+   7.  It grants permissions in addition to those of the GPL.  It removes no
+   condition and imposes no further restriction.  It forms part of the
+   licensing terms under which the Mod is distributed.
+
+   This grant is made by Iridesium, the copyright holder of the Mod.  Each
+   contributor to the Mod licenses their contribution under the GPL together
+   with this Additional Permission, as CONTRIBUTING.md records, so that the
+   permission covers the whole of the Mod as distributed.  Iridesium alone
+   maintains the text of this document.  A change to it is identified by a
+   new version number and date above; a contribution is licensed under the
+   version current when it was made, unless its author agrees otherwise.
+
+   This document has the same structure, version and date as the Additional
+   Permission Iridesium grants for the Tiamat voxel engine.  The two are
+   separate grants over separate works: neither extends nor limits the other.
+
+
+1. DEFINITIONS
+
+   "the Mod" means {{MOD_NAME}} as published by Iridesium in the repository
+   that carries this document: every file of that repository carrying the
+   SPDX identifier GPL-3.0-only, including its scripts, its assets, and its
+   documentation.
+
+   "the Engine" means the Tiamat voxel engine, a separate work licensed under
+   its own terms (its LICENSE and LICENSE.EXCEPTION).
+
+   "the Scripting API" and "the Network Protocol" have the meanings given in
+   the Engine's Additional Permission.
+
+   "the Exports" means everything the Mod deliberately offers to other mods:
+   the tables it publishes through the Scripting API's game.export, the
+   events, hooks, callbacks and commands it accepts from other mods, the data
+   formats it reads and writes for them, and the identifiers of the blocks,
+   items, creatures, sounds, textures and other content it registers with the
+   Engine — as documented in {{EXPORTS_DOC}}.  The documentation describes the
+   Exports; an interface the Mod offers in fact is an Export whether or not
+   the document is up to date.
+
+   "an Independent Work" means a work that interacts with the Mod solely
+   through the Exports, the Scripting API, the Network Protocol, or data the
+   Mod stores or transmits, and that contains no part of the Mod.
+
+
+2. GRANT
+
+   Iridesium hereby grants permission to develop, use, reproduce, distribute,
+   sell, and license Independent Works under terms of the author's own
+   choosing, including terms that are proprietary or otherwise incompatible
+   with the GPL.
+
+   For the avoidance of doubt, an Independent Work is not a derivative work of
+   the Mod, is not a "modified version" or "work based on the Program" as
+   those terms are used in the GPL, and carries no obligation under the GPL by
+   reason of its interaction with the Mod.  This holds regardless of whether
+   the interaction occurs in a shared address space, whether the Independent
+   Work is loaded into a process running the Mod's code, whether the
+   Independent Work names the Mod as a dependency, requires the Mod to be
+   present in order to run, registers content with the Mod, or appears in
+   the Mod's user interface through the Exports, and whether the Mod and the
+   Independent Work are distributed together.
+
+   This permission extends to the output of an Independent Work and to any
+   data, assets, or world content it produces.
+
+
+3. WHAT THIS GRANT DOES NOT COVER
+
+   This permission applies only to interaction through the Exports, the
+   Scripting API, the Network Protocol, and the Mod's data.  It does not
+   apply to a work that:
+
+   (a) copies, incorporates, or adapts any part of the Mod's scripts,
+       assets, or other files, otherwise than by calling the Exports;
+
+   (b) is a modified version of the Mod, or contains a modified copy of any
+       part of the Mod; or
+
+   (c) reaches into the Mod's internal functions, local state, or files
+       other than through the Exports.
+
+   A work of that kind remains subject to the GPL in full.  Modifications to
+   the Mod itself must be released under the GPL, whether or not they are
+   made in order to support an Independent Work.
+
+   Whether a work is an Independent Work is decided by what it contains and
+   how it interacts, not by how it is distributed.  Being distributed
+   together with the Mod, or depending on it, makes no work a derivative
+   work; and independently implementing functionality similar to the Mod's
+   requires no permission at all.  Copying is what the GPL governs: a work
+   that contains a copy or an adaptation of any part of the Mod is covered by
+   the GPL whatever else it does.
+
+
+4. NO EFFECT ON THE MOD'S OWN TERMS
+
+   Nothing in this document alters the terms under which the Mod itself is
+   licensed.  If you convey the Mod, with or without modification, you must
+   do so under the GPL.
+
+   Under GPL section 7 a recipient may remove this Additional Permission from
+   any copy of the Mod they convey, or from any part of it.  Doing so removes
+   only the extra permission granted here; it does not affect anyone else's
+   copy, and it does not affect Independent Works already developed in
+   reliance on this grant.
+
+
+5. IF THIS DOCUMENT IS MISSING
+
+   This Additional Permission is intended to accompany every distribution of
+   the Mod.  The authoritative copy is the one published by Iridesium with
+   the Mod's source.
+
+
+                                  * * *
+
+   A plain-language explanation of what this means for mod authors, and a
+   matrix of what needs which permission, is MOD-LICENSING.md in the Engine's
+   repository.  That file is a summary and has no legal effect; this document
+   and LICENSE are the operative terms.

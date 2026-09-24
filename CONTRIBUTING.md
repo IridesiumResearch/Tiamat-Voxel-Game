@@ -7,17 +7,39 @@
 
 Contributions are accepted under the **Developer Certificate of Origin** (DCO)
 version 1.1, reproduced below. **Authors retain copyright in their
-contributions** and license them under GPLv3-only (MIT for anything under
-`api/`). There is no copyright assignment and no CLA.
+contributions.** There is no copyright assignment and no contributor licence
+agreement.
+
+**What you license by submitting a contribution:**
+
+> By submitting a contribution to this repository, you license it under the
+> GNU General Public License, version 3 only (`GPL-3.0-only`), **together with
+> the Additional Permission in [`LICENSE.EXCEPTION`](LICENSE.EXCEPTION),
+> version 1.0 of 24 September 2026**. Contributions within `api/` are licensed
+> under the MIT licence in [`api/LICENSE`](api/LICENSE) instead. You retain
+> copyright.
+
+The second half of that sentence is the point of it. The engine promises mod
+authors that a work interacting with it only through the scripting API or the
+network protocol is independent and carries no copyleft obligation. That promise
+is worth exactly what every copyright holder in the tree has granted, so a
+contribution licensed under the bare GPL would leave a hole in it. Licensing
+under the GPL *with* the Additional Permission closes that hole for the code you
+add, and your DCO sign-off is the record of having done so.
 
 One consequence worth stating plainly: because copyright stays with each author,
-the project cannot be relicensed, and the section 7 Additional Permission in
-[`LICENSE.EXCEPTION`](LICENSE.EXCEPTION) cannot be amended, without the sign-off
-of every contributor whose code is affected. **Only Iridesium can grant or amend
-that exception**, and it can only do so for code it holds copyright in. This is
-a deliberate trade — contributor-friendly, but it makes licensing changes hard
-on purpose. If the project ever needs a CLA, that decision has to be made before
-outside contributions are accepted, not after.
+the project cannot be relicensed, and the text of the Additional Permission
+cannot be changed for code you wrote, without your agreement. Iridesium
+maintains the text and can amend it for its own code; a new version gets a new
+number and date, and code contributed under an earlier version stays under that
+version unless its author agrees otherwise. This is a deliberate trade —
+contributor-friendly, and it makes licensing changes hard on purpose. If the
+project ever needs a CLA, that decision has to be made before outside
+contributions accumulate, not after.
+
+The same terms, with the same permission adapted to the mod, apply in each of
+Iridesium's default-mod repositories; the checklist that keeps them identical is
+[`docs/licensing/mod-repo-checklist.md`](docs/licensing/mod-repo-checklist.md).
 
 ### Sign-off is required
 
@@ -99,7 +121,8 @@ proposing anything structural — it is short and it is binding.
 - **Every parser or decoder that touches untrusted bytes ships its fuzz target
   in the same change** — not deferred to a hardening pass.
 - **Every source file carries an SPDX header.** `GPL-3.0-only` everywhere except
-  under `api/`, which is `MIT`. CI checks this.
+  under `api/`, which is `MIT`, and `SPDX-FileCopyrightText: Iridesium` on
+  every file. CI checks this.
 - Rust edition 2024, stable toolchain (pinned in `rust-toolchain.toml`).
   `thiserror` for errors. No `unwrap()` outside tests. Public items documented.
 - Conventional-commit messages, one working increment per commit.
