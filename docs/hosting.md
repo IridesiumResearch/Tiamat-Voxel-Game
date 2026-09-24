@@ -97,9 +97,10 @@ and moving between the two later is one DNS change (§2 is what makes that so).
 
 ### 4.1 The repository
 
-A separate repository, `tiamat-updates` — not this one, because a manifest
-publish must not trigger the engine's CI and the engine's commits must not
-redeploy the host. Three things in it:
+A separate repository — **[IridesiumResearch/tiamat-updates](https://github.com/IridesiumResearch/tiamat-updates)**,
+set up 2026-09-24 — not this one, because a manifest publish must not trigger
+the engine's CI and the engine's commits must not redeploy the host. Its
+README has the day-to-day; what is in it:
 
 `Dockerfile`:
 
@@ -135,6 +136,15 @@ COPY site /srv
 `site/`, laid out as in §3. Before the first release it holds only
 `index.html`; the client answers a 404 with "could not reach", which is the
 right thing for a channel with nothing on it yet.
+
+And a check that runs on every push, `scripts/check_manifests.py`, which
+refuses what an installed client would refuse: every cap in §1, the shape of
+the JSON, a `.sig` of exactly 64 raw bytes, the Ed25519 signature over the
+file as committed, the signing key equal to this repository's
+`release-key.pub` on `main` (fetched, so the trust root has no second copy),
+and each head byte-identical to its kept copy. Then it builds the image,
+starts it, and fetches each head back to compare with the tree. It is the
+safety net under the rule in §3; it is not a reason to skip `relman verify`.
 
 ### 4.2 DNS
 
@@ -299,7 +309,8 @@ Then, for each release (`0.2.0` here):
    this moment.
 6. **Publish the manifest.** In `tiamat-updates`, copy `dist/manifest.json`
    and `dist/manifest.json.sig` to `site/test/releases/0.2.0/` and to
-   `site/test/`, commit, push. Dokploy redeploys in seconds.
+   `site/test/`, commit, push. Its check runs, and Dokploy redeploys in
+   seconds. (The README there has these lines ready to paste.)
 7. **Check it from outside.**
 
    ```sh
