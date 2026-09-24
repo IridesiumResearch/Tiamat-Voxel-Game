@@ -435,6 +435,22 @@ const UNDER_SWELL: f32 = 0.03;
 // How deep the small cubes ruffle the underside where the camera is close
 // enough to see them, in small cubes.
 const UNDER_RUFFLE: f32 = 0.6;
+// The crown's cauliflower — weather ask W23, after the designer's
+// references: a crown is a cluster of distinct lobes, not an arc wearing a
+// texture. The big lobes CARVE as well as ride — centred on LOBE_CUT, so
+// the grooves between florets cut into the dome the way the references'
+// do — and near the camera a finer octave of buds rides the lobes
+// themselves, gated by `detail_mix` exactly as the rind is, so it cannot
+// confetti the horizon. The big lobes alone hold a crown's outline at a
+// kilometre, which is W13's lesson kept.
+const LOBE_RELIEF: f32 = 0.5;
+const LOBE_CUT: f32 = 0.3;
+const LOBE_FINE: f32 = 0.14;
+// The most a crown's term can reach — the dome at 1, plus the lobes' share
+// over their cut, plus the buds' — so the reach tests in `column_at` and
+// `deck_slab` bound the same crest the crown assembles and cannot drift
+// from it.
+const HEAP_CREST: f32 = 1.0 + LOBE_RELIEF * (1.0 - LOBE_CUT) + LOBE_FINE * 0.5;
 // The grain — weather ask W22. The rind's cycle is about five cubes, so a
 // run of neighbouring columns quantises to the same shelf and the deck
 // reads as a lattice of clean steps. A second octave of the same noise,
@@ -536,7 +552,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // a floor sits to the tallest heap with its florets on.
     let sits_low = thickness * SIT_RANGE * SIT_CENTRE + small * UNDER_RUFFLE;
     let heaps_high = base + thickness * SIT_RANGE * (1.0 - SIT_CENTRE)
-        + thickness * 0.55 * (HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2) * 1.3
+        + thickness * 0.55 * (HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2) * HEAP_CREST
         + small * 1.2 + cell;
     if (y_hi >= base - sits_low && y_lo <= heaps_high) {
         // Cover raises the water line rather than scaling the field, so a clear
@@ -662,11 +678,20 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
             // heaps that were here — rounded cells with grooves between them
             // are what "lumpy rather than a smooth arc" is — and they do not
             // fade with distance the way the small heaps did, so at a
-            // kilometre a crown still has its lobes.
+            // kilometre a crown still has its lobes. Since W23 the lobes
+            // carve as well as ride, and near the camera a second octave of
+            // buds a quarter their size rides them, faded with the rind's
+            // own `detail_mix` and centred so its absence at a distance is
+            // not a shorter cloud.
             var lobe = 0.0;
+            var buds = 0.0;
             if (crown > 0.08) {
                 let florets = cells(at / (spacing * 0.3), seed + 41.0);
                 lobe = sqrt(clamp((florets.y - florets.x) * 2.2, 0.0, 1.0));
+                if (detail_mix > 0.0) {
+                    let fine = cells(at / (spacing * 0.12), seed + 47.0);
+                    buds = (sqrt(clamp((fine.y - fine.x) * 2.2, 0.0, 1.0)) - 0.5) * detail_mix;
+                }
             }
             let shoulders = smoothstep(0.0, 0.5, crown);
             // **A base is flat per HEAP, not per deck** (ask W15). Each heap
@@ -675,7 +700,8 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
             // see. None of it is a function of the FIELD, which is what
             // terraced W12's undersides, so the terracing cannot come back.
             let floor_y = base + thickness * sits;
-            let top = floor_y + thickness * 0.55 * tall * (crown + 0.3 * lobe * shoulders)
+            let relief = (LOBE_RELIEF * (lobe - LOBE_CUT) + LOBE_FINE * buds) * shoulders;
+            let top = floor_y + thickness * 0.55 * tall * (crown + relief)
                 + rind * shoulders;
             let rim = 1.0 - crown;
             let under = floor_y + thickness * (UNDER_LIFT * rim * rim + UNDER_SWELL * swell)
@@ -1169,7 +1195,7 @@ fn deck_slab() -> vec2<f32> {
     let sits_high = thickness * SIT_RANGE * (1.0 - SIT_CENTRE);
     let tallest = HEIGHT_LEAST + HEIGHT_RANGE + towers * 1.2;
     let rind_high = clouds.shade.w * 1.2;
-    let heaps_high = sits_high + thickness * 0.55 * tallest * 1.3 + rind_high;
+    let heaps_high = sits_high + thickness * 0.55 * tallest * HEAP_CREST + rind_high;
     let strato_high = select(
         0.0,
         thickness * STRATO_DEPTH + rind_high,

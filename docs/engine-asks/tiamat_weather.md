@@ -12,7 +12,7 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Nothing open: W19 to W22 landed 2026-09-24, W17 and W18 the day before, below.
+Nothing open: W19 to W23 landed 2026-09-24, W17 and W18 the day before, below.
 
 **For the sky's owner, 2026-09-23**, protocol v75 — not an ask, a
 capability that landed for the space work and is the sky mod's to use: a
@@ -54,6 +54,26 @@ shows through it at neither. Cost on llvmpipe, Beautiful, Normal, Weather's
 deck, the deck's own cost over a bare sky at 320 x 240, level / thirty
 degrees up / above the deck: 1.20 / 1.83 / 4.04 ms before any of W15, and
 the numbers after are in `how_long_the_deck_costs_from_three_views`.
+
+**W23 landed 2026-09-24.** The designer's references (two pictures, the
+same afternoon as W22): crowns that are CLUSTERS of distinct rounded
+lobes with grooves between them, not domes wearing a texture. The floret
+term rode the crown additively at 0.3, so a crown stayed an arc. Now the
+lobes carve as well as ride — `LOBE_RELIEF 0.5`, centred on `LOBE_CUT
+0.3`, so the grooves cut into the dome — and near the camera a second
+octave of buds a quarter their size (`LOBE_FINE 0.14`, one more Worley
+read per column with a crown) rides the lobes, faded by the rind's own
+`detail_mix` and centred, so its absence at a distance is not a shorter
+cloud and it cannot confetti the horizon; the big lobes alone hold the
+outline at a kilometre, W13's lesson kept. The crest the reach tests
+bound is now the shared `HEAP_CREST`, so `column_at`, `deck_slab` and the
+crown cannot drift apart. Cost on the designer's own card (RTX 5070 Ti,
+1080p, Beautiful, Weather's `cell 24, freq 1/850`): the level and 45-up
+views moved within noise; the above-deck view at `Medium` +0.25 ms cloudy
+and +0.33 ms storm (1.76 / 2.39 ms total), about 2% of a 60 fps frame in
+the view that pays most; `High` above +2.4 ms (14.7 total), the
+enthusiast rung's to spend. All sixteen cloud gates pass unchanged; the
+pictures are the designer's to take.
 
 **W22 landed 2026-09-24.** The deck's cube pattern read as a lattice: the
 rind's cycle is about five cubes, so runs of neighbouring columns quantised
