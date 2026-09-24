@@ -335,21 +335,30 @@ fn write_embedder(name: &str) -> PathBuf {
          license = \"GPL-3.0-only\"\n",
     )
     .expect("manifest");
+    // **On a word from the player, not on the first tick.** The first tick
+    // is fifty milliseconds after the server starts, and a delta goes only to
+    // players already in the world: a bot still shaking hands at that moment
+    // is told nothing, and the chunk it then receives has the rock already in
+    // it. Alone on a fast machine the bot won that race every time; under a
+    // full parallel workspace run, where ten servers start at once, it lost
+    // it and the test saw no edits at all.
     std::fs::write(
         dir.join("init.lua"),
-        "local ground = game.register_block{ id = \"ground\" }\n\
-         local rock = game.register_block{ id = \"rock\" }\n\
-         game.register_on_generate(function(buf, pos)\n\
-         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
-         end)\n\
-         local done = false\n\
-         game.register_on_tick(function()\n\
-         \x20   if done then return end\n\
-         \x20   done = true\n\
-         \x20   local three = (1 << 12) | (1 << 13) | (1 << 14)\n\
-         \x20   game.set_block({ x = 2, y = -2, z = 2 }, \"embed:rock\", three, { merge = true })\n\
-         \x20   game.set_block({ x = 5, y = -2, z = 5 }, \"embed:rock\", three)\n\
-         end)\n",
+        r#"
+local ground = game.register_block{ id = "ground" }
+local rock = game.register_block{ id = "rock" }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+
+game.register_on_chat(function(event)
+    if event.text ~= "embed" then return end
+    local three = (1 << 12) | (1 << 13) | (1 << 14)
+    game.set_block({ x = 2, y = -2, z = 2 }, "embed:rock", three, { merge = true })
+    game.set_block({ x = 5, y = -2, z = 5 }, "embed:rock", three)
+    return false
+end)
+"#,
     )
     .expect("script");
     root
@@ -380,6 +389,9 @@ fn a_merge_write_embeds_in_the_ground_instead_of_standing_in_a_footprint() {
         .await
         .expect("connect");
         bot.join("Bystander").await.expect("join");
+        // In the world now, so the deltas the word provokes have somewhere to
+        // go — see `write_embedder`.
+        bot.chat("embed").await.expect("chat");
 
         let merged_at = BlockPos::new(2, -2, 2);
         let replaced_at = BlockPos::new(5, -2, 5);
