@@ -4548,6 +4548,11 @@ impl App {
         // belongs to the thing that knows what the renderer holds, and so a
         // second caller cannot forget it.
         renderer.clear();
+        // **And the models, which belong to the server that pushed them** —
+        // the rule `clear_models` states, and nothing called it (Life ask
+        // 16). Left in place, a rejoin's skins landed on last visit's passes
+        // and the models that followed replaced those passes, white.
+        renderer.clear_models();
         // **And what the server's mods pushed to look at.** A typeface and a
         // panel background belong to the server that sent them; carrying either
         // into the next world would be one mod's art appearing in somebody

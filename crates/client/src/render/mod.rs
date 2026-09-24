@@ -1374,26 +1374,31 @@ impl Renderer {
             }
         }
         let mut pass = skinned::Skinned::new(&self.gpu, model);
-        // A skin that arrived first, put on now.
-        if let Some(image) = self.figures.skins.remove(id) {
-            pass.set_texture(&self.gpu, &image);
+        // The skin this id wears — one that arrived first, or the one the
+        // pass being replaced was wearing — put on now. **Kept, not taken**:
+        // a re-sent model must not undress its id (Life ask 16).
+        if let Some(image) = self.figures.skins.get(id) {
+            pass.set_texture(&self.gpu, image);
         }
         self.figures.passes.insert(id.to_owned(), pass);
     }
 
     /// Dresses a mod's model in an image it pushed — Life ask 0, step 2.
     ///
-    /// **Remembered when the model has not arrived yet.** The geometry and the
-    /// skin are two hashes fetched independently, and the cache answers at once
-    /// for bytes it already holds, so the skin routinely lands first on a
-    /// second visit to a server. Forgetting it there would leave a cow white
-    /// until somebody reconnected in the other order.
+    /// **Remembered whether or not the model has arrived.** The geometry and
+    /// the skin are two hashes fetched independently, and the cache answers
+    /// at once for bytes it already holds, so the skin routinely lands first
+    /// on a second visit to a server. It was remembered only while no pass
+    /// existed — and on a rejoin the renderer still held last visit's pass,
+    /// so the skin went onto that, the model then arrived and replaced the
+    /// pass with a fresh white one, and every animal was matte white for the
+    /// rest of the session (Life ask 16). The last skin per id is kept now,
+    /// and [`Renderer::add_model`] puts it on whatever pass it builds.
     pub fn set_model_texture(&mut self, id: &str, image: &crate::texture::Image) {
         if let Some(pass) = self.figures.passes.get_mut(id) {
             pass.set_texture(&self.gpu, image);
-        } else {
-            self.figures.skins.insert(id.to_owned(), image.clone());
         }
+        self.figures.skins.insert(id.to_owned(), image.clone());
     }
 
     /// How many figures of a mod's models were placed this frame.

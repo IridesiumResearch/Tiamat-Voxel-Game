@@ -90,7 +90,7 @@ fire). And `game.looking_at` answering an entity when that is what the
 crosshair is on, as `{ entity = id }`, so the between-events question has
 the same answer.
 
-## 16. A mod's model is drawn matte white though its skin arrives (2026-09-23, cause found 2026-09-24): OPEN, a BUG in the client
+## 16. A mod's model is drawn matte white though its skin arrives (2026-09-23, cause found 2026-09-24): LANDED 2026-09-24
 
 **Seen.** In play, every animal is drawn matte white: the rig lit and
 shadowed and no colour at all. "Again": they can be right on a first visit
@@ -127,6 +127,11 @@ remembering it only while no pass exists). A screenshot test of the rejoin
 order would have caught it; `connection.rs` proves a skin arrives, and
 nothing proved it is drawn.
 
-**Until then.** Quit the game fully between worlds: the first world after
-launch draws its animals painted.
+**Landed 2026-09-24**, both halves of the smallest change: a connection's
+end forgets the models it was pushed, as `clear_models` always said it
+should and nothing called; and the renderer keeps the last skin per id
+whether or not a pass exists, so a re-sent model puts on the skin the pass
+it replaces was wearing. The rejoin order — skin, then model — is now the
+second half of `a_mods_model_wears_the_skin_it_was_pushed`, and the
+painted frame comes out of it.
 

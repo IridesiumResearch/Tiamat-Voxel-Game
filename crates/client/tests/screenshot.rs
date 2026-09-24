@@ -4135,6 +4135,34 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
         after[1] < before[1] && after[2] < before[2],
         "a red skin should darken the green and blue of the frame: {before:?} to {after:?}"
     );
+
+    // **Life ask 16: a rejoin.** The renderer outlives a connection, and on a
+    // second visit a warm cache hands the skin over before the model. The skin
+    // therefore landed on last visit's pass, the model then replaced that pass
+    // with a fresh white one, and every animal was matte white for the rest
+    // of the session. The same frame, painted, must come out of that order.
+    renderer.set_model_texture(
+        "zoo:cow",
+        &client::texture::Image::solid(8, 8, [200, 40, 30, 255]),
+    );
+    renderer.add_model("zoo:cow", tiamat_core::model::humanoid(), 1.0);
+    let rejoined = target.capture(&mut renderer, &camera).expect("capture");
+    let again = average(
+        &rejoined,
+        WIDTH / 4,
+        HEIGHT / 4,
+        WIDTH * 3 / 4,
+        HEIGHT * 3 / 4,
+    );
+    assert!(
+        again[1] < before[1] && again[2] < before[2],
+        "after a rejoin's skin-then-model order the model is white again: {again:?} against \
+         {after:?} painted"
+    );
+    // And forgetting the models is what a connection's end does, so the next
+    // visit's skin cannot land on this one's pass at all.
+    renderer.clear_models();
+    assert!(!renderer.has_model("zoo:cow"));
 }
 
 #[test]
