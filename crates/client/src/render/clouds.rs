@@ -725,7 +725,10 @@ impl Pass {
                 state.stratocumulus,
                 state.altocumulus,
                 state.cumulonimbus,
-                0.0,
+                // The highest cover anywhere in the sky, which is the loosest
+                // threshold a heap could be kept by: the cheap reject a heap
+                // takes before the weather at its own centre is asked (W21).
+                reach(state.cover, 3),
             ],
             genera_reach: [
                 reach(state.stratocumulus, 0),
@@ -790,13 +793,15 @@ impl Pass {
     /// the highest share of each genus in any cell, for the slab.
     /// The map's corner, cell size and side for the shader, and the most of
     /// each genus anywhere in it, which sizes the slab the march clips to.
-    fn map_descriptor(&self) -> ([f32; 4], [f32; 3]) {
-        let mut most = [0.0_f32; 3];
+    fn map_descriptor(&self) -> ([f32; 4], [f32; 4]) {
+        let mut most = [0.0_f32; 4];
         let descriptor = self.map.as_ref().map_or([0.0; 4], |map| {
-            for (slot, genus) in
-                most.iter_mut()
-                    .zip([&map.stratocumulus, &map.altocumulus, &map.cumulonimbus])
-            {
+            for (slot, genus) in most.iter_mut().zip([
+                &map.stratocumulus,
+                &map.altocumulus,
+                &map.cumulonimbus,
+                &map.cover,
+            ]) {
                 *slot = f32::from(genus.iter().copied().max().unwrap_or(0)) / 255.0;
             }
             [map.origin[0], map.origin[1], map.cell, f32::from(map.size)]

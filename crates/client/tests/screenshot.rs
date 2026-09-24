@@ -7795,3 +7795,158 @@ fn how_long_weathers_deck_costs_by_knob() {
         }
     }
 }
+
+/// A map clear everywhere but a square of `wide` cells at its middle, the
+/// square centred on the camera, for the tests about what a gradient does
+/// to a cloud. `cell` is a cell's side in blocks, which is also the filtered
+/// ramp's width past the square's edge.
+fn wet_square_map(
+    cover: (u8, u8),
+    cumulonimbus: (u8, u8),
+    cell: f32,
+    wide: usize,
+) -> std::sync::Arc<tiamat_core::atmosphere::CloudMap> {
+    const SIZE: usize = 16;
+    let origin = [
+        24.0 - cell * (SIZE as f32) / 2.0,
+        20.0 - cell * (SIZE as f32) / 2.0,
+    ];
+    let inside = |index: usize| {
+        let (x, z) = (index % SIZE, index / SIZE);
+        let low = SIZE / 2 - wide / 2;
+        (low..low + wide).contains(&x) && (low..low + wide).contains(&z)
+    };
+    let square = |(within, outside): (u8, u8)| -> Vec<u8> {
+        (0..SIZE * SIZE)
+            .map(|index| if inside(index) { within } else { outside })
+            .collect()
+    };
+    #[expect(clippy::cast_possible_truncation, reason = "SIZE is 16")]
+    std::sync::Arc::new(tiamat_core::atmosphere::CloudMap {
+        origin,
+        cell,
+        size: SIZE as u8,
+        cover: square(cover),
+        darkness: vec![0; SIZE * SIZE],
+        stratocumulus: Vec::new(),
+        altocumulus: Vec::new(),
+        cumulonimbus: square(cumulonimbus),
+    })
+}
+
+/// Cloud pixels further than `radius` pixels from the frame's centre.
+fn cloud_pixels_beyond(with: &Image, without: &Image, radius: f32) -> usize {
+    let (cx, cy) = (with.width as f32 / 2.0, with.height as f32 / 2.0);
+    let mut count = 0;
+    for y in 0..with.height {
+        for x in 0..with.width {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            if dx * dx + dy * dy > radius * radius && is_cloud(with, without, x, y) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn a_gradient_in_the_weather_thins_the_clouds_out_and_does_not_cut_them() {
+    // Weather ask W21. Every genus decided whether a cloud was there, and
+    // how big, from the weather at the COLUMN being marched rather than at
+    // the cloud: across a front the same heap was kept from the columns on
+    // one side of the share's iso-line and dropped from the other, a vertical
+    // plane through it. Decided at its own centre, a heap is one heap from
+    // every column and a front thins the heaps out one by one.
+    //
+    // Measured at the mechanism, since a silhouette cannot tell a cut from a
+    // near cube's edge. Straight down at a frame twice the usual, a map
+    // clear everywhere but a square of wet cells around the camera, and the
+    // clear sky beside it for what the sky holds on its own. Past the
+    // square's ramp every column's weather is the clear sky's, so decided
+    // per column the deck out there is the clear sky's, to the pixel — the
+    // square would be a square cloud. Decided at its own centre, a heap
+    // centred in the square reaches past the ramp, and so does a storm's
+    // anvil. Seeds chosen for skies with a heap, or a tower, in the square.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH * 2, HEIGHT * 2);
+    let shoot = |renderer: &mut Renderer, height: f64, state, map, seed| {
+        let mut camera = Camera {
+            position: Position::from_world(24.0, height, 20.0),
+            ..Camera::default()
+        };
+        camera.look(0.0, -1.55);
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: Some(low_deck()),
+            clouds: Some(state),
+            quality: client::render::clouds::Quality::High,
+            seed,
+        });
+        renderer.set_cloud_map(map);
+        let with = target.capture(renderer, &camera).expect("capture");
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: None,
+            clouds: Some(state),
+            quality: client::render::clouds::Quality::High,
+            seed,
+        });
+        let without = target.capture(renderer, &camera).expect("capture");
+        renderer.set_cloud_map(None);
+        (with, without)
+    };
+    // Heaps: four cells of 32 blocks, so the ramp ends 96 blocks out, and a
+    // heap centred inside reaches up to 90 past its own centre. From 600 up
+    // a block is about 1.1 px. Towers: four cells of 128, the ramp ending
+    // 384 out and an anvil reaching 380 past its centre, from 1,400 up
+    // where a block is a quarter of a pixel.
+    let seeds: Vec<u64> = std::env::var("TIAMAT_FRONT_SEEDS")
+        .ok()
+        .map(|list| list.split(',').filter_map(|s| s.parse().ok()).collect())
+        // Seeds 4 and 18 put a heap in the small square; 12 and 13 a tower
+        // in the large one. Found by probing twenty with `TIAMAT_FRONT_SEEDS`.
+        .unwrap_or_else(|| vec![4, 12, 13, 18]);
+    let fronts = [
+        (
+            "cover",
+            600.0,
+            sky_of(0.0, 0.0, 0.0, 0.0),
+            wet_square_map((115, 0), (0, 0), 32.0, 2),
+            82.0,
+        ),
+        (
+            "storm",
+            1400.0,
+            sky_of(77.0 / 255.0, 0.0, 0.0, 0.0),
+            wet_square_map((77, 77), (255, 0), 128.0, 4),
+            105.0,
+        ),
+    ];
+    for (label, height, clear, map, beyond) in fronts {
+        let mut spilled = 0usize;
+        for seed in &seeds {
+            let (bare_sky, bare) = shoot(&mut renderer, height, clear, None, *seed);
+            let (front, bare_front) = shoot(&mut renderer, height, clear, Some(map.clone()), *seed);
+            let outside_clear = cloud_pixels_beyond(&bare_sky, &bare, beyond);
+            let outside_front = cloud_pixels_beyond(&front, &bare_front, beyond);
+            let inside = cloud_pixels_beyond(&front, &bare_front, 0.0) - outside_front;
+            if let Some(dir) = std::env::var_os("TIAMAT_FRONT_PICTURES") {
+                let dir = std::path::PathBuf::from(dir);
+                let _ = std::fs::create_dir_all(&dir);
+                write_png(&dir.join(format!("square-{label}-{seed}.png")), &front);
+            }
+            println!(
+                "{label} seed {seed}: {inside} cloud pixels within the square's reach, \
+                 {outside_front} beyond it against {outside_clear} in the clear sky"
+            );
+            spilled += outside_front.saturating_sub(outside_clear);
+        }
+        assert!(
+            spilled > 2000,
+            "{label}: only {spilled} more cloud pixels beyond the wet square's ramp than the \
+             clear sky has there, over {} skies: the clouds in the square are cut to its shape \
+             instead of being whole",
+            seeds.len()
+        );
+    }
+}

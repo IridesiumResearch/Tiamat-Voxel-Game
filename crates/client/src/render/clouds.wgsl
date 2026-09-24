@@ -464,6 +464,13 @@ const UNDER_RUFFLE: f32 = 0.6;
 // cumulonimbus, and most of it is empty: without this every column on the
 // way up through it would run the heap search, the sheet's cells and the
 // lattice for cloud that could not be there.
+// The world column a point of the field is over: the inverse of the `at`
+// mapping at the top of `column_at`, so a cloud can be asked about the
+// weather where IT is rather than where the ray is (weather ask W21).
+fn field_to_world(point: vec2<f32>, frequency: f32, drift: vec2<f32>, evolve: f32) -> vec2<f32> {
+    return (point - vec2<f32>(evolve, -evolve)) / frequency + drift;
+}
+
 fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Column {
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
@@ -471,18 +478,18 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // caller of this reaches it through the same sample, so the march, the
     // sun's shadow and the fog inside the deck cannot disagree about where the
     // storm is.
+    // **For the darkness alone, since W21.** Whether a cloud is there, and
+    // how big, is decided from the weather at the CLOUD — each genus below
+    // asks `weather_at` at its own centre or anchor — because decided per
+    // column, the same heap was kept from the columns on one side of a
+    // front's iso-line and dropped from the other: a vertical plane through
+    // it, which the designer saw as the big clouds cut in half.
     let weather = weather_at(cell_xz);
-    let cover = weather.cover;
     let frequency = clouds.weather.z;
     let towers = clouds.weather.w;
     let seed = clouds.motion.w;
     let cell = clouds.colour.w;
     let small = clouds.shade.w;
-    // The genera over THIS column too (ask W16): a storm over the next valley
-    // has its sheet and its anvil from here.
-    let strato = weather.stratocumulus;
-    let alto = weather.altocumulus;
-    let cb = weather.cumulonimbus;
 
     // Drift is a rigid translation of the whole deck and evolution is a slow
     // change of shape; both are an offset on where the field is sampled, which
@@ -521,7 +528,9 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
         // Cover raises the water line rather than scaling the field, so a clear
         // sky is a few heaps and an overcast one is a ceiling with holes. The low
         // end goes BELOW zero: overcast should leave almost nothing.
-        let threshold = mix(0.95, -0.10, clamp(cover, 0.0, 1.0));
+        // The loosest threshold any cell of the sky sets, for the cheap
+        // reject below; a heap's own is taken at its own centre (ask W21).
+        let loosest = mix(0.95, -0.10, clamp(clouds.genera.w, 0.0, 1.0));
 
         let spacing = 0.42;
         let home = floor(at / spacing);
@@ -568,11 +577,21 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 let clump = hash2(floor(id * 0.4), seed + 7.0);
                 let raw = 0.62 * clump + 0.38 * roll.x;
                 let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
+                if (stem <= loosest) {
+                    continue;
+                }
+                let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
+                // **The cover at the heap, not at the column** (ask W21): one
+                // threshold per heap, so it is one heap from every column and
+                // a front thins the heaps out one by one rather than cutting
+                // each along the iso-line. Two fetches, and only for a heap
+                // the loosest cell would keep.
+                let own = weather_at(field_to_world(point, frequency, drift, evolve)).cover;
+                let threshold = mix(0.95, -0.10, clamp(own, 0.0, 1.0));
                 if (stem <= threshold) {
                     continue;
                 }
                 let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
-                let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
                 // **The big ones bigger** (weather ask W20). The curve's top
                 // was 0.38, the largest heap 0.68 of the lattice, and a mod's
                 // one knob — `frequency` — scales every heap alike; the
@@ -660,9 +679,13 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // patches, with grooves of sky between the cells that close as the share
     // rises. Thin: a third of the deck's thickness at most.
     let strato_high = base + thickness * STRATO_DEPTH + small * 1.2 + cell;
-    if (strato > 0.0 && y_hi >= base && y_lo <= strato_high) {
+    if (clouds.genera_reach.x > 0.0 && y_hi >= base && y_lo <= strato_high) {
+        // **The share at the patch's own anchor** (ask W21): the lattice
+        // point of the area noise, so a patch is one patch from every column.
+        let anchor = round(at * 0.9) / 0.9;
+        let strato = weather_at(field_to_world(anchor, frequency, drift, evolve)).stratocumulus;
         let area = value2(at * 0.9, seed + 13.0);
-        if (area < strato * 1.15) {
+        if (strato > 0.0 && area < strato * 1.15) {
             let v = cells(at / vec2<f32>(STRATO_CELL_X, STRATO_CELL_Z), seed + 17.0);
             let groove = mix(0.22, 0.06, strato);
             let edge = v.y - v.x;
@@ -683,9 +706,13 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // Towers under spreading anvils, on a lattice seven heaps wide. More of
     // the lattice holds a storm as the share rises, and each is taller and
     // wider; at 1 they are supercells, with mammatus under the anvil.
-    if (cb > 0.0) {
-        let scale = mix(0.55, 1.0, cb);
-        let tallest = thickness * CB_HEIGHT * scale;
+    // Entered wherever any cell of the sky has a storm; each tower decides
+    // for itself, from the share at ITS centre (ask W21), whether it stands
+    // and how tall, so a tower and its anvil are whole or absent.
+    let cb_most = clouds.genera_reach.z;
+    if (cb_most > 0.0) {
+        let scale_most = mix(0.55, 1.0, cb_most);
+        let tallest = thickness * CB_HEIGHT * scale_most;
         if (y_hi >= base && y_lo <= base + tallest * 1.04 + thickness * 0.8 + small * 1.2) {
             let big = 0.42 * CB_LATTICE;
             let home_b = floor(at / big);
@@ -697,11 +724,19 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 for (var i = -1; i <= 1; i = i + 1) {
                     let id = home_b + vec2<f32>(f32(i), f32(j));
                     let r = hash4(id, seed + 31.0);
-                    if (r.x > 0.15 + 0.3 * cb) {
+                    if (r.x > 0.15 + 0.3 * cb_most) {
                         continue;
                     }
                     let centre = (id + 0.3 + 0.4 * r.yz) * big;
                     let from_centre = length(at - centre);
+                    if (from_centre > big * CB_REACH * scale_most) {
+                        continue;
+                    }
+                    let cb = weather_at(field_to_world(centre, frequency, drift, evolve)).cumulonimbus;
+                    if (cb <= 0.0 || r.x > 0.15 + 0.3 * cb) {
+                        continue;
+                    }
+                    let scale = mix(0.55, 1.0, cb);
                     if (from_centre > big * CB_REACH * scale) {
                         continue;
                     }
@@ -763,12 +798,15 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // A mid-level layer of small cloudlets, in patches, lined up in bands the
     // way a mackerel sky is. Thin, lens-shaped, and its own interval, since
     // it can sit under an anvil and over a heap in one column.
-    if (alto > 0.0) {
+    if (clouds.genera_reach.y > 0.0) {
         let level = base + thickness * ALTO_LEVEL;
         let deepest = thickness * ALTO_DEPTH;
         if (y_hi >= level - deepest * 0.35 - small && y_lo <= level + deepest + small) {
+            // The share at the patch's own anchor, as for the sheet (ask W21).
+            let anchor = (round(at * 0.6 + vec2<f32>(5.0, 9.0)) - vec2<f32>(5.0, 9.0)) / 0.6;
+            let alto = weather_at(field_to_world(anchor, frequency, drift, evolve)).altocumulus;
             let area = value2(at * 0.6 + vec2<f32>(5.0, 9.0), seed + 57.0);
-            if (area < alto * 1.1) {
+            if (alto > 0.0 && area < alto * 1.1) {
                 // A sine across the field, bent by a little noise so the
                 // bands are waves rather than rulings.
                 let band = 0.5 + 0.5 * sin(dot(at, vec2<f32>(0.82, 0.57)) * 16.0
