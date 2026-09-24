@@ -535,7 +535,10 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
         // edge is further from this column than that cannot reach it whatever its
         // hashes say, and finding that out is two subtractions against the four
         // rounds a hash costs — in every column of every ray (ask W15).
-        let reach = (0.30 + 0.38) * (1.0 + HEAP_STRETCH) - 0.15;
+        // **Under one cell**, or the three-by-three below would miss a heap
+        // reaching a column from two cells away and clip it at the lattice's
+        // edge: 0.85 at the curve's top of 0.53 (ask W20).
+        let reach = (0.30 + 0.53) * (1.0 + HEAP_STRETCH) - 0.15;
         // The nine cells a heap could reach this column from. Three by three
         // because a heap's radius may exceed its own cell — which is what lets
         // neighbouring heaps merge into a bank rather than sitting in a grid.
@@ -570,7 +573,14 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 }
                 let strength = clamp((stem - threshold) / max(1.0 - threshold, 0.0001), 0.0, 1.0);
                 let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
-                let radius = spacing * (0.30 + 0.38 * sqrt(strength));
+                // **The big ones bigger** (weather ask W20). The curve's top
+                // was 0.38, the largest heap 0.68 of the lattice, and a mod's
+                // one knob — `frequency` — scales every heap alike; the
+                // designer wanted the big clouds to grow more than the small.
+                // The floor is as it was, so the smallest heap is; the top is
+                // 0.83 of the lattice, so the strongest heaps overlap their
+                // neighbours into banks.
+                let radius = spacing * (0.30 + 0.53 * sqrt(strength));
                 // The cheap question first: is this column within the widest the
                 // heap could be, stretched? Most candidates are not, and the hash
                 // below would be spent on a miss.

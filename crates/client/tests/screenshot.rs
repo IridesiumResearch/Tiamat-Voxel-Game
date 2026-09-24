@@ -5424,7 +5424,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
     pass.set(client::render::clouds::Deck {
         layer: Some(layer),
         clouds: Some(state),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     pass.advance(12.0);
@@ -5435,7 +5435,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
     pass.set(client::render::clouds::Deck {
         layer: None,
         clouds: Some(state),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     pass.prepare(&gpu, &frame);
@@ -5512,7 +5512,7 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
             altocumulus: 0.0,
             cumulonimbus: 0.0,
         }),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     let clear = target.capture(&mut renderer, &skyward()).expect("capture");
@@ -5531,7 +5531,7 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
             altocumulus: 0.0,
             cumulonimbus: 0.0,
         }),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     let clouded = target.capture(&mut renderer, &skyward()).expect("capture");
@@ -5575,7 +5575,7 @@ fn a_registered_deck_puts_cloud_in_the_sky_and_off_takes_it_away() {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: None,
         clouds: Some(overcast),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     let none = target.capture(&mut renderer, &skyward()).expect("capture");
@@ -5630,7 +5630,7 @@ fn a_half_covered_sky_has_cloud_and_sky_in_it_rather_than_one_flat_fill() {
             altocumulus: 0.0,
             cumulonimbus: 0.0,
         }),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     let frame = target.capture(&mut renderer, &skyward()).expect("capture");
@@ -5686,7 +5686,7 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
             altocumulus: 0.0,
             cumulonimbus: 0.0,
         }),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
 
@@ -5858,7 +5858,7 @@ fn how_long_the_deck_costs_from_three_views() {
         renderer.set_clouds(client::render::clouds::Deck {
             layer: None,
             clouds: None,
-            quality: client::render::clouds::Quality::Normal,
+            quality: client::render::clouds::Quality::Medium,
             seed: 4242,
         });
         let bare = time(&mut renderer, &camera);
@@ -5866,7 +5866,7 @@ fn how_long_the_deck_costs_from_three_views() {
         renderer.set_clouds(client::render::clouds::Deck {
             layer: Some(deck),
             clouds: Some(state),
-            quality: client::render::clouds::Quality::Normal,
+            quality: client::render::clouds::Quality::Medium,
             seed: 4242,
         });
         let with = time(&mut renderer, &camera);
@@ -5918,7 +5918,7 @@ fn a_deck_past_the_terrains_fog_is_still_drawn_in_every_mode() {
                 altocumulus: 0.0,
                 cumulonimbus: 0.0,
             }),
-            quality: client::render::clouds::Quality::Normal,
+            quality: client::render::clouds::Quality::Medium,
             seed: 4242,
         };
 
@@ -6033,7 +6033,7 @@ fn with_and_without(
         target,
         camera,
         state,
-        client::render::clouds::Quality::Normal,
+        client::render::clouds::Quality::Medium,
     )
 }
 
@@ -6165,14 +6165,14 @@ fn an_altocumulus_layer_is_many_small_cloudlets_from_the_ground() {
         &target,
         &skyward(),
         sky_of(0.0, 0.0, 0.8, 0.0),
-        client::render::clouds::Quality::Fine,
+        client::render::clouds::Quality::High,
     );
     let (heaps, heaps_bare) = with_and_without_at(
         &mut renderer,
         &target,
         &skyward(),
         sky_of(0.55, 0.0, 0.0, 0.0),
-        client::render::clouds::Quality::Fine,
+        client::render::clouds::Quality::High,
     );
     let (alto_cloud, _) = cloud_in(&alto, &alto_bare);
     let (heap_cloud, _) = cloud_in(&heaps, &heaps_bare);
@@ -6303,7 +6303,7 @@ fn how_long_each_genus_costs_from_the_ground() {
         renderer.set_clouds(client::render::clouds::Deck {
             layer: None,
             clouds: None,
-            quality: client::render::clouds::Quality::Normal,
+            quality: client::render::clouds::Quality::Medium,
             seed: 4242,
         });
         let bare = time(&mut renderer);
@@ -6312,7 +6312,7 @@ fn how_long_each_genus_costs_from_the_ground() {
             renderer.set_clouds(client::render::clouds::Deck {
                 layer: Some(tuned_deck()),
                 clouds: Some(sky_of(cover, stratocumulus, altocumulus, cumulonimbus)),
-                quality: client::render::clouds::Quality::Normal,
+                quality: client::render::clouds::Quality::Medium,
                 seed: 4242,
             });
             let added = time(&mut renderer) - bare;
@@ -6353,7 +6353,7 @@ fn a_deck_overhead_shades_the_ground_in_every_mode_but_simple() {
             renderer.set_clouds(client::render::clouds::Deck {
                 layer,
                 clouds: Some(sky_of(1.0, 0.0, 0.0, 0.0)),
-                quality: client::render::clouds::Quality::Normal,
+                quality: client::render::clouds::Quality::Medium,
                 seed: 4242,
             });
             let frame = target.capture(renderer, &viewpoint()).expect("capture");
@@ -6403,7 +6403,7 @@ fn the_decks_shade_moves_over_the_ground_as_the_deck_drifts() {
             ..low_deck()
         }),
         clouds: Some(sky_of(0.5, 0.0, 0.0, 0.0)),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     let before = target
@@ -6441,11 +6441,19 @@ fn the_decks_shade_moves_over_the_ground_as_the_deck_drifts() {
 /// has every such block uniform; a deck marched per pixel has its cube edges
 /// and shading running through them.
 fn uniform_cloud_blocks(with: &Image, without: &Image) -> f32 {
+    uniform_cloud_blocks_of(with, without, 2)
+}
+
+/// The same for blocks `side` pixels square: a deck lifted from a target a
+/// quarter of the frame's size is one colour over four-by-four.
+fn uniform_cloud_blocks_of(with: &Image, without: &Image, side: u32) -> f32 {
     let mut blocks = 0usize;
     let mut uniform = 0usize;
-    for y in (0..HEIGHT / 2 - 1).step_by(2) {
-        for x in (0..WIDTH - 1).step_by(2) {
-            let corners = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)];
+    for y in (0..HEIGHT / 2 - side + 1).step_by(side as usize) {
+        for x in (0..WIDTH - side + 1).step_by(side as usize) {
+            let corners: Vec<(u32, u32)> = (0..side)
+                .flat_map(|dy| (0..side).map(move |dx| (x + dx, y + dy)))
+                .collect();
             if !corners
                 .iter()
                 .all(|&(cx, cy)| is_cloud(with, without, cx, cy))
@@ -6488,8 +6496,32 @@ fn normal_quality_draws_the_deck_at_half_resolution_and_fine_at_full() {
         let (cloud, _) = cloud_in(&with, &without);
         (uniform_cloud_blocks(&with, &without), cloud)
     };
-    let (normal, normal_cloud) = share_at(client::render::clouds::Quality::Normal);
-    let (fine, fine_cloud) = share_at(client::render::clouds::Quality::Fine);
+    let (normal, normal_cloud) = share_at(client::render::clouds::Quality::Medium);
+    let (fine, fine_cloud) = share_at(client::render::clouds::Quality::High);
+    // And `Low`, weather ask W19's bottom rung: a quarter of the frame on
+    // each axis, so every four-by-four block of cloud is one colour.
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: Some(low_deck()),
+        clouds: Some(sky_of(0.55, 0.0, 0.0, 0.0)),
+        quality: client::render::clouds::Quality::Low,
+        seed: 4242,
+    });
+    let with_low = target.capture(&mut renderer, &skyward()).expect("capture");
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: Some(sky_of(0.55, 0.0, 0.0, 0.0)),
+        quality: client::render::clouds::Quality::Low,
+        seed: 4242,
+    });
+    let without_low = target.capture(&mut renderer, &skyward()).expect("capture");
+    let low = uniform_cloud_blocks_of(&with_low, &without_low, 4);
+    let (low_cloud, _) = cloud_in(&with_low, &without_low);
+    println!("uniform four-by-four blocks of cloud at Low: {low:.3} ({low_cloud} cloud pixels)");
+    assert!(
+        low_cloud > 2000 && low > 0.98,
+        "at Low the deck is lifted one texel to four-by-four pixels, so its blocks should be \
+         uniform: {low:.3} over {low_cloud} cloud pixels"
+    );
     println!(
         "uniform two-by-two blocks of cloud: {normal:.3} at Normal ({normal_cloud} cloud \
          pixels), {fine:.3} at Fine ({fine_cloud})"
@@ -6526,8 +6558,8 @@ fn a_deck_below_the_floor_stays_behind_it_at_every_quality() {
         ..low_deck()
     };
     for quality in [
-        client::render::clouds::Quality::Fine,
-        client::render::clouds::Quality::Normal,
+        client::render::clouds::Quality::High,
+        client::render::clouds::Quality::Medium,
     ] {
         let deck = |layer| client::render::clouds::Deck {
             layer,
@@ -6584,7 +6616,7 @@ fn a_storm_cell_in_the_map_puts_an_anvil_over_it_and_not_its_neighbours() {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(low_deck()),
         clouds: Some(sky_of(0.0, 0.0, 0.0, 0.0)),
-        quality: client::render::clouds::Quality::Fine,
+        quality: client::render::clouds::Quality::High,
         seed: 4242,
     });
     const SIZE: usize = 5;
@@ -6706,16 +6738,16 @@ fn pictures_of_the_deck_for_the_designers_eye() {
     //
     // Writes into `TIAMAT_CLOUD_PICTURES` and does nothing without it, so it
     // never litters a checkout by accident. `TIAMAT_CLOUD_QUALITY` picks the
-    // setting — `fine`, `normal` or `coarse`, `normal` when unset — since a
+    // setting — `high`, `medium` or `low`, `medium` when unset — since a
     // deck at half resolution is a look a person has to judge too.
     let Some(dir) = std::env::var_os("TIAMAT_CLOUD_PICTURES") else {
         println!("set TIAMAT_CLOUD_PICTURES to a directory to write the pictures");
         return;
     };
     let quality = match std::env::var("TIAMAT_CLOUD_QUALITY").as_deref() {
-        Ok("fine") => client::render::clouds::Quality::Fine,
-        Ok("coarse") => client::render::clouds::Quality::Coarse,
-        _ => client::render::clouds::Quality::Normal,
+        Ok("high" | "fine") => client::render::clouds::Quality::High,
+        Ok("low" | "coarse") => client::render::clouds::Quality::Low,
+        _ => client::render::clouds::Quality::Medium,
     };
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).expect("the pictures directory");
@@ -6835,16 +6867,16 @@ fn how_long_a_cloud_frame_takes() {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: None,
         clouds: None,
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
     let bare = time(&mut renderer);
     println!("no deck:           {bare:7.2} ms");
 
     for quality in [
-        client::render::clouds::Quality::Coarse,
-        client::render::clouds::Quality::Normal,
-        client::render::clouds::Quality::Fine,
+        client::render::clouds::Quality::Low,
+        client::render::clouds::Quality::Medium,
+        client::render::clouds::Quality::High,
     ] {
         renderer.set_clouds(client::render::clouds::Deck {
             layer: Some(low_deck()),
@@ -6880,7 +6912,7 @@ fn the_sky_is_a_gradient_and_the_horizon_still_matches_the_fog() {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: None,
         clouds: None,
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 4242,
     });
 
@@ -7017,7 +7049,7 @@ fn dump_the_golden_hour() {
                     altocumulus: 0.0,
                     cumulonimbus: 0.0,
                 }),
-                quality: client::render::clouds::Quality::Fine,
+                quality: client::render::clouds::Quality::High,
                 seed: 4242,
             });
             let frame = target.capture(&mut renderer, &camera).expect("capture");
@@ -7169,7 +7201,7 @@ fn stars_show_where_the_sky_says_and_the_star_on_screen_is_the_star_the_catalog_
             altocumulus: 0.0,
             cumulonimbus: 0.0,
         }),
-        quality: client::render::clouds::Quality::Normal,
+        quality: client::render::clouds::Quality::Medium,
         seed: 1,
     });
     let resolved = target.capture(&mut renderer, &camera).expect("capture");
@@ -7270,14 +7302,14 @@ fn the_deck_is_dark_at_midnight_and_still_lit_from_below_at_golden_hour() {
         renderer.set_clouds(client::render::clouds::Deck {
             layer: Some(deck),
             clouds: Some(overcast),
-            quality: client::render::clouds::Quality::Fine,
+            quality: client::render::clouds::Quality::High,
             seed: 4242,
         });
         let with = target.capture(renderer, camera).expect("capture");
         renderer.set_clouds(client::render::clouds::Deck {
             layer: None,
             clouds: Some(overcast),
-            quality: client::render::clouds::Quality::Fine,
+            quality: client::render::clouds::Quality::High,
             seed: 4242,
         });
         let without = target.capture(renderer, camera).expect("capture");
@@ -7377,7 +7409,7 @@ fn a_front_in_the_cover_map_is_a_gradient_a_cell_wide_and_not_a_line() {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(deck),
         clouds: Some(overcast),
-        quality: client::render::clouds::Quality::Fine,
+        quality: client::render::clouds::Quality::High,
         seed: 4242,
     });
     // Three frames: no deck, the deck with no map (overcast everywhere,
@@ -7389,14 +7421,14 @@ fn a_front_in_the_cover_map_is_a_gradient_a_cell_wide_and_not_a_line() {
     renderer.set_clouds(client::render::clouds::Deck {
         layer: None,
         clouds: Some(overcast),
-        quality: client::render::clouds::Quality::Fine,
+        quality: client::render::clouds::Quality::High,
         seed: 4242,
     });
     let bare = target.capture(&mut renderer, &camera).expect("capture");
     renderer.set_clouds(client::render::clouds::Deck {
         layer: Some(deck),
         clouds: Some(overcast),
-        quality: client::render::clouds::Quality::Fine,
+        quality: client::render::clouds::Quality::High,
         seed: 4242,
     });
     renderer.set_cloud_map(None);
@@ -7471,5 +7503,267 @@ fn a_front_in_the_cover_map_is_a_gradient_a_cell_wide_and_not_a_line() {
             "the darkness rises back to {here:.2} at column {x} after {previous:.2}"
         );
         previous = here;
+    }
+}
+
+/// Every separate cloud seen straight down at the deck, as its area in
+/// pixels and its width — the pixels the deck changed, joined four ways.
+/// Sorted by area, so the smallest is first and the biggest bank last.
+fn clouds_from_above(with: &Image, without: &Image) -> Vec<(usize, usize)> {
+    let (w, h) = (with.width as usize, with.height as usize);
+    let mask: Vec<bool> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| is_cloud(with, without, x as u32, y as u32))
+        .collect();
+    let mut label = vec![usize::MAX; w * h];
+    let mut clouds = Vec::new();
+    for start in 0..w * h {
+        if !mask[start] || label[start] != usize::MAX {
+            continue;
+        }
+        let id = clouds.len();
+        let (mut area, mut left, mut right) = (0, w, 0);
+        let mut stack = vec![start];
+        label[start] = id;
+        while let Some(at) = stack.pop() {
+            area += 1;
+            let (x, y) = (at % w, at / w);
+            left = left.min(x);
+            right = right.max(x);
+            let mut visit = |nx: usize, ny: usize| {
+                let n = ny * w + nx;
+                if mask[n] && label[n] == usize::MAX {
+                    label[n] = id;
+                    stack.push(n);
+                }
+            };
+            if x > 0 {
+                visit(x - 1, y);
+            }
+            if x + 1 < w {
+                visit(x + 1, y);
+            }
+            if y > 0 {
+                visit(x, y - 1);
+            }
+            if y + 1 < h {
+                visit(x, y + 1);
+            }
+        }
+        clouds.push((area, right - left + 1));
+    }
+    clouds.sort_unstable();
+    clouds
+}
+
+/// The deck seen straight down from high above — a frame twice the usual,
+/// so a bank of heaps fits in it — at the cover the heap gates use, with and
+/// without the deck.
+fn deck_from_above(renderer: &mut Renderer, target: &Offscreen, cover: f32) -> (Image, Image) {
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 2200.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, -1.55);
+    with_and_without_at(
+        renderer,
+        target,
+        &camera,
+        sky_of(cover, 0.0, 0.0, 0.0),
+        client::render::clouds::Quality::High,
+    )
+}
+
+#[test]
+fn the_big_heaps_are_bigger_the_small_ones_are_not_and_neighbours_make_a_bank() {
+    // **Weather ask W20.** The heap curve's top went from 0.38 to 0.53 of
+    // the lattice: the smallest heap is as it was and the largest a fifth
+    // wider, so the strongest heaps overlap their neighbours into banks —
+    // which a mod's one knob, `frequency`, could not do, since it scales every
+    // heap alike. Seen straight down from 2,200 blocks at a frame twice the
+    // usual, seed 4242, measured on 2026-09-24 before and after:
+    //
+    //   cover 0.30: 50 clouds, the widest 290 px, the smallest real heaps
+    //   (area ≥ 200 px²) 22 to 24 px wide → 34 clouds, the widest 427 px (two
+    //   strong neighbours as one bank), the smallest still 22 to 24 px;
+    //   cover 0.55: 35 clouds and 169,386 cloud pixels → 22 clouds and
+    //   197,350: fewer clouds and more cloud, which is banks.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH * 2, HEIGHT * 2);
+
+    let (with, without) = deck_from_above(&mut renderer, &target, 0.30);
+    let clouds = clouds_from_above(&with, &without);
+    let widest = clouds.iter().map(|(_, width)| *width).max().unwrap_or(0);
+    let smallest: Vec<usize> = clouds
+        .iter()
+        .filter(|(area, _)| *area >= 200)
+        .take(3)
+        .map(|(_, width)| *width)
+        .collect();
+    println!(
+        "cover 0.30: {} clouds, widest {widest} px, smallest real heaps {smallest:?} px wide",
+        clouds.len()
+    );
+    assert!(
+        widest >= 400,
+        "the widest cloud is {widest} px; it was 290 before W20 and two strong neighbours \
+         should now be one bank of over 400"
+    );
+    assert!(
+        clouds.len() <= 42,
+        "{} separate clouds where there were 50: the strong heaps have not merged",
+        clouds.len()
+    );
+    assert!(
+        smallest.iter().all(|width| (10..=28).contains(width)),
+        "the smallest heaps should be as they were, 22 to 24 px wide: {smallest:?}"
+    );
+
+    let (with, without) = deck_from_above(&mut renderer, &target, 0.55);
+    let clouds = clouds_from_above(&with, &without);
+    let total: usize = clouds.iter().map(|(area, _)| area).sum();
+    println!("cover 0.55: {} clouds, {total} cloud pixels", clouds.len());
+    assert!(
+        (183_000..=254_000).contains(&total),
+        "{total} cloud pixels at cover 0.55 against 169,386 before: the big heaps should add \
+         a tenth to a half, not less and not a sky of cloud"
+    );
+    assert!(
+        clouds.len() <= 30,
+        "{} separate clouds at cover 0.55 where there were 35",
+        clouds.len()
+    );
+}
+
+#[test]
+#[ignore = "a measurement for the weather mod's tuning; run with --ignored --nocapture"]
+fn how_long_weathers_deck_costs_by_knob() {
+    // Weather's own probe (its `deck-cost-probe-2026-09-23.rs`, beside ask
+    // W19 on the sheet), kept here so the numbers it reports are reproducible
+    // against the ladder it asked for: Weather's deck as it is registered,
+    // the six skies it sends most, three views, every rung, and then the
+    // mod's knobs at `Medium`. `TIAMAT_PROBE_SIZE=WxH` picks the frame,
+    // 1920x1080 when unset — on a software renderer a smaller frame gives the
+    // same ratios in a tenth of the time. The deck's cost is what it adds
+    // over a bare sky, the median of nine captures.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let (w, h) = std::env::var("TIAMAT_PROBE_SIZE")
+        .ok()
+        .and_then(|size| {
+            let (w, h) = size.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1920u32, 1080u32));
+    let target = Offscreen::new(renderer.gpu(), w, h);
+    let deck = |cell: f32, detail: u8, thickness: f32, frequency: f32| {
+        tiamat_core::atmosphere::CloudLayer {
+            base: 400.0,
+            thickness,
+            cell,
+            detail,
+            frequency,
+            octaves: 2,
+            towers: 0.2,
+            drift: [0.5, 0.0],
+            evolve: 1.0 / 2400.0,
+            colour: [1.0; 3],
+            shade: [0.42, 0.44, 0.58],
+        }
+    };
+    let skies: [(&str, f32, f32, f32, f32); 6] = [
+        ("clear", 0.15, 0.0, 0.25, 0.0),
+        ("clear-no-alto", 0.20, 0.0, 0.0, 0.0),
+        ("cloudy", 0.55, 0.40, 0.30, 0.0),
+        ("rain", 0.30, 0.85, 0.10, 0.0),
+        ("storm", 0.40, 0.70, 0.0, 0.60),
+        ("mega", 0.40, 0.70, 0.0, 1.0),
+    ];
+    let views: [(&str, f64, f32); 3] = [
+        ("level", 40.0, 0.0),
+        ("45 up", 40.0, 0.78),
+        ("above", 700.0, -0.6),
+    ];
+    let rungs = [
+        ("Low", client::render::clouds::Quality::Low),
+        ("Medium", client::render::clouds::Quality::Medium),
+        ("High", client::render::clouds::Quality::High),
+    ];
+    let time = |renderer: &mut Renderer, camera: &Camera| {
+        for _ in 0..2 {
+            let _ = target.capture(renderer, camera);
+        }
+        let mut samples: Vec<f64> = (0..9)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let _ = target.capture(renderer, camera);
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[4]
+    };
+    println!("PROBE {w}x{h}, Beautiful, median of 9; 'added' is the deck over a bare sky");
+    for (vlabel, height, pitch) in views {
+        let mut camera = Camera {
+            position: Position::from_world(24.0, height, 20.0),
+            ..Camera::default()
+        };
+        camera.look(0.0, pitch);
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: None,
+            clouds: None,
+            quality: client::render::clouds::Quality::Medium,
+            seed: 4242,
+        });
+        let bare = time(&mut renderer, &camera);
+        println!("PROBE view {vlabel}: bare {bare:.2} ms");
+        let mut per_rung = [0.0_f64; 3];
+        for (index, (qlabel, quality)) in rungs.iter().enumerate() {
+            for (sky, cover, strato, alto, cb) in skies {
+                renderer.set_clouds(client::render::clouds::Deck {
+                    layer: Some(deck(16.0, 2, 200.0, 1.0 / 680.0)),
+                    clouds: Some(sky_of(cover, strato, alto, cb)),
+                    quality: *quality,
+                    seed: 4242,
+                });
+                let added = time(&mut renderer, &camera) - bare;
+                per_rung[index] += added / skies.len() as f64;
+                println!("PROBE A {vlabel:>6} {qlabel:>6} {sky:>14}: added {added:6.2} ms");
+            }
+        }
+        println!(
+            "PROBE ladder {vlabel:>6}: Low {:.2} ms is {:.2} of Medium {:.2} ms; High {:.2} ms is {:.1}x Medium",
+            per_rung[0],
+            per_rung[0] / per_rung[1].max(1e-6),
+            per_rung[1],
+            per_rung[2],
+            per_rung[2] / per_rung[1].max(1e-6)
+        );
+        let decks: [(&str, f32, u8, f32, f32); 7] = [
+            ("current c16 d2 t200 f680", 16.0, 2, 200.0, 1.0 / 680.0),
+            ("cell 24", 24.0, 2, 200.0, 1.0 / 680.0),
+            ("cell 32", 32.0, 2, 200.0, 1.0 / 680.0),
+            ("detail 1", 16.0, 1, 200.0, 1.0 / 680.0),
+            ("thickness 140", 16.0, 2, 140.0, 1.0 / 680.0),
+            ("freq 1/850 (bigger)", 16.0, 2, 200.0, 1.0 / 850.0),
+            ("cell 24, freq 1/850", 24.0, 2, 200.0, 1.0 / 850.0),
+        ];
+        for (sky, cover, strato, alto, cb) in [skies[2], skies[4]] {
+            for (dlabel, cell, detail, thickness, frequency) in decks {
+                renderer.set_clouds(client::render::clouds::Deck {
+                    layer: Some(deck(cell, detail, thickness, frequency)),
+                    clouds: Some(sky_of(cover, strato, alto, cb)),
+                    quality: client::render::clouds::Quality::Medium,
+                    seed: 4242,
+                });
+                let added = time(&mut renderer, &camera) - bare;
+                println!("PROBE B {vlabel:>6} {sky:>6} {dlabel:>24}: added {added:6.2} ms");
+            }
+        }
     }
 }

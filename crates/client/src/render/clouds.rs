@@ -66,18 +66,35 @@ const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// **The player's own choice, and the server is never told.** A mod declares
 /// the deck; how much of it this machine draws is a graphics setting like view
 /// distance, and a mod must not assume its clouds are being drawn at all.
+///
+/// **A ladder with a cheap rung at the bottom** — weather ask W19. It was
+/// `Coarse`, `Normal` and `Fine`, and measured on a real card the first two
+/// cost about the same (the coarse cubes' saving was spent on two more
+/// kilometres of reach) while `Fine` cost six times either: a ladder of
+/// about-the-same, about-the-same, six-times, with the default on the
+/// second rung and the top rung the fps report. Now three rungs spaced
+/// about four times apart, the bottom one the default. The old names are
+/// still read from a config file, each onto the rung it meant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Quality {
     /// No clouds at all.
     Off,
-    /// Coarse cubes, to the horizon. Half resolution.
-    Coarse,
-    /// The registered cube size. Half resolution.
+    /// Quarter resolution, double cubes, three kilometres, no rind and no
+    /// self-shadow. The default: the cubes' edges are what survive a coarse
+    /// texel, so it still reads as the designer's deck.
     #[default]
-    Normal,
-    /// Finer cubes, nearer. Full resolution.
-    Fine,
+    #[serde(alias = "coarse")]
+    Low,
+    /// Half resolution, the registered cubes, four kilometres, the rind to
+    /// six hundred blocks. What `Normal` was.
+    #[serde(alias = "normal")]
+    Medium,
+    /// Full resolution, half-size cubes, three kilometres, the rind to twelve
+    /// hundred. What `Fine` was, and the one that costs: four times the
+    /// pixels and twice the steps of `Medium`.
+    #[serde(alias = "fine")]
+    High,
 }
 
 impl Quality {
@@ -89,20 +106,23 @@ impl Quality {
     #[must_use]
     pub const fn cell_scale(self) -> f32 {
         match self {
-            Self::Off | Self::Coarse => 2.0,
-            Self::Normal => 1.0,
-            Self::Fine => 0.5,
+            Self::Off | Self::Low => 2.0,
+            Self::Medium => 1.0,
+            Self::High => 0.5,
         }
     }
 
     /// How far the deck is drawn, in blocks.
+    ///
+    /// **A cheaper rung is not a further one.** `Coarse` reached six
+    /// kilometres against `Normal`'s four, and that is where its double-size
+    /// cubes' saving went (ask W19); `Low` reaches three.
     #[must_use]
     pub const fn reach(self) -> f32 {
         match self {
             Self::Off => 0.0,
-            Self::Coarse => 6000.0,
-            Self::Normal => 4000.0,
-            Self::Fine => 3000.0,
+            Self::Low | Self::High => 3000.0,
+            Self::Medium => 4000.0,
         }
     }
 
@@ -110,13 +130,15 @@ impl Quality {
     ///
     /// It FADES to nothing over this rather than stopping at it: a visible
     /// line across the sky where the detail starts is worse than no detail.
+    /// Zero on `Low`, which also turns the self-shadow off — it reaches twice
+    /// this — since at four pixels a texel nobody sees the rim it darkens,
+    /// and it is six more column lookups per hit.
     #[must_use]
     pub const fn detail_reach(self) -> f32 {
         match self {
-            Self::Off => 0.0,
-            Self::Coarse => 200.0,
-            Self::Normal => 600.0,
-            Self::Fine => 1200.0,
+            Self::Off | Self::Low => 0.0,
+            Self::Medium => 600.0,
+            Self::High => 1200.0,
         }
     }
 
@@ -125,17 +147,18 @@ impl Quality {
     /// **Crisp cube edges are the whole aesthetic**, so this is a look
     /// decision before it is a cost one, and the deck is lifted into the frame
     /// one of its texels to a block of pixels rather than filtered — an edge is
-    /// a step and not a smear. Full resolution on `Fine`, where the cubes are
-    /// small enough to show the difference; `Normal` and `Coarse` at half,
-    /// which is a quarter of the pixels marched. `Normal` at half is weather
-    /// ask W15's last step, the designer's own call, pictured against full to
-    /// make it. `Off` marches nothing and paints the sky alone, which is not
-    /// worth making smaller.
+    /// a step and not a smear. Full resolution on `High`, where the cubes are
+    /// small enough to show the difference; `Medium` at half, which is a
+    /// quarter of the pixels marched and was weather ask W15's last step, the
+    /// designer's own call; `Low` at a quarter, a sixteenth of the pixels,
+    /// ask W19's bottom rung. `Off` marches nothing and paints the sky alone,
+    /// which is not worth making smaller.
     #[must_use]
     pub const fn resolution_divisor(self) -> u32 {
         match self {
-            Self::Off | Self::Fine => 1,
-            Self::Coarse | Self::Normal => 2,
+            Self::Off | Self::High => 1,
+            Self::Medium => 2,
+            Self::Low => 4,
         }
     }
 
@@ -143,6 +166,18 @@ impl Quality {
     #[must_use]
     pub const fn draws(self) -> bool {
         !matches!(self, Self::Off)
+    }
+
+    /// What the settings screen says beside the rung: what it costs, since
+    /// the top one is the fps report and nothing else on the screen says so.
+    #[must_use]
+    pub const fn cost_note(self) -> &'static str {
+        match self {
+            Self::Off => "no clouds",
+            Self::Low => "the default; the cheapest that still shows the cubes",
+            Self::Medium => "about four times the cost of Low",
+            Self::High => "full resolution; about six times the cost of Medium",
+        }
     }
 }
 
@@ -1527,27 +1562,106 @@ mod tests {
         // **One slider, not two dials.** A player who could set a tiny cube
         // size AND the horizon would be choosing something unplayable without
         // being told; coarser cubes are what pays for the extra distance.
-        let coarse = Quality::Coarse;
-        let fine = Quality::Fine;
-        assert!(coarse.cell_scale() > fine.cell_scale());
-        assert!(coarse.reach() > fine.reach());
+        assert!(Quality::Low.cell_scale() > Quality::High.cell_scale());
+        assert!(Quality::Medium.reach() > Quality::High.reach());
 
         // Off draws nothing and asks for nothing.
         assert!(!Quality::Off.draws());
         assert!((Quality::Off.reach() - 0.0).abs() < f32::EPSILON);
-        assert!(Quality::Normal.draws());
+        assert!(Quality::Medium.draws());
     }
 
     #[test]
-    fn only_the_finest_setting_draws_the_deck_at_the_frames_own_resolution() {
+    fn the_bottom_rung_is_the_default_and_is_cheaper_in_every_way_not_further() {
+        // **Weather ask W19.** `Coarse` reached further than `Normal` and so
+        // cost about the same; the coarse rung is cheaper on every axis: a
+        // quarter of the pixels, double cubes, no further, no rind and — since
+        // the self-shadow reaches twice the rind — no self-shadow.
+        assert_eq!(
+            Quality::default(),
+            Quality::Low,
+            "a fresh config draws at Low"
+        );
+        assert!(Quality::Low.reach() <= Quality::Medium.reach());
+        assert!(Quality::Low.cell_scale() >= Quality::Medium.cell_scale() * 2.0);
+        assert_eq!(
+            Quality::Low.resolution_divisor(),
+            Quality::Medium.resolution_divisor() * 2
+        );
+        assert!((Quality::Low.detail_reach() - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_old_rung_names_still_read_from_a_config_file() {
+        // A config written with `normal` — every config there is — must keep
+        // drawing what `normal` drew, which is `Medium`; `coarse` and `fine`
+        // likewise. The new names are what a fresh file writes.
+        let read = |name: &str| -> Quality {
+            serde_json::from_str(&format!("\"{name}\"")).expect("a quality name")
+        };
+        assert_eq!(read("coarse"), Quality::Low);
+        assert_eq!(read("normal"), Quality::Medium);
+        assert_eq!(read("fine"), Quality::High);
+        assert_eq!(read("low"), Quality::Low);
+        assert_eq!(read("medium"), Quality::Medium);
+        assert_eq!(read("high"), Quality::High);
+        assert_eq!(read("off"), Quality::Off);
+        assert_eq!(
+            serde_json::to_string(&Quality::Medium).expect("json"),
+            "\"medium\""
+        );
+    }
+
+    #[test]
+    fn only_the_top_rung_draws_the_deck_at_the_frames_own_resolution() {
         // Crisp cube edges are the aesthetic, so resolution is a look decision
-        // before it is a cost one — and `Fine` is where the cubes are small
-        // enough for it to show. `Normal` at half is weather ask W15's last
-        // step, the designer's call; `Off` has nothing to make smaller.
-        assert_eq!(Quality::Fine.resolution_divisor(), 1);
-        assert_eq!(Quality::Normal.resolution_divisor(), 2);
-        assert_eq!(Quality::Coarse.resolution_divisor(), 2);
+        // before it is a cost one — and `High` is where the cubes are small
+        // enough for it to show. `Medium` at half is weather ask W15's last
+        // step, the designer's call; `Low` at a quarter is W19's; `Off` has
+        // nothing to make smaller.
+        assert_eq!(Quality::High.resolution_divisor(), 1);
+        assert_eq!(Quality::Medium.resolution_divisor(), 2);
+        assert_eq!(Quality::Low.resolution_divisor(), 4);
         assert_eq!(Quality::Off.resolution_divisor(), 1);
+    }
+
+    #[test]
+    fn the_heap_search_reaches_as_far_as_the_widest_heap_and_no_further_than_a_cell() {
+        // **Weather ask W20's lattice condition**, read from the shader
+        // itself so the two numbers cannot drift apart: the curve's top sets
+        // the widest heap, the search's reach must be that heap stretched,
+        // and it must stay under one cell or the three-by-three around a
+        // column misses a heap two cells away and clips it at the edge.
+        let shader = include_str!("clouds.wgsl");
+        let number_after = |marker: &str| -> f32 {
+            let at = shader
+                .find(marker)
+                .unwrap_or_else(|| panic!("`{marker}` in clouds.wgsl"));
+            let rest = &shader[at + marker.len()..];
+            let digits: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            digits
+                .parse()
+                .unwrap_or_else(|_| panic!("a number after `{marker}`"))
+        };
+        let floor = number_after("let radius = spacing * (");
+        let top = number_after("let radius = spacing * (0.30 + ");
+        let reach_floor = number_after("let reach = (");
+        let reach_top = number_after("let reach = (0.30 + ");
+        let stretch = number_after("const HEAP_STRETCH: f32 = ");
+        assert!(
+            (floor - 0.30).abs() < 1e-6,
+            "the smallest heap is as it was: {floor}"
+        );
+        assert!((floor - reach_floor).abs() < 1e-6 && (top - reach_top).abs() < 1e-6);
+        let reach = (floor + top) * (1.0 + stretch) - 0.15;
+        assert!(
+            reach < 1.0,
+            "a heap can reach {reach} cells, past the three-by-three the search looks in"
+        );
+        assert!(top >= 0.53, "the curve's top is {top}; W20 asked for 0.53");
     }
 
     #[test]
@@ -1555,12 +1669,7 @@ mod tests {
         // The rind fades out WITHIN the draw distance. Detail reaching past it
         // would be arithmetic that could never be seen, and a fade that never
         // completed would put a line across the sky.
-        for quality in [
-            Quality::Off,
-            Quality::Coarse,
-            Quality::Normal,
-            Quality::Fine,
-        ] {
+        for quality in [Quality::Off, Quality::Low, Quality::Medium, Quality::High] {
             assert!(
                 quality.detail_reach() <= quality.reach(),
                 "{quality:?} details past where it draws"

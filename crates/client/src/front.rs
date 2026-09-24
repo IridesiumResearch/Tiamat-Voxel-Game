@@ -720,8 +720,6 @@ impl Front {
     /// Everything below is a field of `client.toml` and nothing else, which is
     /// why it can be set from here.
     fn settings_tab(&mut self, ui: &mut egui::Ui, config: &mut crate::config::Config) {
-        use crate::config::{LightingMode, RenderMode, ShadowQuality};
-
         let mut changed = false;
         {
             ui.heading("Player");
@@ -733,44 +731,7 @@ impl Front {
             });
             ui.separator();
 
-            ui.heading("Graphics");
-            changed |= choice(
-                ui,
-                "Lighting",
-                &mut config.lighting_mode,
-                &[
-                    (LightingMode::Simple, "Simple"),
-                    (LightingMode::Classic, "Classic"),
-                    (LightingMode::Beautiful, "Beautiful"),
-                ],
-            );
-            changed |= choice(
-                ui,
-                "Shadows",
-                &mut config.shadow_quality,
-                &[
-                    (ShadowQuality::Off, "Off"),
-                    (ShadowQuality::Low, "Low"),
-                    (ShadowQuality::Medium, "Medium"),
-                    (ShadowQuality::High, "High"),
-                ],
-            );
-            changed |= choice(
-                ui,
-                "Draw",
-                &mut config.render_mode,
-                &[
-                    (RenderMode::Textured, "Textured"),
-                    (RenderMode::Flat, "Flat"),
-                    (RenderMode::Wireframe, "Wireframe"),
-                ],
-            );
-            changed |= ui
-                .checkbox(&mut config.vsync, "Wait for the display")
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut config.fov_degrees, 60.0..=110.0).text("field of view"))
-                .changed();
+            changed |= graphics_settings(ui, config);
             ui.separator();
 
             ui.heading("World");
@@ -958,6 +919,72 @@ impl Front {
 /// Buttons rather than a dropdown: there are three or four of each, a player
 /// wants to see what the choices ARE, and a menu that has to be opened to find
 /// out is a menu that gets left on its default.
+/// The Graphics section of the settings tab: everything about how the world
+/// is drawn, each a field of `client.toml`. Its own function because the tab
+/// sat on clippy's line ceiling, and a section is a unit a reader wants
+/// whole.
+fn graphics_settings(ui: &mut egui::Ui, config: &mut crate::config::Config) -> bool {
+    use crate::config::{LightingMode, RenderMode, ShadowQuality};
+    use crate::render::clouds::Quality as CloudQuality;
+    let mut changed = false;
+    ui.heading("Graphics");
+    changed |= choice(
+        ui,
+        "Lighting",
+        &mut config.lighting_mode,
+        &[
+            (LightingMode::Simple, "Simple"),
+            (LightingMode::Classic, "Classic"),
+            (LightingMode::Beautiful, "Beautiful"),
+        ],
+    );
+    changed |= choice(
+        ui,
+        "Shadows",
+        &mut config.shadow_quality,
+        &[
+            (ShadowQuality::Off, "Off"),
+            (ShadowQuality::Low, "Low"),
+            (ShadowQuality::Medium, "Medium"),
+            (ShadowQuality::High, "High"),
+        ],
+    );
+    changed |= choice(
+        ui,
+        "Draw",
+        &mut config.render_mode,
+        &[
+            (RenderMode::Textured, "Textured"),
+            (RenderMode::Flat, "Flat"),
+            (RenderMode::Wireframe, "Wireframe"),
+        ],
+    );
+    // **With what it costs beside it** — weather ask W19. The top rung
+    // is the one that hurts, and a name alone does not say so.
+    changed |= choice(
+        ui,
+        "Clouds",
+        &mut config.clouds,
+        &[
+            (CloudQuality::Off, "Off"),
+            (CloudQuality::Low, "Low"),
+            (CloudQuality::Medium, "Medium"),
+            (CloudQuality::High, "High"),
+        ],
+    );
+    ui.horizontal(|ui| {
+        ui.add_sized([120.0, 18.0], egui::Label::new(""));
+        ui.weak(config.clouds.cost_note());
+    });
+    changed |= ui
+        .checkbox(&mut config.vsync, "Wait for the display")
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut config.fov_degrees, 60.0..=110.0).text("field of view"))
+        .changed();
+    changed
+}
+
 fn choice<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
     label: &str,
