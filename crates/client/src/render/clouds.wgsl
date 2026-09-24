@@ -435,6 +435,15 @@ const UNDER_SWELL: f32 = 0.03;
 // How deep the small cubes ruffle the underside where the camera is close
 // enough to see them, in small cubes.
 const UNDER_RUFFLE: f32 = 0.6;
+// The grain — weather ask W22. The rind's cycle is about five cubes, so a
+// run of neighbouring columns quantises to the same shelf and the deck
+// reads as a lattice of clean steps. A second octave of the same noise,
+// four times the rind's frequency and a quarter of its amplitude, de-aligns
+// the shelves without redrawing them: at the rind's own amplitude the
+// 22-cycle experiment above was confetti, and the ask is "extremely
+// subtle". Centred, so it gnarls both ways rather than fattening the deck.
+const GRAIN: f32 = 0.3;
+const GRAIN_CYCLES: f32 = 29.0;
 
 // The field at one column of the grid.
 //
@@ -508,7 +517,12 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     // every crown to confetti at sixteen-block cubes.
     var rind = 0.0;
     if (detail_mix > 0.0) {
-        rind = small * 1.2 * detail_mix * (value2(at * 7.0, seed + 91.0) - 0.4);
+        // The grain rides inside the rind, so every top and every ruffled
+        // underside that takes the one takes the other — one place to fade
+        // with distance, and nothing for a genus to forget.
+        rind = small * detail_mix
+            * (1.2 * (value2(at * 7.0, seed + 91.0) - 0.4)
+                + GRAIN * (value2(at * GRAIN_CYCLES, seed + 53.0) - 0.5));
     }
 
     // The low cloud — heaps, the sheet and a storm's tower — shares the lower

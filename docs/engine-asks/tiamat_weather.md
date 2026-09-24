@@ -12,7 +12,7 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Nothing open: W19, W20 and W21 landed 2026-09-24, W17 and W18 the day before, below.
+Nothing open: W19 to W22 landed 2026-09-24, W17 and W18 the day before, below.
 
 **For the sky's owner, 2026-09-23**, protocol v75 — not an ask, a
 capability that landed for the space work and is the sky mod's to use: a
@@ -54,6 +54,22 @@ shows through it at neither. Cost on llvmpipe, Beautiful, Normal, Weather's
 deck, the deck's own cost over a bare sky at 320 x 240, level / thirty
 degrees up / above the deck: 1.20 / 1.83 / 4.04 ms before any of W15, and
 the numbers after are in `how_long_the_deck_costs_from_three_views`.
+
+**W22 landed 2026-09-24.** The deck's cube pattern read as a lattice: the
+rind's cycle is about five cubes, so runs of neighbouring columns quantised
+to the same shelf and every edge was a clean staircase. The designer asked
+for "subtle, gnarly noise detail to break up the clear cell pattern just a
+little", and could be "extremely subtle". A second octave of the rind's own
+value noise — four times the frequency (29 cycles per field unit, about a
+cycle per large cube at Weather's numbers) and a quarter of the amplitude,
+centred so it gnarls both ways — folded INTO the rind, so every top and
+every ruffled underside that takes the one takes the other and it fades
+with distance exactly as the rind does. No new field on `register_clouds`:
+the 22-cycle experiment at the rind's own amplitude was confetti, and the
+distance between "subtle" and "confetti" is a judgement the engine keeps
+rather than a knob it hands out — the same reasoning `sway` records. All
+sixteen cloud gates pass unchanged; the pictures are the designer's to
+take (`pictures_of_the_deck_for_the_designers_eye`).
 
 **W21 landed 2026-09-24.** Each cloud is decided from the weather at its
 own centre, and the column's weather is for the darkness alone. A heap asks
