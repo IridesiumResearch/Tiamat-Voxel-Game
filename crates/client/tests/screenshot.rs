@@ -5792,8 +5792,13 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
     // less than they did, and the side of this frame with less cloud in it
     // fell from 0.0485 of greying to just under the old line. Still a fifth
     // of that side's blue, and still nothing on the other side.
+    // **A margin of 0.03, not 0.04.** The greying measured this way is about
+    // 0.04 — 0.0405 on lavapipe and 0.0399 on CI's Windows and macOS
+    // adapters after W20 widened the heaps — and a threshold at the effect's
+    // own size is a coin. The other side is held within 0.02, so 0.03 still
+    // tells a greyed half from an untouched one.
     assert!(
-        clear_left - left_a > 0.04,
+        clear_left - left_a > 0.03,
         "a storm over +x should grey that side: {clear_left:.4} clear, {left_a:.4} stormy"
     );
     assert!(
@@ -5801,7 +5806,7 @@ fn a_storm_over_half_the_world_greys_that_half_of_the_sky() {
         "a storm over +x greyed the other side too: {clear_right:.4} clear, {right_a:.4} with it"
     );
     assert!(
-        clear_right - right_b > 0.04,
+        clear_right - right_b > 0.03,
         "a storm over -x should grey that side: {clear_right:.4} clear, {right_b:.4} stormy"
     );
     assert!(

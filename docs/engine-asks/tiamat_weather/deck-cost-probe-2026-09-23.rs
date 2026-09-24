@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Iridesium
+// SPDX-License-Identifier: GPL-3.0-only
 
 // ---- SCRATCH PROBE (Weather, 2026-09-23): removed after the run. ----
 #[test]
