@@ -12,8 +12,44 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W24, W25 and W26, filed 2026-09-25. W19 to W23 landed 2026-09-24, W17
+Open: W24 to W27, filed 2026-09-25. W19 to W23 landed 2026-09-24, W17
 and W18 the day before, below.
+
+## W27. The deck still lags; the mod is out of knobs (2026-09-25)
+
+**Seen.** The designer, on the default rung: the clouds are "a bit too
+laggy — let's try to optimize and cut some corners". It is the frame, not
+the tick.
+
+**What weather did.** Everything this side has, by plan 10.19's
+measurements: cubes of 32 (from 24; about an eighth off), thickness 180
+(from 200; 140 measured a tenth off), a nearly cloudless clear sky (0.06
+cumulus, 0.08 altocumulus; altocumulus measured 3 to 15% of a clear day).
+Surface `detail` measured nothing, and the floor rose a quarter (400 to 500
+over the ground) at the designer's asking, which lengthens the ray to the
+deck from the ground. That is roughly a fifth, and the rest is the pass.
+
+**Why the mod cannot do more.** What is left is how often and how finely
+the pass marches, which is the renderer's.
+
+**Ask — any of these, cheapest first, gated by the W19 probe
+(`how_long_weathers_deck_costs_by_knob`) on `Low`:**
+- **Temporal amortisation.** March half (or a quarter) of the deck's
+  pixels each frame in a checkerboard and reproject the rest from the last
+  frame by the camera's motion; the deck moves slowly and is soft-edged,
+  which is the case this is made for. Roughly halves `Low` again.
+- **Empty-space skipping at the slab.** A coarse occupancy per large cube
+  (or per map cell), so a ray crosses a clear stretch in one step rather
+  than one per cube; a clear or cloudy sky is mostly empty stretches.
+- **Distance LOD.** Past a kilometre or so, march cubes twice the size and
+  skip the rind: the cost of the far deck is steps a pixel cannot resolve.
+- **A cheaper look from above.** The view from over the deck cost twice any
+  other in 10.19; the tops seen from above could stop at the first hit
+  with no in-scatter or shadow terms.
+
+Gate: `Low` at 1080p, the six skies and three views, at most half of
+today's median, with the storm view from above no worse than today's level
+view.
 
 ## W26. A lightning bolt that is drawn (2026-09-25)
 
