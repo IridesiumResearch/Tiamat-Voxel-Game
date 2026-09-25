@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 75;
+pub const PROTOCOL_VERSION: u32 = 76;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,13 @@ pub const PROTOCOL_VERSION: u32 = 75;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v76 (Life, right-click to eat): `ClientMessage::Use` carries an
+// `Option<SubNodePos>`. The place control pressed at NOTHING in reach — open
+// sky, or a block too far — is a use too, sent without a cell. The server hands
+// it only to the mods whose `register_on_use` asked with `{ anywhere = true }`,
+// so a callback written for a block is never handed a nil. The client used to
+// answer such a press with a local warning and send nothing, and no mod could
+// hear a player eat what they held.
 // v75 (space): `SkyFrame` carries `stars`, how much of the star catalog shows,
 // and `SkyTable` carries `observer`, where in the universe the domain being
 // streamed sits, which is what the catalog is drawn from. The table is now
@@ -1294,9 +1301,9 @@ pub enum ClientMessage {
         value: u32,
     },
 
-    /// The place control landed on a block and there was nothing to place.
+    /// The place control was pressed and there was nothing to place.
     ///
-    /// **Appended at the end** (protocol v52).
+    /// **Appended at the end** (protocol v52); `target` became optional in v76.
     ///
     /// Sent instead of [`Self::Place`] when the hand is empty or holds an item,
     /// which is when a client used to warn locally and send nothing — and so
@@ -1304,10 +1311,16 @@ pub enum ClientMessage {
     /// open it or a lever to pull it. A request, like every other: whether the
     /// cell is in reach, what is in it and what the player holds are read by
     /// the server, and the client names only where it was aiming.
+    ///
+    /// **Aimed at nothing, it is sent all the same**, with no cell: the control
+    /// pressed at open sky or past reach with a meal in the hand is how a
+    /// player eats it. The server hands such a use only to the mods that
+    /// registered for one.
     Use {
         /// The cell under the crosshair — the one a dig would take, not the
-        /// empty one a placement would step across to.
-        target: SubNodePos,
+        /// empty one a placement would step across to — or `None` when the
+        /// crosshair was on nothing in reach.
+        target: Option<SubNodePos>,
     },
 }
 
@@ -3972,12 +3985,19 @@ mod tests {
         })
         .expect("encode");
         assert_eq!(setting[0], 20);
-        // Protocol v52.
+        // Protocol v52; the cell became optional in v76, which changes the
+        // body and not the ordinal.
         let used = encode(&ClientMessage::Use {
-            target: SubNodePos::new(0, 0, 0),
+            target: Some(SubNodePos::new(0, 0, 0)),
         })
         .expect("encode");
         assert_eq!(used[0], 21);
+        let at_nothing = encode(&ClientMessage::Use { target: None }).expect("encode");
+        assert_eq!(
+            at_nothing,
+            [21, 0],
+            "a use at nothing is the ordinal and an absent cell"
+        );
     }
 
     #[test]

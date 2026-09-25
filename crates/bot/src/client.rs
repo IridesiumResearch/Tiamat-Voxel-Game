@@ -2076,7 +2076,23 @@ impl Bot {
     ///
     /// [`BotError::Frame`] if the write fails.
     pub async fn use_block(&mut self, target: tiamat_core::SubNodePos) -> Result<(), BotError> {
-        self.send(&tiamat_core::proto::ClientMessage::Use { target })
+        self.send(&tiamat_core::proto::ClientMessage::Use {
+            target: Some(target),
+        })
+        .await
+    }
+
+    /// Uses what is held at nothing: the place control pressed with no block
+    /// in reach (protocol v76).
+    ///
+    /// Reaches only the mods whose `register_on_use` asked for it with
+    /// `{ anywhere = true }`; the rest never see a use without a cell.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Frame`] if the write fails.
+    pub async fn use_at_nothing(&mut self) -> Result<(), BotError> {
+        self.send(&tiamat_core::proto::ClientMessage::Use { target: None })
             .await
     }
 

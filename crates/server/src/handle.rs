@@ -4207,15 +4207,6 @@ impl ServerHandle {
                         // it.
                         for (actor, target) in shared.drain_uses() {
                             let using_in = shared.player_domain(&actor);
-                            let in_reach = shared
-                                .player_eye(&actor)
-                                .is_none_or(|(origin, eye)| {
-                                    tiamat_core::place::within_reach(origin, eye, target)
-                                });
-                            if !in_reach {
-                                shared.tell(&actor, "that is too far away".to_owned());
-                                continue;
-                            }
                             let held = shared.hands_of(&actor).main;
                             let fallback = match &held {
                                 None => "nothing selected to build with",
@@ -4227,29 +4218,53 @@ impl ServerHandle {
                                 // instead is asked about, and told nothing.
                                 Some(_) => "",
                             };
-                            let material = world
-                                .subnode(&using_in, target, &mut source)
-                                .unwrap_or(tiamat_core::MaterialId::AIR);
-                            // Air is not a block to use: whatever was aimed at
-                            // went between the click and the tick.
-                            let verdict = if material.is_air() {
-                                tiamat_core::script::HookOutcome::allow()
-                            } else {
-                                let event = tiamat_core::script::UseEvent {
-                                    player: *actor.as_bytes(),
-                                    domain: using_in.clone(),
-                                    target,
-                                    material,
-                                    held,
-                                };
-                                // Lent the world, as every hook a player's own
-                                // action reaches: a use decides by what the
-                                // block HOLDS, and has to be able to look.
-                                let (returned, verdict) =
-                                    sight.lending(world, || source.may_use(&event));
-                                world = returned;
-                                verdict
+                            let aim = match target {
+                                // **At nothing in reach** (protocol v76): open
+                                // sky, or further than the arm goes, with a
+                                // meal in the hand. There is no cell to check,
+                                // and only the mods that registered for such
+                                // a use are asked.
+                                None => None,
+                                Some(cell) => {
+                                    let in_reach = shared
+                                        .player_eye(&actor)
+                                        .is_none_or(|(origin, eye)| {
+                                            tiamat_core::place::within_reach(origin, eye, cell)
+                                        });
+                                    if !in_reach {
+                                        shared.tell(&actor, "that is too far away".to_owned());
+                                        continue;
+                                    }
+                                    let material = world
+                                        .subnode(&using_in, cell, &mut source)
+                                        .unwrap_or(tiamat_core::MaterialId::AIR);
+                                    // Air is not a block to use: whatever was
+                                    // aimed at went between the click and the
+                                    // tick. Not a use at nothing either — the
+                                    // client sends that as one — so nobody is
+                                    // asked, and the player hears what an
+                                    // unhandled use hears.
+                                    if material.is_air() {
+                                        if !fallback.is_empty() {
+                                            shared.tell(&actor, fallback.to_owned());
+                                        }
+                                        continue;
+                                    }
+                                    Some(tiamat_core::script::UseAim { cell, material })
+                                }
                             };
+                            let event = tiamat_core::script::UseEvent {
+                                player: *actor.as_bytes(),
+                                domain: using_in,
+                                aim,
+                                held,
+                            };
+                            // Lent the world, as every hook a player's own
+                            // action reaches: a use decides by what the
+                            // block HOLDS, and has to be able to look.
+                            let (returned, verdict) =
+                                sight.lending(world, || source.may_use(&event));
+                            world = returned;
                             for (mod_id, err) in &verdict.faults {
                                 error!(mod_id = %mod_id, "mod disabled after an on_use failure: {err}");
                             }

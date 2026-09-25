@@ -539,6 +539,58 @@ fn a_use_of_a_block_reaches_the_mods_and_an_unhandled_one_gets_the_engines_word(
     assert!(server.stop());
 }
 
+#[test]
+fn a_use_at_nothing_reaches_a_mod_that_asked_for_one_and_is_answered_like_any_other() {
+    // Protocol v76, for the Life mod's meals: the place control at open sky
+    // with food in hand. A mod that registered `anywhere` hears a use with no
+    // cell and the hand as ever; a use it lets pass gets the engine's word,
+    // exactly as one at a block does.
+    let server = start(
+        "use-at-nothing",
+        write_warden(
+            "use-at-nothing",
+            "heard = 0\n\
+             game.register_on_use(function(e)\n\
+             \x20   heard = heard + 1\n\
+             \x20   if heard > 1 then return end\n\
+             \x20   return 'at nothing: x=' .. tostring(e.x) .. ' held=' .. tostring(e.held)\n\
+             end, { anywhere = true })",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let told = |bot: &Bot, word: &str| bot.notices().iter().any(|text| text.starts_with(word));
+        async fn wait_for(bot: &mut Bot, word: &str) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline
+                && !bot.notices().iter().any(|text| text.starts_with(word))
+            {
+                let _ = tokio::time::timeout(Duration::from_millis(200), bot.recv()).await;
+            }
+        }
+
+        bot.use_at_nothing().await.expect("send");
+        wait_for(&mut bot, "at nothing").await;
+        assert!(
+            told(&bot, "at nothing: x=nil held=nil"),
+            "the mod did not hear a use at nothing, or it came with a cell; notices {:?}",
+            bot.notices()
+        );
+
+        // The second one it lets pass: the warning an empty hand has always had.
+        bot.use_at_nothing().await.expect("send");
+        wait_for(&mut bot, "nothing selected").await;
+        assert!(
+            told(&bot, "nothing selected to build with"),
+            "a use at nothing that nobody handled said nothing; notices {:?}",
+            bot.notices()
+        );
+    });
+
+    assert!(server.stop());
+}
+
 /// Where the reference mods live, for the test below.
 fn reference_mods() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

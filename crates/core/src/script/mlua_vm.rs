@@ -63,6 +63,11 @@ const HOOK_PLACE: &str = "on_place";
 /// Registry key holding the mods that registered `on_use`.
 const USERS: &str = "tiamat.users";
 
+/// Registry key holding the mods whose `on_use` also hears a use at NOTHING:
+/// registered with `{ anywhere = true }`. A subset of [`USERS`] in the same
+/// order, so a use aimed at a block asks each of them once, in its place.
+const USERS_ANYWHERE: &str = "tiamat.users_anywhere";
+
 /// Hook name used in registry keys and in fault messages.
 const HOOK_USE: &str = "on_use";
 
@@ -3129,11 +3134,16 @@ impl ScriptVm for MluaVm {
 
     fn use_block(&mut self, event: &crate::script::UseEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.player).and_then(|table| {
-            table.set("x", event.target.x)?;
-            table.set("y", event.target.y)?;
-            table.set("z", event.target.z)?;
+            // A use at nothing has no cell: the fields stay absent, and only
+            // the mods that registered `anywhere` are asked, so nobody who
+            // wrote `e.x // 3` is handed a nil.
+            if let Some(aim) = &event.aim {
+                table.set("x", aim.cell.x)?;
+                table.set("y", aim.cell.y)?;
+                table.set("z", aim.cell.z)?;
+                table.set("material", aim.material.0)?;
+            }
             table.set("domain", event.domain.as_str())?;
-            table.set("material", event.material.0)?;
             // The same shape `game.held` answers with, absent for an empty
             // hand, so `if event.held then` is the test.
             let held = event
@@ -3148,7 +3158,12 @@ impl ScriptVm for MluaVm {
             // could not build the question.
             return HookOutcome::allow();
         };
-        self.run_hook(HOOK_USE, USERS, &table)
+        let asked = if event.aim.is_some() {
+            USERS
+        } else {
+            USERS_ANYWHERE
+        };
+        self.run_hook(HOOK_USE, asked, &table)
     }
 
     fn punch(&mut self, event: &crate::script::PunchEvent) -> HookOutcome {
@@ -4035,7 +4050,7 @@ impl MluaVm {
         .map_err(|err| self.vm_error(&err))?;
         game.set(
             "register_on_use",
-            self.hook_registrar(mod_id, HOOK_USE, USERS)?,
+            self.hook_registrar_with(mod_id, HOOK_USE, USERS, Some(("anywhere", USERS_ANYWHERE)))?,
         )
         .map_err(|err| self.vm_error(&err))?;
         // Registered through the same machinery even though it cannot veto:
@@ -4140,11 +4155,26 @@ impl MluaVm {
         hook: &str,
         list: &'static str,
     ) -> Result<mlua::Function, ScriptError> {
+        self.hook_registrar_with(mod_id, hook, list, None)
+    }
+
+    /// A hook registrar with one boolean option, the only kind any hook takes
+    /// so far: `option` is its name and the second list a `true` adds the mod
+    /// to beside `list` — `on_use`'s `anywhere`. A hook without one refuses an
+    /// options table outright, and an unknown key is an error rather than a
+    /// silent no, so a misspelt option cannot pass for a working one.
+    fn hook_registrar_with(
+        &self,
+        mod_id: &str,
+        hook: &str,
+        list: &'static str,
+        option: Option<(&'static str, &'static str)>,
+    ) -> Result<mlua::Function, ScriptError> {
         let owner = mod_id.to_owned();
         let hook = hook.to_owned();
         let key = Self::hook_key(&hook, mod_id);
         self.lua
-            .create_function(move |lua, callback: mlua::Function| {
+            .create_function(move |lua, (callback, options): (mlua::Function, Option<Table>)| {
                 let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
                 if frozen {
                     return Err(mlua::Error::external(format!(
@@ -4174,12 +4204,49 @@ impl MluaVm {
                          mod — combine them into one function."
                     )));
                 }
+                // The options, checked before anything is written.
+                let mut also = None;
+                if let Some(options) = options {
+                    let Some((flag, list_for_flag)) = option else {
+                        return Err(mlua::Error::external(format!(
+                            "mod `{owner}`: `register_{hook}` takes no options"
+                        )));
+                    };
+                    for pair in options.pairs::<Value, Value>() {
+                        let (name, value) = pair?;
+                        let is_flag =
+                            matches!(&name, Value::String(name) if name.to_string_lossy() == flag);
+                        if !is_flag {
+                            let named = match &name {
+                                Value::String(name) => format!("`{}`", name.to_string_lossy()),
+                                other => format!("of type {}", other.type_name()),
+                            };
+                            return Err(mlua::Error::external(format!(
+                                "mod `{owner}`: `register_{hook}` has no option {named}"
+                            )));
+                        }
+                        match value {
+                            Value::Boolean(true) => also = Some(list_for_flag),
+                            Value::Boolean(false) => {}
+                            other => {
+                                return Err(mlua::Error::external(format!(
+                                    "mod `{owner}`: `{flag}` is true or false, not {}",
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    }
+                }
                 lua.set_named_registry_value(&key, callback)?;
                 // Load order, which the resolver already made deterministic —
                 // so which mod gets to veto first is a property of the mod set
                 // rather than of anything at runtime.
                 let registered: Table = lua.named_registry_value(list)?;
                 registered.push(owner.clone())?;
+                if let Some(also) = also {
+                    let listed: Table = lua.named_registry_value(also)?;
+                    listed.push(owner.clone())?;
+                }
                 Ok(())
             })
             .map_err(|err| self.vm_error(&err))
@@ -7977,6 +8044,7 @@ impl MluaVm {
             DIGGERS,
             PLACERS,
             USERS,
+            USERS_ANYWHERE,
             PUNCHERS,
             FLOWERS,
             JOINERS,
@@ -12427,8 +12495,10 @@ mod tests {
         let bush = crate::script::UseEvent {
             player: [0xEF; 32],
             domain: crate::domain::OVERWORLD.to_owned(),
-            target: crate::coords::SubNodePos::new(4, -2, 9),
-            material: MaterialId(7),
+            aim: Some(crate::script::UseAim {
+                cell: crate::coords::SubNodePos::new(4, -2, 9),
+                material: MaterialId(7),
+            }),
             held: crate::inventory::Stack::new(MaterialId(3), 27),
         };
         let handled = vm.use_block(&bush);
@@ -12455,7 +12525,10 @@ mod tests {
 
         // Stone nobody handles: both are asked, and the outcome says so.
         let stone = crate::script::UseEvent {
-            material: MaterialId(2),
+            aim: Some(crate::script::UseAim {
+                cell: crate::coords::SubNodePos::new(4, -2, 9),
+                material: MaterialId(2),
+            }),
             held: None,
             ..bush
         };
@@ -12466,6 +12539,128 @@ mod tests {
             seen.get::<Value>("held").expect("held").is_nil(),
             "an empty hand has a held"
         );
+    }
+
+    #[test]
+    fn a_use_at_nothing_reaches_only_the_mods_that_asked_for_one() {
+        // The place control at open sky, with a meal in the hand. A callback
+        // written for a block does `e.x // 3` and would be disabled by a nil,
+        // so it is never asked; one registered `anywhere` is, with no cell and
+        // the hand as ever — and still hears every use at a block, in its
+        // place in load order.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "garden",
+            "asked = 0\ngame.register_on_use(function(e)\n\
+             \x20   asked = asked + 1\n\
+             \x20   if e.x // 3 == 1 then return '' end\n\
+             end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "kitchen",
+            "game.register_on_use(function(e)\n\
+             \x20   seen = e\n\
+             \x20   if e.held and e.held.material == 3 then return 'ate' end\n\
+             end, { anywhere = true })",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let at_nothing = crate::script::UseEvent {
+            player: [0xEF; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
+            aim: None,
+            held: crate::inventory::Stack::new(MaterialId(3), 27),
+        };
+        let handled = vm.use_block(&at_nothing);
+        assert!(
+            !handled.allowed,
+            "the kitchen did not hear a use at nothing"
+        );
+        assert_eq!(handled.reason.as_deref(), Some("ate"));
+        let garden = vm.environment("garden").expect("env").clone();
+        assert_eq!(
+            garden.get::<i32>("asked").expect("asked"),
+            0,
+            "a use at nothing reached a mod that did not ask for one"
+        );
+        let kitchen = vm.environment("kitchen").expect("env").clone();
+        let seen: Table = kitchen.get("seen").expect("seen");
+        assert!(
+            seen.get::<Value>("x").expect("x").is_nil(),
+            "a use at nothing came with a cell"
+        );
+        assert!(seen.get::<Value>("material").expect("material").is_nil());
+        assert_eq!(seen.get::<String>("domain").expect("domain"), "overworld");
+
+        // At a block, both are asked in load order: the garden first, which
+        // lets this one pass.
+        let at_stone = crate::script::UseEvent {
+            aim: Some(crate::script::UseAim {
+                cell: crate::coords::SubNodePos::new(9, 0, 9),
+                material: MaterialId(2),
+            }),
+            ..at_nothing
+        };
+        assert_eq!(vm.use_block(&at_stone).reason.as_deref(), Some("ate"));
+        assert_eq!(garden.get::<i32>("asked").expect("asked"), 1);
+        let seen: Table = kitchen.get("seen").expect("seen");
+        assert_eq!(seen.get::<i32>("x").expect("x"), 9);
+
+        // An empty hand at nothing is a use nobody handled.
+        let empty = crate::script::UseEvent {
+            aim: None,
+            held: None,
+            ..at_stone
+        };
+        assert!(
+            vm.use_block(&empty).allowed,
+            "an empty hand at nothing was handled"
+        );
+    }
+
+    #[test]
+    fn a_hook_option_that_does_not_exist_is_refused_at_load() {
+        // A misspelt option must not pass for a working one, and a hook that
+        // takes none must not quietly ignore a table. The reason is in the
+        // error's detail: its display names only the mod and the file.
+        fn detail(err: &ScriptError) -> String {
+            match err {
+                ScriptError::Vm { detail, .. }
+                | ScriptError::Load { detail, .. }
+                | ScriptError::Runtime { detail, .. } => detail.clone(),
+                other => other.to_string(),
+            }
+        }
+        let mut typo = vm();
+        let err = load(
+            &mut typo,
+            "typo",
+            "game.register_on_use(function() end, { anywere = true })",
+        )
+        .expect_err("a misspelt option loaded");
+        assert!(detail(&err).contains("no option `anywere`"), "{err}");
+
+        let mut optioned = vm();
+        let err = load(
+            &mut optioned,
+            "optioned",
+            "game.register_on_place(function() end, { anywhere = true })",
+        )
+        .expect_err("a hook without options took one");
+        assert!(detail(&err).contains("takes no options"), "{err}");
+
+        let mut stringy = vm();
+        let err = load(
+            &mut stringy,
+            "stringy",
+            "game.register_on_use(function() end, { anywhere = 'yes' })",
+        )
+        .expect_err("a string option loaded");
+        assert!(detail(&err).contains("true or false"), "{err}");
     }
 
     #[test]

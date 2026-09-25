@@ -213,7 +213,8 @@ pub struct Shared {
     /// Uses of a block — the place control with nothing to place — waiting for
     /// the tick to ask the mods. Queued for the reason punches are: what the
     /// cell holds and whether it is in reach are the tick's to read.
-    pub uses: std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, tiamat_core::SubNodePos)>>,
+    pub uses:
+        std::sync::Mutex<std::collections::VecDeque<(PlayerUuid, Option<tiamat_core::SubNodePos>)>>,
     /// Mod-registered actions waiting to be handed to the mods.
     ///
     /// Queued on the connection thread and drained by the tick, like every
@@ -1759,7 +1760,7 @@ impl Shared {
     /// Records a use of a block for the next tick to hand to the mods.
     ///
     /// Bounded like every queue a client fills.
-    pub fn queue_use(&self, actor: PlayerUuid, target: tiamat_core::SubNodePos) -> bool {
+    pub fn queue_use(&self, actor: PlayerUuid, target: Option<tiamat_core::SubNodePos>) -> bool {
         let Ok(mut queue) = self.uses.lock() else {
             return false;
         };
@@ -1771,7 +1772,7 @@ impl Shared {
     }
 
     /// Takes the uses waiting for the mods.
-    pub fn drain_uses(&self) -> Vec<(PlayerUuid, tiamat_core::SubNodePos)> {
+    pub fn drain_uses(&self) -> Vec<(PlayerUuid, Option<tiamat_core::SubNodePos>)> {
         self.uses
             .lock()
             .map(|mut queue| queue.drain(..).collect())

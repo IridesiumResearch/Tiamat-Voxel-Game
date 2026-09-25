@@ -812,25 +812,35 @@ pub struct PlaceEvent {
     pub units: u32,
 }
 
-/// The place control landing on a block with nothing to place.
+/// The place control pressed with nothing to place.
 ///
 /// Handed to `on_use` when a player's hand is empty or holds an item and they
-/// press the place control at a block in reach. There is no engine action to
-/// veto — nothing would have been placed — so a mod returning a refusal is
-/// saying it HANDLED the use: `""` silently, a string with that notice. A use
-/// nobody handles is answered with the engine's own warning.
+/// press the place control at a block in reach — or at nothing (protocol v76),
+/// with no `aim`, which only the callbacks registered `anywhere` receive.
+/// There is no engine action to veto — nothing would have been placed — so a
+/// mod returning a refusal is saying it HANDLED the use: `""` silently, a
+/// string with that notice. A use nobody handles is answered with the engine's
+/// own warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseEvent {
     /// Who is using.
     pub player: [u8; 32],
     /// The space they are in, so a hook can read the block it was asked about.
     pub domain: String,
-    /// The cell under the crosshair.
-    pub target: crate::coords::SubNodePos,
-    /// What that cell is made of, in the id space a mod speaks.
-    pub material: MaterialId,
+    /// What the crosshair was on — or `None` for the control pressed at
+    /// nothing in reach, which only the callbacks registered `anywhere` hear.
+    pub aim: Option<UseAim>,
     /// What the player holds in the main hand, if anything.
     pub held: Option<crate::inventory::Stack>,
+}
+
+/// The block a use was aimed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseAim {
+    /// The cell under the crosshair.
+    pub cell: crate::coords::SubNodePos,
+    /// What that cell is made of, in the id space a mod speaks.
+    pub material: MaterialId,
 }
 
 /// Somebody hitting something.

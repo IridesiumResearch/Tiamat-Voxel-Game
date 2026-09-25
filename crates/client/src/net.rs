@@ -674,13 +674,15 @@ pub enum Command {
         detail: Option<String>,
     },
 
-    /// The place control landed on a block with nothing to place.
+    /// The place control was pressed with nothing to place.
     ///
     /// A request: the server reads the cell and asks the mods whether one
-    /// handles it (`register_on_use`).
+    /// handles it (`register_on_use`). Aimed at nothing, it goes without a
+    /// cell, to the mods that asked to hear such a use.
     Use {
-        /// The cell under the crosshair — the one a dig would take.
-        target: tiamat_core::SubNodePos,
+        /// The cell under the crosshair — the one a dig would take — or
+        /// `None` for nothing in reach.
+        target: Option<tiamat_core::SubNodePos>,
     },
 
     /// Report that a mod-registered action was pressed or released.

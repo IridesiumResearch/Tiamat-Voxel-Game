@@ -149,7 +149,11 @@ cancelled dig. Picking fruit, opening a door, pulling a lever: the event has the
 cell, what it is made of and what is in the hand, `game.get_block` works inside
 it, and returning `""` says you handled it. Return `nil` for blocks that are not
 yours, so the next mod — and in the end the engine's own "nothing selected"
-warning — gets its turn.
+warning — gets its turn. **Right-clicking at nothing** (open sky, or past
+reach) is a use too, heard only by a callback registered with
+`{ anywhere = true }`: it comes with no cell — `e.x` and `e.material` nil — and
+`e.held` as ever, which is how a meal is eaten wherever the player looks. A
+callback that did not ask never sees a use without a cell.
 
 **Between events, `game.looking_at(uuid)` says what a player's crosshair is
 on** — the same `{ x, y, z, domain, material }` a use event carries, plus the

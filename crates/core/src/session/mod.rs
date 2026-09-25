@@ -115,13 +115,14 @@ pub enum Action {
         detail: Option<String>,
     },
 
-    /// The place control landed on a block with nothing to place.
+    /// The place control was pressed with nothing to place.
     ///
     /// A request, like [`Action::Place`]: reach, what the cell holds and what
     /// the player carries are the simulation's to read.
     Use {
-        /// The cell under the crosshair.
-        target: crate::coords::SubNodePos,
+        /// The cell under the crosshair, or `None` for the control pressed at
+        /// nothing in reach.
+        target: Option<crate::coords::SubNodePos>,
     },
 
     /// Hit an entity.

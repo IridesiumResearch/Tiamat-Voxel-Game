@@ -2988,11 +2988,11 @@ function game.set_block(position, block, occupancy, options) end
 ---The place control landing on a block with nothing to place.
 ---@class Tiamat.UseEvent
 ---@field player string Who is using, as 64 hex characters.
----@field x integer The CELL under the crosshair — cell coordinates, three to a block, as a dig's are. `x // 3` is the block.
----@field y integer
----@field z integer
+---@field x integer|nil The CELL under the crosshair — cell coordinates, three to a block, as a dig's are. `x // 3` is the block. Absent, with `y`, `z` and `material`, for a use at nothing — which only a callback registered with `anywhere` receives, so `if e.x then` is the test and a callback that did not ask never needs it.
+---@field y integer|nil
+---@field z integer|nil
 ---@field domain string The space the player is in, so `game.get_block{ x, y, z, domain = e.domain }` reads the right world.
----@field material integer What that cell is made of.
+---@field material integer|nil What that cell is made of; absent for a use at nothing.
 ---@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil }|nil What is in the main hand — the shape `game.held` answers with — or `nil` for an empty one. An item, when not nil: a placeable stack is a placement, not a use.
 
 ---Registers a veto on completed digs.
@@ -3083,6 +3083,14 @@ function game.register_on_place(callback) end
 ---by three for the block. An error disables your mod and the use is treated as
 ---unhandled.
 ---
+---**A use at nothing** — the control pressed at open sky, or at a block past
+---reach — is heard only by a callback registered with `{ anywhere = true }`.
+---It arrives with no cell: `x`, `y`, `z` and `material` are nil, `held` is what
+---it always is, and the ladder reads the same. That is how what is held gets
+---eaten wherever the player looks. A callback that did not ask is never handed
+---a use without a cell, so the `e.x // 3` above is safe as written. A callback
+---that did ask still hears every use at a block, in its place in load order.
+---
 ---```lua
 ---game.register_on_use(function(e)
 ---    local at = game.get_block{ x = e.x // 3, y = e.y // 3, z = e.z // 3, domain = e.domain }
@@ -3090,9 +3098,17 @@ function game.register_on_place(callback) end
 ---    game.give(e.player, { material = "my_mod:rose", units = 27 })
 ---    return ""                                          -- handled, silently
 ---end)
+---
+---game.register_on_use(function(e)
+---    local meal = e.held and meals[e.held.material]
+---    if not meal then return end                        -- at a block or not, not ours
+---    eat(e.player, meal)
+---    return ""
+---end, { anywhere = true })
 ---```
 ---@param callback fun(event: Tiamat.UseEvent): boolean|string|nil
-function game.register_on_use(callback) end
+---@param options { anywhere: boolean }? `anywhere = true` to hear a use at nothing as well. Any other key is an error at load.
+function game.register_on_use(callback, options) end
 
 ---Somebody hitting something.
 ---@class Tiamat.PunchEvent

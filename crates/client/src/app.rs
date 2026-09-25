@@ -2509,7 +2509,8 @@ impl App {
     /// the mods (`register_on_use`) — picking a bush, opening a door. The
     /// warning this used to show locally is what the server answers when no
     /// mod handles it, so a use a mod handles says nothing. Aimed at nothing,
-    /// the warning stays local: there is no block to ask about.
+    /// the use goes without a cell (protocol v76), to the mods that asked to
+    /// hear one — eating what is held — and is answered the same way.
     ///
     /// Anything else the server may still refuse — it owns that decision — and
     /// says why, which arrives as a warning.
@@ -2526,13 +2527,13 @@ impl App {
             .as_ref()
             .filter(|stack| !self.items.contains(&stack.material));
         let Some(stack) = placeable.cloned() else {
-            match self.dig_target() {
-                Some(target) => {
-                    self.connection.send(Command::Use { target });
-                }
-                None if stack.is_none() => self.warn("nothing selected to build with".to_owned()),
-                None => self.warn("that is not something you can build with".to_owned()),
-            }
+            // Aimed at a block or at nothing, the server hears it either way:
+            // it is the one that knows which mods want a use without a cell,
+            // and the warning this used to show here is what it answers when
+            // none does.
+            self.connection.send(Command::Use {
+                target: self.dig_target(),
+            });
             return;
         };
         let Some((target, face)) = self.place_aim() else {
