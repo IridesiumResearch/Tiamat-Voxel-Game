@@ -532,7 +532,10 @@ fn plan_memo(ops: &[Op]) -> (Vec<Memo>, usize) {
         let Some(key) = key else { continue };
         if let Some(slot) = kept.iter().position(|seen| seen == key) {
             memo[index] = Memo::Reuse(slot);
-        } else if keys[index + 1..].iter().any(|later| later.as_ref() == Some(key)) {
+        } else if keys[index + 1..]
+            .iter()
+            .any(|later| later.as_ref() == Some(key))
+        {
             // Kept only when something later repeats it, so a program with
             // nothing repeated evaluates exactly as it always did.
             memo[index] = Memo::Keep(kept.len());

@@ -398,11 +398,15 @@ impl mlua::UserData for DensityHandle {
         // because the position asked about is a WORLD block and not a chunk —
         // a structure asks about ground under a tree two chunks away, which no
         // `pos` it holds describes.
-        methods.add_method("at", |_, this, (x, y, z, seed): (f32, f32, f32, u64)| {
-            this.density
-                .sample(seed, x, y, z)
-                .map_err(|err| mlua::Error::external(err.to_string()))
-        });
+        methods.add_method(
+            "at",
+            |_, this, (x, y, z, seed): (f32, f32, f32, mlua::Value)| {
+                let seed = seed_from_lua(&seed)?;
+                this.density
+                    .sample(seed, x, y, z)
+                    .map_err(|err| mlua::Error::external(err.to_string()))
+            },
+        );
 
         methods.add_method("bounds", |lua, this, pos: Table| {
             // The same `pos` the generator was handed, read the same way
@@ -415,7 +419,8 @@ impl mlua::UserData for DensityHandle {
             // about one world's field: the interval that holds for EVERY seed
             // is the one that says the same thing in every chunk, which is the
             // thing this call exists not to be.
-            let seed: u64 = pos.get("seed").map_err(|_| {
+            let seed: mlua::Value = pos.get("seed")?;
+            let seed = seed_from_lua(&seed).map_err(|_| {
                 mlua::Error::external(
                     "density:bounds wants the `pos` your generator was handed — it carries the \
                      world seed, and a bound over a box cannot be computed without it",
@@ -535,7 +540,7 @@ impl mlua::UserData for MapHandle {
         methods.add_method_mut("noise", |_, this, options: Table| {
             let params = density_noise_params(&options);
             let amplitude: f32 = options.get("amplitude").unwrap_or(1.0);
-            let seed: u64 = options.get("seed").unwrap_or(0);
+            let seed = seed_in(&options, "seed")?;
             this.locked()?.noise(seed, &params, amplitude);
             Ok(())
         });
@@ -553,9 +558,8 @@ impl mlua::UserData for MapHandle {
                     .flatten()
                     .unwrap_or(0.0);
                 let seed = options
-                    .map(|table| table.get::<Option<u64>>("seed"))
+                    .map(|table| seed_in(table, "seed"))
                     .transpose()?
-                    .flatten()
                     .unwrap_or(0);
                 this.locked()?
                     .fill_from_density(&density.density, seed, height)
@@ -1287,7 +1291,7 @@ impl MluaVm {
                     .map_err(|err| self.vm_error(&err))?;
             }
             position
-                .set("seed", world_seed)
+                .set("seed", seed_to_lua(world_seed))
                 .map_err(|err| self.vm_error(&err))?;
             position
                 .set("domain", domain)
@@ -1491,6 +1495,74 @@ const DEFAULT_VIEW: &str = "player:main";
 /// convert it before giving it straight back would be a papercut with no
 /// purpose. A string that no mod registered is an error naming the id, not a
 /// silent fall back to air.
+/// The world seed as it crosses into Lua: its 64 bits, as a Lua integer.
+///
+/// **Exact, or the world disagrees with itself.** A `u64` past 2^63 does not
+/// fit a Lua integer, and the obvious crossing, a float, keeps 53 of its bits.
+/// A mod hands `pos.seed` back for its bounds, its ore gates, its random
+/// streams and its heightmaps, while the fills on the buffer use the seed the
+/// engine kept: with the two a few hundred apart, every gate a generator
+/// decided by a bound was decided over a different world from the one it
+/// filled. Reported from the window as half of all new worlds being bare dirt
+/// with air holes and solid boxes in them, the half whose seed had its top
+/// bit set. The bits round-trip: such a seed reads as a negative integer in
+/// Lua, and [`seed_from_lua`] takes the bits, not the sign.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "the bits are the value; the sign is only Lua's reading of them"
+)]
+const fn seed_to_lua(seed: u64) -> i64 {
+    seed as i64
+}
+
+/// A seed as a mod hands it back: the integer [`seed_to_lua`] made, by its
+/// bits, or a whole non-negative float a `u64` can hold, for a mod that
+/// computed one itself.
+///
+/// # Errors
+///
+/// Anything else: a fraction, a negative float, a string, nil.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "an integer's bits are the value; a float is checked non-negative, below 2^64 and whole by casting it back"
+)]
+fn seed_from_lua(value: &mlua::Value) -> mlua::Result<u64> {
+    match value {
+        mlua::Value::Integer(bits) => Ok(*bits as u64),
+        mlua::Value::Number(number) if *number >= 0.0 && *number < 18_446_744_073_709_551_616.0 => {
+            // Whole, or not a seed: the cast truncates, so a float that
+            // survives the round trip had nothing to truncate. Compared by
+            // bits, which is exact and is what a whole number's equality is.
+            let bits = *number as u64;
+            if (bits as f64).to_bits() == number.to_bits() {
+                Ok(bits)
+            } else {
+                Err(mlua::Error::external(format!(
+                    "a seed must be a whole number, not {number}"
+                )))
+            }
+        }
+        other => Err(mlua::Error::external(format!(
+            "a seed must be an integer, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// The seed under `key` in `table`, or zero when there is none.
+///
+/// # Errors
+///
+/// A value that is not a seed, as [`seed_from_lua`] says.
+fn seed_in(table: &Table, key: &str) -> mlua::Result<u64> {
+    match table.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => Ok(0),
+        value => seed_from_lua(&value),
+    }
+}
+
 fn material_of(lua: &mlua::Lua, value: &mlua::Value) -> mlua::Result<crate::material::MaterialId> {
     match value {
         mlua::Value::Integer(id) => u16::try_from(*id)
@@ -2691,12 +2763,13 @@ impl ScriptVm for MluaVm {
             *cell = Some(seed);
         }
         // Every mod's own table: `game` is per mod (see `build_game_table`),
-        // so there is no one table to set it on. Set with the same conversion
-        // `pos.seed` is, so the two compare equal in Lua.
+        // so there is no one table to set it on. Set with the same crossing
+        // `pos.seed` makes (`seed_to_lua`), so the two compare equal in Lua
+        // and both come back by their bits.
         for (mod_id, env) in &self.environments {
             let installed = env
                 .get::<Table>("game")
-                .and_then(|game| game.set("world_seed", seed));
+                .and_then(|game| game.set("world_seed", seed_to_lua(seed)));
             if let Err(err) = installed {
                 tracing::error!(%mod_id, "could not install the world seed: {err}");
             }
@@ -2824,7 +2897,7 @@ impl ScriptVm for MluaVm {
                 .set("z", pos.z)
                 .map_err(|err| self.vm_error(&err))?;
             position
-                .set("seed", world_seed)
+                .set("seed", seed_to_lua(world_seed))
                 .map_err(|err| self.vm_error(&err))?;
 
             self.arm_budget(self.limits.instructions_per_call)?;
@@ -7763,7 +7836,7 @@ impl MluaVm {
                 let chunk_x: i32 = position.get("x")?;
                 let chunk_y: i32 = position.get("y")?;
                 let chunk_z: i32 = position.get("z")?;
-                let seed: u64 = position.get("seed").unwrap_or(0);
+                let seed = seed_in(&position, "seed")?;
 
                 let params = FractalParams {
                     fractal: crate::detgen::Fractal::Fbm,
@@ -7823,7 +7896,7 @@ impl MluaVm {
                 let x: i32 = position.get("x")?;
                 let y: i32 = position.get("y")?;
                 let z: i32 = position.get("z")?;
-                let seed: u64 = position.get("seed").unwrap_or(0);
+                let seed = seed_in(&position, "seed")?;
                 Ok(StreamHandle {
                     stream: StreamRng::new(seed, ChunkPos::new(x, y, z), &name),
                 })
@@ -11904,6 +11977,129 @@ mod tests {
             format!("{on_tick:?}"),
             format!("{from_pos:?}"),
             "game.world_seed and pos.seed are different numbers in Lua"
+        );
+    }
+
+    #[test]
+    fn a_seed_past_the_top_bit_reaches_a_generator_by_its_bits() {
+        // **Half of all new worlds were bare dirt, with air holes and solid
+        // boxes in them.** A `u64` past 2^63 does not fit a Lua integer and
+        // crossed as a float, which keeps 53 bits: `pos.seed` came back to
+        // `density:bounds`, the ore gates, the random streams and the
+        // heightmaps a few hundred off the seed the buffer's fills used, so
+        // every gate a generator decided by a bound was decided over a
+        // different world from the one it filled. Reported from the window
+        // with this very seed, 2026-09-25.
+        let seed = 16_099_289_709_293_836_018_u64;
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "exact",
+            "game.register_on_generate(function(buf, pos)\n\
+             \x20   handed = pos.seed\n\
+             \x20   kind = math.type(pos.seed)\n\
+             \x20   world = game.world_seed\n\
+             end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        vm.set_world_seed(seed);
+        vm.generate_chunk(
+            crate::domain::OVERWORLD,
+            seed,
+            crate::ChunkPos::new(0, 0, 0),
+            MaterialId::AIR,
+        )
+        .expect("generate");
+
+        let env = vm.environment("exact").expect("env");
+        let kind: String = env.get("kind").expect("kind");
+        assert_eq!(
+            kind, "integer",
+            "a seed must cross as an integer, whose bits are exact"
+        );
+        let handed: Value = env.get("handed").expect("handed");
+        assert_eq!(
+            seed_from_lua(&handed).expect("a seed"),
+            seed,
+            "pos.seed did not come back by its bits"
+        );
+        let world: Value = env.get("world").expect("world");
+        assert_eq!(
+            seed_from_lua(&world).expect("a seed"),
+            seed,
+            "game.world_seed did not come back by its bits"
+        );
+        // A float that is a whole number is still taken, for a mod that made
+        // one itself; a fraction is not a seed.
+        assert_eq!(
+            seed_from_lua(&Value::Number(4_294_967_296.0)).expect("whole"),
+            1 << 32
+        );
+        assert!(seed_from_lua(&Value::Number(0.5)).is_err());
+        assert!(seed_from_lua(&Value::Nil).is_err());
+    }
+
+    #[test]
+    fn a_bound_asked_with_the_handed_back_seed_is_the_fills_bound() {
+        // What the bits are for: `density:bounds(pos)` and `density:at` with
+        // `pos.seed` must describe the world the buffer's fills build, which
+        // is the one the Rust side computes from the exact seed. With the
+        // seed rounded through a float they described another world entirely.
+        let seed = 16_099_289_709_293_836_018_u64;
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "bound",
+            "field = game.density{ op = \"noise\", stream = \"t\", frequency = 0.05, octaves = 2, amplitude = 10.0 }\n\
+             game.register_on_generate(function(buf, pos)\n\
+             \x20   local b = field:bounds(pos)\n\
+             \x20   low, high = b.low, b.high\n\
+             \x20   at = field:at(8.5, 8.5, 8.5, pos.seed)\n\
+             end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        vm.set_world_seed(seed);
+        vm.generate_chunk(
+            crate::domain::OVERWORLD,
+            seed,
+            crate::ChunkPos::new(0, 0, 0),
+            MaterialId::AIR,
+        )
+        .expect("generate");
+
+        let env = vm.environment("bound").expect("env");
+        let field: mlua::AnyUserData = env.get("field").expect("field");
+        let handle = field.borrow::<DensityHandle>().expect("a density");
+        let side = crate::CHUNK_BLOCKS as usize;
+        let region = crate::detgen::Region3d {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            origin_z: 0.0,
+            step: 1.0,
+            width: side,
+            height: side,
+            depth: side,
+        };
+        let truth = handle.density.bounds(seed, &region);
+        // Bit for bit: the same program over the same seed is the same
+        // arithmetic, so nothing here is approximately equal.
+        let (low, high): (f32, f32) =
+            (env.get("low").expect("low"), env.get("high").expect("high"));
+        assert_eq!(
+            (low.to_bits(), high.to_bits()),
+            (truth.low.to_bits(), truth.high.to_bits()),
+            "density:bounds answered for a world other than the seed's: {low}..{high} against {}..{}",
+            truth.low,
+            truth.high
+        );
+        let at: f32 = env.get("at").expect("at");
+        let sample = handle.density.sample(seed, 8.5, 8.5, 8.5).expect("sample");
+        assert_eq!(
+            at.to_bits(),
+            sample.to_bits(),
+            "density:at answered for a world other than the seed's: {at} against {sample}"
         );
     }
 

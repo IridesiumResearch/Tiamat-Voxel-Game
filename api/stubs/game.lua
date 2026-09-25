@@ -41,7 +41,7 @@
 ---@field x integer Chunk x, in chunks.
 ---@field y integer Chunk y, in chunks.
 ---@field z integer Chunk z, in chunks.
----@field seed integer The world seed.
+---@field seed integer The world seed, exact: its 64 bits as a Lua integer, which reads as a negative number for a seed with its top bit set. Hand it back unchanged to `density:bounds`, `density:at`, `game.rng_stream` and `game.noise_heightmap`; they take the bits, not the sign.
 
 ---A per-column height field. Produced and consumed natively; you cannot read
 ---the individual heights, by design.
