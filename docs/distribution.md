@@ -216,13 +216,16 @@ download makes real:
    tag the commit. CI builds all four targets, packages them, checks each
    archive, builds the source archive, and uploads all of it to a **draft**
    GitHub Release.
-2. **Sign locally.** `cargo run -p relman -- sign` reads the draft's hashes,
-   writes the manifest and signs it with the release key, which lives on the
-   maintainer's machine and **never** in CI. A private key in a CI secret is a
-   private key in everybody's pull request workflow.
+2. **Sign locally.** Download the draft's archives to the machine that holds
+   the release key. `cargo run -p relman -- manifest` hashes them into the
+   manifest, `cargo run -p relman -- sign` signs it, and
+   `cargo run -p relman -- verify` checks the result the way a client will.
+   `relman` reads only local files; it never fetches anything. The key lives
+   on the maintainer's machine and **never** in CI. A private key in a CI
+   secret is a private key in everybody's pull request workflow.
 3. Publish the release, then publish the manifest and its signature at the
    update host. Where that is, how it is run, and the release steps with their
-   exact commands are in [`hosting.md`](hosting.md).
+   exact commands are in [`hosting.md`](hosting.md) §7.
 4. Older manifests stay published: they are the record of what was signed, and
    a client that has been offline for three versions verifies against the
    current one regardless.
