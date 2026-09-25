@@ -12,8 +12,47 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W24 and W25, filed 2026-09-25. W19 to W23 landed 2026-09-24, W17 and
-W18 the day before, below.
+Open: W24, W25 and W26, filed 2026-09-25. W19 to W23 landed 2026-09-24, W17
+and W18 the day before, below.
+
+## W26. A lightning bolt that is drawn (2026-09-25)
+
+**Seen.** A strike is a flash on the sky (`game.flash`, W3), sparks where it
+lands and thunder after its distance. Nothing is drawn between the cloud and
+the ground, so a storm over the next valley is the sky blinking. The
+designer's reference, `tiamat_weather/lightning-reference-2026-09-25.webp`:
+thin, jagged, forked violet-white bolts from a storm's base to the ground,
+seen from kilometres off through the rain curtain.
+
+**Why the mod cannot draw it.** Particles are the only free-standing thing a
+mod can place, and they are the wrong tool three ways: they are lit by the
+world, so a bolt at night comes out grey (the reason `flash` exists); a
+burst's `area` is an axis-aligned box, so a jagged line is dozens of bursts
+of dozens of particles; and bursts go to players within a radius and are
+dropped first under load, which is exactly when a storm is on.
+
+**Ask.** `game.lightning{ from, to, seed?, colour?, width?, branches?,
+ticks?, radius?, player? }`, sent to every player within `radius` (up to
+the flash's 1024) in the domain, or to one. The client builds the path
+from `seed`: midpoint displacement from `from` (a cloud base) to `to` (the
+ground point the mod found), a few levels deep, with `branches` forks that
+split off partway and fade before reaching the ground. Drawn as unlit,
+additive, camera-facing ribbons `width` blocks across (default ~0.4, with a
+soft glow a few times wider), depth-tested against terrain, over `ticks`
+(default ~8): full at once, then flickering out — two or three dips and
+returns, which is what reads as a return stroke. Presentation only; nothing
+collides or is lit by it beyond what `flash` already does, and a seed makes
+it the same bolt for everyone watching. Default colour violet-white, like
+the reference: about `{ 0.85, 0.8, 1.0 }`.
+
+Gate: a bolt from y + 300 to the ground at 400 blocks is visible as a line
+at night and by day; two clients given the same seed draw the same path; a
+player behind a hill does not see the part the hill hides.
+
+**What weather does once it lands.** `fx.lua`'s `bolt()` already finds the
+ground point and the cloud floor (`floor_at`), so it calls
+`game.lightning{ from = { x, floor, z }, to = at, seed = ... }` beside its
+`flash` and each flicker, feature-detected like every call since W2.
 
 ## W24. A settled fluid never evaporates (2026-09-25)
 
