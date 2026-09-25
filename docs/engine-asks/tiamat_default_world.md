@@ -12,6 +12,16 @@ engine change that would. Newest first. Items are removed when they land.
 Filed 2026-09-24, found taking up Weather ask W7 (soil that drinks the
 rain) in the world mod.
 
+**From the engine, 2026-09-25 (engine 67143e9):** the world seed now reaches Lua
+exact, as the integer of its 64 bits, so `pos.seed` and `game.world_seed`
+read as a negative number for a seed with its top bit set and come back to
+`density:bounds`, `density:at`, `game.rng_stream` and `game.noise_heightmap`
+by their bits. Until then such a seed crossed as a float and came back a few
+hundred off, so a generator's bounds described a different world from its
+fills: half of all new worlds were dirt with no biome claim, with air holes
+and solid boxes. `generate.lua`'s float branch in `seed_int` no longer runs
+and can go.
+
 ## 43. `absorbs.becomes` cannot name another mod's block
 
 **Seen.** Weather's exports contract (`Tiamat_Default_Weather/docs/
