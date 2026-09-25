@@ -25,7 +25,29 @@ permissions:
   contents: write
 
 jobs:
+  # The draft release, made once before any archive exists, so the four
+  # package legs never race to create it and never make two.
+  draft:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: The draft release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # `--draft` because docs/distribution.md §8 publishes by hand, after
+          # the manifest is signed off the runner.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --title "Tiamat $GITHUB_REF_NAME" \
+              --notes "Unsigned test build. See docs/distribution.md for what to do with it."
+
   package:
+    needs: draft
+    # A dispatch run has no tag and no draft; it still packages.
+    if: ${{ !cancelled() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
     strategy:
       # One target failing must not cancel the others: three usable archives
       # and a known gap beats no archives at all when a release is being cut.
@@ -133,12 +155,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Created on the first target to finish and reused by the rest;
-          # `--draft` because §8 publishes by hand, after the manifest is
-          # signed off the runner.
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" \
-              --draft \
-              --title "Tiamat $GITHUB_REF_NAME" \
-              --notes "Unsigned test build. See docs/distribution.md for what to do with it."
-          gh release upload "$GITHUB_REF_NAME" dist/tiamat-*.tar.gz dist/tiamat-*.zip --clobber
+          # Only the archives this leg made: a Linux leg has no .zip and a
+          # Windows leg no .tar.gz, and an unmatched glob handed to gh as a
+          # literal path is exactly how the first tag's run ended.
+          shopt -s nullglob
+          files=(dist/tiamat-*.tar.gz dist/tiamat-*.zip)
+          echo "uploading: ${files[*]}"
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
