@@ -69,23 +69,31 @@ has no say in how a summary cell is drawn.
 pass (or tint-and-blend the quad by the material's own alpha). Cosmetic,
 and the lowest of these four.
 
-## 41. Near summaries are stuck coarse while detail lags
+## 41. Near summaries are stuck coarse while detail lags: LANDED 2026-09-25 (engine c537df8)
 
-**Seen:** the "full chunk issue" — flat-topped, chunk-aligned slabs beside
-the player in the Alpine Highlands, the Badlands and the Ember Ridge. A
-position holds a chunk OR a summary; a summary sent at level 3–5 while the
-player was far away keeps being drawn until the full chunk arrives, and
-summary UPGRADES queue behind the detail frontier — so when generation is
-the bottleneck, the world beside a fast-moving player is 4–16-block slabs
-for minutes.
+**What landed:** the frontier gate in `Streamer::next_summaries` (engine
+9d48673) was holding back every summary past the nearest still-needed
+chunk, not only new ones. It now holds back only a position the client
+draws nothing at. A coarse summary the client already holds is refined as
+the player approaches (level 2 or 3 to level 1 at nine to fifteen chunks),
+and a full chunk that has left the detail radius is downgraded, however far
+behind the detail is. The worker's whole summary chain is stored on the
+first request, so a later, finer request is a database read rather than
+another generation of the chunk.
 
-**Why the mod cannot fix it:** serving order and summary levels are the
-engine's; the mod can only make generation cheaper (it is, this week).
-
-**Smallest change:** inside the detail radius, let a level-1 summary
-(block-resolution, ~14x cheaper than sampled detail) be re-sent AHEAD of
-the detail frontier for positions whose full chunk is still parked on the
-workers. Slab-world becomes block-world while detail catches up.
+**Not done, and why:** the level-1 re-send inside the detail radius. Inside
+the radius the replacement for a slab is the full chunk, and a level-1
+summary costs the same generation as that chunk, since `ChunkSource` has no
+coarse entry point; the re-send would take a worker slot from the chunk it
+stands in for and arrive no sooner. What remains inside the radius is
+throughput. The request queue is re-sorted from the player's position every
+beat, so a stale first-in-first-out order was not the cause; the detail
+lags because a chunk beside a walking player is generated twice, once for
+its summary and once in full, on a pool every player shares. Two engine
+changes would make it cheaper, and either is a separate ask if the mod
+wants it: keeping the chunk built for a summary long enough for the detail
+request that follows it, and a level-aware entry point in `ChunkSource` so
+a block-resolution summary can be built without the full chunk.
 
 ## 40. Generation lag is silent
 
