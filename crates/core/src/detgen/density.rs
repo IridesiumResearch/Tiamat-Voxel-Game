@@ -421,20 +421,23 @@ pub enum DensityError {
 #[derive(Debug, Default)]
 pub struct Scratch {
     slots: Vec<Vec<f32>>,
+    /// The values of the sampled ops a program uses more than once, kept from
+    /// their first use for every later one. See [`Memo`].
+    memo: Vec<Vec<f32>>,
 }
 
 impl Scratch {
-    /// Buffers for `depth` slots of `len` values, grown as needed.
+    /// `depth` buffers of `len` values from `slots`, grown as needed.
     ///
     /// Existing buffers are resized rather than replaced, so the steady state
     /// after the first call is no allocation at all. The contents are not
     /// cleared: every op writes its whole slot before anything reads it, which
     /// is the same guarantee the freshly-allocated version relied on.
-    fn slots(&mut self, depth: usize, len: usize) -> &mut [Vec<f32>] {
-        while self.slots.len() < depth {
-            self.slots.push(vec![0.0; len]);
+    fn grow(slots: &mut Vec<Vec<f32>>, depth: usize, len: usize) -> &mut [Vec<f32>] {
+        while slots.len() < depth {
+            slots.push(vec![0.0; len]);
         }
-        for slot in &mut self.slots[..depth] {
+        for slot in &mut slots[..depth] {
             // **Exactly `len`, not at least it.** Every op writes and reads a
             // whole slot, and the region's own length is what says how long
             // that is — a longer buffer left over from a bigger region would
@@ -444,8 +447,99 @@ impl Scratch {
                 slot.resize(len, 0.0);
             }
         }
-        &mut self.slots[..depth]
+        &mut slots[..depth]
     }
+}
+
+/// What evaluation does with one op's value besides pushing it.
+///
+/// **A mod's field names the same noise many times, and each name was a whole
+/// fresh sampling of it.** The density language has no way to bind a value and
+/// use it twice, so a helper called twice is compiled twice: the world mod's
+/// terrain sampled 155 octaves of noise per point, of which 52 were distinct —
+/// the mesa's plateau noise alone appeared twenty-one times, once per terrace.
+/// Sampling is nearly all of what a program costs.
+///
+/// So `compile` finds the noise and contour ops identical, bit for bit, to an
+/// earlier one, and evaluation samples each once: the first use is kept and
+/// every later one copies it. A copy of the same computation's result is the
+/// value sampling again would give, so this changes what a field costs and
+/// nothing about any world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Memo {
+    /// Used once: sampled, as ever.
+    None,
+    /// The first of several: sampled, and the value kept in this slot.
+    Keep(usize),
+    /// A repeat: the value kept in this slot, copied.
+    Reuse(usize),
+}
+
+/// Everything that decides a sampled op's value, or `None` for an op that is
+/// not sampled. Floats by their bits: `0.0` and `-0.0` compare equal and are
+/// not the same amplitude.
+fn sample_key(op: &Op) -> Option<[u64; 9]> {
+    let shape = |params: &super::noise::FractalParams| {
+        let kind = match params.fractal {
+            super::noise::Fractal::Fbm => 0_u64,
+            super::noise::Fractal::Ridged => 1,
+            super::noise::Fractal::Billow => 2,
+        };
+        [
+            kind | (u64::from(params.octaves) << 8),
+            u64::from(params.frequency.to_bits()),
+            u64::from(params.lacunarity.to_bits()) | (u64::from(params.gain.to_bits()) << 32),
+        ]
+    };
+    match op {
+        Op::Noise {
+            params,
+            amplitude,
+            stream,
+            stretch,
+        } => {
+            let [a, b, c] = shape(params);
+            Some([
+                1,
+                a,
+                b,
+                c,
+                u64::from(amplitude.to_bits()),
+                *stream,
+                u64::from(stretch[0].to_bits()),
+                u64::from(stretch[1].to_bits()),
+                u64::from(stretch[2].to_bits()),
+            ])
+        }
+        Op::Contour {
+            params,
+            stream,
+            signed,
+        } => {
+            let [a, b, c] = shape(params);
+            Some([2, a, b, c, u64::from(*signed), *stream, 0, 0, 0])
+        }
+        _ => None,
+    }
+}
+
+/// The [`Memo`] for each op, and how many values evaluation keeps.
+fn plan_memo(ops: &[Op]) -> (Vec<Memo>, usize) {
+    let keys: Vec<Option<[u64; 9]>> = ops.iter().map(sample_key).collect();
+    let mut memo = vec![Memo::None; ops.len()];
+    let mut kept: Vec<[u64; 9]> = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let Some(key) = key else { continue };
+        if let Some(slot) = kept.iter().position(|seen| seen == key) {
+            memo[index] = Memo::Reuse(slot);
+        } else if keys[index + 1..].iter().any(|later| later.as_ref() == Some(key)) {
+            // Kept only when something later repeats it, so a program with
+            // nothing repeated evaluates exactly as it always did.
+            memo[index] = Memo::Keep(kept.len());
+            kept.push(*key);
+        }
+    }
+    (memo, kept.len())
 }
 
 /// A compiled density program.
@@ -457,6 +551,10 @@ impl Scratch {
 pub struct Density {
     ops: Vec<Op>,
     depth: usize,
+    /// One per op: see [`Memo`].
+    memo: Vec<Memo>,
+    /// How many values evaluation keeps for the ops repeated.
+    kept: usize,
 }
 
 impl Density {
@@ -530,7 +628,13 @@ impl Density {
         if peak > MAX_DEPTH {
             return Err(DensityError::TooDeep { found: peak });
         }
-        Ok(Self { ops, depth: peak })
+        let (memo, kept) = plan_memo(&ops);
+        Ok(Self {
+            ops,
+            depth: peak,
+            memo,
+            kept,
+        })
     }
 
     /// How many buffers evaluating this needs at once.
@@ -857,10 +961,17 @@ impl Density {
             }));
         }
 
-        let stack = scratch.slots(self.depth, len);
+        let Scratch { slots, memo } = scratch;
+        let stack = Scratch::grow(slots, self.depth, len);
+        let memo = Scratch::grow(memo, self.kept, len);
         let mut height = 0usize;
 
-        for op in &self.ops {
+        for (op, plan) in self.ops.iter().zip(&self.memo) {
+            if let Memo::Reuse(kept) = *plan {
+                stack[height].copy_from_slice(&memo[kept]);
+                height += 1;
+                continue;
+            }
             match op {
                 Op::Constant(value) => {
                     stack[height].fill(*value);
@@ -889,6 +1000,9 @@ impl Density {
                             *value *= amplitude;
                         }
                     }
+                    if let Memo::Keep(kept) = *plan {
+                        memo[kept].copy_from_slice(slot);
+                    }
                     height += 1;
                 }
                 Op::Contour {
@@ -898,6 +1012,9 @@ impl Density {
                 } => {
                     let slot = &mut stack[height];
                     contour_distance(seed ^ stream, region, params, *signed, slot)?;
+                    if let Memo::Keep(kept) = *plan {
+                        memo[kept].copy_from_slice(slot);
+                    }
                     height += 1;
                 }
                 Op::Map { map, .. } => {
