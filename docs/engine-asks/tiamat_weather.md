@@ -12,7 +12,75 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Nothing open: W19 to W23 landed 2026-09-24, W17 and W18 the day before, below.
+Open: W24 and W25, filed 2026-09-25. W19 to W23 landed 2026-09-24, W17 and
+W18 the day before, below.
+
+## W24. A settled fluid never evaporates (2026-09-25)
+
+**Seen.** "Rain creates way too many water sources": a world a few storms
+old is spotted with rainwater films that never go, however long it stays
+dry. `tiamat_weather:rainwater` is registered with `evaporates = 300`.
+
+**Why.** `evaporates` is rolled inside `settle_one` (solver.rs, rule 4), so
+it only comes up on a solver VISIT, and a block is visited only while it is
+in the active set. A puddle that has finished spreading changes nothing on
+the visit where its roll fails, so nothing re-wakes it, it leaves the set,
+and it is never rolled again — `1 / evaporates` is the chance it EVER loses
+a cell, not the rate. The tests use `evaporates = 1` or `2`, where the first
+roll almost always lands, so they cannot see it. A chunk reload wakes loose
+water (§4.5) and gives it one more roll, which is why it is not quite never.
+
+**Why the mod cannot fix it.** It can only clear the puddles it happens to
+sample near a player (now done, below); a puddle nobody stands near is
+there for good, and every mod with an evaporating fluid meets the same.
+
+**Ask.** A block holding a fluid with `evaporates > 0`, open to the air,
+stays scheduled — kept in the active set, or in a separate evaporation set
+visited at the fluid's rate — until it is empty or covered. Its cost is
+proportional to the evaporable fluid lying open, which is exactly what the
+mod asked to have evaporate. Gate: a one-cell puddle of an `evaporates = 50`
+fluid on level ground is gone within a few hundred fluid ticks; the same
+under a lid is still there; `evaporates = 0` is untouched.
+
+**And a smaller one beside it.** `surface_at` names a fluid by its numeric
+per-session id and nothing turns a fluid's NAME into that id, so to tell its
+own rainwater from a river the mod writes one cell into an empty sky block,
+reads the id back and clears it (`ground.lua`, `learn_rain_fluid`). A
+`game.fluid_id(name)`, or the name beside the id in `surface_at`, would
+retire that.
+
+**What weather does meanwhile.** Fewer, smaller puddles (one sampled column
+in 32, not 8; 4 cells in a storm, not 6), and the ground sampler clears any
+rainwater it finds near a player once the rain has been gone half a minute.
+
+## W25. Clouds at sunset: a brown sunward face (2026-09-25)
+
+**Seen.** Towards sunset, under a storm deck, the faces of the clouds that
+face the sun are a flat brown-orange slab against violet-grey sides
+(designer's screenshot, 19:16 on 2026-09-24): "a strange brown face, it
+looks awkward. Just tinting the whole cloud a little would be fine, and
+then brightening that face."
+
+**Why.** In `clouds.wgsl` mode >= 1, `lit = mix(cool, warm, sunward^2 *
+horizon)` with `warm = colour * sun_lit`: at a low sun `sun` is saturated
+orange, so the sunward face takes the sun's hue at full strength, while the
+side a few degrees away is `shade * sky`. Then storm `darkness` multiplies
+by (0.30, 0.31, 0.38), and dark orange is brown. The hue change sits on a
+face boundary, so it reads as a painted face rather than light.
+
+**Why the mod cannot fix it.** `colour` and `shade` are the mod's only
+inputs and are fixed at registration; the sun's colour and the mix are the
+pass's.
+
+**Ask.** Split the sun's contribution into a tint applied to the whole
+cloud and a brightness applied by facing: every face takes a share of the
+sun's hue (say `mix(white, sun_hue, 0.35)`, sun_hue being `sun` normalised
+to its brightest channel), and the sunward term raises LUMINANCE rather
+than swapping hue — `lit = cool_tinted * (1 + k * sunward^2 * horizon)`, or
+mixing towards a desaturated `warm`. Under darkness the sunward face then
+goes a warm grey, not brown. Gate: at a sun 3 degrees up, with darkness 0.9,
+the sunward and side faces of one heap differ in luminance by more than
+they differ in hue.
 
 **For the sky's owner, 2026-09-23**, protocol v75 — not an ask, a
 capability that landed for the space work and is the sky mod's to use: a
