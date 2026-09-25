@@ -539,30 +539,49 @@ impl Atlas {
         TILE_PITCH.trailing_zeros() + 1
     }
 
-    /// The mip levels the renderer uploads: box-filtered, truncated to
-    /// [`Atlas::mip_levels`] — and with every alpha-tested tile's coverage
-    /// put back.
+    /// The mip levels the renderer uploads: filtered by [`mip_chain`],
+    /// truncated to [`Atlas::mip_levels`] — and with every alpha-tested
+    /// tile's holes given its colour before the chain is built, and its
+    /// coverage put back after.
+    ///
+    /// **Why the holes need a colour.** A clear texel is never shown on its
+    /// own — the cutout shader discards it — but the sampler averages it in:
+    /// the chain below, and the bilinear filter within a level, both blend a
+    /// leaf's edge with the texel beside it. Every shipped leaf stores black
+    /// under alpha 0, so the blend was dark, and a canopy that read green
+    /// close up went to dark speckle across the fog. A clear texel has no
+    /// colour of its own, so [`dilate_tile_colour`] gives it its
+    /// neighbours', and the chain is built from that.
+    ///
+    /// **Level 0 is still the artist's image, holes and all.** The interface
+    /// draws icons from this same texture through egui, whose blend is
+    /// premultiplied: a clear texel with a colour in it would ADD that colour
+    /// over the slot behind, and every leaf in the hotbar would glow green
+    /// through its holes. The holes' colour is needed where the sampler
+    /// averages them, which is the levels below, so those take the dilated
+    /// image and level 0 does not.
     ///
     /// **Why coverage needs putting back.** The cutout shader discards under
-    /// a constant 0.5, and a box filter averages alpha: a leaf texture that
-    /// is sparse dots — most foliage is — averages below the threshold
-    /// almost everywhere a level or two down, so a canopy thinned to speckle
-    /// with distance and a forest against fog read as dissolving. The
-    /// classic fix is applied per tile, per level: scale the level's alpha
-    /// up until the share of texels passing the test is back to what level 0
-    /// has. Never down — a dense tile that kept its coverage is right
-    /// already — and a texel the artist made fully clear has alpha 0, which
-    /// no scale can raise, so holes stay holes.
+    /// a constant 0.5, and the chain averages alpha: a leaf texture that is
+    /// sparse dots — most foliage is — averages below the threshold almost
+    /// everywhere a level or two down, so a canopy thinned to speckle with
+    /// distance and a forest against fog read as dissolving. The classic fix
+    /// is applied per tile, per level: scale the level's alpha up until the
+    /// share of texels passing the test is back to what level 0 has. Never
+    /// down — a dense tile that kept its coverage is right already — and a
+    /// texel the artist made fully clear has alpha 0, which no scale can
+    /// raise, so holes stay holes.
     #[must_use]
     pub fn mips(&self) -> Vec<Image> {
-        let mut levels = mip_chain(&self.image);
+        let mut source = self.image.clone();
+        for (column, row) in self.alpha_tested_tiles() {
+            dilate_tile_colour(&mut source, column, row);
+        }
+        let mut levels = vec![self.image.clone()];
+        levels.extend(mip_levels_below(&source));
         levels.truncate(self.mip_levels() as usize);
-        for (index, tested) in self.alpha_tested.iter().enumerate() {
-            if !tested {
-                continue;
-            }
-            let slot = self.slots.get(index).copied().unwrap_or(0);
-            let (column, row) = (slot % self.grid, slot / self.grid);
+
+        for (column, row) in self.alpha_tested_tiles() {
             let want = tile_coverage(&levels[0], column, row, 0);
             if want <= 0.0 {
                 continue;
@@ -572,6 +591,19 @@ impl Atlas {
             }
         }
         levels
+    }
+
+    /// The `(column, row)` of every tile marked alpha-tested, in material
+    /// order.
+    fn alpha_tested_tiles(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.alpha_tested
+            .iter()
+            .enumerate()
+            .filter(|(_, tested)| **tested)
+            .map(|(index, _)| {
+                let slot = self.slots.get(index).copied().unwrap_or(0);
+                (slot % self.grid, slot / self.grid)
+            })
     }
 
     /// The UV rectangle of one tile, excluding its padding.
@@ -639,10 +671,10 @@ impl TileMap {
     }
 }
 
-/// Box-filtered mip levels of an image, largest first.
+/// Filtered mip levels of an image, largest first.
 ///
 /// Level 0 is the image itself. Each level after it is a 2x2 average of the one
-/// before, down to a single pixel.
+/// before — see [`halve`] for what "average" weighs — down to a single pixel.
 ///
 /// Generated on the CPU rather than with a GPU blit chain. Three reasons, in
 /// order: an atlas is built once per join and is tens of kilobytes, so this is
@@ -654,49 +686,86 @@ impl TileMap {
 #[must_use]
 pub fn mip_chain(image: &Image) -> Vec<Image> {
     let mut levels = vec![image.clone()];
+    levels.extend(mip_levels_below(image));
+    levels
+}
+
+/// Every level below `image`, largest first, down to a single pixel.
+///
+/// The image itself is not among them, so a caller can build a chain whose
+/// level 0 is one image and whose levels below are filtered from another —
+/// which is what [`Atlas::mips`] does with the holes of an alpha-tested tile.
+fn mip_levels_below(image: &Image) -> Vec<Image> {
+    let mut levels: Vec<Image> = Vec::new();
     loop {
         let previous = levels.last().unwrap_or(image);
         if previous.width <= 1 && previous.height <= 1 {
             break;
         }
-        let width = (previous.width / 2).max(1);
-        let height = (previous.height / 2).max(1);
-        let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
-
-        for y in 0..height {
-            for x in 0..width {
-                // Averaged in u16 and divided once. Summing in u8 wraps at the
-                // fourth bright pixel, and the symptom is a mip level with dark
-                // speckles that only appear at a distance.
-                let mut total = [0u16; 4];
-                let mut samples = 0u16;
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        if let Some(pixel) = previous.pixel(x * 2 + dx, y * 2 + dy) {
-                            for channel in 0..4 {
-                                total[channel] += u16::from(pixel[channel]);
-                            }
-                            samples += 1;
-                        }
-                    }
-                }
-                let samples = samples.max(1);
-                rgba.extend_from_slice(&[
-                    (total[0] / samples) as u8,
-                    (total[1] / samples) as u8,
-                    (total[2] / samples) as u8,
-                    (total[3] / samples) as u8,
-                ]);
-            }
-        }
-
-        levels.push(Image {
-            width,
-            height,
-            rgba,
-        });
+        let next = halve(previous);
+        levels.push(next);
     }
     levels
+}
+
+/// One level down: each texel the average of the 2x2 above it.
+///
+/// **Colour is weighted by alpha; alpha is the plain mean.** A texel's colour
+/// counts for as much of it as can be seen. A box filter that gave a clear
+/// texel's colour the same weight as an opaque one's pulled every sparse tile
+/// toward whatever the artist left under alpha 0 — black, in every shipped
+/// leaf — and a canopy that was green close up was dark at the distance where
+/// the sampler had gone a few levels down. Alpha is coverage, and coverage is
+/// the plain share, which is what [`restore_tile_coverage`] then measures.
+///
+/// Where the 2x2 has no alpha in it at all there is nothing to weight by, and
+/// the plain mean of the colours is kept, so a fully clear region stays what
+/// it was. For a 2x2 of one alpha the weights cancel and this is the plain
+/// box filter exactly: an opaque tile's chain is unchanged to the byte.
+fn halve(previous: &Image) -> Image {
+    let width = (previous.width / 2).max(1);
+    let height = (previous.height / 2).max(1);
+    let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
+
+    for y in 0..height {
+        for x in 0..width {
+            // Summed wide and divided once. Summing in u8 wraps at the fourth
+            // bright pixel, and the symptom is a mip level with dark speckles
+            // that only appear at a distance; a colour times an alpha needs
+            // more than u16 for the same reason.
+            let mut weighted = [0u32; 3];
+            let mut plain = [0u32; 3];
+            let mut alpha = 0u32;
+            let mut samples = 0u32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    if let Some(pixel) = previous.pixel(x * 2 + dx, y * 2 + dy) {
+                        let weight = u32::from(pixel[3]);
+                        for channel in 0..3 {
+                            let value = u32::from(pixel[channel]);
+                            weighted[channel] += value * weight;
+                            plain[channel] += value;
+                        }
+                        alpha += weight;
+                        samples += 1;
+                    }
+                }
+            }
+            let samples = samples.max(1);
+            let colour = |channel: usize| -> u8 {
+                weighted[channel]
+                    .checked_div(alpha)
+                    .unwrap_or(plain[channel] / samples) as u8
+            };
+            rgba.extend_from_slice(&[colour(0), colour(1), colour(2), (alpha / samples) as u8]);
+        }
+    }
+
+    Image {
+        width,
+        height,
+        rgba,
+    }
 }
 
 /// The alpha-test threshold as the mip build counts it: 0.5 of 255, the same
@@ -773,6 +842,107 @@ fn restore_tile_coverage(image: &mut Image, column: u32, row: u32, level: u32, w
             }
         }
     }
+}
+
+/// Gives one tile's clear texels the colour of the texels beside them.
+///
+/// A texel with alpha 0 has no colour of its own — nothing ever shows it —
+/// but the sampler averages it in, within a level and down the chain, so
+/// what the artist left under it is what a leaf's edge blends toward. Here
+/// every clear texel takes the mean colour of its nearest coloured
+/// neighbours, grown outward one texel per pass until every clear texel in
+/// the rect has been reached. Alpha is never touched: a hole stays a hole,
+/// and [`restore_tile_coverage`] measures exactly what it did before.
+///
+/// Over the padded rect rather than the tile alone: the padding is a copy of
+/// the tile's own edge, the sampler reads across into it, and a clear texel
+/// left black there would put a dark seam where the padding meets the tile.
+/// The rect is the tile's own — [`tile_rect`] — so nothing here can reach a
+/// neighbouring tile.
+///
+/// Each pass reads the colours the previous pass left and writes its own
+/// after it has looked at every texel, so the result does not depend on the
+/// order the rect is walked in. A colour reaches the far corner of the rect
+/// in fewer passes than the rect has texels along its two sides, which
+/// bounds the loop; a real leaf's holes are a few texels wide and the fixed
+/// point comes long before that.
+fn dilate_tile_colour(image: &mut Image, column: u32, row: u32) {
+    let rect = tile_rect(column, row, 0);
+    let (x0, y0, pitch) = rect;
+    let local = |x: u32, y: u32| ((y - y0) * pitch + (x - x0)) as usize;
+
+    // Which texels have a colour to give: any alpha at all, or filled by an
+    // earlier pass.
+    let mut coloured = Vec::with_capacity((pitch * pitch) as usize);
+    for y in y0..y0 + pitch {
+        for x in x0..x0 + pitch {
+            coloured.push(image.pixel(x, y).is_some_and(|pixel| pixel[3] > 0));
+        }
+    }
+
+    for _ in 0..pitch * 2 {
+        let mut fills = Vec::new();
+        for y in y0..y0 + pitch {
+            for x in x0..x0 + pitch {
+                if coloured[local(x, y)] {
+                    continue;
+                }
+                if let Some(colour) = neighbours_colour(image, &coloured, rect, x, y) {
+                    fills.push((x, y, colour));
+                }
+            }
+        }
+        if fills.is_empty() {
+            break;
+        }
+        for (x, y, colour) in fills {
+            let index = ((y * image.width + x) as usize) * 4;
+            if let Some(slice) = image.rgba.get_mut(index..index + 3) {
+                slice.copy_from_slice(&colour);
+            }
+            coloured[local(x, y)] = true;
+        }
+    }
+}
+
+/// The mean colour of the coloured 4-neighbours of `(x, y)` inside `rect`,
+/// or `None` while none of them has a colour yet.
+fn neighbours_colour(
+    image: &Image,
+    coloured: &[bool],
+    rect: (u32, u32, u32),
+    x: u32,
+    y: u32,
+) -> Option<[u8; 3]> {
+    let (x0, y0, pitch) = rect;
+    let mut total = [0u32; 3];
+    let mut count = 0u32;
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let (Some(nx), Some(ny)) = (x.checked_add_signed(dx), y.checked_add_signed(dy)) else {
+            continue;
+        };
+        if nx < x0 || nx >= x0 + pitch || ny < y0 || ny >= y0 + pitch {
+            continue;
+        }
+        let local = ((ny - y0) * pitch + (nx - x0)) as usize;
+        if !coloured.get(local).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(pixel) = image.pixel(nx, ny) else {
+            continue;
+        };
+        for channel in 0..3 {
+            total[channel] += u32::from(pixel[channel]);
+        }
+        count += 1;
+    }
+    (count > 0).then(|| {
+        [
+            (total[0] / count) as u8,
+            (total[1] / count) as u8,
+            (total[2] / count) as u8,
+        ]
+    })
 }
 
 /// Copies a tile into the atlas, extending its edge pixels into the padding.
@@ -1168,21 +1338,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_cutout_tiles_coverage_survives_the_whole_mip_chain() {
-        // A leaf texture is sparse dots, and a box filter averages alpha:
-        // left alone, the deeper levels fail the 0.5 test almost everywhere
-        // and a distant canopy dissolves into speckle against the fog.
-        // First reported as a forest of firs gone ghostly in a blizzard.
-        let mut leaves = Image::solid(TILE, TILE, [40, 90, 40, 0]);
+    /// The colour every leaf-fixture dot is drawn in.
+    const LEAF: [u8; 3] = [40, 90, 40];
+
+    /// A leaf texture as the shipped ones are: sparse dots of one colour over
+    /// texels that are clear AND black.
+    ///
+    /// Black under the holes, deliberately. Every shipped leaf PNG stores
+    /// (0, 0, 0) under alpha 0, and an earlier fixture that stored the leaf
+    /// colour there was exactly why the darkening it caused went unseen.
+    fn leaf_tile() -> Image {
+        let mut leaves = Image::solid(TILE, TILE, [0, 0, 0, 0]);
         for y in 0..TILE {
             for x in 0..TILE {
                 if (x * 7 + y * 13) % 10 < 3 {
-                    leaves.rgba[((y * TILE + x) as usize) * 4 + 3] = 255;
+                    let at = ((y * TILE + x) as usize) * 4;
+                    leaves.rgba[at..at + 4].copy_from_slice(&[LEAF[0], LEAF[1], LEAF[2], 255]);
                 }
             }
         }
-        let mut atlas = Atlas::build(&[Some(leaves)]);
+        leaves
+    }
+
+    /// Every texel of one tile's padded rect at one level, with its position.
+    fn tile_texels(image: &Image, level: u32) -> Vec<(u32, u32, [u8; 4])> {
+        let (x0, y0, pitch) = tile_rect(0, 0, level);
+        let mut texels = Vec::new();
+        for y in y0..y0 + pitch {
+            for x in x0..x0 + pitch {
+                texels.push((x, y, image.pixel(x, y).expect("in bounds")));
+            }
+        }
+        texels
+    }
+
+    #[test]
+    fn a_cutout_tiles_coverage_survives_the_whole_mip_chain() {
+        // A leaf texture is sparse dots, and the chain averages alpha: left
+        // alone, the deeper levels fail the 0.5 test almost everywhere and a
+        // distant canopy dissolves into speckle against the fog. First
+        // reported as a forest of firs gone ghostly in a blizzard.
+        let mut atlas = Atlas::build(&[Some(leaf_tile())]);
 
         // The defect, demonstrated, so this test cannot go vacuous: unmarked,
         // the chain loses most of the dots by the third level.
@@ -1192,7 +1388,7 @@ mod tests {
         let faded = tile_coverage(&plain[3], 0, 0, 3);
         assert!(
             faded < want * 0.5,
-            "the box filter alone kept {faded} of {want}, so this test has stopped biting"
+            "the chain alone kept {faded} of {want}, so this test has stopped biting"
         );
 
         atlas.mark_alpha_tested(0);
@@ -1206,15 +1402,181 @@ mod tests {
     }
 
     #[test]
-    fn an_unmarked_tile_is_left_exactly_as_the_box_filter_made_it() {
+    fn a_mip_texel_takes_its_colour_only_from_texels_that_have_any() {
+        // One opaque leaf texel among three clear black ones. Averaged with
+        // equal weight it is a quarter as bright as the leaf; weighted by
+        // alpha it IS the leaf, and only its alpha says how much of the 2x2
+        // was leaf.
+        let mut corner = Image::solid(2, 2, [0, 0, 0, 0]);
+        corner.rgba[..4].copy_from_slice(&[LEAF[0], LEAF[1], LEAF[2], 255]);
+        let levels = mip_chain(&corner);
+        assert_eq!(levels[1].pixel(0, 0), Some([LEAF[0], LEAF[1], LEAF[2], 63]));
+
+        // Nothing to weight by: a fully clear 2x2 keeps the plain mean of
+        // whatever colours it had, so it is at least still what it was.
+        let mut clear = Image::solid(2, 2, [8, 8, 8, 0]);
+        clear.rgba[..4].copy_from_slice(&[40, 40, 40, 0]);
+        assert_eq!(mip_chain(&clear)[1].pixel(0, 0), Some([16, 16, 16, 0]));
+
+        // One alpha throughout — an opaque block, a pane of glass — and the
+        // weights cancel: exactly the plain box filter, byte for byte.
+        for alpha in [255u8, 96] {
+            let mut block = Image::solid(2, 2, [0, 0, 255, alpha]);
+            block.rgba[..4].copy_from_slice(&[255, 0, 0, alpha]);
+            assert_eq!(
+                mip_chain(&block)[1].pixel(0, 0),
+                Some([63, 0, 191, alpha]),
+                "a 2x2 of one alpha ({alpha}) must average as it always did"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cutout_tiles_colour_survives_the_whole_mip_chain() {
+        // **The dark forest across the fog.** Every shipped leaf stores black
+        // under its holes, and a box filter that averaged the holes in with
+        // equal weight made every level darker than the one above — by the
+        // fifth, a distant tree was one texel at a fifth of the leaf's
+        // brightness, and fog only blends that near-black toward the sky.
+        // Restoring the coverage made it worse to look at: the texels it
+        // promoted past the test were exactly the ones the holes had
+        // darkened.
+        let mut atlas = Atlas::build(&[Some(leaf_tile())]);
+        atlas.mark_alpha_tested(0);
+
+        for (level, image) in atlas.mips().iter().enumerate().skip(1) {
+            let mut passing = 0;
+            for (x, y, texel) in tile_texels(image, level as u32) {
+                if texel[3] < ALPHA_TEST {
+                    continue;
+                }
+                passing += 1;
+                assert_eq!(
+                    [texel[0], texel[1], texel[2]],
+                    LEAF,
+                    "level {level} texel ({x}, {y}) is drawn at {texel:?}, not the leaf's colour"
+                );
+            }
+            assert!(passing > 0, "level {level} draws nothing at all");
+        }
+    }
+
+    #[test]
+    fn a_cutout_tiles_holes_take_the_colour_beside_them_below_level_zero() {
+        // The other half of the same defect. Weighting by alpha keeps a
+        // DRAWN texel the leaf's colour, but a texel whose whole 2x2 was
+        // hole is still clear and still black, and the sampler's bilinear
+        // filter blends a leaf's edge with it within the level. So below
+        // level 0 there must be no black texel anywhere in a marked tile's
+        // rect, clear or not.
+        let mut atlas = Atlas::build(&[Some(leaf_tile())]);
+
+        // Demonstrated first: unmarked, the pattern has whole 2x2 holes, so
+        // level 1 keeps clear black texels the filter will blend toward.
+        let plain = atlas.mips();
+        assert!(
+            tile_texels(&plain[1], 1)
+                .iter()
+                .any(|(_, _, texel)| *texel == [0, 0, 0, 0]),
+            "the fixture has no whole hole at level 1, so this test has stopped biting"
+        );
+
+        atlas.mark_alpha_tested(0);
+        let levels = atlas.mips();
+        for (level, image) in levels.iter().enumerate().skip(1) {
+            for (x, y, texel) in tile_texels(image, level as u32) {
+                assert_eq!(
+                    [texel[0], texel[1], texel[2]],
+                    LEAF,
+                    "level {level} texel ({x}, {y}) is {texel:?} under alpha {}: a colour the \
+                     filter will blend the leaf toward",
+                    texel[3]
+                );
+            }
+        }
+
+        // And level 0 is the artist's image to the byte, holes black: the
+        // interface draws icons from it through a premultiplied blend, where
+        // a coloured hole would glow over the slot behind it.
+        assert_eq!(levels[0], atlas.image);
+    }
+
+    #[test]
+    fn dilation_touches_only_the_colour_of_clear_texels() {
+        // What `dilate_tile_colour` may and may not change, checked on the
+        // whole atlas rather than through the chain: no alpha byte moves, no
+        // texel with any alpha moves, and every clear texel in the rect ends
+        // with a colour from beside it — the leaf's, since that is the only
+        // colour there is.
+        let atlas = Atlas::build(&[Some(leaf_tile())]);
+        let before = atlas.image.clone();
+        let mut after = before.clone();
+        dilate_tile_colour(&mut after, 0, 0);
+
+        assert_eq!((after.width, after.height), (before.width, before.height));
+        for y in 0..before.height {
+            for x in 0..before.width {
+                let (was, is) = (
+                    before.pixel(x, y).expect("in bounds"),
+                    after.pixel(x, y).expect("in bounds"),
+                );
+                assert_eq!(
+                    was[3], is[3],
+                    "alpha at ({x}, {y}) moved from {was:?} to {is:?}"
+                );
+                if was[3] > 0 {
+                    assert_eq!(was, is, "a texel with alpha was rewritten at ({x}, {y})");
+                } else {
+                    assert_eq!(
+                        [is[0], is[1], is[2]],
+                        LEAF,
+                        "clear texel ({x}, {y}) is {is:?}, not the colour beside it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fully_clear_tile_is_left_alone_by_dilation() {
+        // Nothing to take a colour from, and a bounded loop that must still
+        // stop: the pathological input for a fill that grows from its
+        // coloured texels is a tile with none.
+        let atlas = Atlas::build(&[Some(Image::solid(TILE, TILE, [0, 0, 0, 0]))]);
+        let mut image = atlas.image.clone();
+        dilate_tile_colour(&mut image, 0, 0);
+        assert_eq!(image, atlas.image);
+    }
+
+    #[test]
+    fn an_unmarked_tile_is_left_exactly_as_the_filter_made_it() {
         // Glass is BLENDED: its partial alpha is what a window looks like,
-        // and "restoring" its coverage would darken every distant pane. Only
-        // marked tiles are touched, byte for byte.
-        let pane = Image::solid(TILE, TILE, [200, 220, 255, 96]);
+        // and "restoring" its coverage would darken every distant pane, while
+        // colouring the clear black hole in this one would put a colour where
+        // the artist drew none. Only marked tiles are touched, byte for byte.
+        let mut pane = Image::solid(TILE, TILE, [200, 220, 255, 96]);
+        for y in 6..10 {
+            for x in 6..10 {
+                let at = ((y * TILE + x) as usize) * 4;
+                pane.rgba[at..at + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+        }
         let atlas = Atlas::build(&[Some(pane)]);
         let mut expected = mip_chain(&atlas.image);
         expected.truncate(atlas.mip_levels() as usize);
-        assert_eq!(atlas.mips(), expected);
+        let levels = atlas.mips();
+        assert_eq!(levels, expected);
+
+        // Including the hole, which is still there and still black.
+        let (x0, y0, _) = tile_rect(0, 0, 1);
+        assert_eq!(
+            levels[1].pixel(
+                x0 + u32::midpoint(PADDING, 7),
+                y0 + u32::midpoint(PADDING, 7)
+            ),
+            Some([0, 0, 0, 0]),
+            "an unmarked tile's hole was coloured or filled"
+        );
     }
 
     #[test]

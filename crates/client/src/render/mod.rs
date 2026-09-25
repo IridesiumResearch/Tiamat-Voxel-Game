@@ -2383,10 +2383,13 @@ struct Culled {
 /// player nears, which is the trade; a fade would need a second pass per chunk.
 ///
 /// Foliage beyond `CUTOUT_DRAW_BLOCKS` is not dropped but drawn SOLID: the
-/// same quads through the terrain's pipeline, whose fragment ignores alpha
-/// (the colour under a leaf texture's holes is the leaf colour), so a far
-/// canopy is a dark mass rather than a smudge with the sky in it, and pays no
-/// discard. At eleven chunks the holes were never visible.
+/// same quads through the terrain's pipeline, which neither tests nor writes
+/// the texture's alpha, so a far canopy is a solid mass rather than a smudge
+/// with the sky in it, and pays no discard. At eleven chunks the holes were
+/// never visible. What colour that mass is comes from the atlas's mip chain:
+/// the shipped leaves store black under their holes, and `Atlas::mips` gives
+/// the holes the leaf's colour below level 0 so the far levels are the leaf
+/// and not the black — see `texture::dilate_tile_colour`.
 const SPRITE_DRAW_BLOCKS: f32 = 112.0;
 const CUTOUT_DRAW_BLOCKS: f32 = 176.0;
 
@@ -4528,7 +4531,26 @@ fn build_world_pipeline(
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: blended.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    // **Opaque geometry does not write alpha.** In mode 3 the
+                    // scene's alpha is not coverage but a MARK the composite
+                    // reads: `CLOUD_MARK` where the cloud pass drew, and the
+                    // clear's 1.0 everywhere else, so a cloud is fogged as the
+                    // sky beside it and not by its depth (weather ask W15).
+                    // `surface()` returns the texture's alpha, and a solid
+                    // pipeline that wrote it put every leaf drawn beyond
+                    // `CUTOUT_DRAW_BLOCKS` — and every horizon summary cell —
+                    // into the scene with a texel alpha under 1, which the
+                    // composite took for a share of cloud and left that share
+                    // of the distance fog off: dark, unfogged speckle where
+                    // the terrain beside it faded. Glass keeps all four
+                    // channels because its alpha is what it blends by, and a
+                    // pane over a cloud pixel raising the mark is what W15
+                    // asks for.
+                    write_mask: if blended {
+                        wgpu::ColorWrites::ALL
+                    } else {
+                        wgpu::ColorWrites::COLOR
+                    },
                 })],
             }),
             primitive: wgpu::PrimitiveState {

@@ -1073,6 +1073,12 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     // it here as well would apply it twice, and the second application is over
     // a colour that has already lost its contrast to the first. That goes for
     // a place's fog as much as the sky's.
+    //
+    // The alpha returned here reaches the scene only from a BLENDED pipeline
+    // (glass), which needs it to blend by. In mode 3 the scene's alpha is the
+    // composite's cloud mark, and a solid pipeline masks its alpha off: a leaf
+    // drawn solid at a distance would otherwise hand the composite its mip's
+    // partial alpha, be taken for that much cloud, and lose that much fog.
     if (globals.lighting_mode == 2u) {
         return vec4<f32>(lit, texel.a);
     }
