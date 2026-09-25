@@ -975,6 +975,13 @@ pub struct Renderer {
     prop_pipeline_hdr: wgpu::RenderPipeline,
     props: wgpu::Buffer,
     prop_count: u32,
+    /// How many [`Prop`]s `props` currently holds room for. Starts at
+    /// [`PROP_CAPACITY`] and grows in [`Renderer::set_props`], the same
+    /// backstop [`viewmodel::Viewmodel::prepare`] gives the hand: an item
+    /// extruded per texel is up to 256 boxes each, and a floor with several
+    /// dropped ones in view can pass that without a frame silently losing
+    /// some of them.
+    prop_capacity: usize,
     /// Mode 3's targets and post chain, built when that mode is showing and
     /// dropped when it is not.
     ///
@@ -1192,6 +1199,7 @@ impl Renderer {
             prop_pipeline_hdr,
             props,
             prop_count: 0,
+            prop_capacity: PROP_CAPACITY,
             post: None,
             // Full daylight until a sky says otherwise, which is what Task
             // 08's scenes assumed and what a world with no sky mod gets.
@@ -2043,17 +2051,24 @@ impl Renderer {
     /// animated joint, so where it is is a function of the clip's phase and
     /// changes on every one of them; there is nothing to keep between frames.
     ///
-    /// Silently truncated at [`PROP_CAPACITY`], which is the same bargain the
-    /// blobs make: a frame that drew a few boxes fewer is better than one that
-    /// reallocated a buffer to draw them all.
+    /// Grows [`Self::props`] rather than truncating, the same bargain
+    /// [`viewmodel::Viewmodel::prepare`] makes for the hand: an extruded
+    /// item is up to 256 boxes on its own, so silently dropping the rest at
+    /// a fixed cap would mean a figure holding a picked-up sword losing
+    /// most of it whenever the floor already had a few items down.
     pub fn set_props(&mut self, props: &[Prop]) {
-        let count = props.len().min(PROP_CAPACITY);
-        self.prop_count = u32::try_from(count).unwrap_or(0);
-        if count > 0 {
-            self.gpu
-                .queue
-                .write_buffer(&self.props, 0, bytemuck::cast_slice(&props[..count]));
+        self.prop_count = u32::try_from(props.len()).unwrap_or(0);
+        if props.is_empty() {
+            return;
         }
+        if props.len() > self.prop_capacity {
+            let capacity = props.len().next_power_of_two();
+            self.props = gpu_prop_buffer(&self.gpu, capacity);
+            self.prop_capacity = capacity;
+        }
+        self.gpu
+            .queue
+            .write_buffer(&self.props, 0, bytemuck::cast_slice(props));
     }
 
     /// Draws what figures are holding, if anything.
@@ -2953,7 +2968,10 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.hands.draw(&mut pass);
+        // A single draw. A second call here once doubled every blended edge
+        // texel of a held item's rim — the viewmodel pipeline has no depth
+        // test, so two overlapping draws of the same alpha-blended geometry
+        // do not merely waste a draw call, they darken the rim they overlap.
         self.hands.draw(&mut pass);
     }
 
@@ -3269,22 +3287,41 @@ fn build_selection_pipeline(
 /// written every frame from a list a server controls the length of.
 const BLOB_CAPACITY: usize = 4096;
 
-/// Most prop boxes one frame will draw.
+/// Prop boxes the buffer starts with room for, before [`Renderer::set_props`]
+/// grows it.
 ///
-/// A held item is at most twenty-seven cells and there are two hands, so this
-/// is a couple of dozen figures' worth. The local player is the only one whose
-/// hands the client knows about today; the cap is what stops a future one that
-/// knows about everybody from being unbounded.
-const PROP_CAPACITY: usize = 512;
+/// A held ITEM is extruded one box per opaque texel of its tile — up to 256,
+/// [`crate::texture::TILE`] squared bits — and the local player (the only one
+/// whose hands the client knows about today) can be showing two of those at
+/// once. `2 * 256` covers both hands at their worst case, plus another 256 of
+/// headroom for whatever a few dropped items on the ground add; past that,
+/// [`Renderer::set_props`] reallocates rather than dropping boxes.
+const PROP_CAPACITY: usize = 2 * 256 + 256;
 
 /// One prop box, as the shader reads it.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Prop {
     /// The model matrix, camera-relative, by column.
     pub model: [f32; 16],
     /// The atlas rectangle: `u0, v0, u1, v1`.
     pub uv: [f32; 4],
+    /// Per-instance switches, `.x` the only one read today: `1.0` marks this
+    /// box an ITEM, drawn through the prop pass's alpha test; `0.0` leaves
+    /// it a BLOCK, drawn solid regardless of what its own texture's alpha
+    /// is. `.yzw` unused — kept as a whole `vec4` so every field of this
+    /// instance is one, the way the viewmodel's `Piece` is, rather than
+    /// growing the stride by an odd four bytes for one flag.
+    ///
+    /// **Why a block is never alpha-tested.** A block's partial alpha is
+    /// BLENDED into the world when it is placed (glass, clear ice) — that
+    /// is its appearance, not a cutout — and a uniformly translucent one
+    /// (clear ice is under 0.5 everywhere) would vanish outright under a
+    /// 0.5 test with nothing in `Prop` to say it should not. An item's
+    /// alpha, by contrast, marks its silhouette: extruded per opaque texel
+    /// it barely matters, but the untextured fallback slab still needs the
+    /// test to cut its clear margin out.
+    pub flags: [f32; 4],
 }
 
 /// How big a held block is, as a half-extent in cells.
@@ -3317,6 +3354,12 @@ const HELD_GRIP: [f32; 3] = [0.0, -0.55, 0.35];
 ///
 /// A cut is one box per occupied cell, exactly as the viewmodel draws it, so a
 /// stair looks like a stair in both views.
+///
+/// `texels` is the material's opacity mask (see
+/// [`crate::texture::TileMap::opacity_of`]); passed through to [`boxes_of`],
+/// which is the one place a held item and a dropped item both become boxes,
+/// so third-person and the floor cannot draw a different shape for the same
+/// sword.
 #[must_use]
 pub fn held_boxes(
     figure: &skinned::Figure,
@@ -3324,6 +3367,7 @@ pub fn held_boxes(
     shape: u32,
     uv: [f32; 4],
     item: bool,
+    texels: Option<[u16; 16]>,
 ) -> Vec<Prop> {
     use glam::Mat4;
 
@@ -3335,28 +3379,77 @@ pub fn held_boxes(
         * Mat4::from_cols_array(joint)
         * Mat4::from_translation(glam::Vec3::from(HELD_GRIP));
 
-    boxes_of(&placed, HELD_HALF, shape, uv, item)
+    boxes_of(&placed, HELD_HALF, shape, uv, item, texels)
+}
+
+/// One box of an item's extruded sprite, `texel` already in the sprite's own
+/// `-1.0..=1.0` square (see [`crate::texture::texel_boxes`]), scaled by this
+/// stack's own half-width and placed inside `placed`'s frame.
+fn item_texel_prop(
+    placed: &glam::Mat4,
+    half: f32,
+    uv: [f32; 4],
+    texel: &crate::texture::TexelBox,
+) -> Prop {
+    use glam::Mat4;
+
+    let offset = Mat4::from_translation(glam::vec3(
+        texel.offset[0] * half,
+        texel.offset[1] * half,
+        0.0,
+    ));
+    let scale = Mat4::from_scale(glam::vec3(
+        half * crate::texture::SPRITE_TEXEL,
+        half * crate::texture::SPRITE_TEXEL,
+        half * ITEM_THICKNESS,
+    ));
+    Prop {
+        model: (*placed * offset * scale).to_cols_array(),
+        uv: crate::texture::tile_sub_rect(uv, texel.uv),
+        flags: [1.0, 0.0, 0.0, 0.0],
+    }
 }
 
 /// A stack's boxes, inside a frame something else has placed.
 ///
 /// `half` is the half-extent of the WHOLE block; a cut's cells are a third of
 /// that each, so three of them fill exactly the block one box would have.
-fn boxes_of(placed: &glam::Mat4, half: f32, shape: u32, uv: [f32; 4], item: bool) -> Vec<Prop> {
+fn boxes_of(
+    placed: &glam::Mat4,
+    half: f32,
+    shape: u32,
+    uv: [f32; 4],
+    item: bool,
+    texels: Option<[u16; 16]>,
+) -> Vec<Prop> {
     use glam::Mat4;
 
     // **An item is a picture with a thickness, not a solid.** A sword is not a
     // cube and drawing it as one wraps the same picture round three faces —
-    // reported from the window as three swords at three angles. One thin slab
-    // instead: a flat sprite from the sides you look at it from, and enough
-    // depth that it is an object rather than a decal.
+    // reported from the window as three swords at three angles. Extruded from
+    // its own opacity mask when one is in hand: one box per opaque texel, the
+    // same shape `viewmodel::cells` builds for the first-person hand, so a
+    // dropped sword and a held one read as the same sword.
     //
     // A cut never applies: an item is not placeable, so it has no occupancy.
     if item {
+        if let Some(boxes) = texels
+            .map(crate::texture::texel_boxes)
+            .filter(|boxes| !boxes.is_empty())
+        {
+            return boxes
+                .iter()
+                .map(|texel| item_texel_prop(placed, half, uv, texel))
+                .collect();
+        }
+        // No mask — the texture has not arrived, or has nothing opaque in
+        // it — falls back to the old single slab rather than drawing
+        // nothing.
         return vec![Prop {
             model: (*placed * Mat4::from_scale(glam::vec3(half, half, half * ITEM_THICKNESS)))
                 .to_cols_array(),
             uv,
+            flags: [1.0, 0.0, 0.0, 0.0],
         }];
     }
 
@@ -3364,6 +3457,7 @@ fn boxes_of(placed: &glam::Mat4, half: f32, shape: u32, uv: [f32; 4], item: bool
         return vec![Prop {
             model: (*placed * Mat4::from_scale(glam::Vec3::splat(half))).to_cols_array(),
             uv,
+            flags: [0.0; 4],
         }];
     }
 
@@ -3385,6 +3479,7 @@ fn boxes_of(placed: &glam::Mat4, half: f32, shape: u32, uv: [f32; 4], item: bool
                 boxes.push(Prop {
                     model: (*placed * placement).to_cols_array(),
                     uv,
+                    flags: [0.0; 4],
                 });
             }
         }
@@ -3440,15 +3535,24 @@ pub fn spin(seconds: f32, id: u64) -> f32 {
 
 /// The boxes one dropped item is made of, camera-relative.
 ///
-/// Same geometry as a held one — a cut is its cells, a whole block is one box —
-/// so an item looks the same in a hand, in a slot and on the floor.
+/// Same geometry as a held one — a cut is its cells, a whole block is one box,
+/// an item is extruded from the same `texels` mask through the same
+/// [`boxes_of`] — so an item looks the same in a hand, in a slot and on the
+/// floor.
 #[must_use]
-pub fn dropped_boxes(at: [f32; 3], yaw: f32, shape: u32, uv: [f32; 4], item: bool) -> Vec<Prop> {
+pub fn dropped_boxes(
+    at: [f32; 3],
+    yaw: f32,
+    shape: u32,
+    uv: [f32; 4],
+    item: bool,
+    texels: Option<[u16; 16]>,
+) -> Vec<Prop> {
     use glam::Mat4;
 
     let placed = Mat4::from_translation(glam::vec3(at[0], at[1] + DROP_LIFT, at[2]))
         * Mat4::from_rotation_y(yaw);
-    boxes_of(&placed, DROP_HALF, shape, uv, item)
+    boxes_of(&placed, DROP_HALF, shape, uv, item, texels)
 }
 
 /// One sub-node column under a blob shadow, before it is placed in the world.
@@ -3642,12 +3746,7 @@ fn build_props(
     let shader = gpu
         .device
         .create_shader_module(wgpu::include_wgsl!("prop.wgsl"));
-    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("props"),
-        size: (PROP_CAPACITY * size_of::<Prop>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    let buffer = gpu_prop_buffer(gpu, PROP_CAPACITY);
     (
         build_prop_pipeline(gpu, &shader, bind_layout, gpu.surface_format()),
         build_prop_pipeline(gpu, &shader, bind_layout, graph::HDR_FORMAT),
@@ -3655,11 +3754,31 @@ fn build_props(
     )
 }
 
-/// The prop pipeline: one instanced cube per box, opaque.
+/// A vertex buffer sized for `capacity` [`Prop`]s.
+///
+/// Its own function because [`Renderer::set_props`] needs to build a bigger
+/// one mid-frame-sequence exactly as `build_props` builds the first one.
+fn gpu_prop_buffer(gpu: &Gpu, capacity: usize) -> wgpu::Buffer {
+    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("props"),
+        size: (capacity * size_of::<Prop>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// The prop pipeline: one instanced cube per box, alpha-tested per instance.
 ///
 /// **Depth-writing, unlike the blob.** A held block is a solid object standing
 /// in the world: the arm holding it goes in front of it from some angles and
 /// behind it from others, and only the depth buffer knows which.
+///
+/// **One pipeline for both, not the world's split into an opaque pass and a
+/// cutout entry point.** `fragment_main` discards only for the instances that
+/// ask for it (`Prop::flags`), so a block still gets early-Z and an item
+/// still gets its cutout, without a second pipeline. The pass is a few
+/// hundred boxes; the world's terrain is millions of fragments, which is
+/// where the split earns its keep.
 fn build_prop_pipeline(
     gpu: &Gpu,
     shader: &wgpu::ShaderModule,
@@ -3673,7 +3792,10 @@ fn build_prop_pipeline(
             bind_group_layouts: &[Some(bind_layout)],
             immediate_size: 0,
         });
-    let columns: [wgpu::VertexAttribute; 5] = std::array::from_fn(|index| wgpu::VertexAttribute {
+    // Six vec4s: the model matrix's four columns, the uv rectangle, and the
+    // per-instance flags — every field of `Prop`, in declaration order, so
+    // adding one here is adding one to the array length and nothing else.
+    let columns: [wgpu::VertexAttribute; 6] = std::array::from_fn(|index| wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: (index * size_of::<[f32; 4]>()) as u64,
         shader_location: index as u32,
@@ -5072,7 +5194,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
         };
-        let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false);
+        let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false, None);
         assert_eq!(boxes.len(), 1, "a whole block is one box");
 
         // At yaw zero the figure's axes are the world's, so the hand is its
@@ -5100,7 +5222,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
         };
-        let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false);
+        let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false, None);
         let at = placement(&boxes[0]);
 
         // The hand's own displacement from the body, which is what turned.
@@ -5129,8 +5251,8 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
         };
-        let block = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false);
-        let item = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], true);
+        let block = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None);
+        let item = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], true, None);
         assert_eq!(block.len(), 1);
         assert_eq!(item.len(), 1);
 
@@ -5167,7 +5289,7 @@ mod tests {
             carrying: [false; 2],
         };
         let mask = 0b111 << 12;
-        let cut = held_boxes(&figure, &joint([0.0; 3]), mask, [0.0; 4], false);
+        let cut = held_boxes(&figure, &joint([0.0; 3]), mask, [0.0; 4], false, None);
         assert_eq!(cut.len(), mask.count_ones() as usize);
 
         // Three cells across is exactly the block one box would have been, in
@@ -5185,7 +5307,7 @@ mod tests {
             }
             (low, high)
         };
-        let whole = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false);
+        let whole = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None);
         let (cut_low, cut_high) = extent(&cut);
         let (whole_low, whole_high) = extent(&whole);
         assert!(
@@ -5202,7 +5324,154 @@ mod tests {
             tiamat_core::inventory::Shape::ALL,
             [0.0; 4],
             false,
+            None,
         );
         assert_eq!(all.len(), 1);
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "the uv and flags compared here are the same constants and the same \
+                  tile_sub_rect arithmetic handed back unchanged by both call sites, so exact \
+                  equality is the question being asked"
+    )]
+    #[test]
+    fn dropped_item_boxes_are_the_same_shape_as_held_ones_from_the_same_mask() {
+        // Third-person held and dropped both go through `boxes_of`; the same
+        // mask must not grow a face on one that the other lacks — a picked-up
+        // sword and the one lying where it was dropped are the same sword.
+        let mut mask = [0u16; 16];
+        mask[0] = 0b101; // texels (0, 0) and (2, 0).
+        mask[9] |= 1 << 7; // texel (7, 9).
+
+        let figure = skinned::Figure {
+            offset: [0.0; 3],
+            yaw: 0.0,
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+        };
+        let uv = [0.2, 0.2, 0.6, 0.6];
+        let held = held_boxes(&figure, &joint([0.0; 3]), 0, uv, true, Some(mask));
+        let dropped = dropped_boxes([0.0; 3], 0.0, 0, uv, true, Some(mask));
+        assert_eq!(held.len(), 3, "one box per opaque texel");
+        assert_eq!(
+            dropped.len(),
+            held.len(),
+            "the same mask should make the same number of boxes either way"
+        );
+
+        // Held boxes carry an extra uniform scale that dropped ones do not —
+        // the rig's own cells-to-blocks conversion, baked into the joint's
+        // frame — so the two passes' RAW sizes are not directly comparable.
+        // That factor is the same on every axis, so it cancels out of the
+        // ratio BETWEEN axes: a texel box is square across the face and a
+        // fixed fraction as deep, whichever pass scaled it.
+        let proportions = |prop: &Prop| {
+            let (x, y, z) = (
+                prop.model[0].abs(),
+                prop.model[5].abs(),
+                prop.model[10].abs(),
+            );
+            [x / y, z / x]
+        };
+        for (index, (h, d)) in held.iter().zip(&dropped).enumerate() {
+            let (hp, dp) = (proportions(h), proportions(d));
+            assert!(
+                (hp[0] - dp[0]).abs() < 1e-4,
+                "box {index}: held is {:.4} as wide as tall, dropped {:.4} — not the same \
+                 square face",
+                hp[0],
+                dp[0]
+            );
+            let want_depth = ITEM_THICKNESS / crate::texture::SPRITE_TEXEL;
+            assert!(
+                (hp[1] - dp[1]).abs() < 1e-4 && (hp[1] - want_depth).abs() < 1e-4,
+                "box {index}: held is {:.4} deep against its width, dropped {:.4}, and a texel \
+                 box should be {want_depth:.4} (ITEM_THICKNESS over a sixteenth of the tile)",
+                hp[1],
+                dp[1]
+            );
+            assert_eq!(
+                h.uv, d.uv,
+                "box {index}: the same texel should sample the same rect"
+            );
+            assert_eq!(
+                h.flags,
+                [1.0, 0.0, 0.0, 0.0],
+                "an extruded item box must be alpha-tested"
+            );
+            assert_eq!(h.flags, d.flags);
+        }
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "flags is a constant the block path either sets to zero or does not; exact \
+                  equality is the question being asked"
+    )]
+    #[test]
+    fn a_block_prop_stays_a_cube_even_if_an_opacity_mask_is_supplied() {
+        // `texels` is read only when `item` is true — nothing sets one on a
+        // block today, but the guard must hold if something ever did.
+        let figure = skinned::Figure {
+            offset: [0.0; 3],
+            yaw: 0.0,
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+        };
+        let boxes = held_boxes(
+            &figure,
+            &joint([0.0; 3]),
+            0,
+            [0.0; 4],
+            false,
+            Some([0xFFFFu16; 16]),
+        );
+        assert_eq!(boxes.len(), 1, "a block is one cube regardless of texels");
+        let half = [boxes[0].model[0], boxes[0].model[5], boxes[0].model[10]];
+        assert!(
+            (half[0] - half[2]).abs() < 1e-6,
+            "a block should stay as deep as it is wide: {half:?}"
+        );
+        assert_eq!(
+            boxes[0].flags, [0.0; 4],
+            "a block prop must never be alpha-tested — a uniformly translucent block \
+             texture (clear ice) must stay solid, not vanish"
+        );
+    }
+
+    #[test]
+    fn a_fully_opaque_mask_fills_the_same_envelope_the_old_slab_did() {
+        // Every texel opaque is what a fully-covering picture (or the
+        // missing-texture checker) draws: 256 boxes tiling the same face the
+        // single slab used to cover.
+        let placed = glam::Mat4::IDENTITY;
+        let full = boxes_of(&placed, 1.0, 0, [0.0; 4], true, Some([0xFFFFu16; 16]));
+        assert_eq!(full.len(), 256);
+        let slab = boxes_of(&placed, 1.0, 0, [0.0; 4], true, None);
+        assert_eq!(slab.len(), 1);
+
+        let envelope = |boxes: &[Prop], axis: usize| {
+            let mut low = f32::MAX;
+            let mut high = f32::MIN;
+            for prop in boxes {
+                let centre = placement(prop)[axis];
+                let half = prop.model[axis * 4 + axis].abs();
+                low = low.min(centre - half);
+                high = high.max(centre + half);
+            }
+            (low, high)
+        };
+        for axis in 0..2 {
+            let (slab_low, slab_high) = envelope(&slab, axis);
+            let (full_low, full_high) = envelope(&full, axis);
+            assert!(
+                (slab_low - full_low).abs() < 1e-4 && (slab_high - full_high).abs() < 1e-4,
+                "axis {axis}: slab spans {slab_low}..{slab_high}, the mosaic \
+                 {full_low}..{full_high}"
+            );
+        }
     }
 }

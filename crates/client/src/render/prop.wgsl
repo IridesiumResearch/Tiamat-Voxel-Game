@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // A prop: a textured box standing somewhere in the world, on somebody's rig.
+// A block's box is solid; an item's is alpha-tested — see `fragment_main`.
 //
 // # What this is for, and why the viewmodel could not do it
 //
@@ -64,6 +65,9 @@ struct Instance {
     @location(3) column3: vec4<f32>,
     // The atlas rectangle: u0, v0, u1, v1.
     @location(4) uv: vec4<f32>,
+    // `.x`: 1.0 for an ITEM box, alpha-tested below; 0.0 for a BLOCK box,
+    // always solid. `.yzw` unused — see the doc on `render::Prop`.
+    @location(5) flags: vec4<f32>,
 };
 
 struct VertexOut {
@@ -71,6 +75,7 @@ struct VertexOut {
     @location(0) uv: vec2<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) distance: f32,
+    @location(3) @interpolate(flat) alpha_tested: f32,
 };
 
 // One unit cube: six faces, two triangles each, wound counter-clockwise seen
@@ -139,6 +144,7 @@ fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexO
     out.normal = normalize((model * vec4<f32>(face_normal(index), 0.0)).xyz);
     out.distance = length(world);
     out.uv = mix(instance.uv.xy, instance.uv.zw, face_uv(index, local));
+    out.alpha_tested = instance.flags.x;
     return out;
 }
 
@@ -149,6 +155,18 @@ fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexO
 // on the shaded side, and a black face on a small object reads as a hole. The
 // world's own lighting is not available here anyway — a prop is not in a chunk
 // and has no propagated light to sample.
+//
+// # Alpha-tested for an item, solid for a block
+//
+// A dropped or held ITEM's tile has a clear margin around its picture — the
+// square PNG around a sword or a piece of meat — and without a cutout that
+// margin used to draw as whatever colour the PNG happened to store under
+// alpha 0, usually black: an opaque box around the picture instead of the
+// picture itself. `cut_out` in `world.wgsl` sets the precedent: the same 0.5
+// threshold, discarded rather than blended, so early depth still works for
+// every fragment that survives. A BLOCK never takes this path — see the doc
+// on `render::Prop::flags` for why a uniformly translucent block texture
+// (clear ice) must stay solid rather than vanish under the same test.
 @fragment
 fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     let normal = normalize(input.normal);
@@ -158,6 +176,9 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     let sun = globals.sun_colour.rgb * globals.sun_intensity * wrapped;
     let sky = globals.sky_colour.rgb * globals.ambient;
     let albedo = textureSample(atlas, atlas_sampler, input.uv);
+    if (input.alpha_tested > 0.5 && albedo.a < 0.5) {
+        discard;
+    }
     let lit = albedo.rgb * (sun + sky);
 
     let far = globals.sky_colour.w;

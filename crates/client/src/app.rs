@@ -3004,6 +3004,7 @@ impl App {
                         tile: None,
                         shape: 0,
                         item: false,
+                        texels: None,
                         swing,
                     };
                 };
@@ -3017,6 +3018,11 @@ impl App {
                     // The same set the slots and the props read, so one sword
                     // is one shape in every view (`f7f20e1` missed this one).
                     item: self.items.contains(&stack.material),
+                    // The opacity mask an item is extruded from — see
+                    // `viewmodel::cells`. `None` for a block, which ignores
+                    // it anyway, and for a material the atlas has no tile
+                    // for yet.
+                    texels: self.tiles.opacity_of(stack.material),
                     swing,
                 }
             };
@@ -3121,6 +3127,7 @@ impl App {
                 stack.shape,
                 self.tile_of(stack.material),
                 self.items.contains(&stack.material),
+                self.tiles.opacity_of(stack.material),
             ));
         }
         props
@@ -3162,6 +3169,7 @@ impl App {
                 stack.shape,
                 self.tile_of(stack.material),
                 self.items.contains(&stack.material),
+                self.tiles.opacity_of(stack.material),
             ));
         }
         props
@@ -6619,12 +6627,15 @@ pub fn build_atlas(
     }
 
     let mut atlas = Atlas::build(&slots);
-    // Foliage and sprites are drawn through the alpha TEST, and a
-    // box-filtered mip of a sparse leaf texture fails it almost everywhere —
-    // distant canopies dissolved into speckle against the fog. A marked
-    // tile's mips keep the artist's coverage instead; see `Atlas::mips`.
+    // Foliage, sprites and items are all drawn through the alpha TEST — a
+    // leaf through `cut_out`, an item through the prop pass's own cutout —
+    // and a box-filtered mip of a sparse texture fails that test almost
+    // everywhere a level or two down: distant canopies used to dissolve
+    // into speckle against the fog, and an unmarked item would thin out and
+    // vanish with distance the same way. A marked tile's mips keep the
+    // artist's coverage instead; see `Atlas::mips`.
     for entry in table {
-        if entry.cutout || entry.billboard {
+        if entry.cutout || entry.billboard || !entry.placeable {
             atlas.mark_alpha_tested(entry.id);
         }
     }

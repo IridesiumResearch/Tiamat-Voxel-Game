@@ -4492,6 +4492,7 @@ fn a_prop_is_drawn_in_the_world_and_hides_behind_what_is_in_front_of_it() {
         )
         .to_cols_array(),
         uv: [0.0, 0.0, 0.25, 0.25],
+        ..Default::default()
     };
     renderer.set_props(std::slice::from_ref(&near));
     let held = target.capture(&mut renderer, &camera).expect("capture");
@@ -4519,6 +4520,7 @@ fn a_prop_is_drawn_in_the_world_and_hides_behind_what_is_in_front_of_it() {
         )
         .to_cols_array(),
         uv: [0.0, 0.0, 0.25, 0.25],
+        ..Default::default()
     };
     renderer.set_props(std::slice::from_ref(&behind));
     let hidden = target.capture(&mut renderer, &camera).expect("capture");
@@ -4526,6 +4528,58 @@ fn a_prop_is_drawn_in_the_world_and_hides_behind_what_is_in_front_of_it() {
     assert_eq!(
         leaked, 0,
         "{leaked} pixels of a prop behind the wall reached the frame, so it is not depth-tested"
+    );
+}
+
+#[test]
+fn props_past_the_starting_capacity_all_reach_the_buffer() {
+    // **The same shape of bug a hundred-entity crowd exercises for figures.**
+    // The buffer used to be a fixed `PROP_CAPACITY` and silently truncated;
+    // an item extruded per opaque texel is up to 256 boxes on its own, so
+    // two held items alone can pass the old 512-box cap. `set_props` must
+    // grow the buffer rather than drop the tail of the slice.
+    let Some(gpu) = gpu() else { return };
+    let chunks = wall_scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    let mut camera = Camera {
+        position: Position::from_world(20.0, 14.0, 24.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, -1.5);
+    let bare = target.capture(&mut renderer, &camera).expect("capture");
+
+    // A thousand boxes: 999 buried far below the floor where nothing can see
+    // them, and the LAST one in the slice — the one a fixed cap below 1000
+    // would have dropped — sitting where the camera looks.
+    let buried = |y: f32| client::render::Prop {
+        model: glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(0.25),
+            glam::Quat::IDENTITY,
+            glam::vec3(0.0, y, 0.0),
+        )
+        .to_cols_array(),
+        uv: [0.0, 0.0, 0.25, 0.25],
+        ..Default::default()
+    };
+    let mut props: Vec<client::render::Prop> = (0..999).map(|_| buried(-30.0)).collect();
+    props.push(buried(-2.0));
+    assert!(props.len() > 768, "must exceed the starting PROP_CAPACITY");
+
+    renderer.set_props(&props);
+    let drawn = target.capture(&mut renderer, &camera).expect("capture");
+
+    let changed = (0..HEIGHT)
+        .step_by(2)
+        .flat_map(|y| (0..WIDTH).step_by(2).map(move |x| (x, y)))
+        .filter(|(x, y)| bare.pixel(*x, *y) != drawn.pixel(*x, *y))
+        .count();
+    assert!(
+        changed > 20,
+        "only {changed} pixels changed with {} props set — the last one, past the old \
+         512-box cap, did not reach the frame",
+        props.len()
     );
 }
 
@@ -4557,6 +4611,7 @@ fn a_hand_is_on_screen_in_first_person_and_holds_what_is_selected() {
             tile: Some([0.0, 0.0, 0.25, 0.25]),
             shape: 0,
             item: false,
+            texels: None,
             swing: 0.0,
         },
     ));

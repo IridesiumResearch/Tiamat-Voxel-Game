@@ -57,6 +57,15 @@ pub const MAX_DECODED_BYTES: u64 = 8 * 1024 * 1024;
 /// bleeding artefacts start.
 pub const TILE: u32 = 16;
 
+/// The width of one texel of a tile, as a share of the tile.
+///
+/// An extruded sprite (see [`texel_boxes`]) is one box per opaque texel, a
+/// sixteenth of the tile wide because [`TILE`] is. Named so the held item,
+/// the third-person prop and the dropped one all divide the tile the same
+/// way instead of three call sites each spelling `16.0` and one of them
+/// drifting if [`TILE`] ever changed.
+pub const SPRITE_TEXEL: f32 = 1.0 / (TILE as f32);
+
 /// Padding around each tile, in pixels.
 ///
 /// Mipmapping averages neighbouring pixels, and at the smallest mip level a
@@ -436,10 +445,19 @@ pub struct Atlas {
     slots: Vec<u32>,
     /// How many slots hold a real texture rather than the chequer.
     filled: usize,
-    /// Which tiles are alpha-TESTED rather than opaque or blended: foliage
-    /// and sprites, the materials `cut_out` discards under 0.5. Their mips
-    /// keep the artist's coverage — see [`Atlas::mips`].
+    /// Which tiles are alpha-TESTED rather than opaque or blended: foliage,
+    /// sprites and items — the materials `cut_out` (and the prop pass's own
+    /// cutout) discard under 0.5. Their mips keep the artist's coverage —
+    /// see [`Atlas::mips`].
     alpha_tested: Vec<bool>,
+    /// Which texels of each material's tile pass the alpha test, indexed by
+    /// material id and then by row: bit `x` of `opaque[material][y]` is set
+    /// when the RESAMPLED 16×16 tile's texel `(x, y)` has alpha at or over
+    /// [`ALPHA_TEST`] — the same threshold the shaders cut out under. An
+    /// item's picture is extruded from this one box per set bit (see
+    /// [`texel_boxes`]), so a held sword is the sword's own silhouette with
+    /// a thickness rather than the whole tile's rectangle.
+    opaque: Vec<[u16; 16]>,
 }
 
 impl Atlas {
@@ -461,12 +479,14 @@ impl Atlas {
         let side = grid * TILE_PITCH;
         let mut image = Image::solid(side, side, [0, 0, 0, 0]);
         let mut slots = Vec::with_capacity(textures.len());
+        let mut opaque = Vec::with_capacity(textures.len());
 
         let mut filled = 0;
         for (index, texture) in textures.iter().enumerate() {
             let slot = u32::try_from(index).unwrap_or(0);
             let tile = texture.as_ref().map_or_else(Image::missing, Image::to_tile);
             filled += usize::from(texture.is_some());
+            opaque.push(opacity_mask(&tile));
             blit_padded(&mut image, &tile, slot % grid, slot / grid);
             slots.push(slot);
         }
@@ -478,12 +498,13 @@ impl Atlas {
             slots,
             filled,
             alpha_tested,
+            opaque,
         }
     }
 
     /// Marks one material's tile as alpha-tested: drawn through the cutout
-    /// or billboard path, where a texel either passes the 0.5 test or does
-    /// not exist.
+    /// or billboard path, or as an item's extruded sprite, where a texel
+    /// either passes the 0.5 test or does not exist.
     ///
     /// [`Atlas::mips`] rescales a marked tile's alpha per level so the share
     /// of texels that pass stays the share the artist drew. Unmarked tiles —
@@ -625,6 +646,7 @@ impl Atlas {
         TileMap {
             grid: self.grid,
             slots: self.slots.clone(),
+            opaque: self.opaque.clone(),
         }
     }
 }
@@ -638,6 +660,11 @@ impl Atlas {
 pub struct TileMap {
     grid: u32,
     slots: Vec<u32>,
+    /// One opacity mask per material id — see [`Atlas::opaque`] for what a
+    /// bit means. Carried alongside `slots` rather than looked up in the
+    /// atlas because the whole point of a `TileMap` is to answer questions
+    /// about materials without holding the packed image.
+    opaque: Vec<[u16; 16]>,
 }
 
 impl TileMap {
@@ -655,6 +682,25 @@ impl TileMap {
         Some(self.uv_of_slot(self.slots.get(material as usize).copied().unwrap_or(0)))
     }
 
+    /// One material's opacity mask — bit `x` of row `y` set where the
+    /// resampled 16×16 tile's texel `(x, y)` passes the alpha test, `y = 0`
+    /// the tile's top row.
+    ///
+    /// Returns `None` for a material the atlas has no entry for, the same
+    /// case [`TileMap::uv_of`] answers with `None` — before a material table
+    /// has arrived, or for an id past the one the table went up to. A
+    /// material that DOES have a tile always has a mask, even a checker or a
+    /// solid colour's all-ones; it is up to the caller ([`texel_boxes`]'s
+    /// caller, in practice) to fall back to a single slab when every bit is
+    /// clear, which is the "this item has no picture to extrude" case.
+    #[must_use]
+    pub fn opacity_of(&self, material: u16) -> Option<[u16; 16]> {
+        if self.opaque.is_empty() {
+            return None;
+        }
+        self.opaque.get(usize::from(material)).copied()
+    }
+
     /// The UV rectangle of one slot, excluding its padding.
     fn uv_of_slot(&self, slot: u32) -> (f32, f32, f32, f32) {
         let side = (self.grid * TILE_PITCH) as f32;
@@ -669,6 +715,115 @@ impl TileMap {
             (origin_y + TILE as f32) / side,
         )
     }
+}
+
+/// One material's opacity mask, computed from its resampled 16×16 tile: bit
+/// `x` of row `y` set where texel `(x, y)`'s alpha is at or over
+/// [`ALPHA_TEST`].
+///
+/// Called from [`Atlas::build`], while the resampled `tile` is still in
+/// hand and before it is padded into the packed atlas image — the padding
+/// only repeats edge pixels for the mip chain's benefit and would otherwise
+/// have to be walked back out of here.
+fn opacity_mask(tile: &Image) -> [u16; 16] {
+    let mut mask = [0u16; 16];
+    for y in 0..TILE {
+        for x in 0..TILE {
+            let Some(pixel) = tile.pixel(x, y) else {
+                continue;
+            };
+            if pixel[3] >= ALPHA_TEST {
+                mask[y as usize] |= 1u16 << x;
+            }
+        }
+    }
+    mask
+}
+
+/// One box of an extruded sprite, in the sprite's own `-1.0..=1.0` square:
+/// `x` right, `y` up. The thickness axis is left to the caller, because the
+/// viewmodel and the prop pass each scale it by a different half-width —
+/// see [`texel_boxes`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TexelBox {
+    /// Centre of the texel, in the sprite's own `-1.0..=1.0` square.
+    pub offset: [f32; 2],
+    /// The texel's own sub-rectangle of the tile, as `u0, v0, u1, v1`
+    /// fractions of the TILE (not of the atlas) — pass through
+    /// [`tile_sub_rect`] with the tile's real atlas rectangle to get
+    /// somewhere to sample.
+    pub uv: [f32; 4],
+}
+
+/// How far a texel's sub-rectangle is inset from the texel's own boundary,
+/// as a share of the texel.
+///
+/// A box's edge sits exactly on a texel seam if the rectangle is not inset
+/// at all, and at magnification the atlas sampler's `Nearest` filter is
+/// ambiguous exactly on a seam — it can round to the neighbouring texel,
+/// which may be transparent, and fringe the picture's outline. `textured`
+/// in the shaders only needs `uv.z > uv.x` (a collapsed rectangle reads as
+/// untextured), so the inset stops well short of that.
+const TEXEL_INSET: f32 = 0.02;
+
+/// Extrudes an opacity mask into one box per opaque texel: the classic
+/// extruded sprite, and the shared shape a held item (in both hands), a
+/// dropped item and a third-person held one are all built from.
+///
+/// **Row 0 is the tile's top row**, because [`Image`] is row-major,
+/// top-left origin, and a texel's offset places it so the assembled boxes
+/// read right-side up: row 0's boxes sit at the top of the `-1.0..=1.0`
+/// square, row 15's at the bottom. Each box is a sixteenth of the square
+/// wide and tall — [`SPRITE_TEXEL`] — which is the same fraction whichever
+/// caller multiplies it by its own half-width.
+///
+/// An empty result means every bit was clear: a texture-less item's mask
+/// (or, in principle, a wholly transparent one), and the caller's cue to
+/// fall back to the single untextured slab rather than draw nothing at all.
+#[must_use]
+pub fn texel_boxes(mask: [u16; 16]) -> Vec<TexelBox> {
+    let inset = SPRITE_TEXEL * TEXEL_INSET;
+    let mut boxes = Vec::new();
+    for (y, row) in mask.iter().enumerate() {
+        for x in 0..TILE {
+            if row & (1u16 << x) == 0 {
+                continue;
+            }
+            let (fx, fy) = (x as f32, y as f32);
+            boxes.push(TexelBox {
+                offset: [
+                    (fx + 0.5) * SPRITE_TEXEL * 2.0 - 1.0,
+                    (TILE as f32 - fy - 0.5) * SPRITE_TEXEL * 2.0 - 1.0,
+                ],
+                uv: [
+                    fx * SPRITE_TEXEL + inset,
+                    fy * SPRITE_TEXEL + inset,
+                    (fx + 1.0) * SPRITE_TEXEL - inset,
+                    (fy + 1.0) * SPRITE_TEXEL - inset,
+                ],
+            });
+        }
+    }
+    boxes
+}
+
+/// Maps a texel's fractional rectangle (0..1 within the tile, as
+/// [`texel_boxes`] returns) to an absolute atlas rectangle, given the
+/// tile's own `(u0, v0, u1, v1)`.
+///
+/// The one piece of arithmetic [`texel_boxes`] deliberately leaves out: it
+/// knows nothing about where in the atlas a tile sits, and both callers
+/// (the viewmodel's `Cell::piece` and the prop pass's `boxes_of`) already
+/// have the tile's real rectangle in hand for the whole-tile case.
+#[must_use]
+pub fn tile_sub_rect(tile: [f32; 4], rel: [f32; 4]) -> [f32; 4] {
+    let (width, height) = (tile[2] - tile[0], tile[3] - tile[1]);
+    [
+        tile[0] + rel[0] * width,
+        tile[1] + rel[1] * height,
+        tile[0] + rel[2] * width,
+        tile[1] + rel[3] * height,
+    ]
 }
 
 /// Filtered mip levels of an image, largest first.
@@ -1658,5 +1813,113 @@ mod tests {
             let image = decode_png(&out).unwrap_or_else(|err| panic!("{colour:?} failed: {err}"));
             assert_eq!(image.rgba.len(), 8 * 8 * 4, "{colour:?} should become RGBA");
         }
+    }
+
+    #[test]
+    fn a_fully_opaque_block_tile_has_an_all_ones_mask() {
+        // A block tile has no transparent texels; every bit of every row
+        // must pass the same test the shaders cut out under.
+        let atlas = Atlas::build(&[Some(Image::solid(TILE, TILE, [10, 20, 30, 255]))]);
+        let mask = atlas.tiles_only().opacity_of(0).expect("material 0 exists");
+        assert!(
+            mask.iter().all(|row| *row == 0xFFFF),
+            "an opaque tile's mask should be all ones, got {mask:?}"
+        );
+    }
+
+    #[test]
+    fn a_tiles_mask_is_set_exactly_where_alpha_passes() {
+        // A known pattern rather than a solid colour, so the test cannot pass
+        // by accident: the left half of the tile is opaque, the right half
+        // is not, and a diagonal row is inverted from the rest.
+        let mut source = Image::solid(TILE, TILE, [255, 255, 255, 255]);
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let opaque = if y == 3 { x >= TILE / 2 } else { x < TILE / 2 };
+                let alpha = if opaque { 255 } else { 0 };
+                let offset = ((y * TILE + x) as usize) * 4 + 3;
+                source.rgba[offset] = alpha;
+            }
+        }
+        let atlas = Atlas::build(&[Some(source)]);
+        let mask = atlas.tiles_only().opacity_of(0).expect("material 0 exists");
+
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let want = if y == 3 { x >= TILE / 2 } else { x < TILE / 2 };
+                let got = mask[y as usize] & (1u16 << x) != 0;
+                assert_eq!(
+                    got, want,
+                    "texel ({x}, {y}) should be {want} in the mask, was {got}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opacity_of_is_none_before_an_atlas_has_arrived() {
+        // The same "nothing to point into yet" case `uv_of` answers with
+        // `None` — a caller that got a mask anyway would extrude a picture
+        // out of the placeholder.
+        let empty = TileMap::default();
+        assert_eq!(empty.opacity_of(0), None);
+    }
+
+    #[test]
+    fn texel_boxes_emits_one_box_per_set_bit_at_a_sixteenth_of_the_tile() {
+        let mut mask = [0u16; 16];
+        mask[0] = 0b11; // texels (0,0) and (1,0): the tile's top-left corner.
+        mask[15] |= 1 << 15; // texel (15,15): the tile's bottom-right corner.
+
+        let boxes = texel_boxes(mask);
+        assert_eq!(boxes.len(), 3, "one box per set bit, not per row");
+
+        // Every box's uv rectangle spans very close to one sixteenth of the
+        // tile — inset by a sliver, so slightly under.
+        for texel in &boxes {
+            let (width, height) = (texel.uv[2] - texel.uv[0], texel.uv[3] - texel.uv[1]);
+            assert!(
+                (width - SPRITE_TEXEL).abs() < SPRITE_TEXEL * 0.1,
+                "texel uv width {width} should be about {SPRITE_TEXEL}"
+            );
+            assert!((height - SPRITE_TEXEL).abs() < SPRITE_TEXEL * 0.1);
+            assert!(width > 0.0, "a collapsed rect reads as untextured");
+        }
+
+        // Row 0 sits at the TOP of the -1..1 square (positive y), and row 15
+        // at the bottom — the offset that keeps the assembled picture the
+        // right way up.
+        let top_left = boxes[0];
+        let bottom_right = boxes[2];
+        assert!(
+            top_left.offset[1] > bottom_right.offset[1],
+            "row 0 should sit above row 15: {top_left:?} against {bottom_right:?}"
+        );
+        assert!(
+            top_left.offset[0] < bottom_right.offset[0],
+            "column 0 should sit left of column 15"
+        );
+    }
+
+    #[test]
+    fn texel_boxes_is_empty_for_a_mask_with_nothing_set() {
+        // The caller's cue to fall back to the single slab rather than draw
+        // nothing: a texture-less item, or in principle a wholly clear one.
+        assert!(texel_boxes([0u16; 16]).is_empty());
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "these are exact constants run through one multiply-add each; exact equality \
+                  is the question being asked, the same reasoning render::mod.rs's blob tests \
+                  give"
+    )]
+    #[test]
+    fn tile_sub_rect_maps_a_relative_rectangle_into_the_tiles_own_rectangle() {
+        let tile = [0.25, 0.5, 0.75, 1.0];
+        assert_eq!(tile_sub_rect(tile, [0.0, 0.0, 1.0, 1.0]), tile);
+
+        let half = tile_sub_rect(tile, [0.0, 0.0, 0.5, 0.5]);
+        assert_eq!(half, [0.25, 0.5, 0.5, 0.75], "the top-left quarter");
     }
 }

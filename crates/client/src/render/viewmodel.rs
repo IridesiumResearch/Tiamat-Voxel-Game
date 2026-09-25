@@ -118,6 +118,16 @@ pub struct Held {
     /// An item ignores `shape`: it is not placeable, so it has no occupancy to
     /// be cut to.
     pub item: bool,
+    /// The opacity mask [`crate::texture::TileMap::opacity_of`] gives for
+    /// what is held, when it is an item.
+    ///
+    /// **What turns a slab into a picture.** With a mask, `cells()` extrudes
+    /// one box per opaque texel instead of drawing the whole tile onto a
+    /// single slab's rim — a sword's rim reads as the sword's own edge
+    /// rather than the whole blade squashed into a strip. `None` for a
+    /// block, which ignores it, and for an item whose tile has not arrived
+    /// yet, which falls back to the old single slab.
+    pub texels: Option<[u16; 16]>,
     /// The 27-bit occupancy it is cut to, or `0` for a whole block.
     ///
     /// **A cut is held as the thing it is.** A hand that drew a cube for both
@@ -171,7 +181,7 @@ pub fn pieces(hand: Hand, held: Held) -> Vec<Piece> {
         // Less than the arm's roll, so a held block leans with the swing
         // without spinning in the hand.
         let lean = roll * 0.4;
-        for cell in cells(held.shape, held.item) {
+        for cell in cells(held.shape, held.item, held.texels) {
             pieces.push(cell.piece(centre, lean, tile));
         }
     }
@@ -192,7 +202,17 @@ struct Cell {
     /// thickness — the same slab `render::held_boxes` builds, from the same
     /// [`super::ITEM_THICKNESS`].
     half: [f32; 3],
+    /// The sub-rectangle of the tile this box samples, as `u0, v0, u1, v1`
+    /// fractions of the tile itself. `[0.0, 0.0, 1.0, 1.0]` — the whole
+    /// tile — for a block cell or the untextured-item fallback slab; a
+    /// texel's own sixteenth for one box of an extruded item (see
+    /// [`texel_cells`]).
+    uv: [f32; 4],
 }
+
+/// The whole tile, unsubdivided: what a block cell and the fallback item
+/// slab both sample.
+const WHOLE_TILE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 impl Cell {
     /// Where this box goes, once the hand's lean is applied.
@@ -218,10 +238,32 @@ impl Cell {
                 lean,
             ],
             size: [self.half[0], self.half[1], self.half[2], 0.0],
-            uv: tile,
+            uv: crate::texture::tile_sub_rect(tile, self.uv),
             tint: [1.0, 1.0, 1.0, 1.0],
         }
     }
+}
+
+/// The boxes of an extruded item, one per opaque texel of `mask` — see
+/// [`crate::texture::texel_boxes`], which does the arithmetic this wraps in
+/// the viewmodel's own units (blocks, not the sprite's `-1.0..=1.0` square).
+fn texel_cells(mask: [u16; 16]) -> Vec<Cell> {
+    crate::texture::texel_boxes(mask)
+        .into_iter()
+        .map(|texel| Cell {
+            offset: [
+                texel.offset[0] * shape::BLOCK,
+                texel.offset[1] * shape::BLOCK,
+                0.0,
+            ],
+            half: [
+                shape::BLOCK * crate::texture::SPRITE_TEXEL,
+                shape::BLOCK * crate::texture::SPRITE_TEXEL,
+                shape::BLOCK * super::ITEM_THICKNESS,
+            ],
+            uv: texel.uv,
+        })
+        .collect()
 }
 
 /// The boxes one held item is made of.
@@ -229,11 +271,21 @@ impl Cell {
 /// A whole block — loose material, or a mask with every cell — is ONE box, not
 /// twenty-seven: it is the common case by far, it looks identical, and a cut is
 /// the only thing that needs the cells drawn separately.
-fn cells(mask: u32, item: bool) -> Vec<Cell> {
+fn cells(mask: u32, item: bool, texels: Option<[u16; 16]>) -> Vec<Cell> {
     // **An item is a picture with a thickness, not a solid.** A sword is not a
     // cube, and drawing it as one wraps the same picture round three faces —
-    // reported from the window as a sword "rendered on a block".
+    // reported from the window as a sword "rendered on a block". Extruded from
+    // its own opacity mask when one is in hand: one box per opaque texel, so
+    // the rim of the assembled shape is the sword's own edge rather than the
+    // whole blade squashed onto a 1:8 strip (`face_uv` maps a box's rim from
+    // the box's OWN tiny uv rect, so a one-texel box needs no shader change).
     if item {
+        if let Some(boxes) = texels.map(texel_cells).filter(|boxes| !boxes.is_empty()) {
+            return boxes;
+        }
+        // No mask — a texture that has not arrived yet, or one with nothing
+        // opaque in it — falls back to the plain slab rather than drawing an
+        // item that never appears in the hand.
         return vec![Cell {
             offset: [0.0; 3],
             half: [
@@ -241,12 +293,14 @@ fn cells(mask: u32, item: bool) -> Vec<Cell> {
                 shape::BLOCK,
                 shape::BLOCK * super::ITEM_THICKNESS,
             ],
+            uv: WHOLE_TILE,
         }];
     }
     if mask == 0 || mask == tiamat_core::inventory::Shape::ALL {
         return vec![Cell {
             offset: [0.0; 3],
             half: [shape::BLOCK; 3],
+            uv: WHOLE_TILE,
         }];
     }
     let half = shape::BLOCK / 3.0;
@@ -265,6 +319,7 @@ fn cells(mask: u32, item: bool) -> Vec<Cell> {
                 cells.push(Cell {
                     offset: [along(x), along(y), along(z)],
                     half: [half; 3],
+                    uv: WHOLE_TILE,
                 });
             }
         }
@@ -283,8 +338,13 @@ pub struct Viewmodel {
     drawn: usize,
 }
 
-/// How many pieces fit before the buffer grows. Two hands, two boxes each.
-const START_CAPACITY: usize = 8;
+/// How many pieces fit before the buffer grows.
+///
+/// An extruded item is at most one box per texel of a 16×16 tile — 256 — plus
+/// the arm, per hand: `2 * (256 + 1)`. Sized for that worst case up front
+/// rather than relying on `prepare`'s regrow, which still exists as the
+/// backstop for whatever this constant gets wrong rather than a truncation.
+const START_CAPACITY: usize = 2 * (256 + 1);
 
 impl Viewmodel {
     /// Builds the pipeline. `format` is the target it draws into.
@@ -526,6 +586,7 @@ mod tests {
             tile: Some([0.1, 0.1, 0.2, 0.2]),
             shape: 0,
             item: false,
+            texels: None,
             swing: 0.0,
         };
         let main = pieces(Hand::Main, held);
@@ -570,6 +631,7 @@ mod tests {
                 tile,
                 shape: 0,
                 item: false,
+                texels: None,
                 swing: 0.0,
             },
         );
@@ -584,6 +646,7 @@ mod tests {
                 tile,
                 shape: mask,
                 item: false,
+                texels: None,
                 swing: 0.0,
             },
         );
@@ -603,7 +666,7 @@ mod tests {
         let envelope = |mask: u32| {
             let mut low = f32::MAX;
             let mut high = f32::MIN;
-            for cell in cells(mask, false) {
+            for cell in cells(mask, false, None) {
                 low = low.min(cell.offset[0] - cell.half[0]);
                 high = high.max(cell.offset[0] + cell.half[0]);
             }
@@ -623,6 +686,7 @@ mod tests {
                 tile,
                 shape: tiamat_core::inventory::Shape::ALL,
                 item: false,
+                texels: None,
                 swing: 0.0,
             },
         );
@@ -642,6 +706,7 @@ mod tests {
             tile: Some([0.1, 0.1, 0.2, 0.2]),
             shape: 0,
             item: false,
+            texels: None,
             swing: 0.0,
         };
         let item = Held {
@@ -679,6 +744,7 @@ mod tests {
             tile: Some([0.1, 0.1, 0.2, 0.2]),
             shape: 0b101,
             item: true,
+            texels: None,
             swing: 0.0,
         };
         assert_eq!(pieces(Hand::Main, held).len(), 2);
@@ -705,6 +771,7 @@ mod tests {
             // nothing else contributes.
             shape: (1 << 12) | (1 << 14),
             item: false,
+            texels: None,
             swing: 0.0,
         };
         for swing in [0.0_f32, 0.25, 0.5, 1.0] {
@@ -730,6 +797,7 @@ mod tests {
             tile: None,
             shape: 0,
             item: false,
+            texels: None,
             swing: 0.0,
         };
         let rest = pieces(Hand::Main, held)[0].placement;
@@ -762,6 +830,7 @@ mod tests {
                 tile: None,
                 shape: 0,
                 item: false,
+                texels: None,
                 swing: 7.5,
             },
         )[0]
@@ -772,10 +841,138 @@ mod tests {
                 tile: None,
                 shape: 0,
                 item: false,
+                texels: None,
                 swing: 1.0,
             },
         )[0]
         .placement;
         assert!((far[3] - end[3]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn an_item_with_a_mask_is_extruded_one_box_per_opaque_texel() {
+        // **The fix.** A whole-tile slab showed the rim as the whole picture
+        // squashed onto a strip — reported as a sword or a piece of meat
+        // reading as a box. An extruded sprite is one box per opaque texel,
+        // each a sixteenth of the tile wide and the item's own thickness
+        // deep, so the assembled rim is the picture's own edge.
+        let mut mask = [0u16; 16];
+        mask[0] = 0b11; // texels (0, 0) and (1, 0): the top-left corner.
+        mask[5] |= 1 << 3; // texel (3, 5): somewhere in the middle.
+
+        let held = Held {
+            tile: Some([0.0, 0.0, 1.0, 1.0]),
+            shape: 0,
+            item: true,
+            texels: Some(mask),
+            swing: 0.0,
+        };
+        let drawn = pieces(Hand::Main, held);
+        assert_eq!(drawn.len(), 1 + 3, "an arm and one box per opaque texel");
+
+        for piece in &drawn[1..] {
+            assert!(
+                (piece.size[0] - shape::BLOCK * crate::texture::SPRITE_TEXEL).abs() < 1e-5,
+                "a texel box should be a sixteenth of the tile wide: {piece:?}"
+            );
+            assert!(
+                (piece.size[1] - shape::BLOCK * crate::texture::SPRITE_TEXEL).abs() < 1e-5,
+                "a texel box should be a sixteenth of the tile tall: {piece:?}"
+            );
+            assert!(
+                (piece.size[2] - shape::BLOCK * crate::render::ITEM_THICKNESS).abs() < 1e-5,
+                "still the item's thickness, not a cube: {piece:?}"
+            );
+            let width = piece.uv[2] - piece.uv[0];
+            assert!(
+                width > 0.0 && width < crate::texture::SPRITE_TEXEL + 1e-3,
+                "a texel box should sample about a sixteenth of the tile, not the whole \
+                 thing: {:?}",
+                piece.uv
+            );
+        }
+    }
+
+    #[test]
+    fn an_item_with_no_opacity_mask_is_still_one_slab() {
+        // Before the atlas has arrived — or for a texture-less item — there
+        // is no picture to extrude from, and falling back to the plain slab
+        // beats drawing nothing at all.
+        let held = Held {
+            tile: Some([0.1, 0.1, 0.2, 0.2]),
+            shape: 0,
+            item: true,
+            texels: None,
+            swing: 0.0,
+        };
+        let drawn = pieces(Hand::Main, held);
+        assert_eq!(drawn.len(), 2, "an arm and one slab, not per-texel boxes");
+        let tile = held.tile.expect("set");
+        assert!(
+            drawn[1]
+                .uv
+                .iter()
+                .zip(tile)
+                .all(|(sampled, whole)| (sampled - whole).abs() < 1e-6),
+            "the fallback slab should sample the whole tile: {:?}",
+            drawn[1].uv
+        );
+    }
+
+    #[test]
+    fn an_all_clear_mask_also_falls_back_to_the_slab() {
+        // Nothing set means nothing to extrude — the same "no picture" case
+        // as `None`, reached from a mask instead of a missing one.
+        let held = Held {
+            tile: Some([0.1, 0.1, 0.2, 0.2]),
+            shape: 0,
+            item: true,
+            texels: Some([0u16; 16]),
+            swing: 0.0,
+        };
+        assert_eq!(pieces(Hand::Main, held).len(), 2);
+    }
+
+    #[test]
+    fn a_block_ignores_an_opacity_mask_and_stays_one_cube() {
+        // `texels` is read only when `item` is true — a block's mask (were
+        // one ever set on it, which nothing does today) must not turn a
+        // block into an extruded sprite.
+        let boxes = cells(0, false, Some([0xFFFFu16; 16]));
+        assert_eq!(boxes.len(), 1, "a block is one cube regardless of texels");
+        assert!(
+            (boxes[0].half[0] - boxes[0].half[2]).abs() < f32::EPSILON,
+            "and it stays a cube: {:?}",
+            boxes[0].half
+        );
+    }
+
+    #[test]
+    fn a_fully_opaque_mask_fills_the_same_envelope_the_old_slab_did() {
+        // Every texel opaque is the shape a fully-covering picture (or the
+        // missing-texture checker) draws: 256 boxes tiling exactly the same
+        // face the single slab used to cover, not a smaller or larger one.
+        let full = cells(0, true, Some([0xFFFFu16; 16]));
+        assert_eq!(full.len(), 256);
+
+        let envelope = |cells: &[Cell], axis: usize| {
+            let mut low = f32::MAX;
+            let mut high = f32::MIN;
+            for cell in cells {
+                low = low.min(cell.offset[axis] - cell.half[axis]);
+                high = high.max(cell.offset[axis] + cell.half[axis]);
+            }
+            (low, high)
+        };
+        let slab = cells(0, true, None);
+        for axis in 0..2 {
+            let (slab_low, slab_high) = envelope(&slab, axis);
+            let (full_low, full_high) = envelope(&full, axis);
+            assert!(
+                (slab_low - full_low).abs() < 1e-4 && (slab_high - full_high).abs() < 1e-4,
+                "axis {axis}: slab spans {slab_low}..{slab_high}, the mosaic \
+                 {full_low}..{full_high}"
+            );
+        }
     }
 }
