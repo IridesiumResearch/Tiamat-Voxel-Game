@@ -1130,10 +1130,25 @@ impl World {
     /// these summaries in the same transaction, so a horizon computed under an
     /// older worldgen cannot outlive the chunk it described.
     ///
-    /// Levels coarser than the one asked for are stored too: they fall out of
-    /// the same computation and the coarsest is a single cell. Finer ones are
-    /// not, because level 1 is 4 KiB and storing it for terrain nobody has
-    /// approached is the disk cost this method exists to avoid.
+    /// **Every level in the chain is stored, not only the one asked for and
+    /// its coarser neighbours.** That used to stop at `level`, on the
+    /// argument that level 1 is 4 KiB and storing it for terrain nobody had
+    /// approached was disk spent on nothing. It still is — roughly 4 KiB per
+    /// horizon chunk summarised at all, since the whole chain is saved on the
+    /// first request whatever its level, with the coarser levels a fraction
+    /// of that each — but the trade was the wrong one.
+    /// `ChunkSource` has no coarse entry point, so a summary at ANY level
+    /// costs the same generation as the chunk itself; discarding the finer
+    /// levels a coarse request already computed meant a client walking
+    /// towards a chunk it first saw from far away — coarse summary, then a
+    /// finer one as it approached, then the chunk — paid for that one
+    /// position three times over. The frontier gate in
+    /// [`crate::transport::stream::Streamer::next_summaries`] no longer waits
+    /// for the whole detail radius before refining a summary the client
+    /// already holds, which makes that upgrade path the common case for
+    /// anyone walking, not a corner case — and an upgrade that is a worker
+    /// generation competes with the leading edge of the world for the same
+    /// pool. Keeping the whole chain turns it into a database read instead.
     ///
     /// # Errors
     ///
@@ -1239,18 +1254,13 @@ impl World {
         chain: &[(u8, Vec<u8>)],
     ) -> Result<Vec<u8>, WorldError> {
         self.computed += 1;
-        let keep: Vec<(u8, Vec<u8>)> = chain
-            .iter()
-            .filter(|(at, _)| *at >= level)
-            .cloned()
-            .collect();
-        let wanted = keep
+        let wanted = chain
             .iter()
             .find(|(at, _)| *at == level)
             .map(|(_, bytes)| bytes.clone())
             .ok_or(WorldError::NoSuchLevel { level })?;
         if !self.is_dirty(domain, pos) {
-            self.db.save_summaries(domain, pos, &keep)?;
+            self.db.save_summaries(domain, pos, chain)?;
         }
         Ok(wanted)
     }
@@ -2024,6 +2034,36 @@ mod tests {
         assert_eq!(
             unsaved, after,
             "the horizon changed when the edit was saved"
+        );
+    }
+
+    #[test]
+    fn a_finer_level_asked_for_later_is_a_cache_hit() {
+        // `adopt_summaries` used to keep only the levels at or above the one
+        // asked for, on the reasoning that storing a finer level for terrain
+        // nobody had approached wasted disk. That made a coarse-then-fine
+        // sequence — a client that first saw a chunk from far away and later
+        // walked towards it — recompute the whole chunk a second time, even
+        // though the first computation already produced every level. The
+        // chain is now kept whole, so the second look is a database read.
+        let (mut world, ids) = world("summary-finer-later");
+        let mut flat = Flat::new(ids[0]);
+        let overworld = tiamat_core::domain::OVERWORLD;
+        let pos = ChunkPos::new(0, -1, 0);
+
+        world
+            .summary(overworld, lod::COARSEST, pos, &mut flat)
+            .expect("coarse summary");
+        assert_eq!(world.summary_work(), (1, 0));
+
+        world
+            .summary(overworld, lod::FINEST, pos, &mut flat)
+            .expect("fine summary");
+        assert_eq!(
+            world.summary_work(),
+            (1, 1),
+            "a finer level asked for after a coarser one recomputed the chunk \
+             instead of reading the chain the coarser request already saved"
         );
     }
 

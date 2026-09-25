@@ -87,6 +87,16 @@ pub struct Streamer {
     /// already held, and starting over each time would spend the whole scan
     /// re-testing the same held entries. Wraps, so everything gets a turn.
     horizon_cursor: usize,
+    /// Where the next pass looks first for what the detail has released.
+    ///
+    /// The first position the last pass found gated — held back by the
+    /// frontier with nothing drawn there yet — or, when the pass filled its
+    /// allowance before reaching one, the position after the last it served.
+    /// `horizon_order` is nearest first, so when the detail moves on the
+    /// position released is exactly this one, and a pass looks here before
+    /// it looks anywhere else. `None` until a pass meets the gate, and again
+    /// whenever the horizon is reordered. See [`Streamer::next_summaries`].
+    gate: Option<usize>,
     /// How far out the detail has got: the streaming distance of the nearest
     /// chunk still needed, or `None` when nothing is.
     ///
@@ -95,10 +105,19 @@ pub struct Streamer {
     /// just past the detail radius — arrived while the detail was still
     /// filling in from the player's feet outward. Reported from the window
     /// as a ring of chunks far out loading with the spawn chunk, with a gap
-    /// between. A summary is now asked for only when it is no further, in
+    /// between. A brand new summary — a position the client draws nothing at
+    /// yet — is asked for only when it is no further, in
     /// [`interest::stream_distance`]'s order, than the nearest chunk the
     /// detail has yet to send, so the two fill together and the horizon
-    /// never shows past a hole. See [`Streamer::next_summaries`].
+    /// never shows past a hole.
+    ///
+    /// **A position the client already holds something at is not gated on
+    /// this.** The gap this exists to prevent is a summary appearing where
+    /// nothing was drawn before; refining a coarse summary the client already
+    /// has, or downgrading a full chunk that has left the detail radius,
+    /// replaces one draw with another and cannot open that gap, so both
+    /// happen as soon as the hysteresis allows regardless of how far behind
+    /// the detail is. See [`Streamer::next_summaries`].
     frontier: Option<i64>,
     /// Chunks the client holds that are one opaque, unlit material through and
     /// through: a wall nothing behind can be seen past. See [`Self::sealed`].
@@ -116,6 +135,18 @@ pub struct Streamer {
     /// `tests::measure_a_pass_at_the_default_view`, release. See
     /// [`Self::is_shadowed`].
     shadowed: BTreeSet<ChunkPos>,
+}
+
+/// What one look at a horizon position found. See [`Streamer::next_summaries`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Looked {
+    /// Held back by the frontier: nothing is drawn there yet and the detail
+    /// has not reached it.
+    Gated,
+    /// Nothing to send: in flight, at its level already, or detail.
+    Nothing,
+    /// A summary to send, at this level.
+    Wanted(ChunkPos, u8),
 }
 
 /// How many horizon positions one pass will look at before giving up.
@@ -141,6 +172,7 @@ impl Streamer {
             summaries: BTreeMap::new(),
             horizon_order: Vec::new(),
             horizon_cursor: 0,
+            gate: None,
             frontier: None,
             sealed: BTreeSet::new(),
             shadowed: BTreeSet::new(),
@@ -304,10 +336,15 @@ impl Streamer {
     /// The next positions to request, nearest first, at most `limit` of them —
     /// everything in range that is not already held or in flight and is not
     /// in shadow behind sealed rock.
+    ///
+    /// **A `limit` of zero still walks far enough to set [`Self::frontier`],
+    /// even though it returns nothing.** A pass can have no chunk budget left
+    /// — every slot spent on summaries, which happens once six or more
+    /// players share the per-tick allowance — and that pass must not leave
+    /// the frontier wherever the last chunk that DID have budget put it: a
+    /// stale frontier is a stale gate in [`Self::next_summaries`], holding
+    /// summaries back a beat longer than the detail actually needs.
     pub fn next_needed(&mut self, limit: usize) -> Vec<ChunkPos> {
-        if limit == 0 {
-            return Vec::new();
-        }
         // **Nearest first, and only what is not in shadow.** The order is the
         // plain streaming distance, as it was before sealing existed: the
         // world fills in from the player outward, continuously, at whatever
@@ -317,7 +354,12 @@ impl Streamer {
         // only expand through chunks already delivered, and that made the
         // frontier advance one chunk per round trip: a player watched rings
         // arrive one at a time, seven chunks out, and reported exactly that.
-        let mut needed = Vec::with_capacity(limit.min(64));
+        //
+        // `scan_limit` is at least one even when `limit` is zero, so the loop
+        // below still finds the nearest still-needed position to set the
+        // frontier from — it is cleared back to empty afterwards.
+        let scan_limit = limit.max(1);
+        let mut needed = Vec::with_capacity(scan_limit.min(64));
         for pos in interest::chunks_around(self.centre, self.view) {
             if self.sent.contains(&pos) || self.in_flight.contains(&pos) {
                 continue;
@@ -330,7 +372,7 @@ impl Streamer {
                 continue;
             }
             needed.push(pos);
-            if needed.len() == limit {
+            if needed.len() == scan_limit {
                 break;
             }
         }
@@ -340,6 +382,9 @@ impl Streamer {
         self.frontier = needed
             .first()
             .map(|pos| interest::stream_distance(self.centre, *pos));
+        if limit == 0 {
+            needed.clear();
+        }
         needed
     }
 
@@ -559,6 +604,21 @@ impl Streamer {
         self.summaries.get(&pos).copied()
     }
 
+    /// What level the client currently holds at `pos`, if any.
+    ///
+    /// `Some(Level::Chunk)` for a full chunk — that is the detail level as far
+    /// as the hysteresis is concerned: it is what the client is drawing, and
+    /// it is what a level change would replace. `None` for a position the
+    /// client draws nothing at, which is the one case [`Self::next_summaries`]
+    /// still lets the frontier hold back.
+    fn held_level(&self, pos: ChunkPos) -> Option<Level> {
+        if self.sent.contains(&pos) {
+            Some(Level::Chunk)
+        } else {
+            self.summaries.get(&pos).map(|level| Level::Summary(*level))
+        }
+    }
+
     /// Up to `limit` chunks in the horizon whose summary the client does not
     /// have at the level its distance calls for, nearest first.
     ///
@@ -567,6 +627,17 @@ impl Streamer {
     /// somebody pacing across a boundary does not re-send — and the client does
     /// not rebuild — a band of the horizon every step. See
     /// [`tiamat_core::lod::Rings::stable_level`].
+    ///
+    /// **The frontier gate only holds back a position the client holds
+    /// nothing at.** [`Self::frontier`] exists to stop a NEW summary from
+    /// appearing past the detail the player is walking towards — that is the
+    /// gap-ring 2026-09-23 fixed. It does not apply to a position already
+    /// drawing something: refining a coarse summary the client already holds,
+    /// or downgrading a full chunk that has just left the detail radius, does
+    /// not open that gap, and gating those too was an unintended side effect
+    /// that left the ground beside a walking player coarse until the whole
+    /// detail radius around their NEW position had streamed. `held` is
+    /// computed before the gate is tested so this distinction can be made.
     ///
     /// Does not mark anything sent, for the same reason [`Streamer::next_needed`]
     /// does not.
@@ -577,35 +648,64 @@ impl Streamer {
         }
         let mut found = Vec::with_capacity(limit.min(HORIZON_SCAN));
         let total = self.horizon_order.len();
-        for step in 0..HORIZON_SCAN.min(total) {
-            let index = (self.horizon_cursor + step) % total;
-            let pos = self.horizon_order[index];
-            // **Behind the detail, never ahead of it.** The order is nearest
-            // first, so a position past the frontier means every position
-            // after it is too: the pass stops here and starts here next
-            // time, once the detail has moved on.
-            if self
-                .frontier
-                .is_some_and(|frontier| interest::stream_distance(self.centre, pos) > frontier)
-            {
-                self.horizon_cursor = index;
-                return found;
+        let budget = HORIZON_SCAN.min(total);
+        let mut examined = 0;
+
+        // **Two looks, one allowance.** First from the gate: the band the
+        // detail has released since the last pass, nearest first, up to the
+        // first position still held back. That is what the gate did by
+        // parking the cursor when it stopped the whole pass, and it is what
+        // fills the horizon in step with the detail at a join. It costs one
+        // position when nothing was released, and never more than the
+        // allowance.
+        if let Some(gate) = self.gate.take() {
+            for index in gate..total {
+                if examined == budget {
+                    self.gate = Some(index);
+                    break;
+                }
+                examined += 1;
+                match self.look(index) {
+                    Looked::Gated => {
+                        self.gate = Some(index);
+                        break;
+                    }
+                    Looked::Nothing => {}
+                    Looked::Wanted(pos, level) => {
+                        found.push((pos, level));
+                        if found.len() >= limit {
+                            self.gate = Some(index + 1);
+                            return found;
+                        }
+                    }
+                }
             }
-            if self.in_flight.contains(&pos) {
-                continue;
-            }
-            let held = if self.sent.contains(&pos) {
-                // A chunk the client holds in full is at the detail level as
-                // far as the hysteresis is concerned: that is what it is
-                // drawing, and it is what a level change would replace.
-                Some(Level::Chunk)
-            } else {
-                self.summaries.get(&pos).map(|level| Level::Summary(*level))
-            };
-            match self.rings.stable_level(held, self.distance(pos)) {
-                Level::Chunk => continue,
-                Level::Summary(level) if held == Some(Level::Summary(level)) => continue,
-                Level::Summary(level) => {
+        }
+
+        // Then the rest of the allowance from the rotating cursor, for what
+        // the gate does not hold: a coarse summary the client already holds,
+        // to refine; a full chunk that has left the detail radius, to
+        // downgrade. Those can be anywhere in the list, thousands of
+        // positions past the gate, and a cursor parked at the gate rescanned
+        // one fixed window for as long as the detail lagged and never
+        // reached them. Rotating, everything gets its turn within a few
+        // passes, and `reorder_horizon` starts the cursor at the nearest
+        // position on every move. A gated position met here with no gate on
+        // record becomes the gate.
+        let start = self.horizon_cursor;
+        let mut step = 0;
+        while examined < budget {
+            let index = (start + step) % total;
+            step += 1;
+            examined += 1;
+            match self.look(index) {
+                Looked::Gated => {
+                    if self.gate.is_none() {
+                        self.gate = Some(index);
+                    }
+                }
+                Looked::Nothing => {}
+                Looked::Wanted(pos, level) => {
                     found.push((pos, level));
                     if found.len() >= limit {
                         self.horizon_cursor = (index + 1) % total;
@@ -614,8 +714,33 @@ impl Streamer {
                 }
             }
         }
-        self.horizon_cursor = (self.horizon_cursor + HORIZON_SCAN.min(total)) % total;
+        self.horizon_cursor = (start + step) % total;
         found
+    }
+
+    /// One horizon position as a pass sees it: held back, nothing to do, or
+    /// a summary to send.
+    ///
+    /// `held` is computed before the gate is tested, which is what lets the
+    /// gate hold back only a position the client draws nothing at.
+    fn look(&self, index: usize) -> Looked {
+        let pos = self.horizon_order[index];
+        if self.in_flight.contains(&pos) {
+            return Looked::Nothing;
+        }
+        let held = self.held_level(pos);
+        if held.is_none()
+            && self
+                .frontier
+                .is_some_and(|frontier| interest::stream_distance(self.centre, pos) > frontier)
+        {
+            return Looked::Gated;
+        }
+        match self.rings.stable_level(held, self.distance(pos)) {
+            Level::Chunk => Looked::Nothing,
+            Level::Summary(level) if held == Some(Level::Summary(level)) => Looked::Nothing,
+            Level::Summary(level) => Looked::Wanted(pos, level),
+        }
     }
 
     /// Recomputes the horizon's order around the current centre.
@@ -649,6 +774,7 @@ impl Streamer {
             .filter(|pos| (pos.y - centre.y).abs() <= layers)
             .collect();
         self.horizon_cursor = 0;
+        self.gate = None;
     }
 
     /// The horizontal distance from the centre, in chunks, rounded up.
@@ -1786,6 +1912,211 @@ mod tests {
             "a pass with the memo cleared: {cold:?}; with it kept: {warm:?}; {} of {} sent",
             streamer.sent.len(),
             interest::chunks_around(centre, ViewDistance::DEFAULT).len()
+        );
+    }
+
+    #[test]
+    fn a_summary_the_client_already_holds_is_refined_ahead_of_the_frontier() {
+        // The gap this must NOT reopen: 9d48673 stopped a brand new summary
+        // from appearing past the detail frontier. This is the different
+        // thing that fix over-corrected to also block — a summary the client
+        // ALREADY holds, refined to a finer level as the player approaches,
+        // which is what turns a coarse slab beside a walking player into a
+        // block-resolution one while its full chunk is still on the way.
+        let mut streamer = Streamer::new(
+            tiamat_core::domain::OVERWORLD,
+            ORIGIN,
+            ViewDistance::DEFAULT,
+        );
+        // Frontier is `None` before `next_needed` is ever called, so this
+        // first pass fills the whole horizon ungated: a position sixteen to
+        // thirty-one chunks out lands at level 2.
+        drain_horizon(&mut streamer);
+        let target = ChunkPos::new(24, 0, 0);
+        assert_eq!(streamer.summary_level(target), Some(2));
+
+        // Walk towards it without delivering any of the new detail: the
+        // nearest still-needed position is the new centre's own chunk, so
+        // the frontier lands as close to the player as it gets.
+        let new_centre = ChunkPos::new(14, 0, 0);
+        streamer.recentre(new_centre);
+        streamer.next_needed(1);
+        let frontier = streamer
+            .frontier()
+            .expect("recentring left detail outstanding");
+        let target_distance = interest::stream_distance(new_centre, target);
+        assert!(
+            target_distance > frontier,
+            "the test needs the held summary to sit past the frontier: \
+             {target_distance} <= {frontier}"
+        );
+
+        // `target` is now ten chunks out — inside the level-1 band, clear of
+        // the hysteresis margin at the level-2/1 boundary — but the client
+        // still holds it at level 2. A position the client already draws
+        // something at must not wait behind the frontier.
+        let refined = drain_horizon(&mut streamer);
+        let upgrade = refined.iter().find(|(pos, _)| *pos == target);
+        assert_eq!(
+            upgrade.map(|(_, level)| *level),
+            Some(1),
+            "a summary the client already held was not refined ahead of the frontier"
+        );
+    }
+
+    #[test]
+    fn a_chunk_that_left_the_detail_radius_is_downgraded_even_when_the_frontier_is_near() {
+        // The other half of the same correction: a full chunk that fell out
+        // of the detail radius is drawing something too, and un-freezing
+        // upgrades without also un-freezing this would leave the wake of
+        // full chunks behind a walking player that the second finding
+        // described — bounded memory depends on this firing just as readily
+        // as the upgrade above.
+        let mut streamer = Streamer::new(
+            tiamat_core::domain::OVERWORLD,
+            ORIGIN,
+            ViewDistance::DEFAULT,
+        );
+        deliver_all(&mut streamer);
+        assert!(streamer.holds(ORIGIN));
+
+        // Ten out clears the hysteresis margin on both sides of the level-1
+        // boundary (nine, the ring the chunk just left), so the downgrade is
+        // not held back by pacing protection either.
+        let new_centre = ChunkPos::new(10, 0, 0);
+        streamer.recentre(new_centre);
+        assert!(
+            streamer.holds(ORIGIN),
+            "a chunk that merely left the detail radius should not be departed \
+             — it is still inside the horizon"
+        );
+
+        // Nothing near the new centre has been delivered, so the frontier
+        // sits close to the player, not out at the departed chunk.
+        streamer.next_needed(1);
+        let frontier = streamer
+            .frontier()
+            .expect("the new detail radius is not yet complete");
+        let origin_distance = interest::stream_distance(new_centre, ORIGIN);
+        assert!(
+            origin_distance > frontier,
+            "the test needs the departed chunk to sit past the frontier: \
+             {origin_distance} <= {frontier}"
+        );
+
+        let refined = drain_horizon(&mut streamer);
+        assert!(
+            refined.iter().any(|(pos, _)| *pos == ORIGIN),
+            "a full chunk that left the detail radius was not downgraded while \
+             the frontier was near"
+        );
+        assert!(
+            !streamer.holds(ORIGIN),
+            "the client is still recorded as holding the full chunk after it \
+             was sent a summary"
+        );
+    }
+
+    #[test]
+    fn a_position_the_client_holds_nothing_at_still_waits_behind_the_frontier() {
+        // The 9d48673 guarantee this change must not lose: a position the
+        // client has never been sent anything for still does not get a
+        // summary until the detail has caught up to it.
+        let mut streamer = Streamer::new(
+            tiamat_core::domain::OVERWORLD,
+            ORIGIN,
+            ViewDistance::DEFAULT,
+        );
+        // Nothing delivered yet, so the nearest still-needed detail chunk is
+        // the player's own, and the frontier sits at distance zero.
+        streamer.next_needed(1);
+        assert_eq!(streamer.frontier(), Some(0));
+
+        assert!(
+            streamer.next_summaries(usize::MAX).is_empty(),
+            "a position the client holds nothing at was summarised ahead of \
+             the frontier"
+        );
+    }
+
+    #[test]
+    fn an_all_in_flight_pass_still_moves_the_frontier() {
+        // A `limit` of zero used to return before touching `frontier` at all,
+        // so a connection with every slot spent on summaries left the gate
+        // testing against whatever the frontier happened to be from an
+        // earlier, larger pass — stale, and stale in the direction that holds
+        // summaries back longer than the detail actually warrants.
+        let mut streamer = Streamer::new(
+            tiamat_core::domain::OVERWORLD,
+            ORIGIN,
+            ViewDistance::DEFAULT,
+        );
+        assert_eq!(streamer.frontier(), None);
+
+        let empty = streamer.next_needed(0);
+        assert!(
+            empty.is_empty(),
+            "a limit of zero must not return positions"
+        );
+        assert_eq!(
+            streamer.frontier(),
+            Some(0),
+            "a pass with no budget left the frontier stale instead of updating it"
+        );
+    }
+
+    #[test]
+    fn a_held_position_far_past_the_gate_is_still_refined_while_the_frontier_holds() {
+        // The cursor rotates rather than parking on the gate. Parked, a pass
+        // rescanned the one window past the gate for as long as the detail
+        // lagged, and a held position further down the list than that window
+        // — here, level-1 ground the player has walked away from, now due a
+        // coarser level — was never looked at again.
+        let mut streamer = Streamer::new(
+            tiamat_core::domain::OVERWORLD,
+            ORIGIN,
+            ViewDistance::DEFAULT,
+        );
+        drain_horizon(&mut streamer);
+        let target = ChunkPos::new(-12, 0, 0);
+        assert_eq!(streamer.summary_level(target), Some(1));
+
+        let new_centre = ChunkPos::new(14, 0, 0);
+        streamer.recentre(new_centre);
+        streamer.next_needed(1);
+        let frontier = streamer
+            .frontier()
+            .expect("recentring left detail outstanding");
+
+        // The guard that keeps this test biting: the target sits more than a
+        // scan window past the first position the gate holds back.
+        let first_gated = streamer
+            .horizon_order
+            .iter()
+            .position(|pos| {
+                streamer.held_level(*pos).is_none()
+                    && interest::stream_distance(new_centre, *pos) > frontier
+            })
+            .expect("a walk of fourteen chunks brings new positions into the horizon");
+        let target_index = streamer
+            .horizon_order
+            .iter()
+            .position(|pos| *pos == target)
+            .expect("the target is still on the horizon");
+        assert!(
+            target_index > first_gated + HORIZON_SCAN,
+            "the target ({target_index}) is within a scan window of the gate ({first_gated}), \
+             so this test has stopped biting"
+        );
+
+        let refined = drain_horizon(&mut streamer);
+        assert_eq!(
+            refined
+                .iter()
+                .find(|(pos, _)| *pos == target)
+                .map(|(_, level)| *level),
+            Some(2),
+            "a held position past the gate's scan window was never refined"
         );
     }
 }
