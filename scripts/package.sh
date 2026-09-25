@@ -103,7 +103,11 @@ for manifest in $(git ls-files 'game/*/mod.toml'); do
 done
 
 echo "==> bundled mods"
+# `bundled=()` and `${#bundled[@]}` together are an "unbound variable" under
+# `set -u` on the bash 3.2 a macOS runner may hand us, so the count is kept
+# by hand and the expansion guarded.
 bundled=()
+bundled_count=0
 if [ -f bundle.toml ]; then
     while IFS=$'\t' read -r id repo path modcommit; do
         if ! bundle_extract "$id" "$repo" "$modcommit" "$path" "$stage/current/game/$id"; then
@@ -135,6 +139,7 @@ if [ -f bundle.toml ]; then
             [ "$head" = "$modcommit" ] || echo "note: game/$id's working tree is at ${head:0:7}; the archive carries ${modcommit:0:7} from bundle.toml." >&2
         fi
         bundled+=("$id	$repo	$path	$modcommit")
+        bundled_count=$((bundled_count + 1))
         echo "    $id at ${modcommit:0:7}"
     done < <(bundle_mods)
 elif [ "$allow_missing_mods" -eq 1 ]; then
@@ -179,10 +184,10 @@ echo "==> release record"
     echo
     echo "## Bundled mods"
     echo
-    if [ "${#bundled[@]}" -gt 0 ]; then
+    if [ "$bundled_count" -gt 0 ]; then
         echo "| mod | repository | commit |"
         echo "|---|---|---|"
-        for entry in "${bundled[@]}"; do
+        for entry in ${bundled[@]+"${bundled[@]}"}; do
             IFS=$'\t' read -r id repo path modcommit <<< "$entry"
             tree="${repo%.git}/tree/${modcommit}/${path}"
             echo "| \`game/${id}\` | ${repo} | [\`${modcommit}\`](${tree}) |"

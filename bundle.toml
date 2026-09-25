@@ -10,7 +10,7 @@
 id = "tiamat_default_life"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Life.git"
 path = "mods/tiamat_default_life"
-commit = "b56ce0c9d31c14c05e92f34cdbfac722de98a4df"
+commit = "e1e9a726d73dba4d85dbbdbe43e0b2214fdb18a0"
 
 [[mod]]
 id = "tiamat_default_ui"
@@ -22,10 +22,10 @@ commit = "c2e1957f5b9c85162975a1bcf2e2934e481ae83c"
 id = "tiamat_default_world"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_World.git"
 path = "mods/tiamat_default_world"
-commit = "42fd408a50943ff04b9c36b2dd14731eb0499fd8"
+commit = "d387aa755cff3c0e0879200814934816835d3972"
 
 [[mod]]
 id = "tiamat_weather"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Weather.git"
 path = "mods/tiamat_weather"
-commit = "051eb2667ae3670fcd380e5f65978799cdd8e95a"
+commit = "1060ee833c2b4cfc38e0b1af51d9e5f7d34d67bf"

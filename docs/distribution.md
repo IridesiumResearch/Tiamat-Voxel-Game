@@ -118,8 +118,8 @@ one — there is no switching at runtime, because a build that could switch coul
 be talked into switching.
 
 The version is the workspace version plus the release's commit, stamped into
-the binary at build time. `0.1.0` is what the repo says today; the first
-testing build is `0.2.0`.
+the binary at build time. `0.2.0`, tagged 2026-09-25, is the first testing
+build; `0.1.0` was the repository before any release.
 
 ## 5. Install layout
 
