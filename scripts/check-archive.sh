@@ -37,7 +37,19 @@ root="$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -1)"
 [ -n "$root" ] || { echo "FAIL: the archive has no top-level directory" >&2; exit 1; }
 
 failures=0
-fail() { echo "FAIL $1"; failures=$((failures + 1)); }
+# Under GitHub Actions a failure is also a workflow annotation, so the reason
+# is readable from the run's summary — and from the public API — without the
+# job log.
+fail() {
+    echo "FAIL $1"
+    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error::check-archive: $1"
+    failures=$((failures + 1))
+}
+warn() {
+    echo "warn $1"
+    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::check-archive: $1"
+    return 0
+}
 ok() { echo "ok   $1"; }
 need() { if [ -e "$root/$1" ]; then ok "$1"; else fail "$1 is missing"; fi; }
 
@@ -78,7 +90,7 @@ if [ -f "$lock" ]; then
             continue
         fi
         [ -f "$root/current/game/$id/LICENSE" ] && ok "game/$id carries its LICENSE" || fail "game/$id has no LICENSE"
-        [ -f "$root/current/game/$id/LICENSE.EXCEPTION" ] || echo "warn game/$id has no LICENSE.EXCEPTION (the mod's own permission; see docs/licensing/mod-repo-checklist.md)"
+        [ -f "$root/current/game/$id/LICENSE.EXCEPTION" ] || warn "game/$id has no LICENSE.EXCEPTION (the mod's own permission; see docs/licensing/mod-repo-checklist.md)"
         grep -q "$commit" "$root/current/RELEASE.md" 2>/dev/null && ok "RELEASE.md records $id at ${commit:0:7}" || fail "RELEASE.md does not record $id at $commit"
     done < <(bundle_mods "$lock")
 fi
