@@ -16,16 +16,16 @@ commit = "e1e9a726d73dba4d85dbbdbe43e0b2214fdb18a0"
 id = "tiamat_default_ui"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_UI.git"
 path = "mods/tiamat_default_ui"
-commit = "c2e1957f5b9c85162975a1bcf2e2934e481ae83c"
+commit = "e17c272254e6047af4128a0032f0495ff858bdf5"
 
 [[mod]]
 id = "tiamat_default_world"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_World.git"
 path = "mods/tiamat_default_world"
-commit = "d387aa755cff3c0e0879200814934816835d3972"
+commit = "fa3b7621388504349488b88bd0da88d12d288f9b"
 
 [[mod]]
 id = "tiamat_weather"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Weather.git"
 path = "mods/tiamat_weather"
-commit = "1060ee833c2b4cfc38e0b1af51d9e5f7d34d67bf"
+commit = "1c3c98c60122a8807cee29e5c5abcbac972fcbd2"

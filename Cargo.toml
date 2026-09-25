@@ -27,7 +27,7 @@ default-members = [
 # Shared metadata. Individual crates inherit with `field.workspace = true` so
 # the version and licence live in exactly one place.
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-only"
