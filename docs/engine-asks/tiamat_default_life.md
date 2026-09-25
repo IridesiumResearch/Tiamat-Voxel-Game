@@ -12,6 +12,19 @@ engine change that would. Newest first. Items are removed when they land.
 **Open as of 2026-09-23: 16, 17 and 18**, below. New ones go at the top,
 newest first.
 
+**From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
+nothing — the place control at open sky, or at a block past reach — now
+reaches a mod that registers `game.register_on_use(callback, { anywhere =
+true })`, with no cell in the event (`e.x`, `e.y`, `e.z` and `e.material`
+nil) and `e.held` as ever; the return ladder reads the same. A callback that
+did not ask never sees one. `hooks.lua`'s wrapper now registers that way, an
+uncommitted edit in the Life checkout made with the engine change, and both
+handlers passed to `tdl.on_use` take a nil cell, so food in hand is eaten
+wherever the player looks; the comment above the eat handler in
+`actions.lua` says so now. Ask 17 (use an entity) is untouched: an entity
+under the crosshair still falls through to the block behind it or, against
+the sky, to a use at nothing.
+
 Landed and in use: 0 (15302d1 and the texture step), 1 and 9 (dc3b5ee,
 82444e7), 2 (eab4c2d), 3, 4, 5, 7 and 8 (a3db9fa), 10 and 11 (990bf8a), 12
 (aa77731), 13 (7c0679c), 14 (033f4e6), and 15 (e5c0394 and the badge step).
