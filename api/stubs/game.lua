@@ -1248,8 +1248,11 @@ function game.surface_at(spec) end
 ---    end
 ---end)
 ---```
+---**An entity nearer than any cell answers `{ domain, entity, owner }`
+---instead** — the same choice a use makes, from the same ray, so what a mod
+---sees a player looking at is what the place control would act on.
 ---@param player string The player's UUID, in hex.
----@return { x: integer, y: integer, z: integer, domain: string, material: integer, face: { x: integer, y: integer, z: integer } }|nil
+---@return { x: integer, y: integer, z: integer, domain: string, material: integer, face: { x: integer, y: integer, z: integer } }|{ domain: string, entity: integer, owner: string|nil }|nil
 function game.looking_at(player) end
 
 ---Which way a player is looking, as a unit vector, and from which domain.
@@ -3165,6 +3168,41 @@ function game.register_on_use(callback, options) end
 ---```
 ---@param callback fun(event: Tiamat.PunchEvent): boolean?
 function game.register_on_punch(callback) end
+
+---Somebody using an entity: the place control on a creature, a dropped stack,
+---another player's body — with it nearer than any block on the reach ray.
+---@class Tiamat.UseEntityEvent
+---@field player string Who is using, as 64 hex characters.
+---@field target integer The entity under the crosshair, as `game.entity` names one.
+---@field owner string|nil The player that entity belongs to, if it is somebody's body — the same field `game.entity` reports.
+---@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil }|nil What is in the main hand, as `on_use` has it, or `nil` for an empty one.
+
+---Registers a handler for USING an entity: the place control with an entity
+---nearer than any block along the player's own reach ray — getting on a
+---horse, milking a cow, shearing a sheep, feeding a pig.
+---
+---**Registration window only.**
+---
+---**The server casts the ray**, the same one `game.looking_at` walks, against
+---the boxes of the entities in reach: a client cannot say it used a cow it was
+---not looking at, and a cow behind glass is the glass. The player's own body
+---is never the target, and an entity with no collider has no box to hit.
+---
+---The same ladder as `game.register_on_use`, read as "handled": `nil` or
+---`true` passes to the next mod; `false`, a string or `""` handles it, and
+---`on_use` is then not asked. A use nobody handles falls through to the block
+---behind the entity, or to a use at nothing, exactly as it did before this
+---hook existed — so a world with no handler plays as it did.
+---
+---```lua
+---game.register_on_use_entity(function(e)
+---    if not (e.held and e.held.material == hay) then return end   -- not feeding: let it pass
+---    feed(e.target, e.player)
+---    return ""
+---end)
+---```
+---@param callback fun(event: Tiamat.UseEntityEvent): boolean|string|nil
+function game.register_on_use_entity(callback) end
 
 ---Fluid pressing against something it cannot get into.
 ---

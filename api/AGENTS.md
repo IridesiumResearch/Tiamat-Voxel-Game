@@ -162,6 +162,10 @@ reach) is a use too, heard only by a callback registered with
 `{ anywhere = true }`: it comes with no cell — `e.x` and `e.material` nil — and
 `e.held` as ever, which is how a meal is eaten wherever the player looks. A
 callback that did not ask never sees a use without a cell.
+**Right-clicking an entity is `register_on_use_entity`**: the server casts
+the ray, a creature nearer than any block is the target, the event carries it
+with its owner and the hand, and a use nobody handles falls through to the
+block. `game.looking_at` answers `{ entity = id }` in the same case.
 
 **Between events, `game.looking_at(uuid)` says what a player's crosshair is
 on** — the same `{ x, y, z, domain, material }` a use event carries, plus the

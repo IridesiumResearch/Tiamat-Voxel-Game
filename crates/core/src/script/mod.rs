@@ -41,7 +41,7 @@ pub use vm::{
     AbsorbsRule, ActionEvent, Backend, BlockRules, BlockTexture, Brush, ChatEvent, DialogEvent,
     DigEvent, DomainEvent, FluidFlowEvent, FluidRules, HookOutcome, JoinEvent, LeaveEvent,
     MAX_REFUSAL_BYTES, PlaceEvent, PunchEvent, RandomTickEvent, ScriptError, ScriptVm, Sky,
-    SkyGrade, SkyKeyframe, Tool, UseAim, UseEvent, VmLimits, WorldEdit,
+    SkyGrade, SkyKeyframe, Tool, UseAim, UseEntityEvent, UseEvent, VmLimits, WorldEdit,
 };
 
 #[cfg(feature = "script")]

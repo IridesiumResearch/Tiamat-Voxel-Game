@@ -182,6 +182,9 @@ const MOD_DIRS: &str = "tiamat.mod_dirs";
 /// Registry key holding the mods that registered `on_punch`.
 const PUNCHERS: &str = "tiamat.punchers";
 
+/// Registry key holding the mods that registered `on_use_entity`.
+const ENTITY_USERS: &str = "tiamat.entity_users";
+
 /// Registry key holding the mods that registered `on_player_join`.
 const JOINERS: &str = "tiamat.joiners";
 /// Registry key for the mods listening for a departure.
@@ -254,6 +257,9 @@ const HOOK_CHAT: &str = "on_chat";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_PUNCH: &str = "on_punch";
+
+/// Hook name used in registry keys and in fault messages.
+const HOOK_USE_ENTITY: &str = "on_use_entity";
 
 /// Globals removed from every mod environment.
 ///
@@ -3166,6 +3172,27 @@ impl ScriptVm for MluaVm {
         self.run_hook(HOOK_USE, asked, &table)
     }
 
+    fn use_entity(&mut self, event: &crate::script::UseEntityEvent) -> HookOutcome {
+        let Ok(table) = self.hook_event(event.player).and_then(|table| {
+            // The entity and its owner, as a punch names them, and the hand as
+            // a use of a block has it: a mod feeding a cow reads all three.
+            table.set("target", event.target.0 as i64)?;
+            if let Some(owner) = event.owner {
+                table.set("owner", hex_uuid(owner))?;
+            }
+            let held = event
+                .held
+                .as_ref()
+                .map(|stack| stack_table(&self.lua, stack))
+                .transpose()?;
+            table.set("held", held)?;
+            Ok(table)
+        }) else {
+            return HookOutcome::allow();
+        };
+        self.run_hook(HOOK_USE_ENTITY, ENTITY_USERS, &table)
+    }
+
     fn punch(&mut self, event: &crate::script::PunchEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.attacker).and_then(|table| {
             // `attacker` as well as `player`, because a punch has two parties
@@ -4051,6 +4078,11 @@ impl MluaVm {
         game.set(
             "register_on_use",
             self.hook_registrar_with(mod_id, HOOK_USE, USERS, Some(("anywhere", USERS_ANYWHERE)))?,
+        )
+        .map_err(|err| self.vm_error(&err))?;
+        game.set(
+            "register_on_use_entity",
+            self.hook_registrar(mod_id, HOOK_USE_ENTITY, ENTITY_USERS)?,
         )
         .map_err(|err| self.vm_error(&err))?;
         // Registered through the same machinery even though it cannot veto:
@@ -5834,16 +5866,34 @@ impl MluaVm {
                     return Ok(mlua::Value::Nil);
                 };
                 let out = lua.create_table()?;
-                out.set("x", looked.cell.x)?;
-                out.set("y", looked.cell.y)?;
-                out.set("z", looked.cell.z)?;
-                out.set("domain", looked.domain)?;
-                out.set("material", looked.material.0)?;
-                let face = lua.create_table()?;
-                face.set("x", looked.face[0])?;
-                face.set("y", looked.face[1])?;
-                face.set("z", looked.face[2])?;
-                out.set("face", face)?;
+                match looked {
+                    crate::sight::Looked::Block {
+                        domain,
+                        cell,
+                        material,
+                        face: normal,
+                    } => {
+                        out.set("x", cell.x)?;
+                        out.set("y", cell.y)?;
+                        out.set("z", cell.z)?;
+                        out.set("domain", domain)?;
+                        out.set("material", material.0)?;
+                        let face = lua.create_table()?;
+                        face.set("x", normal[0])?;
+                        face.set("y", normal[1])?;
+                        face.set("z", normal[2])?;
+                        out.set("face", face)?;
+                    }
+                    // An entity nearer than any cell: the shape a use of one
+                    // has, so a mod handling both reads one thing.
+                    crate::sight::Looked::Entity { domain, id, owner } => {
+                        out.set("domain", domain)?;
+                        out.set("entity", id.0 as i64)?;
+                        if let Some(owner) = owner {
+                            out.set("owner", hex_uuid(owner))?;
+                        }
+                    }
+                }
                 Ok(mlua::Value::Table(out))
             })
             .map_err(|err| self.vm_error(&err))
@@ -8087,6 +8137,7 @@ impl MluaVm {
             PLACERS,
             USERS,
             USERS_ANYWHERE,
+            ENTITY_USERS,
             PUNCHERS,
             FLOWERS,
             JOINERS,
@@ -12669,6 +12720,70 @@ mod tests {
             vm.use_block(&empty).allowed,
             "an empty hand at nothing was handled"
         );
+    }
+
+    #[test]
+    fn a_use_of_an_entity_reaches_the_first_mod_that_handles_it_and_carries_the_hand() {
+        // Life ask 17. The same ladder a use of a block reads, and the event
+        // names the entity, its owner when it is somebody's body, and what
+        // is in the hand — a mod feeding a cow reads all three.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "stable",
+            "game.register_on_use_entity(function(e)\n\
+             \x20   seen = e\n\
+             \x20   if e.held and e.held.material == 3 then return 'fed' end\n\
+             end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "later",
+            "asked = 0\ngame.register_on_use_entity(function() asked = asked + 1 end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let feed = crate::script::UseEntityEvent {
+            player: [0xEF; 32],
+            target: crate::ent::EntityId(7),
+            owner: None,
+            held: crate::inventory::Stack::new(MaterialId(3), 27),
+        };
+        let handled = vm.use_entity(&feed);
+        assert!(!handled.allowed, "the stable did not handle the feed");
+        assert_eq!(handled.reason.as_deref(), Some("fed"));
+        let stable = vm.environment("stable").expect("env").clone();
+        let seen: Table = stable.get("seen").expect("seen");
+        assert_eq!(seen.get::<i64>("target").expect("target"), 7);
+        assert!(
+            seen.get::<Value>("owner").expect("owner").is_nil(),
+            "a cow has no owner"
+        );
+        let held: Table = seen.get("held").expect("held");
+        assert_eq!(held.get::<u16>("material").expect("material"), 3);
+        let later = vm.environment("later").expect("env").clone();
+        assert_eq!(
+            later.get::<i32>("asked").expect("asked"),
+            0,
+            "a handled use went on"
+        );
+
+        // An empty hand at somebody's body: nobody handles it, and the owner
+        // is named.
+        let pat = crate::script::UseEntityEvent {
+            owner: Some([0xAB; 32]),
+            held: None,
+            ..feed
+        };
+        assert!(
+            vm.use_entity(&pat).allowed,
+            "somebody handled an empty hand"
+        );
+        assert_eq!(later.get::<i32>("asked").expect("asked"), 1);
+        let seen: Table = stable.get("seen").expect("seen");
+        assert_eq!(seen.get::<String>("owner").expect("owner"), "ab".repeat(32));
     }
 
     #[test]

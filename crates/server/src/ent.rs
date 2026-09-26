@@ -331,6 +331,15 @@ impl Population {
         Some(entity)
     }
 
+    /// Every live entity, in slot order.
+    ///
+    /// For a reader that has to look at all of them — a ray cast against
+    /// their boxes — beside [`Self::domain_of`], which says which space each
+    /// is in.
+    pub fn iter(&self) -> impl Iterator<Item = (EntityId, &Entity)> {
+        self.entities.iter()
+    }
+
     /// Borrows an entity.
     #[must_use]
     pub fn get(&self, id: EntityId) -> Option<&Entity> {

@@ -1048,6 +1048,20 @@ pub const MAX_BADGED_ENTITIES: usize = 64;
 /// surplus is better than delivering a minute-old explanation.
 pub const MAX_QUEUED_NOTICES: usize = 16;
 
+/// Where a player stands and looks from, in their own chunk frame (charter
+/// rule 7): the input to a ray cast on their behalf.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aim {
+    /// The chunk `feet` and `eye` are measured from.
+    pub origin: tiamat_core::ChunkPos,
+    /// The feet, in cells.
+    pub feet: [f32; 3],
+    /// The eye, in cells.
+    pub eye: [f32; 3],
+    /// Yaw and pitch, in turns.
+    pub look: [f32; 2],
+}
+
 impl Shared {
     /// The current tick, for stamping outbound messages.
     fn tick(&self) -> u64 {
@@ -1160,6 +1174,19 @@ impl Shared {
         let bodies = self.bodies.lock().ok()?;
         let player = bodies.get(uuid)?;
         Some((player.origin, player.body.eye()))
+    }
+
+    /// Where a player stands and looks from, for a ray cast on their behalf:
+    /// what `lease::aim` takes.
+    pub fn player_aim(&self, uuid: &PlayerUuid) -> Option<Aim> {
+        let bodies = self.bodies.lock().ok()?;
+        let player = bodies.get(uuid)?;
+        Some(Aim {
+            origin: player.origin,
+            feet: player.body.position,
+            eye: player.body.eye(),
+            look: player.look,
+        })
     }
 
     /// Every player's chunk origin and body box, for the placement check.

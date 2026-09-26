@@ -77,6 +77,7 @@ pub struct Lease {
     /// overwrites, and its `pitch` is the drawn figure's rather than the
     /// camera's. The body carries `look` as the wire sent it.
     bodies: Option<Arc<crate::transport::PlayerBodies>>,
+    entities: Option<Arc<std::sync::RwLock<crate::ent::Population>>>,
 }
 
 impl Default for Lease {
@@ -95,6 +96,7 @@ impl Lease {
             passable: Arc::new(Vec::new()),
             fluid: None,
             bodies: None,
+            entities: None,
         }
     }
 
@@ -124,6 +126,16 @@ impl Lease {
         self
     }
 
+    /// The entities, so a crosshair can land on one (Life ask 17).
+    #[must_use]
+    pub fn with_entities(
+        mut self,
+        entities: Arc<std::sync::RwLock<crate::ent::Population>>,
+    ) -> Self {
+        self.entities = Some(entities);
+        self
+    }
+
     /// Refills the tick's pathfinding pool.
     ///
     /// Called once per tick by the simulation loop. Explicit rather than folded
@@ -145,6 +157,7 @@ impl Lease {
             passable: Arc::clone(&self.passable),
             fluid: self.fluid.clone(),
             bodies: self.bodies.clone(),
+            entities: self.entities.clone(),
         }
     }
 
@@ -190,6 +203,7 @@ pub struct Shared {
     passable: Arc<Vec<u16>>,
     fluid: Option<Arc<std::sync::RwLock<crate::fluid::Ponds>>>,
     bodies: Option<Arc<crate::transport::PlayerBodies>>,
+    entities: Option<Arc<std::sync::RwLock<crate::ent::Population>>>,
 }
 
 impl Shared {
@@ -387,52 +401,38 @@ impl sight::Access for Shared {
 
     fn looking_at(&self, uuid: [u8; 32]) -> Option<sight::Looked> {
         let bodies = self.bodies.as_ref()?;
+        let who = tiamat_core::PlayerUuid::from_bytes(uuid);
         // The body first, and the lock dropped before the world's: the tick
         // takes them in this order too, and a mod call that took them the other
         // way round would be the one ordering that can deadlock.
-        let (domain, origin, eye, direction) = {
+        let (domain, origin, feet, eye, look) = {
             let bodies = bodies.lock().ok()?;
-            let player = bodies.get(&tiamat_core::PlayerUuid::from_bytes(uuid))?;
+            let player = bodies.get(&who)?;
             (
                 player.domain.clone(),
                 player.origin,
+                player.body.position,
                 player.body.eye(),
-                look_direction(player.look),
+                player.look,
             )
         };
 
         let slot = self.slot.lock().ok()?;
         let world = slot.as_ref()?;
-        // **Not `.passing(...)`.** A tuft of grass is passable to a body and
-        // is still something you can point at and dig, so targeting reads the
-        // terrain as it is rather than as a walk through it does.
-        let terrain = world.solid(&domain);
-        let voxels = tiamat_core::phys::Voxels::new(&terrain, origin);
-        let hit =
-            tiamat_core::phys::ray::cast(&voxels, eye, direction, tiamat_core::phys::ray::REACH)?;
-
-        // The hit is in the body's own chunk frame (charter rule 7); everything
-        // a mod speaks is absolute. Getting this conversion wrong is how a mod
-        // acts on a block a chunk away, so it is one named step.
-        let corner = tiamat_core::BlockPos::from_chunk_corner(origin);
-        let per = tiamat_core::SUBNODES_PER_AXIS as i32;
-        let cell = tiamat_core::SubNodePos::new(
-            corner.x * per + hit.cell[0],
-            corner.y * per + hit.cell[1],
-            corner.z * per + hit.cell[2],
-        );
-        // Resident only, as `block_at` is: a ray that left the loaded world
-        // found nothing, rather than making the server generate a chunk from
-        // inside a mod call.
-        let material = terrain
-            .resident(cell.chunk())
-            .and_then(|chunk| chunk.get_subnode(cell))?;
-        Some(sight::Looked {
-            domain,
-            cell,
-            material,
-            face: hit.normal,
-        })
+        let mobs = self
+            .entities
+            .as_ref()
+            .and_then(|entities| entities.read().ok());
+        aim(
+            world,
+            mobs.as_deref(),
+            &domain,
+            origin,
+            feet,
+            eye,
+            look,
+            Some(who),
+        )
     }
 
     fn gaze(&self, uuid: [u8; 32]) -> Option<sight::Gaze> {
@@ -442,6 +442,142 @@ impl sight::Access for Shared {
             domain: player.domain.clone(),
             direction: look_direction(player.look),
         })
+    }
+}
+
+/// What a ray from a player's eye meets first within reach: an entity's box,
+/// or a cell of terrain — the one answer `looking_at` and a use share (Life
+/// ask 17).
+///
+/// **The entity has to be at least as near as the cell.** A cow in front of a
+/// wall is the cow; a cow behind glass is the glass; a cow pressed against the
+/// wall, its box on the wall's face, is still the cow. Entities in another
+/// space and the player's own body are not candidates, and one with no
+/// collider has no box to hit. Between entities a tie goes to the lower id, so
+/// the order is total and two servers agree.
+///
+/// `feet` and `eye` are in the body's own chunk frame (charter rule 7), which
+/// is the frame the ray is cast in; what comes back is absolute.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the five numbers are one body's place and gaze, read under one lock and handed on"
+)]
+pub(crate) fn aim(
+    world: &World,
+    entities: Option<&crate::ent::Population>,
+    domain: &str,
+    origin: tiamat_core::ChunkPos,
+    feet: [f32; 3],
+    eye: [f32; 3],
+    look: [f32; 2],
+    except: Option<tiamat_core::PlayerUuid>,
+) -> Option<sight::Looked> {
+    use tiamat_core::phys::ray;
+
+    let direction = look_direction(look);
+    // **Not `.passing(...)`.** A tuft of grass is passable to a body and is
+    // still something you can point at and dig, so targeting reads the terrain
+    // as it is rather than as a walk through it does.
+    let terrain = world.solid(domain);
+    let voxels = tiamat_core::phys::Voxels::new(&terrain, origin);
+    let block = ray::cast(&voxels, eye, direction, ray::REACH).map(|hit| {
+        let cell = cell_box(hit.cell);
+        // An eye inside a block is at no distance from it, which is also what
+        // `cast` reports for one.
+        let distance = ray::distance_to_box(eye, direction, &cell).unwrap_or(0.0);
+        (hit, distance)
+    });
+
+    let entity = entities.and_then(|mobs| {
+        let viewer = tiamat_core::ent::Transform::at(origin, feet);
+        let mut nearest: Option<(
+            tiamat_core::ent::EntityId,
+            f32,
+            Option<tiamat_core::PlayerUuid>,
+        )> = None;
+        for (id, entity) in mobs.iter() {
+            if mobs.domain_of(id) != domain {
+                continue;
+            }
+            let owner = entity.owner.map(|owner| owner.0);
+            if except.is_some() && owner == except {
+                continue;
+            }
+            let Some(collider) = entity.collider else {
+                continue;
+            };
+            let offset = viewer.offset_to(&entity.transform);
+            let aabb = collider.aabb([
+                feet[0] + offset[0],
+                feet[1] + offset[1],
+                feet[2] + offset[2],
+            ]);
+            let Some(distance) = ray::distance_to_box(eye, direction, &aabb) else {
+                continue;
+            };
+            if distance > ray::REACH {
+                continue;
+            }
+            let nearer = nearest.is_none_or(|(best_id, best, _)| {
+                distance < best || (distance == best && id < best_id)
+            });
+            if nearer {
+                nearest = Some((id, distance, owner));
+            }
+        }
+        nearest
+    });
+
+    match (entity, block) {
+        (Some((id, near, owner)), Some((_, far))) if near <= far => Some(sight::Looked::Entity {
+            domain: domain.to_owned(),
+            id,
+            owner: owner.map(|owner| *owner.as_bytes()),
+        }),
+        (Some((id, _, owner)), None) => Some(sight::Looked::Entity {
+            domain: domain.to_owned(),
+            id,
+            owner: owner.map(|owner| *owner.as_bytes()),
+        }),
+        (_, Some((hit, _))) => {
+            // The hit is in the body's own chunk frame (charter rule 7);
+            // everything a mod speaks is absolute. Getting this conversion
+            // wrong is how a mod acts on a block a chunk away, so it is one
+            // named step.
+            let corner = tiamat_core::BlockPos::from_chunk_corner(origin);
+            let per = tiamat_core::SUBNODES_PER_AXIS as i32;
+            let cell = tiamat_core::SubNodePos::new(
+                corner.x * per + hit.cell[0],
+                corner.y * per + hit.cell[1],
+                corner.z * per + hit.cell[2],
+            );
+            // Resident only, as `block_at` is: a ray that left the loaded
+            // world found nothing, rather than making the server generate a
+            // chunk from inside a mod call.
+            let material = terrain
+                .resident(cell.chunk())
+                .and_then(|chunk| chunk.get_subnode(cell))?;
+            Some(sight::Looked::Block {
+                domain: domain.to_owned(),
+                cell,
+                material,
+                face: hit.normal,
+            })
+        }
+        (None, None) => None,
+    }
+}
+
+/// The unit box of a cell, for measuring how far along a ray it is.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a cell within reach of an eye is a few dozen from its chunk's corner, far inside f32's whole numbers"
+)]
+fn cell_box(cell: [i32; 3]) -> tiamat_core::phys::Aabb {
+    let low = [cell[0] as f32, cell[1] as f32, cell[2] as f32];
+    tiamat_core::phys::Aabb {
+        min: low,
+        max: [low[0] + 1.0, low[1] + 1.0, low[2] + 1.0],
     }
 }
 
@@ -456,7 +592,7 @@ impl sight::Access for Shared {
 /// `detgen::trig` and not `f32::sin_cos`: a mod acts on this answer, so it
 /// becomes world state, and charter rule 4 does not exempt it the way it
 /// exempts the client's own camera.
-fn look_direction(look: [f32; 2]) -> [f32; 3] {
+pub(crate) fn look_direction(look: [f32; 2]) -> [f32; 3] {
     use tiamat_core::detgen::trig;
     let turn = std::f32::consts::TAU;
     let yaw = look[0] * turn;
@@ -682,14 +818,23 @@ mod tests {
 
         let (_world, looked) = lease.lending(wall(), || handle.looking_at(*uuid.as_bytes()));
         let looked = looked.expect("the wall is three blocks north and within reach");
-        assert_eq!(looked.cell.z, 30, "the near face of the wall is cell z 30");
-        assert_eq!(looked.material, MaterialId(1));
+        let sight::Looked::Block {
+            cell,
+            material,
+            face,
+            domain,
+        } = looked
+        else {
+            panic!("a wall is a block, not an entity: {looked:?}");
+        };
+        assert_eq!(cell.z, 30, "the near face of the wall is cell z 30");
+        assert_eq!(material, MaterialId(1));
         assert_eq!(
-            looked.face,
+            face,
             [0, 0, -1],
             "the face points back out of the wall, so a placement goes in front of it"
         );
-        assert_eq!(looked.domain, tiamat_core::domain::OVERWORLD);
+        assert_eq!(domain, tiamat_core::domain::OVERWORLD);
     }
 
     #[test]
@@ -731,13 +876,22 @@ mod tests {
 
         let (_world, looked) = lease.lending(world, || handle.looking_at(*uuid.as_bytes()));
         let looked = looked.expect("a block one either side, and one of them is east");
+        let sight::Looked::Block {
+            cell,
+            material,
+            face,
+            ..
+        } = looked
+        else {
+            panic!("a block, not an entity: {looked:?}");
+        };
         assert_eq!(
-            looked.material,
+            material,
             MaterialId(1),
             "a quarter turn of yaw looked west; east is -x"
         );
-        assert_eq!(looked.cell.x, 20, "the near face of the east block");
-        assert_eq!(looked.face, [1, 0, 0]);
+        assert_eq!(cell.x, 20, "the near face of the east block");
+        assert_eq!(face, [1, 0, 0]);
     }
 
     #[test]

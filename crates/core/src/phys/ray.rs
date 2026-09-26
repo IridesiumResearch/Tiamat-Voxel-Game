@@ -22,7 +22,7 @@
 use crate::coords::{BlockPos, SubNodePos};
 use crate::detgen::floor_to_i32;
 
-use super::Solid;
+use super::{Aabb, Solid};
 
 /// How far a player can reach, in cells. 4.5 yards.
 pub const REACH: f32 = 13.5;
@@ -178,6 +178,44 @@ fn dominant_axis(direction: [f32; 3]) -> usize {
     }
 }
 
+/// How far along a ray a box is entered, or `None` if the ray misses it.
+///
+/// **A slab test, and nothing else.** For each axis the ray's parameter at the
+/// box's two planes is taken, and the box is hit where the latest entry comes
+/// before the earliest exit. Floats in the allowed subset only — divisions and
+/// comparisons — and a zero component is decided by whether the origin lies
+/// between the planes rather than by dividing, so no NaN is made.
+///
+/// A ray starting inside the box is at distance zero. The distance is in the
+/// units of `direction`, so a caller comparing two distances passes the same
+/// direction to both.
+#[must_use]
+pub fn distance_to_box(origin: [f32; 3], direction: [f32; 3], aabb: &Aabb) -> Option<f32> {
+    let mut entry = 0.0_f32;
+    let mut exit = f32::MAX;
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            if origin[axis] < aabb.min[axis] || origin[axis] > aabb.max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let a = (aabb.min[axis] - origin[axis]) / direction[axis];
+        let b = (aabb.max[axis] - origin[axis]) / direction[axis];
+        let (near, far) = if a < b { (a, b) } else { (b, a) };
+        if near > entry {
+            entry = near;
+        }
+        if far < exit {
+            exit = far;
+        }
+        if exit < entry {
+            return None;
+        }
+    }
+    Some(entry)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -331,5 +369,55 @@ mod tests {
             axis: 0,
         };
         assert_eq!(hit.block(), BlockPos::new(-1, -1, -2));
+    }
+}
+
+#[cfg(test)]
+mod box_tests {
+    use super::*;
+
+    fn unit_box(low: [f32; 3]) -> Aabb {
+        Aabb {
+            min: low,
+            max: [low[0] + 1.0, low[1] + 1.0, low[2] + 1.0],
+        }
+    }
+
+    #[test]
+    fn a_box_ahead_is_entered_at_its_near_face_and_one_beside_is_missed() {
+        let ahead = unit_box([-0.5, -0.5, 3.0]);
+        assert_eq!(
+            distance_to_box([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], &ahead),
+            Some(3.0)
+        );
+        let beside = unit_box([2.0, -0.5, 3.0]);
+        assert_eq!(
+            distance_to_box([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], &beside),
+            None,
+            "a box off the ray was hit"
+        );
+        // Behind: the far plane is passed before the near one is reached.
+        let behind = unit_box([-0.5, -0.5, -3.0]);
+        assert_eq!(
+            distance_to_box([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], &behind),
+            None,
+            "a box behind the eye was hit"
+        );
+    }
+
+    #[test]
+    fn an_eye_inside_a_box_is_at_no_distance_and_a_diagonal_ray_measures_in_its_own_units() {
+        let around = unit_box([-0.5, -0.5, -0.5]);
+        assert_eq!(
+            distance_to_box([0.0, 0.0, 0.0], [0.3, 0.1, 0.9], &around),
+            Some(0.0)
+        );
+        // Two units along x per unit of parameter: the box at x = 4 is reached
+        // at t = 2, in the direction's own units.
+        let along = unit_box([4.0, -0.5, -0.5]);
+        assert_eq!(
+            distance_to_box([0.0, 0.0, 0.0], [2.0, 0.0, 0.0], &along),
+            Some(2.0)
+        );
     }
 }

@@ -421,6 +421,19 @@ impl Generator {
         }
     }
 
+    /// Asks the mods whether one of them handles a use of an entity (Life
+    /// ask 17). Still `allowed` is a use nobody handled, and the caller goes
+    /// on to the block.
+    pub fn may_use_entity(
+        &mut self,
+        event: &tiamat_core::script::UseEntityEvent,
+    ) -> tiamat_core::script::HookOutcome {
+        match self {
+            Self::Mods(generator) => generator.host_mut().vm_mut().use_entity(event),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
+        }
+    }
+
     /// Tells the mods a player used one of their registered actions.
     ///
     /// Named `did_` rather than `may_` because there is nothing to permit: the

@@ -872,6 +872,27 @@ pub struct PunchEvent {
     pub owner: Option<[u8; 32]>,
 }
 
+/// Somebody using an entity: the place control pressed with an entity nearer
+/// than any block on the player's own reach ray (Life ask 17).
+///
+/// **Cast by the server, not named by the client** — the same ray
+/// [`crate::sight::Access::looking_at`] walks — so a client cannot say it used
+/// a cow it was not looking at. There is no engine action to veto; a refusal
+/// means the mod HANDLED it, as with [`UseEvent`], and a use nobody handles
+/// falls through to the block behind the entity, or to a use at nothing, as it
+/// always did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseEntityEvent {
+    /// Who is using.
+    pub player: [u8; 32],
+    /// The entity under the crosshair.
+    pub target: crate::ent::EntityId,
+    /// The player that entity belongs to, if it belongs to one.
+    pub owner: Option<[u8; 32]>,
+    /// What the player holds in the main hand, if anything.
+    pub held: Option<crate::inventory::Stack>,
+}
+
 /// A player arriving in the world.
 ///
 /// # Why the engine does not say whether this is their first time
@@ -1559,6 +1580,13 @@ pub trait ScriptVm: Sized {
     /// land, and no later hook is asked — the same first-refusal-wins rule
     /// [`Self::dig_complete`] documents, and for the same reason.
     fn punch(&mut self, event: &PunchEvent) -> HookOutcome;
+
+    /// Asks every registered `on_use_entity` whether one handles a use of an
+    /// entity.
+    ///
+    /// The ladder [`Self::use_block`] reads: an outcome still `allowed` is a
+    /// use nobody handled, and the caller goes on to the block.
+    fn use_entity(&mut self, event: &UseEntityEvent) -> HookOutcome;
 
     /// Tells every registered `on_action` that a player used one.
     ///

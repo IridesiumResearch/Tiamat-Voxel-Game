@@ -2773,7 +2773,8 @@ impl ServerHandle {
                     // it is deliberately lent.
                     let sight = crate::lease::Lease::new()
                         .with_terrain(passable_runtime, std::sync::Arc::clone(&fluidics))
-                        .with_players(std::sync::Arc::clone(&shared.bodies));
+                        .with_players(std::sync::Arc::clone(&shared.bodies))
+                        .with_entities(std::sync::Arc::clone(&population));
 
                     // Plans a mod has asked to stamp, and has not seen land
                     // yet. Owned here rather than by the VM because the tick is
@@ -4218,6 +4219,53 @@ impl ServerHandle {
                                 // instead is asked about, and told nothing.
                                 Some(_) => "",
                             };
+                            // **An entity under the crosshair comes first**
+                            // (Life ask 17): the server's own ray, against the
+                            // boxes of the entities in reach, and the block
+                            // only if nothing stands nearer. A use nobody
+                            // handles falls through to the block, so a world
+                            // with no such mod plays as it did.
+                            let aimed_entity = shared.player_aim(&actor).and_then(|aim| {
+                                let mobs = population.read().ok()?;
+                                crate::lease::aim(
+                                    &world,
+                                    Some(&mobs),
+                                    &using_in,
+                                    aim.origin,
+                                    aim.feet,
+                                    aim.eye,
+                                    aim.look,
+                                    Some(actor),
+                                )
+                            });
+                            if let Some(tiamat_core::sight::Looked::Entity { id, owner, .. }) =
+                                aimed_entity
+                            {
+                                let event = tiamat_core::script::UseEntityEvent {
+                                    player: *actor.as_bytes(),
+                                    target: id,
+                                    owner,
+                                    held: held.clone(),
+                                };
+                                let (returned, verdict) =
+                                    sight.lending(world, || source.may_use_entity(&event));
+                                world = returned;
+                                for (mod_id, err) in &verdict.faults {
+                                    error!(mod_id = %mod_id, "mod disabled after an on_use_entity failure: {err}");
+                                }
+                                // Handled: told as a handled use of a block is
+                                // told — the mod's own words, the engine's for a
+                                // bare `false`, nothing for `""`.
+                                if !verdict.allowed {
+                                    if let Some(notice) = verdict
+                                        .notice(fallback)
+                                        .filter(|notice| !notice.is_empty())
+                                    {
+                                        shared.tell(&actor, notice.to_owned());
+                                    }
+                                    continue;
+                                }
+                            }
                             let aim = match target {
                                 // **At nothing in reach** (protocol v76): open
                                 // sky, or further than the arm goes, with a

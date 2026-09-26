@@ -185,20 +185,36 @@ pub struct Gaze {
 /// the API is: `on_dig`, `on_place` and `on_use` all name the cell under the
 /// crosshair, three to a block (charter rule 5). A mod holding both should not
 /// have to convert between them.
+///
+/// **An entity nearer than any cell is the answer instead** (Life ask 17): the
+/// same choice a use makes, from the same ray, so what a mod sees a player
+/// looking at is what the place control would act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Looked {
-    /// The space the player is in, so a reader knows which world to ask.
-    pub domain: String,
-    /// The cell under the crosshair, in world sub-node coordinates.
-    pub cell: crate::coords::SubNodePos,
-    /// What that cell is made of.
-    pub material: crate::MaterialId,
-    /// The face it was entered through, pointing back out of the surface.
-    ///
-    /// The same convention [`crate::phys::ray::Hit::normal`] uses, and here for
-    /// the same reason it is there: `cell + face` is where a thing placed
-    /// against what somebody is pointing at would go.
-    pub face: [i32; 3],
+pub enum Looked {
+    /// A cell of terrain.
+    Block {
+        /// The space the player is in, so a reader knows which world to ask.
+        domain: String,
+        /// The cell under the crosshair, in world sub-node coordinates.
+        cell: crate::coords::SubNodePos,
+        /// What that cell is made of.
+        material: crate::MaterialId,
+        /// The face it was entered through, pointing back out of the surface.
+        ///
+        /// The same convention [`crate::phys::ray::Hit::normal`] uses, and here
+        /// for the same reason it is there: `cell + face` is where a thing
+        /// placed against what somebody is pointing at would go.
+        face: [i32; 3],
+    },
+    /// An entity, nearer along the ray than any cell.
+    Entity {
+        /// The space the player is in.
+        domain: String,
+        /// The entity, as `game.entity` names one.
+        id: crate::ent::EntityId,
+        /// The player it belongs to, if it is somebody's body.
+        owner: Option<[u8; 32]>,
+    },
 }
 
 /// What [`Access::surface_at`] looks past on its way down.
