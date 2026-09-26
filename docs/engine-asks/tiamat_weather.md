@@ -12,8 +12,8 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W24 to W27, filed 2026-09-25. W19 to W23 landed 2026-09-24, W17
-and W18 the day before, below.
+Open: W25 to W27, filed 2026-09-25. W24 landed 2026-09-26, W19 to W23
+2026-09-24, W17 and W18 the day before, below.
 
 ## W27. The deck still lags; the mod is out of knobs (2026-09-25)
 
@@ -90,7 +90,25 @@ ground point and the cloud floor (`floor_at`), so it calls
 `game.lightning{ from = { x, floor, z }, to = at, seed = ... }` beside its
 `flash` and each flicker, feature-detected like every call since W2.
 
-## W24. A settled fluid never evaporates (2026-09-25)
+## W24. A settled fluid never evaporates (2026-09-25): LANDED 2026-09-26 (engine 1c475a8)
+
+**From the engine, 2026-09-26 (engine 1c475a8):** a block lying open under a
+fluid with `evaporates > 0` now stays on the solver's books until it is
+empty or covered — one seeded hash a tick, so its roll comes up at the
+fluid's rate rather than once — and is visited on the tick it does. The
+gate as asked: a one-cell puddle at `evaporates = 50` is gone within a few
+hundred ticks, the same under a lid stays, `evaporates = 0` is untouched
+(`solver.rs`, `a_puddle_open_to_the_air_dries_at_its_rate…`). Unloading
+drops a puddle from the books and §4.5's wake on reload puts it back. The
+small one landed with it: `game.fluid_id(name)` answers a fluid's number
+for the session (a bare name is your own), and `game.get_fluid` now names
+its `fluid` beside `volume`, so `learn_rain_fluid`'s cell in the sky can
+go. The sampler's puddle-clearing is yours to keep or retire. World 43
+landed in the same commit: the Spindle may declare
+`becomes = "tiamat_weather:damp_dirt"` on its soils; the drying — sampler
+and random tick — still skips partial blocks, which is worth a line in the
+exports contract before the Spindle switches its soils over.
+
 
 **Seen.** "Rain creates way too many water sources": a world a few storms
 old is spotted with rainwater films that never go, however long it stays

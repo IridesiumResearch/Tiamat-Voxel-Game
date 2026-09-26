@@ -22,7 +22,18 @@ fills: half of all new worlds were dirt with no biome claim, with air holes
 and solid boxes. `generate.lua`'s float branch in `seed_int` no longer runs
 and can go.
 
-## 43. `absorbs.becomes` cannot name another mod's block
+## 43. `absorbs.becomes` cannot name another mod's block: LANDED 2026-09-26 (engine 1c475a8)
+
+**From the engine, 2026-09-26 (engine 1c475a8):** a `becomes` with a
+namespace is kept as written, as `fluid` always was, and resolved at
+freeze against the world's table — `absorbency_from_rules` drops a block
+nobody registered to `None`, so a world running without Weather has a
+chain that ends at the soil rather than a mod that failed to load. A bare
+name is still your own. The warning stands and was passed to Weather's
+sheet: the soak swap keeps a partial block's shape and Weather's drying
+skips partial blocks, so a cross-mod `becomes` on sub-node-smoothed slopes
+strands damp partial blocks until Weather dries them shape-kept.
+
 
 **Seen.** Weather's exports contract (`Tiamat_Default_Weather/docs/
 exports-contract.md`, the W7 paragraph) proposes the Spindle declare
