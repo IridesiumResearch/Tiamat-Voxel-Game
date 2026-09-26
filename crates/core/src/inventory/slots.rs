@@ -556,6 +556,40 @@ impl Slots {
         true
     }
 
+    /// Shift-clicks ACROSS views: out of one and into another, wherever it
+    /// fits.
+    ///
+    /// What the gesture means when a screen shows two inventories — the
+    /// player's own and a chest lent into it: "put this in there", or "take
+    /// this back out". [`View::fill`] decides where it lands, matching stacks
+    /// first and then empty slots, and whatever will not fit stays where it
+    /// was, which is what makes the gesture safe rather than lossy (charter
+    /// rule 5).
+    ///
+    /// Returns whether anything moved: `false` for a slot that is not there
+    /// or empty, a destination that is not there, or one so full it took
+    /// nothing.
+    pub fn transfer(&mut self, from: &str, index: usize, to: &str) -> bool {
+        if from == to {
+            return false;
+        }
+        let Some(source) = self.locate(from, index) else {
+            return false;
+        };
+        let Some(target) = self.index_of(to) else {
+            return false;
+        };
+        let Some(moving) = self.views[source].slots[index].take() else {
+            return false;
+        };
+        let offered = moving.units;
+        let left = self.views[target].fill(None, moving);
+        let moved = left.as_ref().is_none_or(|rest| rest.units < offered);
+        // Whatever would not fit goes back where it came from.
+        self.views[source].slots[index] = left;
+        moved
+    }
+
     /// Puts a stack into a view, filling matching stacks then empty slots.
     ///
     /// **Never lossy.** If the view has no room, it GROWS — a player digging
@@ -860,6 +894,64 @@ mod tests {
             "it did not come back into the band"
         );
         assert_eq!(inv.total_units(), 50);
+    }
+
+    #[test]
+    fn a_shift_click_across_views_moves_what_fits_and_keeps_the_rest() {
+        // A chest lent into the player's slots beside their own view: the
+        // gesture crosses over, tops up a matching stack first, and leaves
+        // behind what the chest cannot take.
+        let mut inv = Slots::for_player();
+        // A stack has a cap of its own; the chest's is ten short of it.
+        let cap = Stack::new(STONE, 1).expect("stack").capacity();
+        inv.views.push(View {
+            name: "chest".to_owned(),
+            slots: vec![None, Some(Stack::new(STONE, cap - 10).expect("stack"))],
+        });
+        inv.views[0].slots[3] = Some(Stack::new(STONE, 50).expect("stack"));
+
+        assert!(inv.transfer(PLAYER_MAIN, 3, "chest"));
+        assert_eq!(
+            at(&inv, "chest", 1).expect("topped up").units,
+            cap,
+            "the matching stack should have been topped up first"
+        );
+        assert_eq!(
+            at(&inv, "chest", 0)
+                .expect("the rest took the empty slot")
+                .units,
+            40
+        );
+        assert!(
+            at(&inv, PLAYER_MAIN, 3).is_none(),
+            "it all fitted, so nothing stays"
+        );
+
+        // Back out again, into the player's own view.
+        assert!(inv.transfer("chest", 0, PLAYER_MAIN));
+        assert!(at(&inv, "chest", 0).is_none());
+        assert_eq!(inv.view(PLAYER_MAIN).expect("main").total_units(), 40);
+
+        // A chest that can take nothing: the stack stays, and nothing moved.
+        inv.views[1].slots[0] = Some(Stack::new(MaterialId(3), 1).expect("other"));
+        let before = inv.total_units();
+        assert!(
+            !inv.transfer("chest", 0, "chest"),
+            "a view is not across from itself"
+        );
+        assert!(
+            !inv.transfer(PLAYER_MAIN, 0, "chest"),
+            "an empty slot has nothing to move"
+        );
+        assert!(
+            !inv.transfer(PLAYER_MAIN, 9, "nowhere"),
+            "a view that is not there"
+        );
+        assert_eq!(
+            inv.total_units(),
+            before,
+            "a transfer that moved nothing changed a count"
+        );
     }
 
     #[test]

@@ -1,0 +1,14 @@
+# Reference container: a chest.
+#
+# The mod id is `core_chest`, not `core`: a mod owns only its own id as a
+# registration namespace, and `core` belongs to `core_blocks`.
+id = "core_chest"
+name = "Core Chest"
+version = "0.1.0"
+description = "A reference chest: an inventory that belongs to the world. A test fixture, not a game."
+license = "GPL-3.0-only"
+# A reference implementation and test fixture, not content: it loads before
+# every other mod, loses a tie the lowest id would win, steps aside for a mod
+# that declares it replaces this one, and the client lists it apart. See
+# game/README.md.
+reference = true

@@ -7019,6 +7019,17 @@ impl MluaVm {
         game.set("break_container", remove)
             .map_err(|err| self.vm_error(&err))?;
 
+        let slot = std::sync::Arc::clone(&self.containers);
+        let holder = self
+            .lua
+            .create_function(move |_, name: String| {
+                // `nil` for nobody, which is also the answer with no world.
+                Ok(reach!(slot, None, |access| access.holder(&name)).map(hex_uuid))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("container_holder", holder)
+            .map_err(|err| self.vm_error(&err))?;
+
         let (give, take) = self.container_transfers()?;
         game.set("container_give", give)
             .map_err(|err| self.vm_error(&err))?;
@@ -15358,9 +15369,14 @@ mod entity_tests {
         held: std::sync::Mutex<
             std::collections::BTreeMap<String, Vec<Option<crate::inventory::Stack>>>,
         >,
+        holders: std::sync::Mutex<std::collections::BTreeMap<String, [u8; 32]>>,
     }
 
     impl crate::inventory::Containers for Boxes {
+        fn holder(&self, name: &str) -> Option<[u8; 32]> {
+            self.holders.lock().expect("lock").get(name).copied()
+        }
+
         fn ensure(&self, name: &str, slots: usize) -> bool {
             let mut held = self.held.lock().expect("lock");
             if held.contains_key(name) {
@@ -15370,11 +15386,16 @@ mod entity_tests {
             true
         }
 
-        fn open(&self, _name: &str, _player: [u8; 32]) -> bool {
+        fn open(&self, name: &str, player: [u8; 32]) -> bool {
+            self.holders
+                .lock()
+                .expect("lock")
+                .insert(name.to_owned(), player);
             true
         }
 
-        fn close(&self, _name: &str, _player: [u8; 32]) -> bool {
+        fn close(&self, name: &str, _player: [u8; 32]) -> bool {
+            self.holders.lock().expect("lock").remove(name);
             true
         }
 
@@ -15438,6 +15459,7 @@ mod entity_tests {
         let mut vm = vm();
         let boxes = std::sync::Arc::new(Boxes {
             held: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            holders: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         });
         vm.set_container_access(
             std::sync::Arc::clone(&boxes) as std::sync::Arc<dyn crate::inventory::Containers>
@@ -15585,9 +15607,38 @@ mod entity_tests {
                  { material = 'early:coal', count = 1 }) == 0)\n\
              assert(game.container_take('nowhere', \n\
                  { material = 'early:coal', count = 1 }) == 0)\n\
-             assert(#game.container('nowhere') == 0)",
+             assert(#game.container('nowhere') == 0)\n\
+             assert(game.container_holder('nowhere') == nil)",
         )
         .expect("no world");
+    }
+
+    #[test]
+    fn a_container_names_its_holder_while_it_is_open() {
+        // The question a chest asks before it is dug: `break_container`
+        // answers an empty list for an empty box and for a refused one alike,
+        // so "somebody is using that" needs its own call.
+        let (mut vm, _boxes) = vm_with_containers();
+        load(
+            &mut vm,
+            "chests",
+            "game.register_block{ id = 'oak' }\ngame.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+
+        vm.eval_in(
+            "chests",
+            "local box = 'chests:at:1,2,3'\n\
+             local who = string.rep('ab', 32)\n\
+             game.make_container(box, 9)\n\
+             assert(game.container_holder(box) == nil, 'a fresh box has a holder')\n\
+             assert(game.open_container(box, who))\n\
+             assert(game.container_holder(box) == who, 'the opener is not the holder')\n\
+             game.close_container(box, who)\n\
+             assert(game.container_holder(box) == nil, 'a closed box keeps its holder')",
+        )
+        .expect("holder");
     }
 
     /// A plan store a test can watch: the server's semantics, in memory.

@@ -2226,12 +2226,17 @@ impl Shared {
         }
     }
 
+    ///
+    /// `across` is the container this player has open, if any: a shift-click
+    /// then crosses into it from their own view and back out of it, which is
+    /// what the gesture means on a screen that shows both.
     pub fn click_slot(
         &self,
         uuid: &PlayerUuid,
         view: &str,
         index: usize,
         click: tiamat_core::proto::Click,
+        across: Option<&str>,
     ) -> bool {
         let Ok(mut inventories) = self.inventories.lock() else {
             return false;
@@ -2242,14 +2247,17 @@ impl Shared {
         let changed = match click {
             tiamat_core::proto::Click::Left => slots.left_click(view, index),
             tiamat_core::proto::Click::Right => slots.right_click(view, index),
-            tiamat_core::proto::Click::ShiftLeft => {
+            tiamat_core::proto::Click::ShiftLeft => match across {
+                // A chest on the screen: out of it into the player's own view,
+                // or out of any view of theirs into it.
+                Some(container) if view == container => slots.transfer(view, index, PLAYER_MAIN),
+                Some(container) => slots.transfer(view, index, container),
                 // **Within the player's own view**, between the hotbar band and
                 // the rest of it — which is what the gesture means now that the
                 // hotbar is the first nine slots of one inventory rather than a
-                // second view to shuffle things into. A mod's container becomes
-                // a destination when views can be mod-owned.
-                slots.stow(view, index, PLAYER_HOTBAR_SLOTS)
-            }
+                // second view to shuffle things into.
+                None => slots.stow(view, index, PLAYER_HOTBAR_SLOTS),
+            },
         };
         if changed && let Ok(mut dirty) = self.inventory_dirty.lock() {
             dirty.insert(*uuid);

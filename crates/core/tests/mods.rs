@@ -97,9 +97,11 @@ fn the_reference_mods_load_in_dependency_order() {
         loaded,
         vec![
             "core",
+            "core_chest",
             "core_gear",
             "core_milk",
             "core_mimic",
+            "core_plans",
             "core_sky",
             "core_space",
             "core_tools",

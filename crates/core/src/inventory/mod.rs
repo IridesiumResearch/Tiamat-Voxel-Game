@@ -1662,4 +1662,12 @@ pub trait Containers: Send + Sync {
     /// Empty and untouched while somebody has it open: those items are in
     /// another player's hands.
     fn remove(&self, name: &str) -> Vec<Stack>;
+
+    /// Who has a container open, if anybody.
+    ///
+    /// The question a mod asks before breaking the block: [`Self::remove`]
+    /// answers an empty list both for an empty container and for one it
+    /// refused to touch, and a chest has to tell those apart to refuse the
+    /// dig out loud. `None` also for a container that does not exist.
+    fn holder(&self, name: &str) -> Option<[u8; 32]>;
 }

@@ -4807,10 +4807,24 @@ impl ServerHandle {
                                 // rather than asked to make it happen — so a mod
                                 // that ignores the event still cannot leave the
                                 // player's items in a state nobody agreed to.
+                                // **A shift-click crosses into the container this
+                                // player has open**, when they have one: the
+                                // screen it was clicked on shows both, and "put
+                                // this in there" is what the gesture means there.
+                                let across = containers
+                                    .lock()
+                                    .ok()
+                                    .and_then(|store| store.held_by(uuid).into_iter().next());
                                 if let tiamat_core::proto::DialogEvent::Clicked {
                                     view, index, click
                                 } = &event
-                                    && shared.click_slot(&uuid, view, usize::from(*index), *click)
+                                    && shared.click_slot(
+                                        &uuid,
+                                        view,
+                                        usize::from(*index),
+                                        *click,
+                                        across.as_deref(),
+                                    )
                                 {
                                     // Every view, not just the clicked one: a
                                     // shift-click moves a stack BETWEEN views, so

@@ -914,6 +914,10 @@ end)
 - **Both answer in UNITS, not true or false.** A container is a fixed size, so a
   partial fit is ordinary: what did not fit was never taken from you. 27 units
   to a block (charter rule 5).
+- **Ask `game.container_holder(name)` before breaking one.** `break_container`
+  answers an empty list for an empty box and for one it refused because somebody
+  has it open, so the holder is how a chest tells "empty" from "in use" and says
+  so instead of vanishing under them. `game/core_chest` is the worked example.
 - **They work while a player has it open.** An open container lives in that
   player's own inventory, and the engine writes into the slots they are looking
   at, so a machine does not stop while its owner watches it.

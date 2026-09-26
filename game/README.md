@@ -15,6 +15,8 @@ implementations and test fixtures, not shipped content.
 | `core_gear` | Items that are not blocks, dropping and picking up, and a worn-slot view all live in Lua — the engine draws a dropped stack and decides nothing else about it. |
 | `core_ui` | The HUD and the inventory screen live in Lua — delete it and a client keeps a crosshair, chat and settings, and loses everything else on the screen (Task 14). |
 | `core_space` | Every star in the sky is a place: a body made at a star's position from the catalog, with a sky of its own, and the travel rule in Lua — the engine knows nothing of "visit" (Task 15c). |
+| `core_chest` | A container is an inventory that belongs to the world: made when its block is placed, lent to one player at a time when it is used, and emptied into the digger's hands when it is dug — the engine owns the slots, the one-holder rule and the save; the mod owns where it is and who may open it. |
+| `core_plans` | A box of blocks captured from the world and built again elsewhere is five chat words in Lua — `capture`, `stamp`, `plan`, `plans`, `forget` — and the engine paces the building across ticks and keeps the plan across a restart. |
 
 Each of those is checked by a test that removes the directory and asserts what
 stops working, which is the only way a claim like "this lives in a mod" can be

@@ -856,6 +856,17 @@ function game.container_take(name, spec) end
 ---@return table[] stacks What was in it.
 function game.break_container(name) end
 
+---Who has a container open, as a player UUID in hex — or `nil` for nobody.
+---
+---The question to ask before breaking the block: `game.break_container`
+---answers an empty list both for an empty box and for one it refused to touch
+---because somebody has it open, and a chest has to tell those apart to say
+---"somebody is using that" rather than vanish under them. `nil` also for a
+---container that does not exist. `game/core_chest` is the worked example.
+---@param name string
+---@return string|nil holder
+function game.container_holder(name) end
+
 ---Registers an inventory view: a place stacks may sit, given to every player.
 ---Registration window only.
 ---

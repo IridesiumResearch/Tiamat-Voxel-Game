@@ -178,16 +178,24 @@ impl Containers {
     ///
     /// Returns the names, so a caller can say what it put away.
     pub fn close_all(&mut self, uuid: PlayerUuid, from: &mut Slots) -> Vec<String> {
-        let open: Vec<String> = self
-            .by_name
-            .iter()
-            .filter(|(_, container)| container.holder == Some(uuid))
-            .map(|(name, _)| name.clone())
-            .collect();
+        let open = self.held_by(uuid);
         for name in &open {
             self.close(name, uuid, from);
         }
         open
+    }
+
+    /// The containers one player has open, by name, in name order.
+    ///
+    /// What a shift-click on their screen crosses into: the box they are
+    /// looking at is the one they hold.
+    #[must_use]
+    pub fn held_by(&self, uuid: PlayerUuid) -> Vec<String> {
+        self.by_name
+            .iter()
+            .filter(|(_, container)| container.holder == Some(uuid))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// What is in a container, when nobody has it open.
@@ -324,6 +332,14 @@ impl Shared {
 }
 
 impl tiamat_core::inventory::Containers for Shared {
+    fn holder(&self, name: &str) -> Option<[u8; 32]> {
+        self.store
+            .lock()
+            .ok()?
+            .holder(name)
+            .map(|holder| *holder.as_bytes())
+    }
+
     fn ensure(&self, name: &str, slots: usize) -> bool {
         self.store
             .lock()
