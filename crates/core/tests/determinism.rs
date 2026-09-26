@@ -714,7 +714,13 @@ fn detgen_contains_no_terrain_policy() {
 /// distance travelled from a source, volume means volume, and there are no
 /// sources (Sub-Node Contract §4.1). A deliberate rule change is exactly the
 /// case this constant's warning names.
-const FLUID_GOLDEN: u64 = 10_233_241_359_803_942_171;
+///
+/// Rebaselined 2026-09-26 for Weather ask W24: a block lying open under a
+/// fluid that evaporates stays on the solver's books and is rolled at the
+/// fluid's rate rather than once, on its one visit. Scenario 4 runs under an
+/// evaporating tuning, so it dries further than it did — the rule changed, on
+/// purpose, and `the_fluid_golden_is_stable_across_repeated_calls` still holds.
+const FLUID_GOLDEN: u64 = 5_510_003_317_614_485_795;
 // Regenerated once, deliberately, when the hole preference was WIRED IN. It had
 // been written, table-driven tested and never consulted by the solver, so milk
 // spread evenly in all directions and reached a hole by covering the ground

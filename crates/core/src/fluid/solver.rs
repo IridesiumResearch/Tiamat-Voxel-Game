@@ -49,6 +49,12 @@
 //! finished spreading has an empty one, and the whole system drops out of the
 //! tick. That is the property the perf criterion asserts, and it is why the
 //! solver is written around a work queue instead of a per-chunk sweep.
+//!
+//! The one standing cost is a puddle of something that evaporates: a block
+//! lying open under such a fluid is on the solver's books until it is gone,
+//! one hash a tick, so that its roll comes up at the fluid's rate rather than
+//! once (Weather ask W24). Its cost is proportional to the evaporable fluid
+//! lying open, which is exactly what the mod asked to have evaporate.
 
 use std::collections::BTreeSet;
 
@@ -405,6 +411,18 @@ pub struct Solver {
     /// Carried rather than dropped: a pour that overruns its budget finishes
     /// next tick instead of leaving milk half-spread forever.
     carried: BTreeSet<BlockPos>,
+    /// Blocks holding an evaporable fluid open to the air — Weather ask W24.
+    ///
+    /// **What makes `evaporates` a rate rather than a single chance.** The
+    /// roll is made on a visit, and a puddle that has finished spreading is
+    /// visited once: it changes nothing, leaves the active set, and was never
+    /// rolled again — so `1 / evaporates` was the chance a puddle EVER lost a
+    /// cell, and a world a few storms old was spotted with films of rainwater
+    /// for good. A block whose last visit left it evaporable and uncovered
+    /// stays here, and each tick the ones whose roll comes up are visited.
+    /// Pruned as they empty, are covered, or unload; a chunk coming back wakes
+    /// its loose water (§4.5) and puts them back.
+    evaporating: BTreeSet<BlockPos>,
     /// Flows that could not happen, for the `on_fluid_flow` hook.
     ///
     /// Drained by the caller with [`Solver::take_blocked`] rather than returned
@@ -489,9 +507,13 @@ impl Solver {
     }
 
     /// Whether there is nothing to do.
+    ///
+    /// A puddle lying open under a fluid that evaporates is something to do:
+    /// it has a roll coming up. A world with one is settled the moment the
+    /// puddle is gone.
     #[must_use]
     pub fn is_settled(&self) -> bool {
-        self.active.is_empty() && self.carried.is_empty()
+        self.active.is_empty() && self.carried.is_empty() && self.evaporating.is_empty()
     }
 
     /// Takes the flows that could not happen since this was last called.
@@ -545,6 +567,26 @@ impl Solver {
         // a pour that keeps re-queueing its own neighbourhood.
         let mut pending = std::mem::take(&mut self.carried);
         pending.extend(std::mem::take(&mut self.active));
+
+        // W24: an evaporable block open to the air is visited on the tick its
+        // roll comes up, which is what makes `evaporates` a rate. The walk is
+        // one hash per block lying open; a block found empty — dried, drained,
+        // or in a chunk that has gone — is dropped here, and a chunk coming
+        // back wakes its loose water (§4.5) and puts it back.
+        let mut due = Vec::new();
+        let mut gone = Vec::new();
+        for &pos in &self.evaporating {
+            let held = world.fluid(pos);
+            if held.is_empty() {
+                gone.push(pos);
+            } else if evaporates(tunings.of(held.fluid()), pos, seed, fluid_tick) {
+                due.push(pos);
+            }
+        }
+        for pos in gone {
+            self.evaporating.remove(&pos);
+        }
+        pending.extend(due);
 
         let full_tick = tunings.all_due(fluid_tick);
         let mut visited = 0;
@@ -602,6 +644,17 @@ impl Solver {
                     washed: &mut self.washed,
                 },
             );
+            // W24's books: on them while evaporable and open to the air, off
+            // them the moment it is not — however the visit ended.
+            let held = world.fluid(pos);
+            if !held.is_empty()
+                && tunings.of(held.fluid()).evaporates > 0
+                && open_to_the_air(world, pos)
+            {
+                self.evaporating.insert(pos);
+            } else {
+                self.evaporating.remove(&pos);
+            }
             // Everything that changed wakes its own neighbourhood, including
             // the block above: milk drained from under a column is what lets
             // the column fall.
@@ -784,6 +837,16 @@ const fn rotation(pos: BlockPos) -> usize {
     // `rem_euclid` rather than `%`: the world has negative coordinates and a
     // negative index is not a direction.
     (pos.x.rem_euclid(4) + pos.y.rem_euclid(4) + pos.z.rem_euclid(4)) as usize % 4
+}
+
+/// Whether the block above is empty air that is loaded: what evaporation
+/// needs, and what a lid takes away.
+fn open_to_the_air<N: Neighbourhood + ?Sized>(world: &N, pos: BlockPos) -> bool {
+    let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
+    world.fluid(above).is_empty()
+        && world
+            .occupancy(above)
+            .is_some_and(|occupancy| occupancy == 0)
 }
 
 /// Whether this block loses a cell to the air on this tick.
@@ -996,13 +1059,7 @@ fn settle_one(
     if world.fluid(pos).is_empty() {
         return;
     }
-    let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
-    if world.fluid(above).is_empty()
-        && world
-            .occupancy(above)
-            .is_some_and(|occupancy| occupancy == 0)
-        && evaporates(tunings.of(fluid), pos, seed, fluid_tick)
-    {
+    if open_to_the_air(world, pos) && evaporates(tunings.of(fluid), pos, seed, fluid_tick) {
         let was = world.fluid(pos);
         let now = was.with_volume(was.volume() - 1);
         world.set_fluid(pos, now);
@@ -1737,6 +1794,57 @@ mod tests {
 
         assert_eq!(sinks.total(), 1, "absorbed more than was there to absorb");
         assert_eq!(scene.total(), 0);
+    }
+
+    #[test]
+    fn a_puddle_open_to_the_air_dries_at_its_rate_and_one_under_a_lid_does_not() {
+        // Weather ask W24. A one-cell puddle on level ground is a droplet that
+        // moves only downhill (rule 3), so it settles at once: visited once,
+        // rolled once, and — before the evaporation set — never again, so a
+        // fluid with `evaporates = 50` dried on a 1-in-50 chance for ever.
+        // The ask's gate: gone within a few hundred ticks; the same under a
+        // lid is still there; `evaporates = 0` is untouched.
+        fn puddle(lid: bool) -> Scene {
+            let mut scene = Scene::floored(-3..=3, -3..=3);
+            if lid {
+                scene.solid.insert((0, 2, 0));
+            }
+            scene.pour(BlockPos::new(0, 1, 0), 1);
+            scene
+        }
+        fn dry(scene: &mut Scene, evaporates: u32, ticks: u64) -> (u32, bool) {
+            let mut solver = Solver::new();
+            solver.touch(BlockPos::new(0, 1, 0));
+            let tunings = Tunings::uniform(Tuning {
+                evaporates,
+                ..Tuning::DEFAULT
+            });
+            for tick in 0..ticks {
+                solver.tick(scene, &tunings, usize::MAX, SEED, tick);
+            }
+            (scene.at(BlockPos::new(0, 1, 0)), solver.is_settled())
+        }
+
+        let mut open = puddle(false);
+        let (left, settled) = dry(&mut open, 50, 400);
+        assert_eq!(
+            left, 0,
+            "an open puddle of an evaporating fluid is still there"
+        );
+        assert!(settled, "a dried puddle is still on the solver's books");
+
+        let mut covered = puddle(true);
+        let (left, settled) = dry(&mut covered, 50, 400);
+        assert_eq!(left, 1, "a puddle under a lid evaporated");
+        assert!(
+            settled,
+            "a covered puddle is on the solver's books for nothing"
+        );
+
+        let mut lasting = puddle(false);
+        let (left, settled) = dry(&mut lasting, 0, 400);
+        assert_eq!(left, 1, "a fluid with `evaporates = 0` lost a cell");
+        assert!(settled, "a puddle that never evaporates is on the books");
     }
 
     #[test]

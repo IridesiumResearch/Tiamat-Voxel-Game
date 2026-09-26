@@ -1416,7 +1416,9 @@ naming the other fluid, so what it MEANS — steam, obsidian, a hiss — is your
 write from there.
 
 **Ground drinks any fluid unless it names one.** `absorbs = { rate, becomes }`
-drinks whatever touches it; `absorbs = { rate, becomes, fluid = "weather:rain" }`
+drinks whatever touches it, and `becomes` may be another mod's block —
+`"tiamat_weather:damp_dirt"` — resolved once every mod has registered, so the
+soil is the world's and the dampness the weather's; `absorbs = { rate, becomes, fluid = "weather:rain" }`
 drinks that fluid alone, so the bed that soaks a puddle of rain does not drain
 the river it is the bed of. A named fluid nobody registered is one nothing
 drinks.

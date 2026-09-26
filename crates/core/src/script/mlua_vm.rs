@@ -6314,6 +6314,30 @@ impl MluaVm {
     ///
     /// Its own method for the reason `light_reader` is: these are the part of
     /// the frozen API that depends on something outside the VM.
+    /// `game.fluid_id(name)`: a fluid's per-session number by its name —
+    /// Weather ask W24, the small one.
+    ///
+    /// What `surface_at` and `get_fluid` answer with, so a mod can tell its
+    /// own rainwater from a river without writing a cell into the sky to read
+    /// the number back. A bare name is the mod's own; `nil` for a fluid nobody
+    /// registered, and for a world with no fluids at all.
+    fn fluid_id_lookup(&self, mod_id: &str) -> Result<mlua::Function, ScriptError> {
+        let owner = mod_id.to_owned();
+        self.lua
+            .create_function(move |lua, name: String| {
+                let name = if name.contains(':') {
+                    name
+                } else {
+                    format!("{owner}:{name}")
+                };
+                let Ok(ids) = lua.named_registry_value::<Table>("tiamat.fluid_ids") else {
+                    return Ok(None);
+                };
+                ids.get::<Option<u8>>(name.as_str())
+            })
+            .map_err(|err| self.vm_error(&err))
+    }
+
     fn fluid_functions(&self) -> Result<(mlua::Function, mlua::Function), ScriptError> {
         let reader = std::sync::Arc::clone(&self.fluid);
         let get = self
@@ -6350,6 +6374,11 @@ impl MluaVm {
                 // §4.2).
                 out.set("volume", value.volume())?;
                 out.set("empty", value.is_empty())?;
+                // Which fluid, by the number `game.fluid_id` answers with:
+                // absent for an empty block, which has no fluid to name.
+                if !value.is_empty() {
+                    out.set("fluid", value.fluid().0)?;
+                }
                 Ok(out)
             })
             .map_err(|err| self.vm_error(&err))?;
@@ -7898,6 +7927,8 @@ impl MluaVm {
 
         let (get_fluid, set_fluid) = self.fluid_functions()?;
         game.set("get_fluid", get_fluid)
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("fluid_id", self.fluid_id_lookup(mod_id)?)
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_fluid", set_fluid)
             .map_err(|err| self.vm_error(&err))?;
@@ -9576,11 +9607,18 @@ fn block_absorbs(lua: &Lua, owner: &str, id: &str, absorbs: &Table) -> mlua::Res
     }
     let stored = lua.create_table()?;
     stored.set("rate", rate)?;
+    // `becomes` may be another mod's — the damp twin of this soil is the
+    // weather mod's, and dampness is weather (World ask 43) — so a name with
+    // a namespace is kept as written, like `fluid` below, and resolved at
+    // freeze against the world's table, where a block nobody registered ends
+    // the chain rather than failing the mod.
     if let Some(becomes) = absorbs.get::<Option<String>>("becomes")? {
-        stored.set(
-            "becomes",
-            qualify_id(owner, &becomes).map_err(mlua::Error::external)?,
-        )?;
+        let becomes = if becomes.contains(':') {
+            becomes
+        } else {
+            qualify_id(owner, &becomes).map_err(mlua::Error::external)?
+        };
+        stored.set("becomes", becomes)?;
     }
     // A fluid may be another mod's — `core_milk:milk` — so a name with a
     // namespace is kept as written, and a bare one is the mod's own. Whether
@@ -15611,6 +15649,74 @@ mod entity_tests {
              assert(game.container_holder('nowhere') == nil)",
         )
         .expect("no world");
+    }
+
+    #[test]
+    fn a_soils_becomes_may_be_another_mods_block() {
+        // World ask 43: the damp twin of a soil is the weather mod's, so the
+        // world mod names it across the namespace and it is kept as written,
+        // as `fluid` always was, for the freeze to resolve. A bare name is
+        // still the mod's own.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "spindle",
+            "game.register_block{ id = 'dirt', absorbs = { rate = 3, \
+             becomes = 'tiamat_weather:damp_dirt', fluid = 'tiamat_weather:rainwater' } }\n\
+             game.register_block{ id = 'sand', absorbs = { rate = 2, becomes = 'wet_sand' } }",
+        )
+        .expect("a `becomes` across the namespace should load");
+        let rules = vm.registered_block_rules();
+        let dirt = rules
+            .iter()
+            .find(|rules| rules.absorbs.rate == 3)
+            .expect("dirt");
+        assert_eq!(
+            dirt.absorbs.becomes.as_deref(),
+            Some("tiamat_weather:damp_dirt"),
+            "another mod's block was not kept as written"
+        );
+        assert_eq!(
+            dirt.absorbs.fluid.as_deref(),
+            Some("tiamat_weather:rainwater")
+        );
+        let sand = rules
+            .iter()
+            .find(|rules| rules.absorbs.rate == 2)
+            .expect("sand");
+        assert_eq!(
+            sand.absorbs.becomes.as_deref(),
+            Some("spindle:wet_sand"),
+            "a bare name is the mod's own"
+        );
+    }
+
+    #[test]
+    fn a_fluids_number_is_found_by_its_name() {
+        // Weather ask W24, the small one: `surface_at` and `get_fluid` name a
+        // fluid by its per-session number, and until this nothing turned a
+        // name into that number but writing a cell into the sky and reading
+        // it back.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "weather",
+            "game.register_block{ id = 'x' }\ngame.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        vm.set_fluid_ids(&[
+            ("weather:rainwater".to_owned(), crate::fluid::FluidId(2)),
+            ("core_milk:milk".to_owned(), crate::fluid::FluidId(1)),
+        ]);
+        vm.eval_in(
+            "weather",
+            "assert(game.fluid_id('rainwater') == 2, 'a bare name is the mod\\'s own')\n\
+             assert(game.fluid_id('weather:rainwater') == 2)\n\
+             assert(game.fluid_id('core_milk:milk') == 1, 'another mod\\'s fluid by its full name')\n\
+             assert(game.fluid_id('sea') == nil, 'a fluid nobody registered')",
+        )
+        .expect("fluid ids");
     }
 
     #[test]
