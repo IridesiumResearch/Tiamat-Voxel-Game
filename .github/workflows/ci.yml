@@ -306,6 +306,14 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             -- -max_total_time=60 -rss_limit_mb=2048
 
+      # What an installed copy fetches from the update host, parsed before its
+      # signature is checked: hostile until the signature holds.
+      - name: Fuzz the release manifest parser (smoke)
+        run: |
+          cargo +nightly fuzz run manifest_decode \
+            --target x86_64-unknown-linux-gnu \
+            -- -max_total_time=60 -rss_limit_mb=2048
+
       # **The crashing input, or the finding is only a stack trace.**
       # `fuzz/artifacts/` is gitignored, so until this existed a crash found
       # only on CI could not be reproduced without re-fuzzing locally and

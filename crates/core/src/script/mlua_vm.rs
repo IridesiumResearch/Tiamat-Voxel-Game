@@ -1533,30 +1533,66 @@ const fn seed_to_lua(seed: u64) -> i64 {
 /// # Errors
 ///
 /// Anything else: a fraction, a negative float, a string, nil.
+fn seed_from_lua(value: &mlua::Value) -> mlua::Result<u64> {
+    bits_from_lua(value, "a seed")
+}
+
+/// An entity id as a mod hands it back: the integer `spawn_entity` answered,
+/// by its bits, or a whole float — the same crossing a seed makes, for the
+/// same reason. An id nobody has, such as a negative integer, is an id nobody
+/// has; a fraction or a string is a mistake and is refused rather than
+/// truncated into some other entity's id.
+///
+/// # Errors
+///
+/// A fraction, a negative float, a string, nil.
+fn entity_id_from_lua(value: &mlua::Value) -> mlua::Result<crate::ent::EntityId> {
+    bits_from_lua(value, "an entity id").map(crate::ent::EntityId)
+}
+
+/// The entity id under `key` in `spec`, if there is one.
+///
+/// # Errors
+///
+/// A value that is not an id, as [`entity_id_from_lua`] says.
+fn entity_id_in(spec: &Table, key: &str) -> mlua::Result<Option<crate::ent::EntityId>> {
+    match spec.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => Ok(None),
+        value => entity_id_from_lua(&value).map(Some),
+    }
+}
+
+/// Sixty-four bits as a mod hands them back: an integer by its bits, or a
+/// whole non-negative float a `u64` can hold. `what` names the thing in the
+/// refusal — "a seed", "an entity id".
+///
+/// # Errors
+///
+/// Anything else: a fraction, a negative float, a string, nil.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
     reason = "an integer's bits are the value; a float is checked non-negative, below 2^64 and whole by casting it back"
 )]
-fn seed_from_lua(value: &mlua::Value) -> mlua::Result<u64> {
+fn bits_from_lua(value: &mlua::Value, what: &str) -> mlua::Result<u64> {
     match value {
         mlua::Value::Integer(bits) => Ok(*bits as u64),
         mlua::Value::Number(number) if *number >= 0.0 && *number < 18_446_744_073_709_551_616.0 => {
-            // Whole, or not a seed: the cast truncates, so a float that
-            // survives the round trip had nothing to truncate. Compared by
-            // bits, which is exact and is what a whole number's equality is.
+            // Whole, or not one: the cast truncates, so a float that survives
+            // the round trip had nothing to truncate. Compared by bits, which
+            // is exact and is what a whole number's equality is.
             let bits = *number as u64;
             if (bits as f64).to_bits() == number.to_bits() {
                 Ok(bits)
             } else {
                 Err(mlua::Error::external(format!(
-                    "a seed must be a whole number, not {number}"
+                    "{what} must be a whole number, not {number}"
                 )))
             }
         }
         other => Err(mlua::Error::external(format!(
-            "a seed must be an integer, not {}",
+            "{what} must be an integer, not {}",
             other.type_name()
         ))),
     }
@@ -3897,8 +3933,9 @@ impl MluaVm {
         let slot = std::sync::Arc::clone(&self.particles);
         let show_over = self
             .lua
-            .create_function(move |_, (entity, spec): (u64, Table)| {
-                let request = crate::particle::sanitise_badge(badge_request(entity, &spec)?);
+            .create_function(move |_, (entity, spec): (mlua::Value, Table)| {
+                let entity = entity_id_from_lua(&entity)?;
+                let request = crate::particle::sanitise_badge(badge_request(entity.0, &spec)?);
                 let told = slot
                     .lock()
                     .ok()
@@ -4345,7 +4382,7 @@ impl MluaVm {
                     pos: [pos.get("x")?, pos.get("y")?, pos.get("z")?],
                     radius: spec.get::<Option<f32>>("radius")?.unwrap_or(16.0),
                     gain: spec.get::<Option<f32>>("gain")?.unwrap_or(1.0),
-                    entity: spec.get::<Option<u64>>("entity")?,
+                    entity: entity_id_in(&spec, "entity")?.map(|id| id.0),
                 });
                 // How many were told, which is the mod's only feedback — and
                 // deliberately not a promise anybody HEARD it.
@@ -4573,7 +4610,7 @@ impl MluaVm {
                     pos: [pos.get("x")?, pos.get("y")?, pos.get("z")?],
                     radius: spec.get::<Option<f32>>("radius")?.unwrap_or(16.0),
                     gain: spec.get::<Option<f32>>("gain")?.unwrap_or(1.0),
-                    entity: spec.get::<Option<u64>>("entity")?,
+                    entity: entity_id_in(&spec, "entity")?.map(|id| id.0),
                 });
                 let told = slot
                     .lock()
@@ -6137,71 +6174,74 @@ impl MluaVm {
         let entities = std::sync::Arc::clone(&self.entities);
         let paths = std::sync::Arc::clone(&self.paths);
         self.lua
-            .create_function(move |_, (id, target, gait): (u64, Table, Option<String>)| {
-                // From the TARGET, because a mob does not walk between spaces:
-                // wherever it is being sent is the space it is already in.
-                let domain = domain_of(&target)?;
-                let to: [f64; 3] = [target.get("x")?, target.get("y")?, target.get("z")?];
-                // The same three names `set_entity`'s drive takes, so a mod
-                // that knows one knows the other. An unknown one walks rather
-                // than erroring: a typo in a gait should not stop a mob dead.
-                let gait = match gait.as_deref() {
-                    Some("sprint") => crate::phys::Gait::Sprint,
-                    Some("sneak") => crate::phys::Gait::Sneak,
-                    _ => crate::phys::Gait::Walk,
-                };
+            .create_function(
+                move |_, (id, target, gait): (mlua::Value, Table, Option<String>)| {
+                    let id = entity_id_from_lua(&id)?;
+                    // From the TARGET, because a mob does not walk between spaces:
+                    // wherever it is being sent is the space it is already in.
+                    let domain = domain_of(&target)?;
+                    let to: [f64; 3] = [target.get("x")?, target.get("y")?, target.get("z")?];
+                    // The same three names `set_entity`'s drive takes, so a mod
+                    // that knows one knows the other. An unknown one walks rather
+                    // than erroring: a typo in a gait should not stop a mob dead.
+                    let gait = match gait.as_deref() {
+                        Some("sprint") => crate::phys::Gait::Sprint,
+                        Some("sneak") => crate::phys::Gait::Sneak,
+                        _ => crate::phys::Gait::Walk,
+                    };
 
-                let Ok(entity_slot) = entities.lock() else {
-                    return Ok(mlua::Value::Nil);
-                };
-                let Some(access) = entity_slot.as_ref() else {
-                    return Ok(mlua::Value::Nil);
-                };
-                let Some(state) = access.get(crate::ent::EntityId(id)) else {
-                    // No such entity. Not an error: a mod steering something a
-                    // moment after it despawned is ordinary, and raising here
-                    // would make every mob loop need a guard.
-                    return Ok(mlua::Value::Nil);
-                };
-                let from = state.transform.to_world();
-                // The body's own height, so a mob does not jump into a ceiling
-                // it cannot fit through. A marker with no collider is one block
-                // tall for this purpose — it has no physics to speak of.
-                // `floor_to_i32` and add one rather than `ceil`: the ceiling
-                // functions are on this crate's determinism deny-list, and one
-                // spelling of a rounding per workspace is worth more than the
-                // exemption this could claim for being presentation-adjacent.
-                let height = state.collider.map_or(1, |shape| {
-                    crate::detgen::floor_to_i32(shape.height).max(1) + 1
-                });
+                    let Ok(entity_slot) = entities.lock() else {
+                        return Ok(mlua::Value::Nil);
+                    };
+                    let Some(access) = entity_slot.as_ref() else {
+                        return Ok(mlua::Value::Nil);
+                    };
+                    let Some(state) = access.get(id) else {
+                        // No such entity. Not an error: a mod steering something a
+                        // moment after it despawned is ordinary, and raising here
+                        // would make every mob loop need a guard.
+                        return Ok(mlua::Value::Nil);
+                    };
+                    let from = state.transform.to_world();
+                    // The body's own height, so a mob does not jump into a ceiling
+                    // it cannot fit through. A marker with no collider is one block
+                    // tall for this purpose — it has no physics to speak of.
+                    // `floor_to_i32` and add one rather than `ceil`: the ceiling
+                    // functions are on this crate's determinism deny-list, and one
+                    // spelling of a rounding per workspace is worth more than the
+                    // exemption this could claim for being presentation-adjacent.
+                    let height = state.collider.map_or(1, |shape| {
+                        crate::detgen::floor_to_i32(shape.height).max(1) + 1
+                    });
 
-                let Ok(path_slot) = paths.lock() else {
-                    return Ok(mlua::Value::Nil);
-                };
-                let Some(paths) = path_slot.as_ref() else {
-                    return Ok(mlua::Value::Nil);
-                };
-                let Some(steer) = paths.steer(&domain, from, to, height) else {
-                    return Ok(mlua::Value::Nil);
-                };
+                    let Ok(path_slot) = paths.lock() else {
+                        return Ok(mlua::Value::Nil);
+                    };
+                    let Some(paths) = path_slot.as_ref() else {
+                        return Ok(mlua::Value::Nil);
+                    };
+                    let Some(steer) = paths.steer(&domain, from, to, height) else {
+                        return Ok(mlua::Value::Nil);
+                    };
 
-                access.patch(
-                    crate::ent::EntityId(id),
-                    &crate::ent::access::Patch {
-                        drive: Some(crate::phys::Intent {
-                            // A mod steers a body on the ground. Flight is a
-                            // permission a SERVER grants a player, not a mode a
-                            // mob asks for.
-                            fly: false,
-                            walk: steer.walk,
-                            jump: steer.jump,
-                            gait,
-                        }),
-                        ..Default::default()
-                    },
-                );
-                Ok(mlua::Value::Boolean(!steer.arrived))
-            })
+                    access.patch(
+                        id,
+                        &crate::ent::access::Patch {
+                            drive: Some(crate::phys::Intent {
+                                // A mod steers a body on the ground. Flight is a
+                                // permission a SERVER grants a player, not a mode a
+                                // mob asks for.
+                                fly: false,
+                                walk: steer.walk,
+                                jump: steer.jump,
+                                gait,
+                            }),
+                            ..Default::default()
+                        },
+                    );
+                    Ok(mlua::Value::Boolean(!steer.arrived))
+                },
+            )
             .map_err(|err| self.vm_error(&err))
     }
 
@@ -6610,9 +6650,10 @@ impl MluaVm {
         let store = std::sync::Arc::clone(&self.entities);
         let despawn = self
             .lua
-            .create_function(move |_, id: i64| {
+            .create_function(move |_, id: mlua::Value| {
+                let id = entity_id_from_lua(&id)?;
                 let store = store!(store, false);
-                Ok(store.despawn(crate::ent::EntityId(id as u64)))
+                Ok(store.despawn(id))
             })
             .map_err(|err| self.vm_error(&err))?;
 
@@ -6642,9 +6683,9 @@ impl MluaVm {
         let store = std::sync::Arc::clone(&self.entities);
         let get = self
             .lua
-            .create_function(move |lua, id: i64| {
+            .create_function(move |lua, id: mlua::Value| {
                 let store = store!(store, None::<Table>);
-                let Some(entity) = store.get(crate::ent::EntityId(id as u64)) else {
+                let Some(entity) = store.get(entity_id_from_lua(&id)?) else {
                     return Ok(None);
                 };
                 let out = lua.create_table()?;
@@ -6737,10 +6778,10 @@ impl MluaVm {
         let store = std::sync::Arc::clone(&self.entities);
         let set = self
             .lua
-            .create_function(move |_, (id, spec): (i64, Table)| {
+            .create_function(move |_, (id, spec): (mlua::Value, Table)| {
                 let store = store!(store, false);
                 let patch = read_patch(&spec)?;
-                Ok(store.patch(crate::ent::EntityId(id as u64), &patch))
+                Ok(store.patch(entity_id_from_lua(&id)?, &patch))
             })
             .map_err(|err| self.vm_error(&err))?;
 
@@ -6804,31 +6845,31 @@ impl MluaVm {
         let slot = std::sync::Arc::clone(&self.entities);
         let transfer = self
             .lua
-            .create_function(move |_, (id, domain, position): (u64, String, Table)| {
-                let to = [
-                    position.get::<f64>("x")?,
-                    position.get::<f64>("y")?,
-                    position.get::<f64>("z")?,
-                ];
-                if to.iter().any(|axis| !axis.is_finite()) {
-                    return Err(mlua::Error::external(
-                        "game.transfer_entity was given a position that is not a number",
-                    ));
-                }
-                if domain.is_empty() {
-                    return Err(mlua::Error::external(
-                        "game.transfer_entity was given no domain to move into",
-                    ));
-                }
-                Ok(slot
-                    .lock()
-                    .ok()
-                    .and_then(|slot| {
-                        slot.as_ref()
-                            .map(|store| store.transfer(crate::ent::EntityId(id), &domain, to))
-                    })
-                    .unwrap_or(false))
-            })
+            .create_function(
+                move |_, (id, domain, position): (mlua::Value, String, Table)| {
+                    let id = entity_id_from_lua(&id)?;
+                    let to = [
+                        position.get::<f64>("x")?,
+                        position.get::<f64>("y")?,
+                        position.get::<f64>("z")?,
+                    ];
+                    if to.iter().any(|axis| !axis.is_finite()) {
+                        return Err(mlua::Error::external(
+                            "game.transfer_entity was given a position that is not a number",
+                        ));
+                    }
+                    if domain.is_empty() {
+                        return Err(mlua::Error::external(
+                            "game.transfer_entity was given no domain to move into",
+                        ));
+                    }
+                    Ok(slot
+                        .lock()
+                        .ok()
+                        .and_then(|slot| slot.as_ref().map(|store| store.transfer(id, &domain, to)))
+                        .unwrap_or(false))
+                },
+            )
             .map_err(|err| self.vm_error(&err))?;
         game.set("transfer_entity", transfer)
             .map_err(|err| self.vm_error(&err))?;
@@ -15317,6 +15358,37 @@ mod entity_tests {
              assert(math.abs(game.heading(0, 1)) < 0.01, 'north is zero')",
         )
         .expect("the round trip through facing and heading");
+    }
+
+    #[test]
+    fn an_entity_id_crosses_by_its_bits_and_a_fraction_is_refused() {
+        // The seed's lesson, applied to the other 64-bit thing a mod hands
+        // back: an id is its bits, a whole float is the same id, an id nobody
+        // has is nobody's, and a fraction or a string is a mistake to hear
+        // about rather than truncate into some other entity.
+        let (mut vm, _herd) = vm_with_entities();
+        load(
+            &mut vm,
+            "keeper",
+            "game.register_block{ id = 'salt' }\ngame.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+
+        vm.eval_in(
+            "keeper",
+            "local id = game.spawn_entity{ pos = { x = 1, y = 2, z = 3 } }\n\
+             assert(id ~= nil, 'spawned')\n\
+             assert(game.entity(id) ~= nil, 'by its integer')\n\
+             assert(game.entity(id + 0.0) ~= nil, 'a whole float is the same id')\n\
+             assert(game.entity(-1) == nil, 'a negative integer is an id nobody has')\n\
+             assert(not pcall(game.entity, 1.5), 'a fraction was taken for an id')\n\
+             assert(not pcall(game.despawn_entity, 'x'), 'a string was taken for an id')\n\
+             assert(not pcall(game.set_entity, -0.5, {}), 'a negative float was taken for an id')\n\
+             assert(game.despawn_entity(id + 0.0), 'despawned by a whole float')\n\
+             assert(game.entity(id) == nil, 'gone')",
+        )
+        .expect("ids");
     }
 
     #[test]

@@ -1187,3 +1187,89 @@ fn the_lod_scene_is_not_trivially_uniform() {
         middle.level()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Random ticks
+// ---------------------------------------------------------------------------
+
+/// The golden random-tick fingerprint.
+///
+/// **Regenerate ONLY with a deliberate change to the sampler**, exactly as
+/// with the goldens above. Charter rule 4 names random ticks: which cells a
+/// chunk offers its mods on a tick is the world seed, the chunk and the tick
+/// number and nothing else, so two servers agree on which crop grew and which
+/// sapling became a tree. This pins that the derivation, and the order the
+/// cells come out in, is the same on every platform — the sampler had a
+/// benchmark and no gate until 2026-09-26.
+const RANDOM_TICK_GOLDEN: u64 = 5_551_473_749_863_285_710;
+
+fn random_tick_fingerprint() -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tiamat:random-tick-golden:v1");
+    // Seeds with the top bit clear and set, chunks near and far and below
+    // zero, and ticks from the first to one a server would take years to
+    // reach.
+    let seeds = [7_u64, u64::MAX, 16_099_289_709_293_836_018];
+    let chunks = [
+        ChunkPos::new(0, 0, 0),
+        ChunkPos::new(-3, 7, 12),
+        ChunkPos::new(956, 1854, 0),
+    ];
+    let ticks = [0_u64, 1, 2, 19, 20, 4_000_000_000];
+    for seed in seeds {
+        for chunk in chunks {
+            for tick in ticks {
+                for cell in tiamat_core::tick::random::cells(seed, chunk, tick) {
+                    hasher.update(&cell.x.to_le_bytes());
+                    hasher.update(&cell.y.to_le_bytes());
+                    hasher.update(&cell.z.to_le_bytes());
+                }
+            }
+        }
+    }
+    u64::from_le_bytes(
+        hasher.finalize().as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 output is 32 bytes"),
+    )
+}
+
+#[test]
+fn random_ticks_hash_to_their_golden() {
+    // The CI matrix runs this on Linux, Windows and macOS against the same
+    // constant: which blocks get a turn is the same everywhere.
+    assert_eq!(
+        random_tick_fingerprint(),
+        RANDOM_TICK_GOLDEN,
+        "the same seeds, chunks and ticks sampled different cells. Do NOT update the constant \
+         to match unless the sampler changed deliberately — a difference here means the \
+         derivation or the order of the cells varies between builds."
+    );
+}
+
+#[test]
+fn the_random_tick_golden_is_stable_across_repeated_calls() {
+    assert_eq!(random_tick_fingerprint(), random_tick_fingerprint());
+}
+
+#[test]
+fn random_ticks_move_from_tick_to_tick_and_stay_inside_their_chunk() {
+    // A golden over a sampler that answered the same cells every tick, or
+    // cells outside the chunk, would still be a constant. This pins that the
+    // fixture has the two properties a mod relies on.
+    let chunk = ChunkPos::new(-3, 7, 12);
+    let first = tiamat_core::tick::random::cells(7, chunk, 0);
+    let second = tiamat_core::tick::random::cells(7, chunk, 1);
+    assert_eq!(first.len(), tiamat_core::tick::random::PER_CHUNK);
+    assert_ne!(first, second, "the same cells got a turn two ticks running");
+    let corner = tiamat_core::BlockPos::from_chunk_corner(chunk);
+    let span = i32::try_from(CHUNK_BLOCKS).expect("a chunk's side fits an i32");
+    for cell in first.iter().chain(&second) {
+        assert!(
+            (corner.x..corner.x + span).contains(&cell.x)
+                && (corner.y..corner.y + span).contains(&cell.y)
+                && (corner.z..corner.z + span).contains(&cell.z),
+            "{cell:?} is outside chunk {chunk:?}"
+        );
+    }
+}
