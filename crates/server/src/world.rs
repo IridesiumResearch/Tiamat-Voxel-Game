@@ -317,6 +317,18 @@ impl Generator {
         }
     }
 
+    /// Asks the mods whether a dig may begin — the same event, on the tick
+    /// the dig is first seen and before any of the block comes off.
+    pub fn may_start_dig(
+        &mut self,
+        event: &tiamat_core::script::DigEvent,
+    ) -> tiamat_core::script::HookOutcome {
+        match self {
+            Self::Mods(generator) => generator.host_mut().vm_mut().dig_start(event),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
+        }
+    }
+
     /// Asks the mods whether a placement may proceed.
     pub fn may_place(
         &mut self,

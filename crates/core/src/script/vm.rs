@@ -1523,6 +1523,15 @@ pub trait ScriptVm: Sized {
     /// hook order is load order, which the resolver already fixed.
     fn dig_complete(&mut self, event: &DigEvent) -> HookOutcome;
 
+    /// Asks every registered `on_dig_start` whether a dig may begin.
+    ///
+    /// The same event and the same ladder as [`Self::dig_complete`], asked on
+    /// the tick a dig is first seen and before any of the block comes off —
+    /// and again after the crosshair moves to another block, which is a new
+    /// dig. What a mod gating a block on the tool in hand wants: the player
+    /// hears why at once rather than after the wait.
+    fn dig_start(&mut self, event: &DigEvent) -> HookOutcome;
+
     /// Asks every registered `on_place` whether a placement may proceed.
     ///
     /// The same rules as [`Self::dig_complete`], and called after the engine's

@@ -204,6 +204,45 @@ fn a_mod_can_refuse_a_dig() {
 }
 
 #[test]
+fn a_mod_can_refuse_a_dig_before_it_starts_and_the_player_hears_why_at_once() {
+    // Craft ask 1. `on_dig_complete` is asked at the first chip, which for a
+    // one-cell dig is after the whole wait; a tool gate wants to say "not
+    // with that" as the player starts. The block stays, nothing is credited,
+    // and the reason reaches the player.
+    let server = start(
+        "dig-gated",
+        write_warden(
+            "dig-gated",
+            "game.register_on_dig_start(function() return 'that needs a pick' end)",
+        ),
+    );
+    let stone = stone();
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let removed = dig_and_see(&mut bot, &server, BlockPos::new(2, -1, 0), stone).await;
+        assert!(
+            !removed,
+            "the gate refused the dig and the block went anyway"
+        );
+        assert!(
+            bot.inventory().is_empty(),
+            "a dig refused at its start still credited the player: {:?}",
+            bot.inventory()
+        );
+        assert!(
+            bot.notices()
+                .iter()
+                .any(|text| text.starts_with("that needs a pick")),
+            "the player was not told why; notices {:?}",
+            bot.notices()
+        );
+    });
+
+    assert!(server.stop());
+}
+
+#[test]
 fn a_hook_that_does_not_refuse_lets_the_dig_through() {
     // The twin of the test above. Without this, "the block survived" would also
     // be satisfied by a server on which nothing can be dug at all.

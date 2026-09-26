@@ -3056,6 +3056,33 @@ function game.set_block(position, block, occupancy, options) end
 ---@param callback fun(event: Tiamat.DigEvent): boolean|string|nil
 function game.register_on_dig_complete(callback) end
 
+---Registers a veto on digs BEGINNING: the tick a dig is first seen, before
+---any of the block has come off.
+---
+---**Registration window only.**
+---
+---The same event and the same ladder as `game.register_on_dig_complete` —
+---`false` refuses with nothing said, a string refuses with that, `""` refuses
+---silently, anything else allows — but asked at once. A mod gating a block on
+---the tool in hand says "not with that" as the player starts, not after they
+---have waited out the dig; and it is asked again when the crosshair moves to
+---another block, which is a new dig. `on_dig_complete` is still asked at the
+---first chip, as it always was, for the mods that want the block's state
+---then.
+---
+---An error disables your mod and the dig goes ahead, as with every veto.
+---
+---```lua
+---game.register_on_dig_start(function(e)
+---    local held = game.held(e.player)
+---    if ore[e.material] and not (held and picks[held.material]) then
+---        return "that needs a pick"
+---    end
+---end)
+---```
+---@param callback fun(event: Tiamat.DigEvent): boolean|string|nil
+function game.register_on_dig_start(callback) end
+
 ---Registers a veto on placements.
 ---
 ---**Registration window only.**

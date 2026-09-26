@@ -149,8 +149,16 @@ calling one is a hard error. Anything conditional on the world, the player or
 the time of day belongs in a hook, not in registration.
 
 Hooks (`register_on_tick`, `register_on_chat`, `register_on_place`,
-`register_on_dig_complete`, `register_on_use`, `register_on_generate`, …) are
-registered in the window and called for ever after.
+`register_on_dig_start`, `register_on_dig_complete`, `register_on_use`,
+`register_on_generate`, …) are registered in the window and called for ever
+after.
+
+**A tool gate goes on `register_on_dig_start`**, which is asked the tick a dig
+begins: "that needs a pick" reaches the player as they start, not after they
+have waited out the dig. `register_on_dig_complete` is asked at the first chip,
+for a mod that wants the block's state then. And a tools mod's `default` hand
+wins over the engine's reference `core_tools:hand` whatever the ids, so it need
+not `conflicts` the fixture out of the set to be the hand.
 
 **Right-clicking a block with nothing to place is `register_on_use`**, not a
 cancelled dig. Picking fruit, opening a door, pulling a lever: the event has the

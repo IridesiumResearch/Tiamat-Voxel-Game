@@ -2349,11 +2349,26 @@ impl ServerHandle {
             .unwrap_or_default();
         info!(views = views.len(), "inventory views registered");
         // Lowest id among those marked default, so the answer does not depend
-        // on which mod loaded first.
-        let default_tool = tools
-            .values()
-            .find(|tool| tool.default)
-            .map(|tool| tool.id.clone());
+        // on which mod loaded first — among mods that are not reference mods,
+        // the rule the sky uses: the engine's own fixture hand loses to any
+        // real mod's, whatever the ids, so a tools mod need not conflict with
+        // `core_tools` to be the hand.
+        let reference: std::collections::BTreeSet<String> = host
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .resolved()
+                    .order
+                    .iter()
+                    .filter(|resolved| resolved.reference)
+                    .map(|resolved| resolved.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let default_tool = default_tool_among(
+            tools.values().map(|tool| (tool.id.as_str(), tool.default)),
+            &reference,
+        );
         info!(
             hardness = hardness.len(),
             tools = tools.len(),
@@ -3579,7 +3594,13 @@ impl ServerHandle {
                         // movement is: it reads the world, it writes the world,
                         // and doing it from a connection task would make the
                         // result depend on which one woke first.
-                        for (uuid, target, brush) in shared.digs_in_progress() {
+                        for crate::transport::endpoint::DigInProgress {
+                            uuid,
+                            target,
+                            brush,
+                            fresh,
+                        } in shared.digs_in_progress()
+                        {
                             // **The space the digger is standing in.** Every
                             // read below decides what to break and every write
                             // does the breaking, and the two must be about the
@@ -3686,6 +3707,37 @@ impl ServerHandle {
                                 // telling anybody about.
                                 shared.set_dig(&uuid, None);
                                 continue;
+                            }
+                            // **The start, before any of it comes off** (Craft
+                            // ask 1). A mod gating a block on the tool in hand
+                            // says so now rather than after the wait — and
+                            // again when the crosshair moves to another block,
+                            // which is a new dig. The completion hook below is
+                            // still asked at the first chip, as it always was.
+                            if fresh {
+                                let (returned, verdict) = sight.lending(world, || {
+                                    source.may_start_dig(&tiamat_core::script::DigEvent {
+                                        player: *uuid.as_bytes(),
+                                        target,
+                                        material,
+                                        brush,
+                                    })
+                                });
+                                world = returned;
+                                for (mod_id, err) in &verdict.faults {
+                                    error!(mod_id = %mod_id, "mod disabled after an on_dig_start failure: {err}");
+                                }
+                                if !verdict.allowed {
+                                    shared.set_dig(&uuid, None);
+                                    if let Some(notice) = verdict
+                                        .reason
+                                        .as_deref()
+                                        .filter(|reason| !reason.is_empty())
+                                    {
+                                        shared.tell(&uuid, notice.to_owned());
+                                    }
+                                    continue;
+                                }
                             }
                             let Some(bite) = shared.advance_dig(&uuid, hardness, cells) else {
                                 continue;
@@ -6457,5 +6509,63 @@ mod relight_budget_tests {
             1,
             budget
         ));
+    }
+}
+
+/// The default tool among `tools` (`id`, `default`): the lowest id marked
+/// default, with every tool of a reference mod behind every tool of a real
+/// one — the rule the sky uses, so the engine's fixture hand yields to a
+/// tools mod's without the mod having to conflict it out of the set.
+fn default_tool_among<'a>(
+    tools: impl Iterator<Item = (&'a str, bool)>,
+    reference: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    tools
+        .filter(|(_, default)| *default)
+        .min_by_key(|(id, _)| {
+            let owner = id.split_once(':').map_or(*id, |(owner, _)| owner);
+            (reference.contains(owner), *id)
+        })
+        .map(|(id, _)| id.to_owned())
+}
+
+#[cfg(test)]
+mod default_tool_tests {
+    use super::default_tool_among;
+
+    #[test]
+    fn a_real_mods_hand_beats_the_reference_hand_whatever_the_ids() {
+        // `core_tools:hand` sorts before `zz_craft:hand` as a string and lost
+        // the world its hand for ever; a reference mod stands aside.
+        let reference: std::collections::BTreeSet<String> = ["core_tools".to_owned()].into();
+        let tools = [
+            ("core_tools:chisel", false),
+            ("core_tools:hand", true),
+            ("zz_craft:hand", true),
+        ];
+        assert_eq!(
+            default_tool_among(tools.into_iter(), &reference).as_deref(),
+            Some("zz_craft:hand")
+        );
+        // Two real mods: the lowest id, so the answer does not depend on load
+        // order. And with only the fixture, the fixture.
+        let tools = [
+            ("b_mod:pick", true),
+            ("a_mod:hand", true),
+            ("core_tools:hand", true),
+        ];
+        assert_eq!(
+            default_tool_among(tools.into_iter(), &reference).as_deref(),
+            Some("a_mod:hand")
+        );
+        let tools = [("core_tools:hand", true), ("core_tools:chisel", false)];
+        assert_eq!(
+            default_tool_among(tools.into_iter(), &reference).as_deref(),
+            Some("core_tools:hand")
+        );
+        assert_eq!(
+            default_tool_among([("x:y", false)].into_iter(), &reference),
+            None
+        );
     }
 }

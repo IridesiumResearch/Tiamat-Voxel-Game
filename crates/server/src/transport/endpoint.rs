@@ -1062,6 +1062,20 @@ pub struct Aim {
     pub look: [f32; 2],
 }
 
+/// One player's dig, as the tick reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DigInProgress {
+    /// Who is digging.
+    pub uuid: PlayerUuid,
+    /// The cell aimed at.
+    pub target: tiamat_core::SubNodePos,
+    /// Whole blocks or one cell at a time.
+    pub brush: tiamat_core::dig::Brush,
+    /// Whether nothing has happened to this target yet: the tick the mods are
+    /// asked whether it may begin.
+    pub fresh: bool,
+}
+
 impl Shared {
     /// The current tick, for stamping outbound messages.
     fn tick(&self) -> u64 {
@@ -1533,9 +1547,7 @@ impl Shared {
     /// between entries, and holding the lock across that would put a
     /// connection task's contention inside the tick.
     #[must_use]
-    pub fn digs_in_progress(
-        &self,
-    ) -> Vec<(PlayerUuid, tiamat_core::SubNodePos, tiamat_core::dig::Brush)> {
+    pub fn digs_in_progress(&self) -> Vec<DigInProgress> {
         let Ok(bodies) = self.bodies.lock() else {
             return Vec::new();
         };
@@ -1543,7 +1555,12 @@ impl Shared {
             .iter()
             .filter_map(|(uuid, player)| {
                 let dig = player.dig.as_ref()?;
-                Some((*uuid, dig.target(), dig.brush()))
+                Some(DigInProgress {
+                    uuid: *uuid,
+                    target: dig.target(),
+                    brush: dig.brush(),
+                    fresh: dig.is_fresh(),
+                })
             })
             .collect()
     }

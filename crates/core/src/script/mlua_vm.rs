@@ -51,11 +51,17 @@ use crate::script::vm::{
 /// the contract and a Lua table keyed by mod id has no order at all.
 const DIGGERS: &str = "tiamat.diggers";
 
+/// Registry key holding the mods that registered `on_dig_start`.
+const DIG_STARTERS: &str = "tiamat.dig_starters";
+
 /// Registry key holding the mods that registered `on_place`.
 const PLACERS: &str = "tiamat.placers";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_DIG: &str = "on_dig_complete";
+
+/// Hook name used in registry keys and in fault messages.
+const HOOK_DIG_START: &str = "on_dig_start";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_PLACE: &str = "on_place";
@@ -3137,26 +3143,20 @@ impl ScriptVm for MluaVm {
     }
 
     fn dig_complete(&mut self, event: &crate::script::DigEvent) -> HookOutcome {
-        let Ok(table) = self.hook_event(event.player).and_then(|table| {
-            table.set("x", event.target.x)?;
-            table.set("y", event.target.y)?;
-            table.set("z", event.target.z)?;
-            table.set("material", event.material.0)?;
-            table.set(
-                "brush",
-                match event.brush {
-                    crate::dig::Brush::Block => "block",
-                    crate::dig::Brush::SubNode => "subnode",
-                },
-            )?;
-            Ok(table)
-        }) else {
+        let Some(table) = self.dig_event_table(event) else {
             // The table could not be built, which is a VM problem rather than a
             // mod problem. Allowing is the safe answer: refusing would stop
             // every dig on the server because of an allocation failure.
             return HookOutcome::allow();
         };
         self.run_hook(HOOK_DIG, DIGGERS, &table)
+    }
+
+    fn dig_start(&mut self, event: &crate::script::DigEvent) -> HookOutcome {
+        let Some(table) = self.dig_event_table(event) else {
+            return HookOutcome::allow();
+        };
+        self.run_hook(HOOK_DIG_START, DIG_STARTERS, &table)
     }
 
     fn place(&mut self, event: &crate::script::PlaceEvent) -> HookOutcome {
@@ -4100,6 +4100,11 @@ impl MluaVm {
         game.set(
             "register_on_dig_complete",
             self.hook_registrar(mod_id, HOOK_DIG, DIGGERS)?,
+        )
+        .map_err(|err| self.vm_error(&err))?;
+        game.set(
+            "register_on_dig_start",
+            self.hook_registrar(mod_id, HOOK_DIG_START, DIG_STARTERS)?,
         )
         .map_err(|err| self.vm_error(&err))?;
         game.set(
@@ -6404,6 +6409,27 @@ impl MluaVm {
     ///
     /// Its own method for the reason `light_reader` is: these are the part of
     /// the frozen API that depends on something outside the VM.
+    /// The table a dig event reaches a mod as: the cell, what it is made of,
+    /// and the brush — the same for the start and the completion of a dig.
+    fn dig_event_table(&self, event: &crate::script::DigEvent) -> Option<Table> {
+        self.hook_event(event.player)
+            .and_then(|table| {
+                table.set("x", event.target.x)?;
+                table.set("y", event.target.y)?;
+                table.set("z", event.target.z)?;
+                table.set("material", event.material.0)?;
+                table.set(
+                    "brush",
+                    match event.brush {
+                        crate::dig::Brush::Block => "block",
+                        crate::dig::Brush::SubNode => "subnode",
+                    },
+                )?;
+                Ok(table)
+            })
+            .ok()
+    }
+
     /// `game.fluid_id(name)`: a fluid's per-session number by its name —
     /// Weather ask W24, the small one.
     ///
@@ -8175,6 +8201,7 @@ impl MluaVm {
         // it was added to the constants and forgotten here.
         for list in [
             DIGGERS,
+            DIG_STARTERS,
             PLACERS,
             USERS,
             USERS_ANYWHERE,
@@ -12573,6 +12600,44 @@ mod tests {
     }
 
     /// A dig event for a fixed player and cell.
+    #[test]
+    fn a_dig_may_be_refused_before_it_starts_and_the_completion_hook_is_its_own() {
+        // Craft ask 1: a tool gate that fires as the dig begins rather than
+        // after the wait. The same event, the same ladder, a separate list —
+        // a mod on one is not on the other.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "gate",
+            "game.register_on_dig_start(function(e)\n\
+             \x20   if e.material == 7 then return 'that needs a pick' end\n\
+             end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "watcher",
+            "seen = 0\ngame.register_on_dig_complete(function() seen = seen + 1 end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let refused = vm.dig_start(&a_dig());
+        assert!(!refused.allowed, "the gate let the dig start");
+        assert_eq!(refused.reason.as_deref(), Some("that needs a pick"));
+        // Another material: allowed, and the completion hook was never asked
+        // by a start.
+        let soft = crate::script::DigEvent {
+            material: MaterialId(2),
+            ..a_dig()
+        };
+        assert!(vm.dig_start(&soft).allowed);
+        let watcher = vm.environment("watcher").expect("env").clone();
+        assert_eq!(watcher.get::<i32>("seen").expect("seen"), 0);
+        assert!(vm.dig_complete(&soft).allowed);
+        assert_eq!(watcher.get::<i32>("seen").expect("seen"), 1);
+    }
+
     fn a_dig() -> crate::script::DigEvent {
         crate::script::DigEvent {
             player: [0xAB; 32],

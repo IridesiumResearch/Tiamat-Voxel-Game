@@ -251,6 +251,14 @@ impl Dig {
         self.total > 0 && self.chipped >= self.total
     }
 
+    /// Whether nothing has happened to this target yet: the tick a dig
+    /// begins, and again after a retarget, which is a new dig of a new
+    /// block. What `on_dig_start` is asked on.
+    #[must_use]
+    pub const fn is_fresh(&self) -> bool {
+        self.elapsed == 0 && self.chipped == 0
+    }
+
     /// Points the dig at a different cell, discarding progress.
     ///
     /// Returns whether anything was discarded, which is worth telling the
