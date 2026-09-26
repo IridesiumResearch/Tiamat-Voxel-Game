@@ -148,6 +148,8 @@ glam = "0.33"
 # forbids C codec bindings anywhere in the client asset path, so this is not a
 # preference — a `libpng` binding would be a rule violation.
 png = "0.18"
+# The icon on a Windows executable; a no-op build dependency elsewhere.
+winresource = "0.1"
 # Nothing yet for the client itself; wgpu, winit, kira, and egui arrive in
 # Tasks 08, 13, and 14. Anything listed here is forbidden to `core` and
 # `server` by the firewall.

@@ -948,6 +948,7 @@ impl Client {
     ) -> Result<Surface, Box<dyn std::error::Error>> {
         let attributes = Window::default_attributes()
             .with_title("Tiamat")
+            .with_window_icon(window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1));
         let window = Arc::new(event_loop.create_window(attributes)?);
 
@@ -2885,6 +2886,29 @@ fn grab(window: &Window, grab: bool) -> bool {
         .is_ok();
     window.set_cursor_visible(!grabbed);
     grabbed
+}
+
+/// The window's icon: the crest in `assets/icon/tiamat.png`, decoded once at
+/// start. The executable's own icon on Windows is the same picture, put there
+/// by `build.rs`; this is what the title bar and the task switcher show where
+/// the platform reads it from the window.
+///
+/// `None` — a window with no icon, never a refused window — if the picture
+/// could not be read, which would be a build broken in a way the tests catch
+/// long before a player sees it.
+fn window_icon() -> Option<winit::window::Icon> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
+        "../../../assets/icon/tiamat.png"
+    )));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buffer = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut buffer).ok()?;
+    if frame.color_type != png::ColorType::Rgba {
+        return None;
+    }
+    buffer.truncate(frame.buffer_size());
+    winit::window::Icon::from_rgba(buffer, frame.width, frame.height).ok()
 }
 
 #[cfg(test)]

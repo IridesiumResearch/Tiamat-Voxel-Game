@@ -18,6 +18,7 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
     println!("cargo:rustc-env=TIAMAT_TARGET={target}");
     println!("cargo:rerun-if-changed=build.rs");
+    embed_icon();
     println!("cargo:rerun-if-env-changed=TIAMAT_RELEASE_KEY");
 
     if std::env::var_os("TIAMAT_RELEASE_KEY").is_some() {
@@ -41,5 +42,25 @@ fn main() {
             println!("cargo:rustc-env=TIAMAT_RELEASE_KEY={key}");
         }
         _ => println!("cargo:warning=release-key.pub holds no 64-character hex key"),
+    }
+}
+
+/// The icon on the executable, on Windows: what Explorer, the taskbar and
+/// the title bar show. `winresource` compiles a resource script with the
+/// SDK's `rc.exe`, which the MSVC toolchain the release builds on has; on
+/// every other target this does nothing, and the window sets its own icon at
+/// start. A missing tool is a warning and a plain executable, never a failed
+/// build.
+fn embed_icon() {
+    let icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/icon/tiamat.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    if let Err(err) = winresource::WindowsResource::new()
+        .set_icon(&icon.to_string_lossy())
+        .compile()
+    {
+        println!("cargo:warning=no icon on the executable: {err}");
     }
 }

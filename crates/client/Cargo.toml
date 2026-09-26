@@ -75,3 +75,6 @@ criterion.workspace = true
 [[bench]]
 name = "mesher"
 harness = false
+
+[build-dependencies]
+winresource.workspace = true

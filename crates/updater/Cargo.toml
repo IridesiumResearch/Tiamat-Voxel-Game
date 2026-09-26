@@ -32,3 +32,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "tiamat"
 path = "src/main.rs"
+
+[build-dependencies]
+winresource.workspace = true
