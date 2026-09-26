@@ -1,0 +1,17 @@
+# {{MOD_NAME}}: a Tiamat mod, started from the engine's template.
+#
+# `id` is the namespace of everything this mod registers: `beacon` in init.lua
+# is `{{MOD_ID}}:beacon` to every other mod. Lowercase letters, digits and
+# underscores, starting with a letter.
+id = "{{MOD_ID}}"
+name = "{{MOD_NAME}}"
+version = "0.1.0"
+description = "A tour of the mod API: a block, a tool, a sound, an action, a dialog, an entity."
+# An SPDX licence identifier, yours to choose. The engine's scripting API is
+# MIT and its licence exception says a mod is not a derivative work of the
+# engine, so any terms are open to you.
+license = "{{LICENSE}}"
+# Mods this one needs loaded first, with version bounds if you want them:
+#     depends = ["some_world >=0.2, <1"]
+# Mods this one cannot run beside:
+#     conflicts = ["another_mod"]

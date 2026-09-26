@@ -28,9 +28,21 @@ so it cannot quietly fall behind the engine the way hand-written API docs do.
 That makes it the one file worth reading end to end before writing a mod — and
 the one worth handing to a tool that is going to write one with you.
 
+**[`template/`](template/)** — a mod to start from: the manifest, an
+`init.lua` touring the API (a block, a tool, a sound, an action, a dialog, an
+entity), a texture, a sound, a README walkthrough and an editor config pointed
+at the stubs. It is compiled into the server, so
+
+```console
+cargo run -p server -- --create-mod my_mod --into <mods-dir>
+```
+
+writes it out with your id, name and licence on it, the stubs and `AGENTS.md`
+beside it, and checks it the way `--check-mods` would before handing it over.
+`--name`, `--license` and `--copyright` set what the defaults guess.
+
 ## What is not here yet
 
-- The mod template (Task 16).
 - Prose documentation. Until it exists, the stubs carry the reference material
   in their doc comments, and [`../game/`](../game/) holds worked examples —
   every mod in it is written through this API and nothing else, which is a rule

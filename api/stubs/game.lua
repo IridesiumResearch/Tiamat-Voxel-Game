@@ -1720,6 +1720,10 @@ function game.close_dialog(spec) end
 ---
 ---Only your own: a dialog's events are private to the mod that opened it.
 ---
+---`event.form` is the dialog's name as it went to the client — namespaced with
+---your mod id, the way `event.id` names an action — so compare it with
+---`game.mod_id .. ":name"`.
+---
 ---`event.kind` says what the player did, and which other fields are set:
 ---
 ---  - `"pressed"` — `name`

@@ -64,6 +64,14 @@ typos, namespace errors and load-order problems in seconds:
 cargo run -p server -- --check-mods <mods-dir>
 ```
 
+A mod to start from is one command away: the engine's template, written out
+with your id, name and licence, the stubs and this file beside it, and checked
+the same way before it is handed over.
+
+```console
+cargo run -p server -- --create-mod my_mod --into <mods-dir>
+```
+
 It prints the mods that loaded, in dependency order, and every block that
 registered. A mod that fails to load is disabled and named; it does not take the
 server down.

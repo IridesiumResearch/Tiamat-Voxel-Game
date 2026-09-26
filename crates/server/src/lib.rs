@@ -34,6 +34,7 @@ pub mod lease;
 pub mod light;
 pub mod plans;
 pub mod rcon;
+pub mod scaffold;
 pub mod shutdown;
 pub mod sim;
 pub mod skies;

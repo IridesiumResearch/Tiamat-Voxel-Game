@@ -28,7 +28,7 @@ mod resolve;
 
 pub use manifest::{
     DiscoveredMod, ENTRY_FILE, ManifestError, ModManifest, Theme, ThemeColours, WorldOption,
-    WorldOptionValue, parse_colour, scan_directory,
+    WorldOptionValue, is_valid_id, parse_colour, scan_directory,
 };
 
 /// The entry script filename every mod must have.

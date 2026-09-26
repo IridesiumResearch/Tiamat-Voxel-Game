@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tiamat_core::identity::Allowlist;
 use tiamat_server::config::{Config, ConfigError};
-use tiamat_server::{ServerHandle, Settings, StartError, checkmods, shutdown};
+use tiamat_server::{ServerHandle, Settings, StartError, checkmods, scaffold, shutdown};
 use tracing::{error, info};
 
 /// Command-line arguments.
@@ -30,8 +30,12 @@ use tracing::{error, info};
 struct Cli {
     /// Path to the server configuration file (TOML).
     ///
-    /// Required unless `--check-mods` is given.
-    #[arg(long, value_name = "path", required_unless_present = "check_mods")]
+    /// Required unless `--check-mods` or `--create-mod` is given.
+    #[arg(
+        long,
+        value_name = "path",
+        required_unless_present_any = ["check_mods", "create_mod"]
+    )]
     config: Option<PathBuf>,
 
     /// Validate a mod directory and exit, without touching a world.
@@ -40,6 +44,31 @@ struct Cli {
     /// Exits 0 if every mod is usable and 1 otherwise, so CI can gate on it.
     #[arg(long, value_name = "dir", conflicts_with = "config")]
     check_mods: Option<PathBuf>,
+
+    /// Start a new mod from the template and exit.
+    ///
+    /// Writes `<dir>/<id>/`: the manifest, an init.lua touring the API, a
+    /// texture, a sound, the editor config, and the API stubs and AGENTS.md
+    /// vendored from `api/`. Then checks it the way `--check-mods` would, and
+    /// exits 0 only if that check passes.
+    #[arg(long, value_name = "id", conflicts_with_all = ["config", "check_mods"])]
+    create_mod: Option<String>,
+
+    /// Where `--create-mod` puts the new directory. Default: here.
+    #[arg(long, value_name = "dir", requires = "create_mod")]
+    into: Option<PathBuf>,
+
+    /// The new mod's display name. Default: made from the id.
+    #[arg(long, value_name = "name", requires = "create_mod")]
+    name: Option<String>,
+
+    /// The SPDX licence identifier the new mod's files carry. Default: MIT.
+    #[arg(long, value_name = "spdx", requires = "create_mod")]
+    license: Option<String>,
+
+    /// The copyright holder the new mod's headers name. Default: "<name> authors".
+    #[arg(long, value_name = "holder", requires = "create_mod")]
+    copyright: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -71,6 +100,11 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+
+    // Likewise: files on disk and a dry-run check, and no server.
+    if let Some(id) = &cli.create_mod {
+        return create_mod(&cli, id);
     }
 
     match run(&cli) {
@@ -174,5 +208,47 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
         Ok(())
     } else {
         Err(ServerError::UncleanShutdown)
+    }
+}
+
+/// `--create-mod`: the template written out with the caller's name on it,
+/// then checked alone so a broken neighbour cannot fail a mod that is fine.
+fn create_mod(cli: &Cli, id: &str) -> ExitCode {
+    let spec = scaffold::NewMod::with_defaults(
+        id,
+        cli.name.as_deref(),
+        cli.license.as_deref(),
+        cli.copyright.as_deref(),
+    );
+    let into = cli.into.clone().unwrap_or_else(|| PathBuf::from("."));
+    let dir = match scaffold::create(&spec, &into) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("cannot create the mod `{id}`");
+            eprintln!("  {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("created `{}`", dir.display());
+    match scaffold::check_alone(&dir) {
+        Ok(report) if report.is_ok() => {
+            println!(
+                "checked: it loads and registers {}",
+                report.blocks.join(", ")
+            );
+            println!("Put it in the server's mods directory and read its README.md.");
+            ExitCode::SUCCESS
+        }
+        Ok(report) => {
+            for (mod_id, why) in &report.failed {
+                eprintln!("FAILED {mod_id}: {why}");
+            }
+            ExitCode::FAILURE
+        }
+        Err(message) => {
+            eprintln!("checking the new mod");
+            eprintln!("  {message}");
+            ExitCode::FAILURE
+        }
     }
 }
