@@ -208,8 +208,15 @@ pub fn create(spec: &NewMod, into: &Path) -> Result<PathBuf, ScaffoldError> {
 
 /// The template's text with the placeholders filled and the header made the
 /// new mod's.
+///
+/// **Line endings are the template's, not the checkout's.** The text is
+/// embedded at build time from the engine's working copy, and a Windows
+/// checkout with `core.autocrlf` hands the compiler CRLF — which would make
+/// what `--create-mod` writes depend on how the engine was cloned, and made
+/// the scaffold tests red on Windows alone. Normalised to LF here, once.
 fn filled(bytes: &[u8], spec: &NewMod) -> String {
     String::from_utf8_lossy(bytes)
+        .replace("\r\n", "\n")
         .replace("{{MOD_ID}}", &spec.id)
         .replace("{{MOD_NAME}}", &spec.name)
         .replace("{{LICENSE}}", &spec.license)
@@ -328,6 +335,20 @@ mod tests {
             report.blocks.iter().any(|name| name == "demo:beacon"),
             "no beacon among {:?}",
             report.blocks
+        );
+    }
+
+    #[test]
+    fn a_template_checked_out_with_crlf_still_writes_lf() {
+        // What a Windows checkout with `core.autocrlf` hands the compiler.
+        let spec = NewMod::with_defaults("demo", None, None, None);
+        let text = filled(
+            b"-- SPDX-FileCopyrightText: Iridesium\r\n-- SPDX-License-Identifier: MIT\r\nid = \"{{MOD_ID}}\"\r\n",
+            &spec,
+        );
+        assert_eq!(
+            text,
+            "-- SPDX-FileCopyrightText: Demo authors\n-- SPDX-License-Identifier: MIT\nid = \"demo\"\n"
         );
     }
 
