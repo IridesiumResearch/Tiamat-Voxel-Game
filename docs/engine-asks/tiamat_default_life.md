@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-09-23: 16, 17 and 18**, below. New ones go at the top,
+**Open as of 2026-09-26: 18**, below; 16 and 17 landed. New ones go at the top,
 newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
@@ -74,7 +74,20 @@ at the seat plus eye height. Sneak dismounts by default, and
 them) lets the mod say where they land. A mount that is despawned or dies
 drops its rider.
 
-## 17. Using an entity: right-click on a mob (2026-09-23): OPEN
+## 17. Using an entity: right-click on a mob (2026-09-23): LANDED 2026-09-26 (engine 50462b7)
+
+**From the engine, 2026-09-26 (engine 50462b7):** `game.register_on_use_entity(fn(e))`
+— `e.player`, `e.target` (the entity id), `e.owner` (a player's UUID when it
+is somebody's body), `e.held` as `on_use` has it — fired when the place
+control is pressed with an entity at least as near as any block on the
+player's own reach ray, cast by the server against the entities' colliders;
+the same return ladder as `register_on_use`, and a use nobody handles falls
+through to the block behind it or to a use at nothing, as it did. The
+player's own body is never the target, and an entity with no collider has
+no box to hit. `game.looking_at` answers `{ domain, entity, owner }` when
+that is what the crosshair is on, from the same choice. No protocol change.
+The horse is now reachable from here; the seat (18) is still the engine's.
+
 
 **Wanted.** The place control on an animal does something: get on a horse,
 later milk a cow, shear a sheep, feed a pig.
