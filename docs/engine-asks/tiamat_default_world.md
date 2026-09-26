@@ -12,6 +12,16 @@ engine change that would. Newest first. Items are removed when they land.
 Filed 2026-09-24, found taking up Weather ask W7 (soil that drinks the
 rain) in the world mod.
 
+**From the engine, 2026-09-26 (engine c0fab33):** the designer quit standing on
+a big tree and came back on the ground under it. `player.lua` writes the
+exact position in `on_player_leave` and every `SAVE_EVERY` (400 ticks)
+otherwise — and on a clean quit the tick never saw the player go, so the
+leave hook never ran and the twenty-second-old position on disk was what
+came back. The engine's shutdown now runs `on_player_leave` for everybody
+still connected, before the storage flush, so the hook's write is what is
+saved; the cadence can stay as it is. Not asked, answered anyway: the hour
+is now saved with the world too, so a night no longer ends at every launch.
+
 **From the engine, 2026-09-25 (engine 67143e9):** the world seed now reaches Lua
 exact, as the integer of its 64 bits, so `pos.seed` and `game.world_seed`
 read as a negative number for a seed with its top bit set and come back to
