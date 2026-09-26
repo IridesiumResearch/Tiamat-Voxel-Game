@@ -522,6 +522,14 @@ fn entity_messages(
 /// the shutdown flush — and a mod's facts have to survive both. A failure is
 /// logged rather than fatal: losing a mod's bookkeeping is bad, and taking the
 /// server down over it is worse.
+/// Writes the hour to the world, beside the seed: what a played world resumes
+/// at. Logged rather than fatal, like every other save on the way out.
+fn save_time_of_day(world: &crate::world::World, shared: &crate::transport::Shared) {
+    if let Err(err) = world.db().set_time_of_day(shared.day_ticks()) {
+        error!("could not save the time of day: {err}");
+    }
+}
+
 fn flush_mod_storage(
     world: &crate::world::World,
     storage: &std::sync::RwLock<crate::storage::ModStorage>,
@@ -2642,6 +2650,17 @@ impl ServerHandle {
                     shared
                         .seed
                         .store(world.seed(), std::sync::atomic::Ordering::Relaxed);
+                    // **And the hour.** The clock is a tick counter the sky
+                    // mod's `start_time` seeded, and until this it was seeded
+                    // so on every start: a world left at night came back in
+                    // the morning, every launch. A world that has been played
+                    // resumes where it was left; a fresh one keeps the mod's
+                    // morning.
+                    match world.db().time_of_day() {
+                        Ok(Some(ticks)) => shared.restore_day(ticks),
+                        Ok(None) => {}
+                        Err(err) => error!("could not read the time of day: {err}"),
+                    }
 
                     // One per server, opened on the simulation thread because
                     // that is the only thread that writes to it.
@@ -5492,6 +5511,7 @@ impl ServerHandle {
                             // every tick would otherwise be a database write
                             // every tick.
                             flush_mod_storage(&world, &mod_storage);
+                            save_time_of_day(&world, &shared);
                             flush_containers(&world, &containers);
 
                             phases.mark("save mod state");
@@ -5562,7 +5582,29 @@ impl ServerHandle {
                     // debounced save would be lost on a clean shutdown, the one
                     // case a player has every right to expect nothing is.
                     {
+                        // **Everybody still connected leaves first.** The
+                        // leave-diff above fires only for somebody the tick SAW
+                        // go, and nobody is seen going when the server stops
+                        // under them — so the hook a mod persists on never ran
+                        // on a clean quit: the World mod writes a player's
+                        // exact position in `on_player_leave` and every twenty
+                        // seconds otherwise, and a player who quit up a tree
+                        // came back on the ground under it. Before the storage
+                        // flush, so what the hooks write is what is saved.
+                        for (uuid, _) in shared.all_inventories() {
+                            let outcome = source.player_left(&tiamat_core::script::LeaveEvent {
+                                player: *uuid.as_bytes(),
+                                name: known_names.get(&uuid).cloned().unwrap_or_default(),
+                            });
+                            for (mod_id, err) in &outcome.faults {
+                                error!(
+                                    mod_id = %mod_id,
+                                    "mod disabled after an on_player_leave failure at shutdown: {err}"
+                                );
+                            }
+                        }
                         flush_mod_storage(&world, &mod_storage);
+                        save_time_of_day(&world, &shared);
                         // **Everybody still connected.** A clean shutdown is
                         // the one case a player has every right to expect
                         // nothing is lost, and the leave-diff above only fires

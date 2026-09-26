@@ -2244,6 +2244,17 @@ impl Bot {
     /// something. Without reading these, a refused placement and a lost packet
     /// look identical from a script.
     #[must_use]
+    /// The last time of day the server sent, `0.0..1.0`, if any.
+    pub fn time_of_day(&self) -> Option<f32> {
+        self.received()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                ServerMessage::TimeOfDay { time } => Some(*time),
+                _ => None,
+            })
+    }
+
     pub fn notices(&self) -> Vec<String> {
         self.received()
             .iter()

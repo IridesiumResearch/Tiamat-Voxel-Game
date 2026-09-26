@@ -1426,6 +1426,26 @@ impl Shared {
     /// `0.0..1.0`, midnight to midnight. A world with no sky mod has no day
     /// length, so its clock never moves and this is always zero — which the
     /// client renders as a sky that does not change.
+    /// The clock as it stands, in ticks into the day: what the world saves.
+    pub fn day_ticks(&self) -> u64 {
+        self.time_of_day.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Puts the clock back where a saved world left it.
+    ///
+    /// Wrapped into the day this server has, because the day's length is a
+    /// mod's choice and the world may have been saved under another one; a
+    /// world with no sky has no day to put it into and keeps its zero.
+    pub fn restore_day(&self, ticks: u64) {
+        if self.sky_day_length == 0 {
+            return;
+        }
+        self.time_of_day.store(
+            ticks % u64::from(self.sky_day_length),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     pub fn advance_day(&self) -> f32 {
         use std::sync::atomic::Ordering;
         if self.sky_day_length == 0 {

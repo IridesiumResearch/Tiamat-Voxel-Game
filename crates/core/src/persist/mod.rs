@@ -106,6 +106,8 @@ pub mod meta_keys {
     pub const DOMAIN_POSITIONS: &str = "domain_positions";
     /// Which rule built the cached summaries, as [`crate::lod::SUMMARY_RULE`].
     pub const SUMMARY_RULE: &str = "summary_rule";
+    /// The hour, as the sky clock's tick count, so a world resumes where it was left.
+    pub const TIME_OF_DAY: &str = "time_of_day";
 }
 
 /// The format an entity blob is written in.
@@ -1849,6 +1851,32 @@ impl WorldDb {
     /// Any SQL failure.
     pub fn set_world_seed(&self, seed: u64) -> Result<(), WorldError> {
         self.set_meta(meta_keys::WORLD_SEED, &seed.to_le_bytes())
+    }
+
+    /// Reads the hour the world was left at, as the sky clock's tick count,
+    /// if one was ever saved.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn time_of_day(&self) -> Result<Option<u64>, WorldError> {
+        Ok(self
+            .meta(meta_keys::TIME_OF_DAY)?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+            .map(u64::from_le_bytes))
+    }
+
+    /// Saves the hour, as the sky clock's tick count.
+    ///
+    /// **A tick count, not a fraction**, because it is what the clock holds;
+    /// the day's length is a mod's choice and may differ on the next load, so
+    /// the reader wraps it into whatever day it finds.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn set_time_of_day(&self, ticks: u64) -> Result<(), WorldError> {
+        self.set_meta(meta_keys::TIME_OF_DAY, &ticks.to_le_bytes())
     }
 
     /// Reads what this world chose for its mods' world options, as
