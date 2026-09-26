@@ -240,3 +240,23 @@ fn versions_compare_by_number_and_nonsense_loses() {
     assert_eq!(compare("0.1.0", "nightly"), Ordering::Greater);
     assert_eq!(compare("1.2.3.4", "1.2.3"), Ordering::Less);
 }
+
+#[test]
+fn a_hash_of_signs_is_not_a_hash() {
+    // The manifest fuzz target's first finding: `from_str_radix` takes a
+    // leading `+`, so thirty-two `+f`s read as a hash no download could ever
+    // match, and a client would have fetched the whole archive to refuse it.
+    assert_eq!(hex_to_array::<2>("0aff"), Some([0x0a, 0xff]));
+    assert_eq!(hex_to_array::<2>("+a+f"), None, "a sign is not a hex digit");
+    assert_eq!(
+        hex_to_array::<2>("0AFF"),
+        Some([0x0a, 0xff]),
+        "upper case is hex"
+    );
+    assert_eq!(hex_to_array::<2>("0af"), None, "the wrong length");
+    assert_eq!(
+        hex_to_array::<1>("é"),
+        None,
+        "two bytes that are one character"
+    );
+}

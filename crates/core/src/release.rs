@@ -366,8 +366,13 @@ fn parts(version: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Hex to exactly `N` bytes, or nothing.
+///
+/// **Hex digits only.** `from_str_radix` takes a leading `+`, so `+f` read as
+/// a byte and a hash of thirty-two `+f`s was a "hash" no download could ever
+/// match — found by the manifest fuzz target on its first run. A client would
+/// have fetched the whole archive to refuse it.
 fn hex_to_array<const N: usize>(hex: &str) -> Option<[u8; N]> {
-    if hex.len() != N * 2 {
+    if hex.len() != N * 2 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0_u8; N];

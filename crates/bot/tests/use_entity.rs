@@ -67,7 +67,9 @@ game.register_on_tick(function()
         if not done then
             local id = game.player_entity(uuid)
             local body = id and game.entity(id)
-            if body then
+            -- Once they stand: a scarecrow put up beside a player still
+            -- falling in from the join would be put up in the air.
+            if body and body.on_ground then
                 -- A model, so the client is told about it and the test can
                 -- see it stand: an entity nobody can see is still a target,
                 -- but a test wants to watch.
@@ -172,8 +174,9 @@ async fn scarecrow_up(bot: &mut Bot, mark: u16) {
     bot.expect_block(SCARECROW_UP, mark, PATIENCE)
         .await
         .expect("the mod should put a scarecrow up");
-    // And a few ticks for it to land and for the server's picture of the
-    // player to settle, so the ray is cast from where they stand.
+    // At rest, so the ray is cast from where the player stands, and a few
+    // ticks for the scarecrow to settle beside them.
+    let _ = bot.settle().await;
     bot.sleep_ticks(6).await;
 }
 
