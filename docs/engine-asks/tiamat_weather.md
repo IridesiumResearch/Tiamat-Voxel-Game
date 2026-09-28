@@ -12,11 +12,11 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W29, filed 2026-09-28. W27's first step landed 2026-09-28 with the gate not yet met (see it),
+Open: none. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
-## W29. A cave's fog is the sky's colour (2026-09-28)
+## W29. A cave's fog is the sky's colour (2026-09-28): LANDED 2026-09-28 (engine 0fdbca8), awaiting the eye
 
 **Seen.** The designer: "be sure that the day night cycle does not affect
 the colour of cave fog underground". Fog is drawn in `moment.sky`
@@ -48,6 +48,31 @@ the sky-lit part, which keeps lightning out of caves without anyone having
 to be told. Gate: a tunnel whose far end opens to daylight, at noon and at
 midnight: the fog on the tunnel walls is the same colour in both, and the
 daylit ground seen through the mouth is fogged in the sky's colour.
+
+**From the engine, 2026-09-28 (engine 0fdbca8, b99ce98):** as asked. The
+fog colour is blended per fragment by the sky light the mesh already
+carries, from the frame's sky colour at full sky light — the clock, the
+modifier and a flash already folded in, so a flash leans only the
+sky-lit share — to `cave_fog` at none, and `cave_fog = { r, g, b }` is
+the sky owner's on `register_sky`, defaulting to a dark neutral
+{0.05, 0.05, 0.06}; it travels with the sky table, so the protocol is 78.
+In every lighting mode, the fluid, glass and particle passes included; in
+mode 3 the terrain writes its sky light into the scene's alpha above the
+cloud mark and the post fog reads it back. From 0.85 of the fog's reach
+outward the fog is the sky's whatever the light, so a cut tunnel at the
+edge of the loaded world stays hidden as it did; a far hillside drawn from
+its summary, a wall where the streamed world stops, and a held block are
+each fogged as the sky and screenshot-tested so. The gate as written is a
+screenshot test in all three modes: a tunnel opening onto a daylit cliff,
+the deep walls the cave's colour at noon and at midnight alike, the cliff
+through the mouth in the day's. Two limits, on the sheet so nobody is
+surprised: a pool underground fogs a little toward the sky in mode 3
+alone (glass and water blend the mark by their coverage), and a floor
+dark for another reason — under a dense canopy, on a sea bed — fogs
+toward the cave's colour in the middle distance, since the rule reads the
+sky light at the surface, as asked. The look is the designer's ([H]):
+deep in a tunnel with the mouth in view, noon and midnight, all three
+modes. The mod can drop its `CAVE_SKY` modifier and set `cave_fog`.
 
 ## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
 
