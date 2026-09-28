@@ -10983,6 +10983,31 @@ fn density_noise(spec: &Table) -> mlua::Result<crate::detgen::Op> {
     })
 }
 
+/// Reads a `noise2` node: a noise node sampled on the ground plane, never
+/// reading `y` (World ask 39) — the mask a terraced fill's `within` can be
+/// built from. Same options as `noise`, and no `stretch`.
+fn density_noise2(spec: &Table) -> mlua::Result<crate::detgen::Op> {
+    let crate::detgen::Op::Noise {
+        params,
+        amplitude,
+        stream,
+        stretch,
+    } = density_noise(spec)?
+    else {
+        unreachable!("density_noise builds a noise op")
+    };
+    if stretch != crate::detgen::UNSTRETCHED {
+        return Err(mlua::Error::external(
+            "a `noise2` node takes no `stretch`; stretch is a `noise` option",
+        ));
+    }
+    Ok(crate::detgen::Op::Noise2 {
+        params,
+        amplitude,
+        stream,
+    })
+}
+
 /// How deep a density table may nest before it is refused.
 ///
 /// A table arrives from a script and this walk is recursive, so the bound is
@@ -11026,6 +11051,7 @@ fn compile_density(
         "y" => ops.push(Op::Coordinate(Axis::Y)),
         "z" => ops.push(Op::Coordinate(Axis::Z)),
         "noise" => ops.push(density_noise(spec)?),
+        "noise2" => ops.push(density_noise2(spec)?),
         "contour" => {
             // The distance to a 2D noise's zero contour, in blocks — the
             // same stream, frequency and octaves as a noise node; no
@@ -12042,6 +12068,35 @@ mod tests {
                 "{spec} should say `{says}`: {detail}"
             );
         }
+    }
+
+    #[test]
+    fn a_noise2_node_reads_no_height_and_takes_no_stretch() {
+        // World ask 39: the mask a terraced fill's `within` can be built from
+        // — the same value at every height, through the same point sample a
+        // generator uses.
+        let mut host = vm();
+        load(
+            &mut host,
+            "river",
+            "local flat = game.density{ op = 'noise2', stream = 'bed', frequency = 0.05, amplitude = 3 }\n\
+             local plane = game.density{ op = 'noise', stream = 'bed', frequency = 0.05, amplitude = 3 }\n\
+             for _, x in ipairs({ 3.5, 40.5, -17.5 }) do\n\
+             \x20   local low = flat:at(x, -80, 9.5, 7)\n\
+             \x20   local high = flat:at(x, 900, 9.5, 7)\n\
+             \x20   assert(low == high, 'noise2 read height at ' .. x)\n\
+             \x20   assert(low == plane:at(x, 0, 9.5, 7), 'noise2 is not the noise on the plane')\n\
+             end",
+        )
+        .expect("load");
+        let mut fresh = vm();
+        let err = load(
+            &mut fresh,
+            "river",
+            "game.density{ op = 'noise2', stream = 'bed', stretch = { x = 2 } }",
+        )
+        .expect_err("a stretched noise2 loaded");
+        assert!(format!("{err:?}").contains("takes no `stretch`"), "{err:?}");
     }
 
     #[test]

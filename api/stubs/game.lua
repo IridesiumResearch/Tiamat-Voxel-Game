@@ -3674,6 +3674,15 @@ function Density:at(x, y, z, seed) end
 ---  features four times as tall here, as if sampled at `y / 4` — for rock that
 ---  flutes vertically or strata that run level; an axis left out is 1. Every
 ---  value must be above zero. Bounds follow it, so pruning still works.
+---- `{ op = "noise2", stream = "name", octaves = 4, frequency = 0.02,
+---  amplitude = 1.0 }` — the same noise sampled on the GROUND PLANE, `y`
+---  held at zero, so the field never reads height: one value per column,
+---  the same at every y. **Flat by construction**, which is what a terraced
+---  fill's `within` needs (`fill_fluid_terraced` reads it on one plane for
+---  the whole world and refuses a field that answers differently at two
+---  heights) and what any mask meant as a map of the ground wants. Same
+---  options as `noise` but no `stretch`. A `contour` of the same stream
+---  draws its line through this field.
 ---- `{ op = "map", map = <a Tiamat.Map> }` — the map's value under this
 ---  sample, ignoring y. **The way an eroded field becomes terrain.** A map is
 ---  a surface, so subtract `y` to get a density from it. The node takes a COPY

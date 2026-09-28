@@ -294,6 +294,24 @@ pub enum Op {
         /// blocks of it. Unsigned, it is the distance alone.
         signed: bool,
     },
+    /// Push fractal noise sampled on the ground plane: `y` held at zero, so
+    /// the field never reads height (World ask 39).
+    ///
+    /// **Flat by construction.** A terraced fill's `within` is read on one
+    /// plane for the whole world, and a field that reads `y` answers about
+    /// somewhere else there — the ask-35 check refuses it. The flattest mask
+    /// a mod could build from a 3D noise was `stretch = { y = 1000 }`, tall
+    /// rather than flat, so two heights still disagreed by a hair and every
+    /// river bed came out dry. This is the same noise as [`Op::Contour`]
+    /// samples, one sample per column, broadcast up the region.
+    Noise2 {
+        /// The fractal's shape, as a noise node's.
+        params: FractalParams,
+        /// Scales the result, as a noise node's.
+        amplitude: f32,
+        /// Mixed into the world seed, as a noise node's.
+        stream: u64,
+    },
     /// Pop two, push the sum.
     Add,
     /// Pop two, push `first - second`.
@@ -519,6 +537,14 @@ fn sample_key(op: &Op) -> Option<[u64; 9]> {
             let [a, b, c] = shape(params);
             Some([2, a, b, c, u64::from(*signed), *stream, 0, 0, 0])
         }
+        Op::Noise2 {
+            params,
+            amplitude,
+            stream,
+        } => {
+            let [a, b, c] = shape(params);
+            Some([3, a, b, c, u64::from(amplitude.to_bits()), *stream, 0, 0, 0])
+        }
         _ => None,
     }
 }
@@ -571,8 +597,9 @@ impl Density {
     /// See [`super::buffer::ChunkBuffer::fill_fluid_terraced`].
     ///
     /// `Coordinate(Y)` reads it outright and a noise node reads it implicitly —
-    /// the fractal is sampled in three dimensions. A contour and a map are both
-    /// taken on the ground plane with `y` held at zero, so neither does.
+    /// the fractal is sampled in three dimensions. A contour, a map and a
+    /// `noise2` are all taken on the ground plane with `y` held at zero, so
+    /// none of them does.
     #[must_use]
     pub fn reads_y(&self) -> bool {
         self.ops
@@ -676,6 +703,22 @@ impl Density {
         out: &mut [f32],
     ) -> Result<(), DensityError> {
         self.evaluate_with(seed, region, out, &mut Scratch::default())
+    }
+
+    /// The box a region covers, one interval per axis.
+    fn axes_of(over: &Region3d) -> [Interval; 3] {
+        let span = |origin: f32, count: usize| -> Interval {
+            let far = origin + (count.saturating_sub(1)) as f32 * over.step;
+            Interval {
+                low: origin.min(far),
+                high: origin.max(far),
+            }
+        };
+        [
+            span(over.origin_x, over.width),
+            span(over.origin_y, over.height),
+            span(over.origin_z, over.depth),
+        ]
     }
 
     /// A noise node's interval over one box.
@@ -825,18 +868,7 @@ impl Density {
     /// find surface a coarser bound said was not there.
     #[must_use]
     pub fn bounds(&self, seed: u64, over: &Region3d) -> Interval {
-        let span = |origin: f32, count: usize| -> Interval {
-            let far = origin + (count.saturating_sub(1)) as f32 * over.step;
-            Interval {
-                low: origin.min(far),
-                high: origin.max(far),
-            }
-        };
-        let axes = [
-            span(over.origin_x, over.width),
-            span(over.origin_y, over.height),
-            span(over.origin_z, over.depth),
-        ];
+        let axes = Self::axes_of(over);
 
         let mut stack: Vec<Interval> = Vec::with_capacity(self.depth);
         for op in &self.ops {
@@ -866,6 +898,19 @@ impl Density {
                     low: if *signed { -CONTOUR_FAR } else { 0.0 },
                     high: CONTOUR_FAR,
                 }),
+                // The ground plane's box: the same bound as a noise node's
+                // with `y` pinned to zero, which is where the fill samples.
+                Op::Noise2 {
+                    params,
+                    amplitude,
+                    stream,
+                } => stack.push(Self::noise_bounds(
+                    seed ^ stream,
+                    &[axes[0], Interval::exactly(0.0), axes[2]],
+                    params,
+                    *amplitude,
+                    UNSTRETCHED,
+                )),
                 Op::Map { map, range } => stack.push(Self::map_bounds(map, *range, &axes)),
                 Op::Absolute => {
                     let Some(value) = stack.pop() else {
@@ -991,18 +1036,19 @@ impl Density {
                     stretch,
                 } => {
                     let slot = &mut stack[height];
-                    // The round field keeps its own loop, so no world that
-                    // never asked for a stretch changes by a bit.
-                    if *stretch == UNSTRETCHED {
-                        fill_3d(seed ^ stream, region, params, slot)?;
-                    } else {
-                        fill_3d_stretched(seed ^ stream, region, params, *stretch, slot)?;
+                    fill_noise(seed ^ stream, region, params, *amplitude, *stretch, slot)?;
+                    if let Memo::Keep(kept) = *plan {
+                        memo[kept].copy_from_slice(slot);
                     }
-                    if (*amplitude - 1.0).abs() > f32::EPSILON {
-                        for value in slot.iter_mut() {
-                            *value *= amplitude;
-                        }
-                    }
+                    height += 1;
+                }
+                Op::Noise2 {
+                    params,
+                    amplitude,
+                    stream,
+                } => {
+                    let slot = &mut stack[height];
+                    ground_noise(seed ^ stream, region, params, *amplitude, slot)?;
                     if let Memo::Keep(kept) = *plan {
                         memo[kept].copy_from_slice(slot);
                     }
@@ -1071,6 +1117,7 @@ impl Op {
             Self::Constant(_)
             | Self::Coordinate(_)
             | Self::Noise { .. }
+            | Self::Noise2 { .. }
             | Self::Contour { .. }
             | Self::Map { .. } => 0,
             Self::Absolute | Self::Clamp { .. } => 1,
@@ -1100,6 +1147,14 @@ impl Op {
                 (stretch[0], "a noise stretch"),
                 (stretch[1], "a noise stretch"),
                 (stretch[2], "a noise stretch"),
+            ],
+            Self::Noise2 {
+                params, amplitude, ..
+            } => vec![
+                (*amplitude, "a noise amplitude"),
+                (params.frequency, "a noise frequency"),
+                (params.lacunarity, "a noise lacunarity"),
+                (params.gain, "a noise gain"),
             ],
             Self::Clamp { low, high } => vec![(*low, "a clamp bound"), (*high, "a clamp bound")],
             _ => Vec::new(),
@@ -1217,6 +1272,67 @@ pub const CONTOUR_FAR: f32 = 256.0;
 /// way along x and z — and a division: `|n| / |grad n|`, with the gradient
 /// by central differences. Deterministic for the reasons every fill is; the
 /// square root is one of the operations the determinism gate admits.
+/// Evaluates [`Op::Noise`] over a region: the fractal, stretched if asked,
+/// scaled by the amplitude.
+///
+/// The round field keeps its own loop, so no world that never asked for a
+/// stretch changes by a bit.
+fn fill_noise(
+    seed: u64,
+    region: &Region3d,
+    params: &FractalParams,
+    amplitude: f32,
+    stretch: [f32; 3],
+    slot: &mut [f32],
+) -> Result<(), DensityError> {
+    if stretch == UNSTRETCHED {
+        fill_3d(seed, region, params, slot)?;
+    } else {
+        fill_3d_stretched(seed, region, params, stretch, slot)?;
+    }
+    if (amplitude - 1.0).abs() > f32::EPSILON {
+        for value in slot.iter_mut() {
+            *value *= amplitude;
+        }
+    }
+    Ok(())
+}
+
+/// Evaluates [`Op::Noise2`] over a region: one sample per column on the
+/// ground plane, broadcast up every layer.
+///
+/// The same sampler as [`contour_distance`]'s centre pass, so a `noise2` and
+/// a `contour` of one stream describe the same field.
+fn ground_noise(
+    seed: u64,
+    region: &Region3d,
+    params: &FractalParams,
+    amplitude: f32,
+    out: &mut [f32],
+) -> Result<(), DensityError> {
+    let ground = Region3d {
+        origin_x: region.origin_x,
+        origin_y: 0.0,
+        origin_z: region.origin_z,
+        step: region.step,
+        width: region.width,
+        height: 1,
+        depth: region.depth,
+    };
+    let mut columns = vec![0.0_f32; ground.width * ground.depth];
+    fill_3d(seed, &ground, params, &mut columns)?;
+    // `out` is the region's length: `evaluate` checked it before any op ran.
+    for z in 0..region.depth {
+        for x in 0..region.width {
+            let value = columns[x + region.width * z] * amplitude;
+            for y in 0..region.height {
+                out[x + region.width * (y + region.height * z)] = value;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn contour_distance(
     seed: u64,
     region: &Region3d,
@@ -1321,6 +1437,92 @@ mod tests {
     /// away from it: along a row of the ground, every sign change of the raw
     /// noise sits within a block of a point the distance calls near, and the
     /// point where the noise is largest is called far.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "bit-identical by construction is the claim"
+    )]
+    fn a_noise2_field_never_reads_height() {
+        // World ask 39: a mask that is flat by construction. The same field
+        // at two heights, bit for bit, and `reads_y` says so — which is what
+        // lets a terraced fill's `within` be built from noise at all.
+        let params = FractalParams {
+            fractal: Fractal::Fbm,
+            octaves: 3,
+            frequency: 1.0 / 32.0,
+            lacunarity: 2.0,
+            gain: 0.5,
+        };
+        let flat = Density::compile(vec![Op::Noise2 {
+            params,
+            amplitude: 2.5,
+            stream: 9,
+        }])
+        .expect("compiles");
+        assert!(!flat.reads_y(), "a ground-plane noise reads no height");
+        let low = Region3d {
+            origin_x: 12.5,
+            origin_y: -40.0,
+            origin_z: -3.5,
+            step: 1.0,
+            width: 8,
+            height: 4,
+            depth: 8,
+        };
+        let high = Region3d {
+            origin_y: 900.0,
+            ..low
+        };
+        let mut a = vec![0.0; low.len()];
+        let mut b = vec![0.0; high.len()];
+        flat.evaluate(3, &low, &mut a).expect("evaluates");
+        flat.evaluate(3, &high, &mut b).expect("evaluates");
+        assert_eq!(a, b, "the same field at two heights");
+        // And every layer of one region is the ground layer.
+        for z in 0..low.depth {
+            for x in 0..low.width {
+                let ground = a[x + low.width * (low.height * z)];
+                for y in 1..low.height {
+                    assert_eq!(a[x + low.width * (y + low.height * z)], ground);
+                }
+            }
+        }
+        // The values are the 3D noise's on the plane, scaled — the field a
+        // `contour` of the same stream draws its line through.
+        let plane = Density::compile(vec![Op::Noise {
+            params,
+            amplitude: 2.5,
+            stream: 9,
+            stretch: UNSTRETCHED,
+        }])
+        .expect("compiles");
+        let ground = Region3d {
+            origin_y: 0.0,
+            height: 1,
+            ..low
+        };
+        let mut on_plane = vec![0.0; ground.len()];
+        plane
+            .evaluate(3, &ground, &mut on_plane)
+            .expect("evaluates");
+        for z in 0..low.depth {
+            for x in 0..low.width {
+                assert_eq!(
+                    a[x + low.width * (low.height * z)],
+                    on_plane[x + ground.width * z]
+                );
+            }
+        }
+        // Bounds hold over a box, whatever its height.
+        let bounds = flat.bounds(3, &high);
+        for value in &b {
+            assert!(
+                bounds.low <= *value && *value <= bounds.high,
+                "{value} outside {bounds:?}"
+            );
+        }
+    }
+
     #[test]
     fn contour_distance_is_small_at_the_zero_contour_and_grows_away_from_it() {
         let params = FractalParams {

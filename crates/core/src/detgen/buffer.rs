@@ -3583,6 +3583,43 @@ mod tests {
     }
 
     #[test]
+    fn a_terraced_within_built_from_noise2_is_flat_by_construction() {
+        // World ask 39: the flattest mask a mod could build from noise was
+        // `stretch = { y = 1000 }`, tall rather than flat, so the check above
+        // fired on a hair's disagreement and every river bed came out dry.
+        // A `noise2` never reads y, so the same field is read on the plane
+        // and over the chunk, and the fill goes ahead.
+        use super::super::density::{Density, Op};
+        use super::super::noise::{Fractal, FractalParams};
+        let mut buffer = ChunkBuffer::new(ChunkPos::new(0, 4, 0), MaterialId::AIR);
+        let level = Density::compile(vec![Op::Constant(70.0)]).expect("compiles");
+        let mask = Density::compile(vec![Op::Noise2 {
+            params: FractalParams {
+                fractal: Fractal::Fbm,
+                octaves: 2,
+                frequency: 1.0 / 24.0,
+                lacunarity: 2.0,
+                gain: 0.5,
+            },
+            amplitude: 1.0,
+            stream: 11,
+        }])
+        .expect("compiles");
+        assert!(!mask.reads_y());
+        buffer
+            .fill_fluid_terraced(
+                7,
+                &Terraces {
+                    level: &level,
+                    within: Some(&mask),
+                    fluid: crate::fluid::FluidId(1),
+                    lip: None,
+                },
+            )
+            .expect("a y-free `within` is never refused for reading height");
+    }
+
+    #[test]
     fn a_terraced_within_that_is_simply_empty_here_is_not_an_error() {
         // The other side of it: a field that says "no body in this chunk" and
         // means it must still cost nothing and say nothing. Only a field that
