@@ -150,7 +150,7 @@ the pool can hold in flight, the server logs one line at `warn`:
 the pool keeps up with says nothing. `Pool::recent_cost` and
 `Pool::capacity` are there for anything else that wants the numbers.
 
-## 39. A terraced fill's `within` cannot be built flat
+## 39. A terraced fill's `within` cannot be built flat: LANDED 2026-09-28 (engine 4885f54)
 
 **Seen:** a fully-dressed river bed, bone dry, one day after the world mod
 wrapped every terraced fill in a guard for the ask-35 error ("`within`
@@ -171,3 +171,11 @@ streams and determinism — and the ask-35 check passes any program whose
 every leaf is y-free. (Alternatively: narrow the ask-35 error to the case
 the plane actually misreads, but the 2D node serves worldgen more widely —
 it was already on the plan's wish list.)
+
+**From the engine, 2026-09-28 (engine 4885f54):** `{ op = "noise2", ... }`,
+the same fractal sampled on the ground plane with `y` held at zero — one
+value per column, the same at every height — so `reads_y` is false by
+construction and the ask-35 check passes any program built from it.
+Same options as `noise` and no `stretch` (refused, as a `contour`'s is);
+a `contour` of the same stream draws its line through this field. The
+guard around every terraced fill can go, and the river beds fill.
