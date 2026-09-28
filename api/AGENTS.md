@@ -165,11 +165,19 @@ cancelled dig. Picking fruit, opening a door, pulling a lever: the event has the
 cell, what it is made of and what is in the hand, `game.get_block` works inside
 it, and returning `""` says you handled it. Return `nil` for blocks that are not
 yours, so the next mod — and in the end the engine's own "nothing selected"
-warning — gets its turn. **Right-clicking at nothing** (open sky, or past
-reach) is a use too, heard only by a callback registered with
-`{ anywhere = true }`: it comes with no cell — `e.x` and `e.material` nil — and
-`e.held` as ever, which is how a meal is eaten wherever the player looks. A
-callback that did not ask never sees a use without a cell.
+warning — gets its turn. **A callback registered with `materials = { "campfire_lit",
+... }` is asked first, and only, at those blocks**, ahead of every callback with
+no list — a fire's own mod hears the use before a mod that eats whatever is
+held. `register_on_use` may be called twice per mod, once with `materials` and
+once without: each is its own slot, so a mod can both claim its own blocks and
+still be heard, in its ordinary load-order place, at every block it cannot
+name. **Right-clicking at nothing** (open sky, or past reach) is a use too,
+heard only by a callback registered with `{ anywhere = true }` — the UNLISTED
+one; a listed callback can never be asked about a use with no block, so
+`anywhere` on one is refused at load: it comes with no cell — `e.x` and
+`e.material` nil — and `e.held` as ever, which is how a meal is eaten wherever
+the player looks. A callback that did not ask never sees a use without a
+cell.
 **Right-clicking an entity is `register_on_use_entity`**: the server casts
 the ray, a creature nearer than any block is the target, the event carries it
 with its owner and the hand, and a use nobody handles falls through to the
@@ -941,8 +949,10 @@ end)
 - **They work while a player has it open.** An open container lives in that
   player's own inventory, and the engine writes into the slots they are looking
   at, so a machine does not stop while its owner watches it.
-- **One callback per hook per mod.** Two `register_on_tick` calls is an error,
-  not a merge — put your machines in one tick function.
+- **One callback per hook per mod — `on_use` is the exception.** Two
+  `register_on_tick` calls is an error, not a merge — put your machines in
+  one tick function. `register_on_use` alone takes two: once with
+  `materials`, once without (see "Right-clicking a block", above).
 
 ---
 

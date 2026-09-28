@@ -66,7 +66,9 @@ const HOOK_DIG_START: &str = "on_dig_start";
 /// Hook name used in registry keys and in fault messages.
 const HOOK_PLACE: &str = "on_place";
 
-/// Registry key holding the mods that registered `on_use`.
+/// Registry key holding the mods whose UNLISTED `on_use` is registered — the
+/// slot with no `materials`. A mod that registered only a listed callback is
+/// not on this list; it is on [`USERS_SCOPED`] instead (Craft ask 10).
 const USERS: &str = "tiamat.users";
 
 /// Registry key holding the mods whose `on_use` also hears a use at NOTHING:

@@ -912,13 +912,23 @@ fn write_use_slots_fixture(name: &str) -> PathBuf {
     .expect("life manifest");
     std::fs::write(
         life.join("init.lua"),
-        // Eats whatever is held, at any block or at nothing. The bot in
-        // this test never holds anything, so this never actually answers —
-        // it is here to be the earlier-loaded mod Craft's listed slot must
-        // still be asked ahead of, and whose unlisted slot must still be
-        // asked ahead of Craft's own unlisted one off the listed block.
+        // Eats whatever is held, at any block or at nothing — the bot in
+        // this test never holds anything, so `'ate'` never actually answers.
+        // At the campfire specifically, an empty hand answers `'watched'`
+        // instead of declining outright: Life loads before Craft and sits on
+        // the same unlisted list Craft's own unlisted handler does, so if
+        // ordering ever let an unlisted handler run ahead of a listed one,
+        // Life would answer here before Craft's listed handler got the
+        // chance to, and `'cooked'` below would never arrive — proving the
+        // listed slot really is asked first, not just that both slots are
+        // reachable. `game.get_block_id` is called from inside the callback,
+        // not at the top of this file: Craft has not registered its blocks
+        // yet when Life's init.lua runs (Craft depends on Life, so Life
+        // loads first), only by the time a use reaches the callback, after
+        // every mod has.
         "game.register_on_use(function(e)\n\
          \x20   if e.held then return 'ate' end\n\
+         \x20   if e.material == game.get_block_id('craft:campfire') then return 'watched' end\n\
          end, { anywhere = true })\n",
     )
     .expect("life script");
@@ -992,12 +1002,21 @@ fn a_use_reaches_a_mods_listed_handler_first_and_its_unlisted_one_elsewhere() {
         }
 
         // The listed block: Craft's listed handler answers, ahead of
-        // Life — loaded first — and of Craft's own unlisted handler.
+        // Life — loaded first — and of Craft's own unlisted handler. If
+        // Life's empty-hand `'watched'` ever won the race instead, the walk
+        // would have stopped there and `'cooked'` would never show up: that
+        // is what proves the listed slot is really asked first, not merely
+        // that it is reachable at all.
         bot.use_block(centre_of(fire_pos)).await.expect("send");
         wait_for(&mut bot, "cooked").await;
         assert!(
             told(&bot, "cooked"),
             "the listed handler did not answer for its own block; notices {:?}",
+            bot.notices()
+        );
+        assert!(
+            !told(&bot, "watched"),
+            "Life's unlisted handler answered ahead of Craft's listed one; notices {:?}",
             bot.notices()
         );
 
