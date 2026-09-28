@@ -3007,6 +3007,20 @@ impl Renderer {
         self.hands.draw(&mut pass);
     }
 
+    /// The deck's own passes, before the world pass that lifts it into place.
+    ///
+    /// Three of them, in this order: the deck from below, for the terrain to
+    /// shade by (ask W11); which of the deck's cells hold cloud, for the march
+    /// to skip the clear ones (ask W27); and the deck itself, smaller than the
+    /// frame when the quality says so (ask W15). Their own function because
+    /// `render` is at clippy's line ceiling, and the deck is the one thing in
+    /// the frame that draws itself more than once.
+    fn render_cloud_passes(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        self.clouds.render_shadow(encoder);
+        self.clouds.render_occupancy(encoder);
+        self.clouds.render_half(encoder);
+    }
+
     /// Renders one frame into `target`.
     ///
     /// `size` is the target's dimensions; the depth buffer is rebuilt when they
@@ -3080,13 +3094,7 @@ impl Renderer {
             });
 
         self.fill_cascades(&mut encoder, &culled);
-        // The deck from below, for the terrain to shade by — ask W11.
-        self.clouds.render_shadow(&mut encoder);
-        // Which of the deck's cells hold cloud, for the march — ask W27.
-        self.clouds.render_occupancy(&mut encoder);
-        // And the deck itself, smaller than the frame when the quality says
-        // so, for the world pass to lift into place — ask W15.
-        self.clouds.render_half(&mut encoder);
+        self.render_cloud_passes(&mut encoder);
 
         let pass_targets = self.world_pass_target(target);
 
