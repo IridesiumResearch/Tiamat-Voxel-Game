@@ -15,6 +15,31 @@ removed when they land.
 Open: W25 to W27, filed 2026-09-25. W24 landed 2026-09-26, W19 to W23
 2026-09-24, W17 and W18 the day before, below.
 
+## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28)
+
+**Seen.** The designer: "lightning strikes and weather should not affect the
+underground". Rain, the storm's sky and its loop are already per player and
+go quiet under a roof (`set_precipitation`, `set_sky_modifier`,
+`play_loop{ player }`). Lightning is not: `game.flash` is sent to everybody
+within `radius`, and so is `game.play_sound`. So a player in a cave under a
+storm hears every clap overhead, positioned and unoccluded, and the flash
+leans the sky colour, and with it the fog down the tunnel.
+
+**What weather does meanwhile.** A bolt lands only on ground under open sky
+(it used to look for ground from 64 blocks over the player, which in a deep
+cave was inside the rock), and a bolt that no player under open sky is near
+enough to see is neither flashed nor sounded. That silences a player alone
+underground, but not one underground beside a friend at the cave mouth.
+
+**Ask.** `player` on `game.flash` and `game.play_sound`, as
+`emit_particles` and `play_loop` already have: the mod then sends each
+strike to the players who are out under the sky, which it already knows.
+(An engine-side rule — "only players whose head has sun" — would also do,
+but the mod's canopy and shaft rules would not be in it, so `player` is
+the smaller and more useful change.) Gate: two players 20 blocks apart, one
+in the open and one under a roof, a flash and a sound addressed to the
+first: the second's client receives neither.
+
 ## W27. The deck still lags; the mod is out of knobs (2026-09-25)
 
 **Seen.** The designer, on the default rung: the clouds are "a bit too
