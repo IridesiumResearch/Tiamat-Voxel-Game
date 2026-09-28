@@ -647,7 +647,7 @@ fn paint(
         egui::vec2(laid.rect.w as f32, laid.rect.h as f32),
     );
     paint_background(ui, rect, &node.style, look);
-    paint_widget(ui, rect, node, form, local, views, icons, look, raised);
+    let widget_claimed = paint_widget(ui, rect, node, form, local, views, icons, look, raised);
 
     // **A scroll box clips its children and moves them under the clip.**
     // `core::ui` already lays them out at their full height inside it — "the
@@ -670,8 +670,10 @@ fn paint(
 
     // **Children first, so a descendant's tooltip can be told from ours.** The
     // fold, not a short-circuiting `any`: every child still has to be painted
-    // even after one of them claims the tooltip.
-    let mut claimed_by_child = false;
+    // even after one of them claims the tooltip. Seeded with `widget_claimed`
+    // so this node's OWN built-in hover text (an item slot's name) counts the
+    // same as a child's: a container tooltip must not paint over it either.
+    let mut claimed_by_child = widget_claimed;
     for (child, child_laid) in tree.children_of(index).zip(&laid.children) {
         let child_claimed = paint(
             ui,
@@ -820,6 +822,11 @@ impl Paint<'_> {
     clippy::too_many_arguments,
     reason = "the dispatcher carries what every widget painter might need"
 )]
+/// Returns whether this widget painted a hover text of its own this frame —
+/// currently only an item slot's stack name (see [`paint_slot`]). UI ask 15's
+/// "a child's tooltip wins" applies to this built-in hint too: [`paint`] ORs
+/// it into `claimed_by_child` so a `tooltip` on this node or a container
+/// around it never paints over a slot's own name.
 fn paint_widget(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -830,7 +837,7 @@ fn paint_widget(
     icons: Icons<'_>,
     look: Look<'_>,
     raised: &mut Vec<Raised>,
-) {
+) -> bool {
     let paint = Paint {
         form,
         icons,
@@ -857,30 +864,41 @@ fn paint_widget(
                 paint.font.clone(),
                 paint.colour,
             );
+            false
         }
-        Widget::Button { text } => paint_button(ui, rect, node, text, &paint, raised),
+        Widget::Button { text } => {
+            paint_button(ui, rect, node, text, &paint, raised);
+            false
+        }
         Widget::Checkbox { text, checked } => {
             paint_checkbox(ui, rect, node, text, *checked, &paint, local, raised);
+            false
         }
         Widget::Slider { min, max, value } => {
             paint_slider(ui, rect, node, (*min, *max, *value), &paint, local, raised);
+            false
         }
         Widget::Dropdown { options, selected } => {
             paint_dropdown(ui, rect, node, options, *selected, &paint, local, raised);
+            false
         }
         Widget::TextInput {
             initial,
             placeholder,
-        } => paint_text_input(ui, rect, node, initial, placeholder, &paint, local, raised),
+        } => {
+            paint_text_input(ui, rect, node, initial, placeholder, &paint, local, raised);
+            false
+        }
         Widget::Progress { permille } => {
             ui.painter().rect_filled(rect, 2.0, paint.fill(40));
             let mut bar = rect;
             bar.set_width(rect.width() * f32::from(*permille) / 1000.0);
             ui.painter()
                 .rect_filled(bar, 2.0, egui::Color32::from_rgb(90, 160, 90));
+            false
         }
         Widget::ItemSlot { view, index } => {
-            paint_slot(ui, rect, view, *index, form, views, &paint, raised);
+            paint_slot(ui, rect, view, *index, form, views, &paint, raised)
         }
         Widget::ItemGrid {
             view,
@@ -899,6 +917,7 @@ fn paint_widget(
         ),
         Widget::ShapeEditor { shape, material } => {
             paint_shape_editor(ui, rect, node, (*shape, *material), &paint, local, raised);
+            false
         }
         // **A picture, if its bytes have arrived.** Nothing until they do,
         // rather than a placeholder: art landing a few frames after the dialog
@@ -909,9 +928,10 @@ fn paint_widget(
             if let Some(picture) = look.art.get(hash) {
                 crate::pictures::paint(ui.painter(), picture.texture, rect);
             }
+            false
         }
         // Drawn by their children, or by nothing at all.
-        Widget::Container { .. } | Widget::Scroll | Widget::Spacer => {}
+        Widget::Container { .. } | Widget::Scroll | Widget::Spacer => false,
     }
 }
 
@@ -1502,6 +1522,9 @@ fn paint_text_input(
     clippy::too_many_arguments,
     reason = "a widget painter takes its widget, its box, and where events go"
 )]
+/// Returns whether any slot in the grid painted its own hover text this
+/// frame — folded rather than short-circuited, since every slot still has to
+/// be painted regardless of what an earlier one showed. See [`paint_slot`].
 fn paint_grid(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1511,9 +1534,10 @@ fn paint_grid(
     views: &BTreeMap<String, ViewContents>,
     paint: &Paint,
     raised: &mut Vec<Raised>,
-) {
+) -> bool {
     let (columns, first, count) = shape;
     let columns = i32::from(columns.max(1));
+    let mut showed_own_hover = false;
     for offset in 0..i32::from(count) {
         let (row, column) = (offset.div_euclid(columns), offset.rem_euclid(columns));
         let slot = egui::Rect::from_min_size(
@@ -1521,8 +1545,9 @@ fn paint_grid(
             egui::vec2(SLOT as f32, SLOT as f32),
         );
         let index = first.saturating_add(u16::try_from(offset).unwrap_or(0));
-        paint_slot(ui, slot, view, index, form, views, paint, raised);
+        showed_own_hover |= paint_slot(ui, slot, view, index, form, views, paint, raised);
     }
+    showed_own_hover
 }
 
 /// One inventory slot, and the click it reports.
@@ -1532,6 +1557,11 @@ fn paint_grid(
 /// [`tiamat_core::proto::DialogEvent::Clicked`]. What it DRAWS is likewise the
 /// server's last word: this never edits a slot locally, so a client that lied
 /// about a click still sees the truth a moment later.
+///
+/// Returns whether it painted its own hover text (the stack's name) this
+/// frame — UI ask 15's "a child's tooltip wins" applies just as much to this
+/// built-in hint as to a mod's `tooltip` field: a container tooltipped around
+/// a filled slot must not paint over the slot's own name.
 #[expect(
     clippy::too_many_arguments,
     reason = "a widget painter takes its widget, its box, and where events go"
@@ -1545,7 +1575,8 @@ fn paint_slot(
     views: &BTreeMap<String, ViewContents>,
     paint: &Paint,
     raised: &mut Vec<Raised>,
-) {
+) -> bool {
+    let mut showed_own_hover = false;
     let inner = rect.shrink(2.0);
     let mut response = ui.allocate_rect(inner, egui::Sense::click());
     ui.painter().rect_filled(inner, 2.0, paint.fill(52));
@@ -1583,6 +1614,7 @@ fn paint_slot(
         if let Some(name) = paint.icons.name_of(material) {
             let (blocks, spares) = tiamat_core::inventory::display(units);
             response = response.on_hover_text(format!("{name}\n{blocks} blocks + {spares} nodes"));
+            showed_own_hover = true;
         }
     }
 
@@ -1604,6 +1636,7 @@ fn paint_slot(
             },
         });
     }
+    showed_own_hover
 }
 
 #[cfg(test)]
@@ -1781,6 +1814,20 @@ mod tests {
     /// `RawInput::events` is the frame that would show the tooltip on a real
     /// client too, once the mouse had actually rested.
     fn paint_at(tree: &Tree, size: (i32, i32), pointer: egui::Pos2) -> String {
+        paint_at_with(tree, size, pointer, &BTreeMap::new(), Icons::default())
+    }
+
+    /// The same as [`paint_at`], but with the view contents and icon names a
+    /// test needs to reach an item slot's own hover text — [`Icons::default`]
+    /// answers `name_of` with `None` for everything, and `paint_slot` never
+    /// shows its hint without a name.
+    fn paint_at_with(
+        tree: &Tree,
+        size: (i32, i32),
+        pointer: egui::Pos2,
+        views: &BTreeMap<String, ViewContents>,
+        icons: Icons<'_>,
+    ) -> String {
         let ctx = egui::Context::default();
         crate::app::install_fonts(&ctx);
         ctx.all_styles_mut(|style| {
@@ -1794,7 +1841,6 @@ mod tests {
             fonts: &fonts,
         };
         let ruler = EguiRuler { ctx: &ctx, look };
-        let views = BTreeMap::new();
         let mut local = Local::default();
         let mut raised = Vec::new();
         let raw = || egui::RawInput {
@@ -1814,8 +1860,8 @@ mod tests {
                     &ruler,
                     "mod:screen",
                     &mut local,
-                    &views,
-                    Icons::default(),
+                    views,
+                    icons,
                     look,
                     raised,
                 );
@@ -1905,6 +1951,66 @@ mod tests {
         assert!(
             !painted.contains("outer"),
             "the container's tooltip painted over its child's: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_filled_slots_own_hover_text_wins_over_its_containers_tooltip() {
+        // The child-wins rule is not only about a mod's own `tooltip` field —
+        // `paint_slot` already shows the stack's name on hover, and a
+        // container tooltipped around a filled slot must defer to that the
+        // same way it defers to a child's `tooltip`. A container with the
+        // same rectangle as its one child, as in
+        // `a_childs_tooltip_wins_over_its_containers`, so the rectangles alone
+        // cannot answer which one the pointer is over.
+        let tree = Build::of(
+            Node {
+                tooltip: Some("outer".to_owned()),
+                ..Node::new(Widget::Container {
+                    direction: Direction::Column,
+                    gap: 0,
+                    padding: 0,
+                    align: Align::Stretch,
+                })
+            },
+            vec![Build::of(
+                Node {
+                    size: Some(40),
+                    ..Node::new(Widget::ItemSlot {
+                        view: "player:main".to_owned(),
+                        index: 0,
+                    })
+                },
+                Vec::new(),
+            )],
+        )
+        .flatten();
+
+        let mut views = BTreeMap::new();
+        views.insert(
+            "player:main".to_owned(),
+            ViewContents {
+                slots: vec![Some(tiamat_core::proto::StackDef {
+                    material: 7,
+                    units: 27,
+                    shape: 0,
+                    detail: None,
+                })],
+                held: None,
+            },
+        );
+        let mut names = std::collections::BTreeMap::new();
+        names.insert(7u16, "Cobblestone".to_owned());
+        let icons = Icons::default().with_names(&names);
+
+        let painted = paint_at_with(&tree, (100, 40), egui::pos2(50.0, 20.0), &views, icons);
+        assert!(
+            painted.contains("Cobblestone"),
+            "the slot's own hover text did not paint: {painted:?}"
+        );
+        assert!(
+            !painted.contains("outer"),
+            "the container's tooltip painted over the slot's own hover text: {painted:?}"
         );
     }
 
