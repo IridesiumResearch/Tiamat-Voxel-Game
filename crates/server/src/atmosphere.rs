@@ -50,6 +50,11 @@ impl tiamat_core::atmosphere::Access for Shared {
             if player.domain != request.domain {
                 continue;
             }
+            // Addressed to one player: everyone else is skipped, and that
+            // one still has to be in range (W28).
+            if request.player.is_some_and(|only| only != *uuid) {
+                continue;
+            }
             let at =
                 tiamat_core::ent::Transform::at(player.origin, player.body.position).to_world();
             let offset = [

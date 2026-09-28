@@ -926,6 +926,24 @@ pub struct JoinEvent {
     pub name: String,
 }
 
+/// A player's feet crossed into another block (Progress ask 3).
+///
+/// Fired from the tick after the body has moved, once per block crossed —
+/// not per tick, and not per cell. `from` is `None` the first time a player
+/// is placed, which is the tick after they join. An observation: the return
+/// value is read for faults and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveEvent {
+    /// Who moved, canonically.
+    pub player: [u8; 32],
+    /// The space they are in.
+    pub domain: String,
+    /// The block their feet are in now.
+    pub block: BlockPos,
+    /// The block they were in, if they have been anywhere yet.
+    pub from: Option<BlockPos>,
+}
+
 /// One block the engine chose to offer a mod this tick.
 ///
 /// **The mechanism behind everything that happens on its own**: a crop
@@ -1570,6 +1588,13 @@ pub trait ScriptVm: Sized {
     /// not a mod's decision to make here: an allowlist is charter rule 13's
     /// business and happens long before a body exists.
     fn player_join(&mut self, event: &JoinEvent) -> HookOutcome;
+
+    /// Tells the mods a player's feet crossed into another block.
+    ///
+    /// Progress ask 3: a biome or a depth is discovered by being there, and
+    /// until this a mod polled every player round-robin whether anybody had
+    /// moved or not. The engine knows the moment it happens.
+    fn player_move(&mut self, event: &MoveEvent) -> HookOutcome;
 
     /// Runs every `on_player_leave` hook.
     fn player_leave(&mut self, event: &LeaveEvent) -> HookOutcome;

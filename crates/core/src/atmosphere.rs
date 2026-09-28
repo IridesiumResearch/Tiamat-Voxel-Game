@@ -156,6 +156,13 @@ pub struct FlashRequest {
     pub domain: String,
     /// How far it is seen from.
     pub radius: f32,
+    /// One player to send it to, or `None` for everyone in range.
+    ///
+    /// Weather ask W28: a player in a cave under a storm saw every flash
+    /// lean the sky down the tunnel. Narrows, never widens — the domain and
+    /// the radius still apply — so the mod, which knows who is under open
+    /// sky, sends each strike to them alone, as `emit_particles` does.
+    pub player: Option<crate::identity::PlayerUuid>,
 }
 
 /// Clamps a flash request's numbers into range.
@@ -816,6 +823,7 @@ mod tests {
     #[test]
     fn a_flash_is_clamped_into_the_same_ranges_it_is_checked_against() {
         let wild = FlashRequest {
+            player: None,
             flash: Flash {
                 intensity: 40.0,
                 colour: [f32::NAN, 3.0, 0.5],

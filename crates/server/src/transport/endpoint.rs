@@ -569,6 +569,9 @@ pub struct PlayerSim {
     ///
     /// See `ent::Entity::submerged`.
     pub submerged: f32,
+    /// The block the feet were in when the tick last looked, for
+    /// `on_player_move` (Progress ask 3). `None` until the first tick.
+    pub stood_in: Option<tiamat_core::BlockPos>,
     /// What a mod has granted this player, or `None` for nothing said.
     ///
     /// Life asks 1 and 9. `None` rather than `Abilities::DEFAULT` so that
@@ -642,6 +645,7 @@ impl PlayerSim {
             falling: 0.0,
             fell: 0.0,
             submerged: 0.0,
+            stood_in: None,
             granted: None,
             abilities_sent: false,
             look: [0.0; 2],
@@ -1998,6 +2002,17 @@ impl Shared {
             reply,
         });
         Some(receiver)
+    }
+
+    /// How many chunk requests are waiting for the tick to serve them.
+    ///
+    /// The backlog the generation-lag line reports (World ask 40): a request
+    /// sits here until the tick takes it, and the tick hands the workers only
+    /// as many as the pool holds, so this is where a queue forms when they
+    /// cannot keep up.
+    #[must_use]
+    pub fn queued_chunk_requests(&self) -> usize {
+        self.chunk_requests.lock().map_or(0, |queue| queue.len())
     }
 
     /// Takes up to [`CHUNKS_PER_TICK`] requests for the simulation to serve.

@@ -1216,15 +1216,60 @@ impl WorldDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Replaces everything one mod has stored.
+    /// Writes one mod's changed keys: an upsert for each value, a delete for
+    /// each `None`, in one transaction.
     ///
-    /// Replace rather than merge, for the reason a chunk's entities are
-    /// replaced: the caller holds the whole bag in memory and a merge would
-    /// leave a deleted key behind for ever.
+    /// **Only what moved** (Progress ask 2). The whole-bag write below
+    /// deleted and rewrote every row a mod had whenever one key changed,
+    /// which for a mod keeping a key per player per fact was ten thousand
+    /// rows every two seconds.
     ///
     /// # Errors
     ///
-    /// [`WorldError`] on a SQL failure or an unencodable value.
+    /// [`WorldError`] if a value cannot be encoded or the write fails; the
+    /// transaction rolls back and the caller keeps the changes dirty.
+    pub fn save_mod_storage_changes(
+        &self,
+        mod_id: &str,
+        changes: &[(String, Option<crate::storage::Value>)],
+    ) -> Result<(), WorldError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        {
+            let mut upsert = transaction.prepare(
+                "INSERT OR REPLACE INTO mod_storage (mod_id, key, value) VALUES (?1, ?2, ?3)",
+            )?;
+            let mut delete =
+                transaction.prepare("DELETE FROM mod_storage WHERE mod_id = ?1 AND key = ?2")?;
+            for (key, value) in changes {
+                match value {
+                    Some(value) => {
+                        let blob = postcard::to_allocvec(value).map_err(|source| {
+                            WorldError::ModStorage {
+                                mod_id: mod_id.to_owned(),
+                                key: key.clone(),
+                                reason: source.to_string(),
+                            }
+                        })?;
+                        upsert.execute(params![mod_id, key, blob])?;
+                    }
+                    None => {
+                        delete.execute(params![mod_id, key])?;
+                    }
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Replaces everything one mod has stored with `bag`.
+    ///
+    /// The whole-bag write; the tick's debounce uses
+    /// [`Self::save_mod_storage_changes`] and writes only what moved.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError`] if a value cannot be encoded or the write fails.
     pub fn save_mod_storage(
         &self,
         mod_id: &str,

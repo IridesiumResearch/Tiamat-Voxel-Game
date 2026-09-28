@@ -32,6 +32,16 @@ const UNDER_SPAWN: ChunkPos = ChunkPos::new(0, -1, 0);
 /// The mob's nametag, which is how the bot tells it from a player mirror.
 const KEEPER: &str = "keeper";
 
+/// How long to wait for a chunk or a mob to arrive over loopback.
+///
+/// Generous, because a shared CI runner is not this machine: the macOS leg
+/// went red on a deadline a third of this while every leg passed locally.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// How long an empty server may take to unload everything: the save
+/// debounce (two seconds) writes what is dirty, the next sweep takes it.
+const DRAIN: Duration = Duration::from_secs(45);
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("tiamat-unload").join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -162,11 +172,11 @@ fn chunks_nobody_is_near_leave_memory_and_come_back_whole() {
     block_on(async {
         let mut bot = join(&server, "First").await;
         assert!(
-            sees_keeper(&mut bot, Duration::from_secs(10)).await,
+            sees_keeper(&mut bot, PATIENCE).await,
             "the keeper never appeared beside the first player"
         );
         assert!(
-            holds_ground(&mut bot, Duration::from_secs(10)).await,
+            holds_ground(&mut bot, PATIENCE).await,
             "the ground under spawn never arrived"
         );
         assert!(
@@ -183,7 +193,7 @@ fn chunks_nobody_is_near_leave_memory_and_come_back_whole() {
         // With nobody connected, nothing is near anybody. Every chunk goes:
         // the clean ones on the first sweep, the ones with unsaved edits once
         // the debounce has written them.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + DRAIN;
         while control.resident_chunks() > 0 {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -199,11 +209,11 @@ fn chunks_nobody_is_near_leave_memory_and_come_back_whole() {
         // one — the mod spawns once.
         let mut again = join(&server, "Second").await;
         assert!(
-            holds_ground(&mut again, Duration::from_secs(10)).await,
+            holds_ground(&mut again, PATIENCE).await,
             "the ground did not come back from the database"
         );
         assert!(
-            sees_keeper(&mut again, Duration::from_secs(10)).await,
+            sees_keeper(&mut again, PATIENCE).await,
             "the keeper was lost with its chunk: frozen and never thawed, or never written"
         );
     });

@@ -116,6 +116,11 @@ pub struct PlayRequest {
     pub gain: f32,
     /// An entity to follow, if this sound should move.
     pub entity: Option<u64>,
+    /// One player to send it to, or `None` for everyone in earshot.
+    ///
+    /// Weather ask W28: thunder was heard in every cave under the storm.
+    /// Narrows, never widens — the radius still applies.
+    pub player: Option<crate::identity::PlayerUuid>,
 }
 
 /// A looping sound, and where it is heard.
@@ -308,6 +313,7 @@ mod tests {
             radius: 16.0,
             gain: 1.0,
             entity: None,
+            player: None,
         }
     }
 

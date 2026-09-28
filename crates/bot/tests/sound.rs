@@ -76,6 +76,50 @@ fn write_noisemaker(root: &std::path::Path) -> PathBuf {
     mods
 }
 
+/// A mod that plays a sound beside spawn for each player who joins, to that
+/// player alone (W28).
+fn write_whisperer(root: &std::path::Path) -> PathBuf {
+    let mods = root.join("mods");
+    let dir = mods.join("noise");
+    std::fs::create_dir_all(dir.join("sounds")).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"noise\"\nname = \"Noise\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(dir.join("sounds/thud.ogg"), b"not really an ogg").expect("sound file");
+    std::fs::write(
+        dir.join("init.lua"),
+        "game.register_sound{ id = \"near\", file = \"sounds/thud.ogg\" }\n\
+         game.register_on_player_join(function(event)\n\
+         \x20   game.play_sound{ sound = \"near\", pos = { x = 0, y = 0, z = 0 }, radius = 512, player = event.player }\n\
+         end)\n",
+    )
+    .expect("init.lua");
+    mods
+}
+
+fn start_whispering(name: &str) -> ServerHandle {
+    let root = scratch(name);
+    let mods = write_whisperer(&root);
+    ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: root,
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods),
+        enabled_mods: None,
+        seed: Some(3),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start")
+}
+
 fn start(name: &str) -> ServerHandle {
     let root = scratch(name);
     let mods = write_noisemaker(&root);
@@ -123,6 +167,44 @@ async fn pump(bot: &mut Bot, ticks: u32) {
     for _ in 0..ticks {
         let _ = tokio::time::timeout(Duration::from_millis(50), bot.recv()).await;
     }
+}
+
+#[test]
+fn a_sound_addressed_to_one_player_reaches_nobody_else() {
+    // Weather ask W28: thunder kept out of a cave. Both players are in
+    // earshot of every clap; each is addressed to one of them.
+    let server = start_whispering("whisper");
+    block_on(async {
+        let mut first = join_at(&server, "First", 1.0, 1.0).await;
+        pump(&mut first, 40).await;
+        let heard = |bot: &Bot| {
+            bot.sounds_heard()
+                .iter()
+                .filter(|(sound, _)| sound == "noise:near")
+                .count()
+        };
+        assert_eq!(
+            heard(&first),
+            1,
+            "the sound addressed to the first: {:?}",
+            first.sounds_heard()
+        );
+
+        let mut second = join_at(&server, "Second", 2.0, 2.0).await;
+        pump(&mut second, 40).await;
+        pump(&mut first, 20).await;
+        assert_eq!(heard(&second), 1, "the sound addressed to the second");
+        assert_eq!(
+            heard(&first),
+            1,
+            "a sound addressed to the second player reached the first: {:?}",
+            first.sounds_heard()
+        );
+
+        first.disconnect().await;
+        second.disconnect().await;
+    });
+    server.stop();
 }
 
 #[test]

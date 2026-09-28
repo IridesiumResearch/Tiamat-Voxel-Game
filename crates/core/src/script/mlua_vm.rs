@@ -73,6 +73,10 @@ const USERS: &str = "tiamat.users";
 /// registered with `{ anywhere = true }`. A subset of [`USERS`] in the same
 /// order, so a use aimed at a block asks each of them once, in its place.
 const USERS_ANYWHERE: &str = "tiamat.users_anywhere";
+/// Mods whose `on_use` was registered for particular materials, in load
+/// order — asked before the rest for a use at one of their blocks, and not
+/// asked at all for a use at any other (Craft ask 8).
+const USERS_SCOPED: &str = "tiamat.users_scoped";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_USE: &str = "on_use";
@@ -193,6 +197,17 @@ const ENTITY_USERS: &str = "tiamat.entity_users";
 
 /// Registry key holding the mods that registered `on_player_join`.
 const JOINERS: &str = "tiamat.joiners";
+/// Mods that registered `on_player_move`, in load order.
+const MOVERS: &str = "tiamat.movers";
+
+/// How far a hook walk goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    /// A veto: the first refusal stops the rest.
+    UntilRefused,
+    /// An observation: every mod hears it, whatever any returns.
+    Everyone,
+}
 /// Registry key for the mods listening for a departure.
 const LEAVERS: &str = "tiamat.leavers";
 /// Mods with an `on_domain_exit` handler.
@@ -213,6 +228,7 @@ const RANDOM_TICK_OWNERS: &str = "tiamat.random_tick_owners";
 
 /// Hook name used in registry keys and in fault messages.
 const HOOK_JOIN: &str = "on_player_join";
+const HOOK_MOVE: &str = "on_player_move";
 /// The `on_player_leave` hook's name.
 const HOOK_LEAVE: &str = "on_player_leave";
 /// The hook asked before a body leaves a domain.
@@ -1680,7 +1696,25 @@ fn flash_request(spec: &Table) -> mlua::Result<crate::atmosphere::FlashRequest> 
         pos: [pos.get("x")?, pos.get("y")?, pos.get("z")?],
         domain: domain_of(&pos)?,
         radius: spec.get::<Option<f32>>("radius")?.unwrap_or(256.0),
+        player: player_field(spec, "flash")?,
     })
+}
+
+/// An optional `player` on a broadcast: a UUID in hex, or nothing.
+///
+/// A bad one is an error rather than a silent broadcast, for the reason
+/// `emit_particles` gives: a mod that wrote `player = name` would otherwise
+/// reach everybody and never learn why.
+fn player_field(spec: &Table, call: &str) -> mlua::Result<Option<crate::identity::PlayerUuid>> {
+    spec.get::<Option<String>>("player")?
+        .map(|uuid| {
+            crate::identity::PlayerUuid::from_hex(&uuid).map_err(|_| {
+                mlua::Error::external(format!(
+                    "{call}: `player` is a player's UUID in hex, not `{uuid}`"
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// A sky modifier from a mod's table. See `install_atmosphere`.
@@ -2527,6 +2561,7 @@ impl ScriptVm for MluaVm {
             .set_named_registry_value("tiamat.frozen", true)
             .map_err(|err| self.vm_error(&err))?;
         self.frozen = true;
+        self.warn_of_dead_use_materials();
         Ok(())
     }
 
@@ -3200,12 +3235,26 @@ impl ScriptVm for MluaVm {
             // could not build the question.
             return HookOutcome::allow();
         };
-        let asked = if event.aim.is_some() {
-            USERS
-        } else {
-            USERS_ANYWHERE
+        let Some(aim) = &event.aim else {
+            // No block, so no block's handler: the mods that asked to hear a
+            // use at nothing, in load order.
+            return self.run_hook(HOOK_USE, USERS_ANYWHERE, &table);
         };
-        self.run_hook(HOOK_USE, asked, &table)
+        // **The block that was clicked answers first** (Craft ask 8). The
+        // handlers registered for this material, in load order among
+        // themselves; then the handlers registered for no material in
+        // particular. A handler with a list is never asked about a block off
+        // it. Without this a mod that eats whatever is held, loaded first,
+        // ate the meat a player held out over a campfire owned by a mod
+        // loaded after it, and no load order could be right for both.
+        let mods = match self.use_order(aim.material.0) {
+            Ok(mods) => mods,
+            Err(err) => {
+                tracing::error!(error = %err, "could not order the on_use handlers; the use is unhandled");
+                return HookOutcome::allow();
+            }
+        };
+        self.run_hook_over(HOOK_USE, mods, &table, Walk::UntilRefused)
     }
 
     fn use_entity(&mut self, event: &crate::script::UseEntityEvent) -> HookOutcome {
@@ -3260,6 +3309,28 @@ impl ScriptVm for MluaVm {
             return HookOutcome::allow();
         };
         self.run_hook(HOOK_JOIN, JOINERS, &table)
+    }
+
+    fn player_move(&mut self, event: &crate::script::MoveEvent) -> HookOutcome {
+        let Ok(table) = self.hook_event(event.player).and_then(|table| {
+            table.set("x", event.block.x)?;
+            table.set("y", event.block.y)?;
+            table.set("z", event.block.z)?;
+            table.set("domain", event.domain.as_str())?;
+            // Absent rather than a table of nils the first time, so
+            // `if e.from then` is the test.
+            if let Some(from) = event.from {
+                let was = self.lua.create_table()?;
+                was.set("x", from.x)?;
+                was.set("y", from.y)?;
+                was.set("z", from.z)?;
+                table.set("from", was)?;
+            }
+            Ok(table)
+        }) else {
+            return HookOutcome::allow();
+        };
+        self.observe_hook(HOOK_MOVE, MOVERS, &table)
     }
 
     fn player_leave(&mut self, event: &crate::script::LeaveEvent) -> HookOutcome {
@@ -4135,6 +4206,11 @@ impl MluaVm {
         )
         .map_err(|err| self.vm_error(&err))?;
         game.set(
+            "register_on_player_move",
+            self.hook_registrar(mod_id, HOOK_MOVE, MOVERS)?,
+        )
+        .map_err(|err| self.vm_error(&err))?;
+        game.set(
             "register_on_player_join",
             self.hook_registrar(mod_id, HOOK_JOIN, JOINERS)?,
         )
@@ -4278,6 +4354,7 @@ impl MluaVm {
                 }
                 // The options, checked before anything is written.
                 let mut also = None;
+                let mut materials: Option<Table> = None;
                 if let Some(options) = options {
                     let Some((flag, list_for_flag)) = option else {
                         return Err(mlua::Error::external(format!(
@@ -4286,26 +4363,60 @@ impl MluaVm {
                     };
                     for pair in options.pairs::<Value, Value>() {
                         let (name, value) = pair?;
-                        let is_flag =
-                            matches!(&name, Value::String(name) if name.to_string_lossy() == flag);
-                        if !is_flag {
-                            let named = match &name {
-                                Value::String(name) => format!("`{}`", name.to_string_lossy()),
-                                other => format!("of type {}", other.type_name()),
-                            };
-                            return Err(mlua::Error::external(format!(
-                                "mod `{owner}`: `register_{hook}` has no option {named}"
-                            )));
-                        }
-                        match value {
-                            Value::Boolean(true) => also = Some(list_for_flag),
-                            Value::Boolean(false) => {}
+                        let named = match &name {
+                            Value::String(name) => name.to_string_lossy(),
                             other => {
                                 return Err(mlua::Error::external(format!(
-                                    "mod `{owner}`: `{flag}` is true or false, not {}",
+                                    "mod `{owner}`: `register_{hook}` has no option of type {}",
                                     other.type_name()
                                 )));
                             }
+                        };
+                        if named == flag {
+                            match value {
+                                Value::Boolean(true) => also = Some(list_for_flag),
+                                Value::Boolean(false) => {}
+                                other => {
+                                    return Err(mlua::Error::external(format!(
+                                        "mod `{owner}`: `{flag}` is true or false, not {}",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                        } else if hook == HOOK_USE && named == "materials" {
+                            // Craft ask 8: a handler for particular blocks,
+                            // asked before any handler without a list when
+                            // one of them is used, and for nothing else. The
+                            // ids are references, so another mod's block may
+                            // be named (as a drop may), bare ones are the
+                            // registrant's own.
+                            let Value::Table(list) = value else {
+                                return Err(mlua::Error::external(format!(
+                                    "mod `{owner}`: `materials` is a list of block ids, not {}",
+                                    value.type_name()
+                                )));
+                            };
+                            let scoped = lua.create_table()?;
+                            for id in list.sequence_values::<Value>() {
+                                let Value::String(id) = id? else {
+                                    return Err(mlua::Error::external(format!(
+                                        "mod `{owner}`: every entry of `materials` is a block id \
+                                         string"
+                                    )));
+                                };
+                                scoped.push(named_block(&owner, &id.to_string_lossy()))?;
+                            }
+                            if scoped.raw_len() == 0 {
+                                return Err(mlua::Error::external(format!(
+                                    "mod `{owner}`: `materials` names no blocks; leave it out to \
+                                     hear every use"
+                                )));
+                            }
+                            materials = Some(scoped);
+                        } else {
+                            return Err(mlua::Error::external(format!(
+                                "mod `{owner}`: `register_{hook}` has no option `{named}`"
+                            )));
                         }
                     }
                 }
@@ -4317,6 +4428,11 @@ impl MluaVm {
                 registered.push(owner.clone())?;
                 if let Some(also) = also {
                     let listed: Table = lua.named_registry_value(also)?;
+                    listed.push(owner.clone())?;
+                }
+                if let Some(materials) = materials {
+                    lua.set_named_registry_value(&Self::use_materials_key(&owner), materials)?;
+                    let listed: Table = lua.named_registry_value(USERS_SCOPED)?;
                     listed.push(owner.clone())?;
                 }
                 Ok(())
@@ -4386,6 +4502,7 @@ impl MluaVm {
                     radius: spec.get::<Option<f32>>("radius")?.unwrap_or(16.0),
                     gain: spec.get::<Option<f32>>("gain")?.unwrap_or(1.0),
                     entity: entity_id_in(&spec, "entity")?.map(|id| id.0),
+                    player: player_field(&spec, "play_sound")?,
                 });
                 // How many were told, which is the mod's only feedback — and
                 // deliberately not a promise anybody HEARD it.
@@ -4614,6 +4731,7 @@ impl MluaVm {
                     radius: spec.get::<Option<f32>>("radius")?.unwrap_or(16.0),
                     gain: spec.get::<Option<f32>>("gain")?.unwrap_or(1.0),
                     entity: entity_id_in(&spec, "entity")?.map(|id| id.0),
+                    player: player_field(&spec, "cue")?,
                 });
                 let told = slot
                     .lock()
@@ -4835,6 +4953,42 @@ impl MluaVm {
     /// — `inventory` answers empty, `give` is dropped and `take` takes nothing,
     /// because there is nobody carrying anything yet. Same rule as
     /// `game.set_tool`.
+    /// `game.slot(player, view, n)`: one slot of a view, one-based as a mod
+    /// counts (Craft ask 9).
+    ///
+    /// `game.held` is the main hand; the off-hand is slot 28 of
+    /// `player:main`, and a station worked in the world reads it here, takes
+    /// from it with `slot` and gives back into it.
+    fn install_slot_read(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.inventories);
+        let slot_of = self
+            .lua
+            .create_function(move |lua, (uuid, view, index): (String, String, usize)| {
+                let player = player_of(&uuid, "slot")?;
+                if index == 0 {
+                    return Err(mlua::Error::external(
+                        "game.slot: slots count from 1, as the screens number them",
+                    ));
+                }
+                let stack = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .map(|access| access.slot(player, &view, index - 1))
+                    })
+                    .flatten();
+                stack
+                    .as_ref()
+                    .map(|stack| stack_table(lua, stack))
+                    .transpose()
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("slot", slot_of)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     fn install_inventory(&self, game: &Table) -> Result<(), ScriptError> {
         let slot = std::sync::Arc::clone(&self.inventories);
         let read = self
@@ -4908,6 +5062,8 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("held", held).map_err(|err| self.vm_error(&err))?;
+
+        self.install_slot_read(game)?;
 
         let slot = std::sync::Arc::clone(&self.inventories);
         let take = self
@@ -7575,10 +7731,14 @@ impl MluaVm {
         let owner = mod_id.to_owned();
         let keys = self
             .lua
-            .create_function(move |lua, ()| {
+            .create_function(move |lua, prefix: Option<String>| {
                 let store = store!(slot, lua.create_table()?);
                 let out = lua.create_table()?;
-                for (index, key) in store.keys(&owner).into_iter().enumerate() {
+                // With a prefix, only the keys under it (Progress ask 1): a
+                // mod keeping one record per player under `uuid .. ":"` reads
+                // one player's on join rather than everybody's.
+                let prefix = prefix.unwrap_or_default();
+                for (index, key) in store.keys(&owner, &prefix).into_iter().enumerate() {
                     out.set(index + 1, key)?;
                 }
                 Ok(out)
@@ -8232,6 +8392,43 @@ impl MluaVm {
     ///
     /// Separate from `create` so the borrow checker is not asked to hold `self`
     /// across a Lua callback that also wants it.
+    /// Creates the list every `register_on_*` appends to.
+    fn install_hook_lists(&self) -> Result<(), ScriptError> {
+        // **Every list a `register_on_*` appends to.** A hook whose list is
+        // missing makes `hook_registrar` fail, which disables the mod at load
+        // with no clue as to why — which is exactly what `DIALOGISTS` did when
+        // it was added to the constants and forgotten here.
+        for list in [
+            DIGGERS,
+            DIG_STARTERS,
+            PLACERS,
+            USERS,
+            USERS_ANYWHERE,
+            USERS_SCOPED,
+            ENTITY_USERS,
+            PUNCHERS,
+            FLOWERS,
+            JOINERS,
+            MOVERS,
+            LEAVERS,
+            DOMAIN_EXITERS,
+            DOMAIN_ENTERERS,
+            ACTORS,
+            DIALOGISTS,
+            CHATTERS,
+            RANDOM_TICKS,
+            RANDOM_TICK_OWNERS,
+            CHUNK_TINTERS,
+            CHUNK_FOGGERS,
+        ] {
+            let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
+            self.lua
+                .set_named_registry_value(list, table)
+                .map_err(|err| self.vm_error(&err))?;
+        }
+        Ok(())
+    }
+
     fn install_registry(&mut self) -> Result<(), ScriptError> {
         let blocks = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
         let block_textures = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
@@ -8273,36 +8470,7 @@ impl MluaVm {
         self.lua
             .set_named_registry_value("tiamat.entity_steppers", steppers)
             .map_err(|err| self.vm_error(&err))?;
-        // **Every list a `register_on_*` appends to.** A hook whose list is
-        // missing makes `hook_registrar` fail, which disables the mod at load
-        // with no clue as to why — which is exactly what `DIALOGISTS` did when
-        // it was added to the constants and forgotten here.
-        for list in [
-            DIGGERS,
-            DIG_STARTERS,
-            PLACERS,
-            USERS,
-            USERS_ANYWHERE,
-            ENTITY_USERS,
-            PUNCHERS,
-            FLOWERS,
-            JOINERS,
-            LEAVERS,
-            DOMAIN_EXITERS,
-            DOMAIN_ENTERERS,
-            ACTORS,
-            DIALOGISTS,
-            CHATTERS,
-            RANDOM_TICKS,
-            RANDOM_TICK_OWNERS,
-            CHUNK_TINTERS,
-            CHUNK_FOGGERS,
-        ] {
-            let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
-            self.lua
-                .set_named_registry_value(list, table)
-                .map_err(|err| self.vm_error(&err))?;
-        }
+        self.install_hook_lists()?;
         self.lua
             .set_named_registry_value("tiamat.generators", generators)
             .map_err(|err| self.vm_error(&err))?;
@@ -8419,7 +8587,106 @@ impl MluaVm {
             .sequence_values::<String>()
             .filter_map(Result::ok)
             .collect();
+        self.run_hook_over(hook, mods, event, Walk::UntilRefused)
+    }
 
+    /// Runs an observation hook: every mod hears it, whatever any returns.
+    ///
+    /// `on_player_move` is told, not asked, so a callback returning `false`
+    /// must not stop the mods after it from hearing — which the veto walk
+    /// would do.
+    fn observe_hook(&mut self, hook: &str, list: &str, event: &Table) -> HookOutcome {
+        let Ok(registered) = self.lua.named_registry_value::<Table>(list) else {
+            return HookOutcome::allow();
+        };
+        let mods: Vec<String> = registered
+            .sequence_values::<String>()
+            .filter_map(Result::ok)
+            .collect();
+        self.run_hook_over(hook, mods, event, Walk::Everyone)
+    }
+
+    /// The mods to ask about a use at a block of `material`, in order: those
+    /// registered for it, then those registered for no material.
+    fn use_order(&self, material: u16) -> mlua::Result<Vec<String>> {
+        let name = block_name_of(&self.lua, material)?;
+        let scoped: Table = self.lua.named_registry_value(USERS_SCOPED)?;
+        let mut first = Vec::new();
+        let mut listed = std::collections::BTreeSet::new();
+        for mod_id in scoped.sequence_values::<String>() {
+            let mod_id = mod_id?;
+            listed.insert(mod_id.clone());
+            let Some(name) = name.as_deref() else {
+                continue;
+            };
+            let materials: Table = self
+                .lua
+                .named_registry_value(&Self::use_materials_key(&mod_id))?;
+            if materials
+                .sequence_values::<String>()
+                .filter_map(Result::ok)
+                .any(|id| id == name)
+            {
+                first.push(mod_id);
+            }
+        }
+        let everyone: Table = self.lua.named_registry_value(USERS)?;
+        for mod_id in everyone.sequence_values::<String>() {
+            let mod_id = mod_id?;
+            if !listed.contains(&mod_id) {
+                first.push(mod_id);
+            }
+        }
+        Ok(first)
+    }
+
+    /// Says which `materials` entries of an `on_use` name no block.
+    ///
+    /// Checked once every mod has registered, because the id may be another
+    /// mod's. A handler listed for a block nobody registered is never asked,
+    /// and a misspelling that made a handler silently dead is the kind of
+    /// bug a mod author would look for everywhere but here.
+    fn warn_of_dead_use_materials(&self) {
+        let blocks = self.block_ids();
+        let Ok(scoped) = self.lua.named_registry_value::<Table>(USERS_SCOPED) else {
+            return;
+        };
+        for mod_id in scoped.sequence_values::<String>().filter_map(Result::ok) {
+            let Ok(materials) = self
+                .lua
+                .named_registry_value::<Table>(&Self::use_materials_key(&mod_id))
+            else {
+                continue;
+            };
+            for block in materials.sequence_values::<String>().filter_map(Result::ok) {
+                if !blocks.contains_key(&block) {
+                    tracing::warn!(
+                        mod_id = %mod_id,
+                        block = %block,
+                        "`register_on_use` lists a block nobody registered; that entry is never asked"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The registry key holding a mod's `materials` list for `on_use`.
+    fn use_materials_key(mod_id: &str) -> String {
+        format!("tiamat.use_materials.{mod_id}")
+    }
+
+    /// Runs one hook over the given mods, in the given order.
+    ///
+    /// The walk behind [`Self::run_hook`], for a caller that has already
+    /// decided the order — `on_use`, which asks the clicked block's handlers
+    /// before the rest — or decided that nobody may stop it.
+    fn run_hook_over(
+        &mut self,
+        hook: &str,
+        mods: Vec<String>,
+        event: &Table,
+        walk: Walk,
+    ) -> HookOutcome {
         let mut outcome = HookOutcome::allow();
         for mod_id in mods {
             if self.is_faulted(&mod_id) {
@@ -8454,6 +8721,10 @@ impl MluaVm {
                     );
                     outcome.faults.push((mod_id, error));
                 }
+                // An observation has no veto: the answer is noted and the
+                // walk goes on.
+                Ok(mlua::Value::Boolean(false) | mlua::Value::String(_))
+                    if walk == Walk::Everyone => {}
                 Ok(mlua::Value::Boolean(false)) => {
                     outcome.allowed = false;
                     // Stop here: see the trait docs. A hook running after a
@@ -12127,6 +12398,45 @@ mod tests {
     }
 
     #[test]
+    fn a_flash_may_be_addressed_to_one_player() {
+        // Weather ask W28: a strike sent to the players under open sky and
+        // to nobody in a cave beside them. The UUID rides the request; who
+        // is skipped is the server's, tested there.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([0xAB; 32]);
+        load(
+            &mut host,
+            "storm",
+            &format!(
+                "game.flash{{ pos = {{ x = 0, y = 80, z = 0 }}, player = '{}' }}\n\
+                 game.flash{{ pos = {{ x = 0, y = 80, z = 0 }} }}",
+                uuid.to_hex()
+            ),
+        )
+        .expect("load");
+        let flashed = weather.flashed.lock().expect("lock").clone();
+        assert_eq!(flashed.len(), 2);
+        assert_eq!(flashed[0].player, Some(uuid));
+        assert_eq!(flashed[1].player, None, "no `player` is everybody in range");
+
+        // A `player` that is not a UUID is a mistake to hear about, not a
+        // silent broadcast.
+        let mut other = vm();
+        other.set_atmosphere_access(weather.clone());
+        assert!(
+            load(
+                &mut other,
+                "storm",
+                "game.flash{ pos = { x = 0, y = 80, z = 0 }, player = 'Ada' }",
+            )
+            .is_err(),
+            "a display name was taken for a UUID"
+        );
+    }
+
+    #[test]
     #[expect(
         clippy::float_cmp,
         reason = "the values asserted are set, not computed"
@@ -13520,6 +13830,172 @@ mod tests {
             .is_err(),
             "registering into another mod's namespace is still refused"
         );
+    }
+
+    #[test]
+    fn a_mod_hears_a_players_feet_cross_into_another_block() {
+        // Progress ask 3. The first time has no `from`; after that it is the
+        // block they came from, so a mod can tell arriving from standing.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "scout",
+            "game.register_on_player_move(function(e) seen = e end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let first = crate::script::MoveEvent {
+            player: [0xAB; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
+            block: crate::BlockPos::new(3, -4, 5),
+            from: None,
+        };
+        let outcome = vm.player_move(&first);
+        assert!(outcome.faults.is_empty());
+        vm.eval_in(
+            "scout",
+            &format!(
+                "assert(seen.x == 3 and seen.y == -4 and seen.z == 5, 'the block')\n\
+                 assert(seen.from == nil, 'nowhere before the first')\n\
+                 assert(seen.domain == '{}', 'the domain')\n\
+                 assert(#seen.player == 64, 'the uuid in hex')",
+                crate::domain::OVERWORLD
+            ),
+        )
+        .expect("first");
+
+        vm.player_move(&crate::script::MoveEvent {
+            block: crate::BlockPos::new(4, -4, 5),
+            from: Some(crate::BlockPos::new(3, -4, 5)),
+            ..first
+        });
+        vm.eval_in(
+            "scout",
+            "assert(seen.x == 4 and seen.from.x == 3 and seen.from.y == -4, 'where they came from')",
+        )
+        .expect("second");
+    }
+
+    #[test]
+    fn a_move_is_heard_by_every_mod_whatever_the_first_one_returns() {
+        // An observation, not a veto: a callback returning `false` (or a
+        // string) must not stop the mods after it from hearing.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "first",
+            "game.register_on_player_move(function() return false end)",
+        )
+        .expect("first");
+        load(
+            &mut vm,
+            "second",
+            "heard = 0\ngame.register_on_player_move(function() heard = heard + 1 return 'no' end)",
+        )
+        .expect("second");
+        load(
+            &mut vm,
+            "third",
+            "heard = 0\ngame.register_on_player_move(function() heard = heard + 1 end)",
+        )
+        .expect("third");
+        vm.freeze().expect("freeze");
+        let outcome = vm.player_move(&crate::script::MoveEvent {
+            player: [0xAB; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
+            block: crate::BlockPos::new(1, 2, 3),
+            from: None,
+        });
+        assert!(outcome.faults.is_empty());
+        for mod_id in ["second", "third"] {
+            vm.eval_in(mod_id, "assert(heard == 1, 'not heard')")
+                .unwrap_or_else(|err| panic!("{mod_id} was not told: {err}"));
+        }
+    }
+
+    #[test]
+    fn a_use_at_a_block_reaches_the_handler_registered_for_that_block_first() {
+        // Craft ask 8. Life loads first and eats whatever is held, anywhere;
+        // Craft loads after it and owns the campfire. Meat held out over the
+        // fire is cooked, not eaten; at any other block Life still eats it;
+        // and at nothing Craft is not asked at all.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "life",
+            "game.register_on_use(function(e) return 'ate' end, { anywhere = true })",
+        )
+        .expect("life");
+        load(
+            &mut vm,
+            "craft",
+            "game.register_block{ id = 'campfire' }\n\
+             game.register_block{ id = 'anvil' }\n\
+             game.register_on_use(function(e) return 'cooked' end, { materials = { 'campfire' } })",
+        )
+        .expect("craft");
+        vm.freeze().expect("freeze");
+        let id_of = |name: &str| {
+            vm.registered_blocks()
+                .into_iter()
+                .find(|(block, _)| block == name)
+                .map(|(_, id)| id)
+                .expect("registered")
+        };
+        let fire = id_of("craft:campfire");
+        let anvil = id_of("craft:anvil");
+        let at = |material: MaterialId| crate::script::UseEvent {
+            player: [0xEF; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
+            aim: Some(crate::script::UseAim {
+                cell: crate::coords::SubNodePos::new(3, 3, 3),
+                material,
+            }),
+            held: crate::inventory::Stack::new(MaterialId(3), 27),
+        };
+        assert_eq!(vm.use_block(&at(fire)).reason.as_deref(), Some("cooked"));
+        assert_eq!(vm.use_block(&at(anvil)).reason.as_deref(), Some("ate"));
+        let at_nothing = crate::script::UseEvent {
+            aim: None,
+            ..at(fire)
+        };
+        assert_eq!(vm.use_block(&at_nothing).reason.as_deref(), Some("ate"));
+
+        // Alone, a listed handler hears its blocks and nothing else.
+        let mut alone = self::vm();
+        load(
+            &mut alone,
+            "craft",
+            "game.register_block{ id = 'campfire' }\n\
+             game.register_block{ id = 'anvil' }\n\
+             game.register_on_use(function(e) return 'cooked' end, { materials = { 'campfire' } })",
+        )
+        .expect("craft alone");
+        alone.freeze().expect("freeze");
+        assert_eq!(alone.use_block(&at(fire)).reason.as_deref(), Some("cooked"));
+        assert!(
+            alone.use_block(&at(anvil)).allowed,
+            "asked about a block off its list"
+        );
+
+        // The option is checked at load.
+        for bad in [
+            "{ materials = 'campfire' }",
+            "{ materials = {} }",
+            "{ materials = { 3 } }",
+        ] {
+            let mut wrong = self::vm();
+            assert!(
+                load(
+                    &mut wrong,
+                    "craft",
+                    &format!("game.register_on_use(function() end, {bad})"),
+                )
+                .is_err(),
+                "{bad} loaded"
+            );
+        }
     }
 
     #[test]
@@ -16681,12 +17157,12 @@ mod entity_tests {
             }
         }
 
-        fn keys(&self, mod_id: &str) -> Vec<String> {
+        fn keys(&self, mod_id: &str, prefix: &str) -> Vec<String> {
             self.held.lock().map_or_else(
                 |_| Vec::new(),
                 |held| {
                     held.keys()
-                        .filter(|(owner, _)| owner == mod_id)
+                        .filter(|(owner, key)| owner == mod_id && key.starts_with(prefix))
                         .map(|(_, key)| key.clone())
                         .collect()
                 },
@@ -16727,9 +17203,30 @@ mod entity_tests {
         .expect("storage round trip");
 
         assert_eq!(
-            crate::storage::Access::keys(&*shelf, "keeper"),
+            crate::storage::Access::keys(&*shelf, "keeper", ""),
             vec!["greeted".to_owned(), "imprint".to_owned()]
         );
+    }
+
+    #[test]
+    fn storage_keys_can_be_asked_for_by_prefix() {
+        // Progress ask 1: one player's record, kept under their UUID, read
+        // back without walking everybody's.
+        let (mut vm, _shelf) = vm_with_storage();
+        load(&mut vm, "keeper", "game.register_on_tick(function() end)").expect("load");
+        let _ = vm.freeze();
+        vm.eval_in(
+            "keeper",
+            "game.storage.set('ada:node:1', true)\n\
+             game.storage.set('ada:node:2', true)\n\
+             game.storage.set('bob:node:1', true)\n\
+             local ada = game.storage.keys('ada:')\n\
+             assert(#ada == 2 and ada[1] == 'ada:node:1' and ada[2] == 'ada:node:2', 'the prefix')\n\
+             assert(#game.storage.keys('') == 3, 'the empty prefix is everything')\n\
+             assert(#game.storage.keys() == 3, 'no prefix is everything')\n\
+             assert(#game.storage.keys('nobody:') == 0, 'none of those')",
+        )
+        .expect("keys by prefix");
     }
 
     #[test]

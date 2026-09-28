@@ -66,6 +66,118 @@ end)
     root
 }
 
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(future)
+}
+
+/// A storm that flashes for each player who joins, to that player alone.
+fn write_aimed_storm(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("storm");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"storm\"\nname = \"Storm\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+game.register_on_player_join(function(event)
+    -- Beside spawn, so everybody is in range; addressed to the one who
+    -- just arrived (W28), so nobody else sees it.
+    game.flash{ pos = { x = 0, y = 80, z = 0 }, radius = 256, intensity = 1.0, player = event.player }
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
+#[test]
+fn a_flash_addressed_to_one_player_reaches_nobody_else() {
+    // Weather ask W28: thunder and a flash kept out of a cave. Two players
+    // in range of every strike; each strike is addressed to one of them,
+    // and the other's client receives nothing.
+    let mods = write_aimed_storm("aimed");
+    let server = ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch("aimed-world"),
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods.clone()),
+        enabled_mods: bot::fixture::enabled_mods_for(&mods).expect("the mod's manifest"),
+        seed: Some(3),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start");
+
+    block_on(async {
+        let join = |name: &'static str| async {
+            let mut bot = Bot::connect(
+                server.local_addr(),
+                Identity::generate().expect("identity"),
+                server.cert_fingerprint(),
+            )
+            .await
+            .expect("connect");
+            bot.join(name).await.expect("join");
+            bot
+        };
+        let mut first = join("First").await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline && first.flashes_received().is_empty() {
+            let _ = tokio::time::timeout(Duration::from_millis(100), first.recv()).await;
+        }
+        assert_eq!(
+            first.flashes_received().len(),
+            1,
+            "the strike addressed to the first"
+        );
+
+        let mut second = join("Second").await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline && second.flashes_received().is_empty() {
+            let _ = tokio::time::timeout(Duration::from_millis(100), second.recv()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(20), first.recv()).await;
+        }
+        assert_eq!(
+            second.flashes_received().len(),
+            1,
+            "the strike addressed to the second"
+        );
+        // And twenty server ticks more for anything wrongly sent to the
+        // first: the strike went out in the second's join tick, so anything
+        // addressed wrongly is long since on the wire. Real time, not
+        // `recv` timeouts — those return at once while an inbox has
+        // anything in it, and a player is sent a state every tick.
+        first.sleep_ticks(20).await;
+        for _ in 0..10 {
+            let _ = tokio::time::timeout(Duration::from_millis(20), first.recv()).await;
+        }
+        assert_eq!(
+            first.flashes_received().len(),
+            1,
+            "a flash addressed to the second player reached the first"
+        );
+    });
+
+    assert!(server.stop());
+}
+
 #[test]
 #[expect(
     clippy::float_cmp,

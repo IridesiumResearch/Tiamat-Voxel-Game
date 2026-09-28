@@ -660,7 +660,12 @@ function game.set_sky_modifier(player, modifier) end
 ---Defaults: white, `radius` 256, `intensity` 1, one tick up, six down. Wrong
 ---numbers are clamped (intensity up to 4, radius up to 1024, attack up to 100
 ---ticks, decay up to 400).
----@param spec { pos: Tiamat.BlockPos, radius?: number, intensity?: number, colour?: number[]|{ r: number, g: number, b: number }, attack_ticks?: integer, decay_ticks?: integer }
+---
+---`player` sends the flash to that one player and nobody else, provided they
+---are in the domain and within `radius` — it narrows, never widens. A player
+---in a cave under a storm saw every flash lean the sky down the tunnel; the
+---mod knows who is under open sky, and sends each strike to them alone.
+---@param spec { pos: Tiamat.BlockPos, radius?: number, intensity?: number, colour?: number[]|{ r: number, g: number, b: number }, attack_ticks?: integer, decay_ticks?: integer, player?: string }
 ---@return integer told
 function game.flash(spec) end
 
@@ -1417,6 +1422,37 @@ function game.line_of_sight(from, to) end
 ---@param callback fun(event: { player: string, name: string })
 function game.register_on_player_join(callback) end
 
+---Called when a player's feet cross into another block.
+---
+---**Registration window only.**
+---
+---Once per tick in which the feet's block changed — not per tick, not per
+---cell — after the body has moved, on the simulation thread inside the tick.
+---A fast fall may pass several blocks in one tick; you hear the one it ended
+---in, with `from` the last one you heard. A biome or a depth is discovered by
+---being there, and this is how a mod hears "there" without polling every
+---player every few ticks. `from` is absent the first time a player is placed,
+---which is the tick after they join (after your `on_player_join`) and again
+---after a move between domains. An observation: every mod that registered
+---hears it whatever any returns, and an error disables your mod.
+---
+---```lua
+---game.register_on_player_move(function(e)
+---    if e.y < -60 then discover(e.player, "the deep") end
+---end)
+---```
+---@param callback fun(event: Tiamat.MoveEvent)
+function game.register_on_player_move(callback) end
+
+---A player's feet crossing into another block.
+---@class Tiamat.MoveEvent
+---@field player string The player's UUID in hex.
+---@field x integer The block the feet are in now.
+---@field y integer
+---@field z integer
+---@field domain string The space they are in.
+---@field from { x: integer, y: integer, z: integer }? The block they were in, or nil the first time.
+
 ---Called when a player presses or releases one of YOUR registered actions.
 ---
 ---Charter rule 11: you are told WHAT was done, never which key did it. There is
@@ -1546,6 +1582,23 @@ function game.give(player, spec) end
 ---@param player string A player UUID in hex.
 ---@return table|nil held
 function game.held(player) end
+
+---The stack in one slot of a player's view, or nil for an empty slot, a view
+---that does not exist, a slot past its end, or a player who is not connected.
+---
+---`game.held` is the main hand; this is any slot, counted from 1 as the
+---screens number them. The off-hand is slot 28 of `"player:main"`, so a
+---station worked in the world — a hammer in the main hand, the bloom in the
+---off-hand, a right-click a blow — reads the bloom here, takes it with
+---`game.take(player, { ..., slot = 28 })` and gives the bar back into the same
+---slot with `game.give(player, { ..., slot = 28 })`.
+---
+---The same table `game.held` answers: `material`, `units`, `shape`, `detail`.
+---@param player string A player UUID in hex.
+---@param view string A view name, such as `"player:main"`.
+---@param n integer The slot, from 1.
+---@return table|nil stack
+function game.slot(player, view, n) end
 
 ---The heading of a direction across the ground, in radians.
 ---
@@ -1894,7 +1947,7 @@ function game.bind_sound(cue, sound) end
 ---```lua
 ---game.cue{ cue = "door_open", pos = pos, radius = 12 }
 ---```
----@param spec { cue: string, pos: { x: number, y: number, z: number }, radius?: number, gain?: number, entity?: integer }
+---@param spec { cue: string, pos: { x: number, y: number, z: number }, radius?: number, gain?: number, entity?: integer, player?: string } `player`, a UUID in hex, sends the cue to that one player alone, provided they are within `radius`.
 ---@return integer told
 function game.cue(spec) end
 
@@ -2498,6 +2551,7 @@ function game.set_clouds(uuid, spec) end
 ---@field radius number? How far it carries, in blocks. Default 16, capped at 512. Players outside are not sent it at all.
 ---@field gain number? Loudness multiplier on the sound's registered gain. Default 1.
 ---@field entity integer? An entity to follow, if the sound should move with one.
+---@field player string? A player's UUID in hex. Sends the sound to that one player and nobody else, provided they are within `radius` — it narrows, never widens. How thunder is kept out of a cave: the mod sends each clap to the players it knows are under open sky.
 
 ---Plays a sound for everyone close enough to hear it.
 ---
@@ -3201,8 +3255,24 @@ function game.register_on_place(callback) end
 ---    return ""
 ---end, { anywhere = true })
 ---```
+---**A use at a block reaches that block's handler first.** A callback
+---registered with `materials = { "campfire_lit", ... }` is asked about a use
+---at one of those blocks BEFORE any callback registered without a list, and
+---is not asked about a use at any other block. Among themselves the listed
+---handlers keep load order. So a mod that eats whatever is held, loaded
+---first, no longer eats the meat a player holds out over another mod's fire:
+---the fire's mod lists its fires and hears the use first, and the eating
+---mod hears only what no block claimed. Bare ids are your own; a namespaced
+---id may be any mod's block. A use at nothing has no block, so the list does
+---not apply to it — add `anywhere = true` to hear those too.
+---
+---```lua
+---game.register_on_use(function(e)
+---    if e.held and raw[e.held.material] then cook(e) return "" end
+---end, { materials = { "campfire_lit", "kiln_lit" } })
+---```
 ---@param callback fun(event: Tiamat.UseEvent): boolean|string|nil
----@param options { anywhere: boolean }? `anywhere = true` to hear a use at nothing as well. Any other key is an error at load.
+---@param options { anywhere?: boolean, materials?: string[] }? `anywhere = true` to hear a use at nothing as well; `materials` to be asked first, and only, about uses at those blocks. Any other key is an error at load.
 function game.register_on_use(callback, options) end
 
 ---Somebody hitting something.
@@ -4153,13 +4223,22 @@ function game.player_entity(player) end
 ---Names are a per-server claim and can be rebound to someone else; the UUID is
 ---the identity, and every engine system keys on it.
 ---
+---**How big it may get.** There is no fixed ceiling. A key is a row in the
+---world file, loaded once at start and held in memory; only the keys that
+---changed since the last save are written, on the same two-second debounce
+---as chunks, so a mod with ten thousand keys pays for the ones it touched and
+---not for the ten thousand. What grows with the count is `keys()`, which walks
+---them all — give it a prefix. Per-player state is a prefix: a record kept
+---under `uuid .. ":" .. fact` is read back with `keys(uuid .. ":")`.
+---
 ---```lua
 ---game.storage.set("imprint", uuid)     -- a UUID string, not a display name
 ---game.storage.set("greeted", true)
 ---local who = game.storage.get("imprint")
 ---for _, key in ipairs(game.storage.keys()) do ... end
+---for _, key in ipairs(game.storage.keys(uuid .. ":")) do ... end   -- one player's
 ---```
----@field storage { get: fun(key: string): string|number|boolean|nil, set: fun(key: string, value: string|number|boolean|nil), keys: fun(): string[] }
+---@field storage { get: fun(key: string): string|number|boolean|nil, set: fun(key: string, value: string|number|boolean|nil), keys: fun(prefix?: string): string[] }
 
 --- PLANS ------------------------------------------------------------------
 

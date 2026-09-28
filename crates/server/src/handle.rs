@@ -253,6 +253,9 @@ fn apply_transfer(
         && let Some(player) = bodies.get_mut(&uuid)
     {
         player.domain = request.domain.clone();
+        // A new space, so the next tick's block is an arrival even at the
+        // same coordinates (`on_player_move`, from = nil).
+        player.stood_in = None;
         player.origin = landing.chunk;
         player.body.position = landing.local;
         player.body.velocity = [0.0; 3];
@@ -595,9 +598,15 @@ fn flush_mod_storage(
     let Ok(mut held) = storage.write() else {
         return;
     };
-    for (mod_id, bag) in held.take_dirty() {
-        if let Err(err) = world.save_mod_storage(&mod_id, &bag) {
+    for (mod_id, changes) in held.take_dirty() {
+        if let Err(err) = world.save_mod_storage_changes(&mod_id, &changes) {
+            // Put them back rather than lose them: the transaction rolled
+            // back, so the rows are as they were, and the next debounce
+            // writes the same changes again.
             error!("could not save storage for mod `{mod_id}`: {err}");
+            for (key, value) in changes {
+                held.mark_dirty(&mod_id, &key, value);
+            }
         }
     }
 }
@@ -1274,6 +1283,13 @@ const SAVE_INTERVAL_TICKS: u64 = 40;
 /// behind it; seldom enough that walking the whole resident set against every
 /// player is not a per-tick cost.
 const UNLOAD_INTERVAL_TICKS: u64 = 20;
+
+/// Ticks between looks at the generation backlog: one second.
+///
+/// World ask 40. Reported only while more chunks are waiting than the
+/// workers can hold at once, so a walk that the pool keeps up with says
+/// nothing.
+const GENERATION_REPORT_TICKS: u64 = 20;
 
 /// Chunks unloaded per tick, at most.
 ///
@@ -3452,6 +3468,10 @@ impl ServerHandle {
                             }
                         }
 
+                        // Feet that crossed into another block this tick, for
+                        // `on_player_move` (Progress ask 3), heard after the
+                        // arrivals below.
+                        let mut moved: Vec<tiamat_core::script::MoveEvent> = Vec::new();
                         if let Ok(mut bodies) = shared.bodies.lock() {
                             let ponds = fluidics.read().expect("fluid lock");
                             // A space nobody has poured in is dry, and dry is
@@ -3541,6 +3561,23 @@ impl ServerHandle {
                                 if origin.in_world() {
                                     player.origin = origin;
                                     player.body.position = local;
+                                    // Once per block crossed, not per tick: a
+                                    // mod discovering a biome by being in it
+                                    // hears about arrivals, not about standing.
+                                    let block = tiamat_core::ent::Transform::at(
+                                        player.origin,
+                                        player.body.position,
+                                    )
+                                    .block();
+                                    if player.stood_in != Some(block) {
+                                        moved.push(tiamat_core::script::MoveEvent {
+                                            player: *uuid.as_bytes(),
+                                            domain: player.domain.clone(),
+                                            block,
+                                            from: player.stood_in,
+                                        });
+                                        player.stood_in = Some(block);
+                                    }
                                 } else {
                                     // The world is finite (charter rule 6), so a
                                     // body must not leave it. Without this a
@@ -4644,6 +4681,27 @@ impl ServerHandle {
                                     );
                                 }
                             }
+                            // After the arrivals, so a new player's first
+                            // block is heard after their join.
+                            for event in &moved {
+                                // Collected under one lock and fired under
+                                // another: a player whose connection went
+                                // between the two is not somebody to tell
+                                // the mods about.
+                                let who = tiamat_core::identity::PlayerUuid::from_bytes(
+                                    event.player,
+                                );
+                                if shared.player_chunk(&who).is_none() {
+                                    continue;
+                                }
+                                let outcome = source.player_moved(event);
+                                for (mod_id, err) in &outcome.faults {
+                                    error!(
+                                        mod_id = %mod_id,
+                                        "mod disabled after an on_player_move failure: {err}"
+                                    );
+                                }
+                            }
                             for (mod_id, err) in source.tick(1) {
                                 error!(mod_id = %mod_id, "mod disabled after a tick failure: {err}");
                             }
@@ -4803,6 +4861,34 @@ impl ServerHandle {
                             &mut parked,
                         );
                         control.note_generated_off_tick(served.from_workers);
+                        // **Generation lag is a line in the log** (World ask
+                        // 40). The over-budget warning watches the tick, and
+                        // the workers exist to keep generation off it — so a
+                        // world arriving as slabs said nothing anywhere. Once
+                        // a second while more is waiting than the pool can
+                        // hold: the depth, and what a chunk has been costing.
+                        if tick % GENERATION_REPORT_TICKS == 0
+                            && let Some(pool) = workers.as_ref()
+                        {
+                            // **Waiting is the queue, not the parking.** A
+                            // request is parked only once the pool has taken
+                            // its chunk, so what is parked never exceeds the
+                            // pool's capacity; the queue the tick has not yet
+                            // served is where a backlog forms.
+                            let waiting = shared.queued_chunk_requests() + parked.requests.len();
+                            if waiting > pool.capacity() {
+                                let cost = pool
+                                    .recent_cost()
+                                    .map_or(0.0, |cost| cost.as_secs_f64() * 1000.0);
+                                warn!(
+                                    waiting,
+                                    in_flight = pool.in_flight(),
+                                    ms_per_chunk = format!("{cost:.1}"),
+                                    "generation behind: {waiting} chunks waiting, {} in flight, {cost:.1} ms/chunk",
+                                    pool.in_flight()
+                                );
+                            }
+                        }
 
                         phases.mark("serving");
                         // Chunks that arrived this tick, whatever brought
@@ -6164,6 +6250,22 @@ impl tiamat_core::inventory::Access for Carried {
             .flatten()
     }
 
+    fn slot(
+        &self,
+        player: [u8; 32],
+        view: &str,
+        slot: usize,
+    ) -> Option<tiamat_core::inventory::Stack> {
+        let uuid = tiamat_core::identity::PlayerUuid::from_bytes(player);
+        self.shared
+            .slots_of(&uuid)?
+            .view(view)?
+            .slots
+            .get(slot)
+            .cloned()
+            .flatten()
+    }
+
     fn take(
         &self,
         player: [u8; 32],
@@ -6507,6 +6609,11 @@ impl tiamat_core::sound::Access for Earshot {
         let radius = f64::from(request.radius);
         let mut told = 0;
         for (uuid, player) in bodies.iter() {
+            // Addressed to one player: everyone else is skipped, and that
+            // one still has to be in earshot (W28).
+            if request.player.is_some_and(|only| only != *uuid) {
+                continue;
+            }
             let at =
                 tiamat_core::ent::Transform::at(player.origin, player.body.position).to_world();
             // Squared, so there is no root: charter rule 4 does not reach audio,

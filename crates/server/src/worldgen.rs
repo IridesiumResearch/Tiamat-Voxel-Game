@@ -138,6 +138,13 @@ pub struct Done {
     pub summaries: Vec<(u8, Vec<u8>)>,
     /// Mods this job faulted in the worker, for the tick to fault everywhere.
     pub faults: Vec<String>,
+    /// How long the worker spent generating it.
+    ///
+    /// World ask 40: the designer flew a world arriving as slabs and the
+    /// log said nothing, because the over-budget warning watches the tick
+    /// and the workers exist to keep generation off it. Timed here so the
+    /// pool can say what a chunk costs.
+    pub took: std::time::Duration,
 }
 
 /// Why a pool could not start.
@@ -171,7 +178,16 @@ pub struct Pool {
     generated: u64,
     /// The next job's sequence number.
     next_seq: u64,
+    /// How long the last few chunks took, in microseconds, newest last.
+    ///
+    /// A rolling window rather than a lifetime average: what a chunk costs
+    /// changes with the country a player is over, and the line that reports
+    /// it (World ask 40) is about now.
+    recent_micros: std::collections::VecDeque<u64>,
 }
+
+/// How many recent chunks the pool averages its cost over.
+const RECENT_CHUNKS: usize = 64;
 
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -270,6 +286,7 @@ impl Pool {
             workers: handles,
             generated: 0,
             next_seq: 0,
+            recent_micros: std::collections::VecDeque::with_capacity(RECENT_CHUNKS),
         })
     }
 
@@ -289,6 +306,26 @@ impl Pool {
     #[must_use]
     pub fn in_flight(&self) -> usize {
         self.in_flight.len()
+    }
+
+    /// How many jobs may be out at once.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// What a chunk has cost lately, averaged over the last few answered.
+    ///
+    /// `None` until one has been answered.
+    #[must_use]
+    pub fn recent_cost(&self) -> Option<std::time::Duration> {
+        if self.recent_micros.is_empty() {
+            return None;
+        }
+        let total: u64 = self.recent_micros.iter().sum();
+        Some(std::time::Duration::from_micros(
+            total / self.recent_micros.len() as u64,
+        ))
     }
 
     /// How many chunks the workers have answered.
@@ -330,6 +367,11 @@ impl Pool {
             self.in_flight
                 .remove(&(answer.job.domain.clone(), answer.job.pos));
             self.generated += 1;
+            let micros = u64::try_from(answer.took.as_micros()).unwrap_or(u64::MAX);
+            if self.recent_micros.len() == RECENT_CHUNKS {
+                self.recent_micros.pop_front();
+            }
+            self.recent_micros.push_back(micros);
             done.push(answer);
         }
         done
@@ -398,7 +440,9 @@ fn worker(
             }
             known_faulted.clone_from(&shared);
         }
-        let answer = generate(&mut host, &job, &spec.fluids, &mut known_faulted);
+        let started = std::time::Instant::now();
+        let mut answer = generate(&mut host, &job, &spec.fluids, &mut known_faulted);
+        answer.took = started.elapsed();
         if done.send(answer).is_err() {
             // The tick has dropped the pool.
             return;
@@ -498,6 +542,7 @@ fn generate(
         fog,
         summaries,
         faults,
+        took: std::time::Duration::ZERO,
     }
 }
 
@@ -594,6 +639,27 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         all
+    }
+
+    #[test]
+    fn the_pool_says_what_a_chunk_has_been_costing() {
+        // World ask 40: the line that reports a backlog needs a cost beside
+        // the depth, and the workers are the only ones who can time it.
+        let root = write_mod("cost", "");
+        let (_host, spec) = spec_for(&root);
+        let mut pool = Pool::start(&spec, 1).expect("pool");
+        assert!(pool.recent_cost().is_none(), "nothing answered yet");
+        assert!(pool.capacity() >= 1);
+        let answers = generate_all(
+            &mut pool,
+            &[ChunkPos::new(0, 0, 0), ChunkPos::new(1, 0, 0)],
+            7,
+        );
+        assert_eq!(answers.len(), 2);
+        assert!(
+            pool.recent_cost().is_some(),
+            "two chunks answered and no cost to report"
+        );
     }
 
     #[test]

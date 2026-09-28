@@ -121,7 +121,12 @@ pub trait Access: Send + Sync {
     fn set(&self, mod_id: &str, key: &str, value: Option<Value>);
 
     /// Every key a mod has, in order.
-    fn keys(&self, mod_id: &str) -> Vec<String>;
+    /// Every key under `prefix`, in order; `""` for all of them.
+    ///
+    /// The prefix is the store's to apply, not the caller's (Progress ask 1):
+    /// a mod keeping one record per player reads one player's back without
+    /// the store cloning everybody's keys first.
+    fn keys(&self, mod_id: &str, prefix: &str) -> Vec<String>;
 }
 
 #[cfg(test)]

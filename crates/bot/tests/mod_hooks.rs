@@ -293,6 +293,73 @@ fn a_mod_that_throws_while_vetoing_does_not_stop_the_dig() {
     assert!(server.stop());
 }
 
+#[test]
+fn a_mod_can_read_one_slot_of_a_players_view() {
+    // Craft ask 9: the off-hand, for a station worked in the world. The
+    // warden gives into slot 3 and reads it back; slot 28 is empty and says
+    // so; it marks the world only if both are as expected.
+    let server = start(
+        "slot-read",
+        write_warden(
+            "slot-read",
+            "game.register_block{ id = 'mark' }\n\
+             game.register_on_player_join(function(e)\n\
+             \x20   assert(game.give(e.player, { material = 'warden:ground', units = 5, slot = 3 }))\n\
+             \x20   local got = game.slot(e.player, 'player:main', 3)\n\
+             \x20   local none = game.slot(e.player, 'player:main', 28)\n\
+             \x20   local ground = game.get_block_id('warden:ground')\n\
+             \x20   if got and got.units == 5 and got.material == ground and none == nil then\n\
+             \x20       game.set_block({ x = 9, y = 10, z = 1 }, 'warden:mark')\n\
+             \x20   end\n\
+             end)",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let mark = material_named(&bot, "warden:mark");
+        bot.expect_block(BlockPos::new(9, 10, 1), mark, Duration::from_secs(10))
+            .await
+            .expect("the slot read back what was given into it");
+    });
+
+    assert!(server.stop());
+}
+
+#[test]
+fn a_mod_hears_a_player_cross_into_another_block() {
+    // Progress ask 3. The first time, the tick after the join, has no
+    // `from`; a walk after that has one.
+    let server = start(
+        "moves",
+        write_warden(
+            "moves",
+            "game.register_block{ id = 'mark' }\n\
+             game.register_on_player_move(function(e)\n\
+             \x20   if e.from == nil then\n\
+             \x20       game.set_block({ x = 9, y = 10, z = 1 }, 'warden:mark')\n\
+             \x20   else\n\
+             \x20       game.set_block({ x = 11, y = 10, z = 1 }, 'warden:mark')\n\
+             \x20   end\n\
+             end)",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let mark = material_named(&bot, "warden:mark");
+        bot.expect_block(BlockPos::new(9, 10, 1), mark, Duration::from_secs(10))
+            .await
+            .expect("the first block a player is placed in is heard");
+        bot.walk([1.0, 0.0, 0.0], 0, 40).await.expect("walk");
+        bot.expect_block(BlockPos::new(11, 10, 1), mark, Duration::from_secs(10))
+            .await
+            .expect("a walk into the next block is heard, with where they came from");
+    });
+
+    assert!(server.stop());
+}
+
 /// The world id the server gave a mod's block, from the table sent on join.
 fn material_named(bot: &Bot, name: &str) -> u16 {
     bot.material_table()

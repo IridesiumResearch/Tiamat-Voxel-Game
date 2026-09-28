@@ -787,6 +787,15 @@ pub trait Access: Send + Sync {
     /// between an inventory and a weapon.
     fn held(&self, player: [u8; 32]) -> Option<Stack>;
 
+    /// The stack in one slot of a view, counted from zero (Craft ask 9).
+    ///
+    /// `None` for a player who is not connected, a view that does not exist,
+    /// a slot past the view's end, or an empty slot — "what is in the
+    /// off-hand" has the same answer for the last two. [`Self::held`] is this
+    /// for the main view's selected slot; this is any slot, so a station
+    /// worked in the world can read the off-hand and `take` from it alone.
+    fn slot(&self, player: [u8; 32], view: &str, slot: usize) -> Option<Stack>;
+
     /// Takes up to `units` of one material and cut, returning how many it got.
     ///
     /// **Partial by design.** A crafting mod asking for more than the player

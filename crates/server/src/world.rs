@@ -351,6 +351,17 @@ impl Generator {
         }
     }
 
+    /// Tells the mods a player's feet crossed into another block.
+    pub fn player_moved(
+        &mut self,
+        event: &tiamat_core::script::MoveEvent,
+    ) -> tiamat_core::script::HookOutcome {
+        match self {
+            Self::Mods(generator) => generator.host_mut().vm_mut().player_move(event),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
+        }
+    }
+
     /// Asks whether a body may leave a domain.
     pub fn domain_exited(
         &mut self,
@@ -1702,6 +1713,19 @@ impl World {
         self.db.save_mod_storage(mod_id, bag)
     }
 
+    /// Writes one mod's changed keys, and deletes the ones it removed.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError`] if the write fails; nothing is written then.
+    pub fn save_mod_storage_changes(
+        &self,
+        mod_id: &str,
+        changes: &[(String, Option<tiamat_core::storage::Value>)],
+    ) -> Result<(), WorldError> {
+        self.db.save_mod_storage_changes(mod_id, changes)
+    }
+
     /// A plan a mod saved, or `None` if it never saved one by that name.
     ///
     /// # Errors
@@ -2536,6 +2560,52 @@ mod tests {
         assert!(
             world.resident(domain, chunk).is_some(),
             "and it is resident again"
+        );
+    }
+
+    #[test]
+    fn mod_storage_changes_write_and_delete_only_the_keys_they_name() {
+        // Progress ask 2's write: a key per change, over a bag that already
+        // holds others — which stay exactly as they were.
+        let (world, _ids) = world("storage-changes");
+        let mut bag = tiamat_core::storage::Bag::new();
+        bag.insert("keep".to_owned(), tiamat_core::storage::Value::Number(1.0));
+        bag.insert("gone".to_owned(), tiamat_core::storage::Value::Flag(true));
+        bag.insert(
+            "old".to_owned(),
+            tiamat_core::storage::Value::Text("old".into()),
+        );
+        world.save_mod_storage("progress", &bag).expect("whole bag");
+
+        world
+            .save_mod_storage_changes(
+                "progress",
+                &[
+                    ("gone".to_owned(), None),
+                    (
+                        "old".to_owned(),
+                        Some(tiamat_core::storage::Value::Text("new".into())),
+                    ),
+                    (
+                        "added".to_owned(),
+                        Some(tiamat_core::storage::Value::Number(2.0)),
+                    ),
+                ],
+            )
+            .expect("changes");
+
+        let read = world.load_mod_storage("progress").expect("load");
+        assert_eq!(
+            read.keys().cloned().collect::<Vec<_>>(),
+            vec!["added".to_owned(), "keep".to_owned(), "old".to_owned()]
+        );
+        assert_eq!(
+            read.get("old"),
+            Some(&tiamat_core::storage::Value::Text("new".into()))
+        );
+        assert_eq!(
+            read.get("keep"),
+            Some(&tiamat_core::storage::Value::Number(1.0))
         );
     }
 

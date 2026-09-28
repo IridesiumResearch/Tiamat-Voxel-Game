@@ -12,9 +12,13 @@
 //! not data), so it is loaded at startup and written back on the same debounced
 //! save the chunks use.
 //!
-//! **Dirty is per mod**, not per key: `save_mod_storage` replaces a mod's whole
-//! bag, because the caller holds all of it and a merge would leave a deleted
-//! key behind for ever.
+//! **Dirty is per key.** It was per mod, and the save replaced a mod's whole
+//! bag — every row deleted and written again whenever one key changed. Fine
+//! for a mod storing a dozen facts; a mod keeping one key per player per fact
+//! (Progress ask 2: ten thousand keys at fifty players) would have rewritten
+//! ten thousand rows every two seconds for as long as anybody was discovering
+//! anything. Now what is handed to the save is each changed key with its new
+//! value, or `None` for one deleted, and the save writes exactly those.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,8 +28,13 @@ use tiamat_core::storage::{Bag, Value};
 #[derive(Debug, Default)]
 pub struct ModStorage {
     bags: BTreeMap<String, Bag>,
-    dirty: BTreeSet<String>,
+    /// The keys changed since the last save, by mod.
+    dirty: BTreeMap<String, BTreeSet<String>>,
 }
+
+/// One mod's changes since the last save: each key with its new value, or
+/// `None` for a key that was deleted.
+pub type Changes = Vec<(String, Option<Value>)>;
 
 impl ModStorage {
     /// An empty store.
@@ -58,26 +67,48 @@ impl ModStorage {
             None => bag.remove(key).is_some(),
         };
         if changed {
-            self.dirty.insert(mod_id.to_owned());
+            self.dirty
+                .entry(mod_id.to_owned())
+                .or_default()
+                .insert(key.to_owned());
         }
     }
 
     /// A mod's keys, in order.
     #[must_use]
-    pub fn keys(&self, mod_id: &str) -> Vec<String> {
+    pub fn keys(&self, mod_id: &str, prefix: &str) -> Vec<String> {
         self.bags
             .get(mod_id)
-            .map(|bag| bag.keys().cloned().collect())
+            .map(|bag| {
+                // A bounded walk: from the prefix, while it still matches.
+                bag.range(prefix.to_owned()..)
+                    .map(|(key, _)| key)
+                    .take_while(|key| key.starts_with(prefix))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Takes the mods whose storage needs writing, and what to write.
-    pub fn take_dirty(&mut self) -> Vec<(String, Bag)> {
+    /// Takes the changes waiting to be written, by mod.
+    ///
+    /// Each entry is a key with the value it holds now, or `None` for one
+    /// that was deleted, so the save can write and delete exactly those rows
+    /// and no others. Nothing is handed over twice: a key changed again
+    /// after this is dirty again.
+    pub fn take_dirty(&mut self) -> Vec<(String, Changes)> {
         std::mem::take(&mut self.dirty)
             .into_iter()
-            .map(|mod_id| {
-                let bag = self.bags.get(&mod_id).cloned().unwrap_or_default();
-                (mod_id, bag)
+            .map(|(mod_id, keys)| {
+                let bag = self.bags.get(&mod_id);
+                let changes = keys
+                    .into_iter()
+                    .map(|key| {
+                        let value = bag.and_then(|bag| bag.get(&key).cloned());
+                        (key, value)
+                    })
+                    .collect();
+                (mod_id, changes)
             })
             .collect()
     }
@@ -86,6 +117,19 @@ impl ModStorage {
     #[must_use]
     pub fn dirty(&self) -> usize {
         self.dirty.len()
+    }
+
+    /// Puts a change back on the list, for a save that failed.
+    ///
+    /// The value the store holds is still the truth; what is re-marked is
+    /// only that the key needs writing. `value` is ignored except that it
+    /// keeps the call's shape the same as what [`Self::take_dirty`] handed
+    /// out, so a failed batch is put back with one loop.
+    pub fn mark_dirty(&mut self, mod_id: &str, key: &str, _value: Option<Value>) {
+        self.dirty
+            .entry(mod_id.to_owned())
+            .or_default()
+            .insert(key.to_owned());
     }
 }
 
@@ -119,10 +163,10 @@ impl tiamat_core::storage::Access for Shared {
         }
     }
 
-    fn keys(&self, mod_id: &str) -> Vec<String> {
+    fn keys(&self, mod_id: &str, prefix: &str) -> Vec<String> {
         self.storage
             .read()
-            .map(|storage| storage.keys(mod_id))
+            .map(|storage| storage.keys(mod_id, prefix))
             .unwrap_or_default()
     }
 }
@@ -146,7 +190,25 @@ mod tests {
             Some(Value::Text("something else".into()))
         );
         assert_eq!(storage.get("c", "seen"), None);
-        assert_eq!(storage.keys("a"), vec!["seen".to_owned()]);
+        assert_eq!(storage.keys("a", ""), vec!["seen".to_owned()]);
+    }
+
+    #[test]
+    fn keys_under_a_prefix_are_a_bounded_walk_from_it() {
+        let mut storage = ModStorage::new();
+        for key in ["ada:1", "ada:2", "adam:1", "bob:1"] {
+            storage.set("a", key, Some(Value::Flag(true)));
+        }
+        assert_eq!(
+            storage.keys("a", "ada:"),
+            vec!["ada:1".to_owned(), "ada:2".to_owned()]
+        );
+        assert_eq!(
+            storage.keys("a", "ada"),
+            vec!["ada:1".to_owned(), "ada:2".to_owned(), "adam:1".to_owned()]
+        );
+        assert_eq!(storage.keys("a", "zed").len(), 0);
+        assert_eq!(storage.keys("a", "").len(), 4);
     }
 
     #[test]
@@ -182,20 +244,31 @@ mod tests {
     }
 
     #[test]
-    fn take_dirty_hands_over_the_whole_bag() {
-        // `save_mod_storage` replaces rather than merges, so what it is handed
-        // has to be everything the mod holds — not only what changed.
+    fn take_dirty_hands_over_only_what_changed_with_deletions_as_none() {
+        // Progress ask 2: a mod with ten thousand keys pays for the ones it
+        // touched. The save writes what it is handed and deletes the `None`s,
+        // so the untouched rows stay as they are.
         let mut storage = ModStorage::new();
         storage.set("a", "one", Some(Value::Number(1.0)));
+        storage.set("a", "gone", Some(Value::Flag(true)));
         let _ = storage.take_dirty();
         storage.set("a", "two", Some(Value::Number(2.0)));
+        storage.set("a", "gone", None);
 
         let written = storage.take_dirty();
         assert_eq!(written.len(), 1);
+        assert_eq!(written[0].0, "a");
         assert_eq!(
-            written[0].1.keys().cloned().collect::<Vec<_>>(),
-            vec!["one".to_owned(), "two".to_owned()],
-            "only the changed key was handed over, so the save would drop the rest"
+            written[0].1,
+            vec![
+                ("gone".to_owned(), None),
+                ("two".to_owned(), Some(Value::Number(2.0))),
+            ],
+            "the changed keys only, in key order, a deletion as None"
+        );
+        assert!(
+            storage.take_dirty().is_empty(),
+            "nothing is handed over twice"
         );
     }
 }
