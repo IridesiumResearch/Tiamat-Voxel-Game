@@ -12,9 +12,42 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: none. W27's first step landed 2026-09-28 with the gate not yet met (see it),
+Open: W29, filed 2026-09-28. W27's first step landed 2026-09-28 with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
+
+## W29. A cave's fog is the sky's colour (2026-09-28)
+
+**Seen.** The designer: "be sure that the day night cycle does not affect
+the colour of cave fog underground". Fog is drawn in `moment.sky`
+(`app.rs`, the frame's `set_sky`), the keyframed sky colour, so the fog down
+a tunnel is pale blue at noon, orange at dusk and black at midnight, and it
+leans with a storm's modifier and a flash's colour too.
+
+**What weather does meanwhile.** A player with no sky over their head (sun
+0 at the head, or the shaft rule) gets a sky modifier of `sky = CAVE_SKY,
+sky_mix = 1`, one dark colour at every hour, eased at the cave mouth. It
+works, but a modifier is the WHOLE sky's colour: deep in a cave, the sky
+seen out of a long tunnel's mouth and the daylit ground beyond it fog to
+the cave's dark colour, and the switch is one player-wide state decided
+twice a second on the server rather than per pixel.
+
+**Why the mod cannot do better.** Fog colour is chosen once per frame for
+the whole view; only the client knows, per fragment, how much sky reaches
+what it is looking at.
+
+**Ask.** Fog that knows a cave from the sky: blend the fog colour per
+fragment by the SKY LIGHT at the fragment (already in the mesh for
+lighting), from the sky's colour at sky light 15 to a cave fog colour at 0,
+where the cave colour does not follow the clock. Its value is the sky
+owner's to set, e.g. `cave_fog = { r, g, b }` on `register_sky` (or on the
+modifier, so a mod can change it), defaulting to a dark neutral. Then the
+fog down a tunnel is the cave's and the view out of the mouth is the day's,
+in the same frame, and weather drops its cave modifier. A flash leans only
+the sky-lit part, which keeps lightning out of caves without anyone having
+to be told. Gate: a tunnel whose far end opens to daylight, at noon and at
+midnight: the fog on the tunnel walls is the same colour in both, and the
+daylit ground seen through the mouth is fogged in the sky's colour.
 
 ## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
 
