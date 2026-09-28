@@ -1760,6 +1760,33 @@ impl World {
         }
     }
 
+    /// Drops one chunk from memory, if it has nothing unsaved.
+    ///
+    /// **The production twin of [`Self::evict`]**, and the first thing that
+    /// ever took a chunk out of the cache outside a test: until the unload
+    /// sweep every chunk a player walked past stayed resident for the life of
+    /// the server, with its light, its fluid and its mobs stepped every tick.
+    ///
+    /// A dirty chunk is refused — `false` — rather than written here, because
+    /// the debounced save writes it within two seconds and the sweep comes
+    /// back after that; a write on the tick thread per unloaded chunk is
+    /// exactly the cost the debounce exists to avoid. Struck from the arrival
+    /// list too, or the lighting would relight a chunk that is no longer there
+    /// and the entity store would load its mobs into thin air.
+    pub fn unload(&mut self, domain: &str, pos: ChunkPos) -> bool {
+        let Some(space) = self.domains.get_mut(domain) else {
+            return false;
+        };
+        if space.dirty.contains(&pos) {
+            return false;
+        }
+        let held = space.cache.remove(&pos).is_some();
+        if held {
+            space.arrived.retain(|arrived| *arrived != pos);
+        }
+        held
+    }
+
     /// Drops one domain's cached chunks without saving them.
     ///
     /// Stages an eviction, which is the only way to test that a dirty chunk
@@ -2471,6 +2498,45 @@ mod tests {
                 "an accepted edit must reach the database"
             );
         }
+    }
+
+    #[test]
+    fn an_unloaded_chunk_comes_back_from_the_database_and_a_dirty_one_stays() {
+        // The unload sweep's contract with the world: a clean chunk leaves
+        // memory and is read again, edits intact, when something asks; a
+        // chunk with unsaved edits is refused rather than lost.
+        let (mut world, ids) = world("unload");
+        let mut air = Air;
+        let domain = tiamat_core::domain::OVERWORLD;
+        let pos = BlockPos::new(35, 3, 36);
+        let chunk = pos.chunk();
+        world
+            .apply(
+                domain,
+                &Edit::Block {
+                    pos,
+                    material: ids[1].0,
+                },
+                &mut air,
+            )
+            .expect("apply");
+        assert!(
+            !world.unload(domain, chunk),
+            "a chunk with an unsaved edit must not leave memory"
+        );
+        world.save_dirty().expect("save");
+        assert!(world.unload(domain, chunk), "a clean chunk leaves");
+        assert!(!world.unload(domain, chunk), "and is gone");
+        assert!(world.resident(domain, chunk).is_none());
+        assert_eq!(
+            world.block_material(domain, pos, &mut air).expect("read"),
+            ids[1],
+            "reading it again loads the saved edit rather than regenerating"
+        );
+        assert!(
+            world.resident(domain, chunk).is_some(),
+            "and it is resident again"
+        );
     }
 
     #[test]

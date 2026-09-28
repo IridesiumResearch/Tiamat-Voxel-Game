@@ -206,6 +206,14 @@ impl Ponds {
         self.domains.get(domain)
     }
 
+    /// One domain's fluid to change, if anything has poured there.
+    ///
+    /// Beside [`Self::of`] for the caller that must not create a store — the
+    /// unload sweep forgetting a chunk in a domain that was always dry.
+    pub fn get_mut(&mut self, domain: &str) -> Option<&mut Fluidics> {
+        self.domains.get_mut(domain)
+    }
+
     /// What the mods registered. The same table for every domain: a fluid is a
     /// kind of thing, not a thing in a place.
     #[must_use]
@@ -464,6 +472,16 @@ impl Fluidics {
     /// next unload without anything going wrong visibly.
     pub fn mark_dirty(&mut self, pos: ChunkPos) {
         self.dirty.insert(pos);
+    }
+
+    /// Whether a chunk's fluid has changed since it was last written.
+    ///
+    /// What the unload sweep asks before [`Self::forget`]: a layer that is
+    /// dirty waits for the debounce that writes it, or forgetting it would be
+    /// losing it.
+    #[must_use]
+    pub fn is_dirty(&self, pos: ChunkPos) -> bool {
+        self.dirty.contains(&pos)
     }
 
     /// Records which materials drink, and what they turn into.

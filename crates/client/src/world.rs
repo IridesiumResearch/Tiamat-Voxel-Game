@@ -552,6 +552,9 @@ impl ChunkStore {
         // session of walking, and stale light for a chunk that comes back is
         // worse than none — the server sends fresh light with it.
         self.light.remove(&pos);
+        // And the fluid, for the same reason: the map holds what there is
+        // milk in, and a pond walked away from was staying in it for ever.
+        self.fluid.remove(&pos);
         self.dirty.remove(&pos);
         if held {
             self.mark_neighbours(pos);
@@ -949,6 +952,32 @@ mod tests {
 
     fn solid_at(x: i32, y: i32, z: i32) -> Chunk {
         Chunk::new(ChunkPos::new(x, y, z), STONE)
+    }
+
+    #[test]
+    fn a_removed_chunk_takes_its_fluid_with_it() {
+        // The fluid map holds what there is milk in, and a chunk the server
+        // told the client to unload was leaving its layer behind: a pond
+        // walked away from stayed in memory for the session.
+        use tiamat_core::coords::LocalBlock;
+        use tiamat_core::fluid::{Fluid, FluidId, FluidLayer};
+
+        let mut store = ChunkStore::new();
+        let pos = ChunkPos::new(3, 0, 3);
+        store.insert(chunk_at(3, 0, 3));
+        let mut layer = FluidLayer::empty();
+        layer.set(
+            LocalBlock::new(1, 1, 1),
+            Fluid::new(FluidId(1), tiamat_core::fluid::MAX_VOLUME),
+        );
+        store.set_fluid(pos, layer);
+        assert!(store.chunk_has_fluid(pos));
+
+        assert!(store.remove(pos));
+        assert!(
+            !store.chunk_has_fluid(pos),
+            "the chunk left and its fluid stayed"
+        );
     }
 
     #[test]

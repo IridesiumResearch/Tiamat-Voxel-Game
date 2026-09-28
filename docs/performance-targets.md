@@ -168,6 +168,16 @@ this is where to look first.
   chunks and is not any more. The bound exists because a teleport or a fresh
   start can make thousands of chunks resident at once; what a tick does not
   reach it takes on the next one.
+- **Memory is bounded by where the players are.** Once a second the tick
+  sweeps for chunks outside every player's view distance plus two chunks (in
+  the space that player is in) and unloads them, at most 32 a tick: the
+  world drops the chunk, its mobs are frozen and written, its fluid and light
+  forgotten. A chunk with unsaved edits or fluid waits for the debounced save
+  and goes on the next sweep. Before this nothing ever left memory, and a
+  server a few hours old was stepping the mobs and the ponds of every chunk
+  anybody had ever walked past — which reached the player as dropped ticks
+  and a body the client could not predict. `Control::resident_chunks` and
+  `Control::unloaded` are the two numbers to watch.
 - Ordinary digging is free at any player count — 50 players digging flat out is
   0.006 ms a tick.
 - **Lamps are the expensive edit.** Fifty players breaking lamps as fast as

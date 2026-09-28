@@ -1748,8 +1748,18 @@ impl App {
             }
         }
         // Whatever is left after the bound is a renumber, as before: past that
-        // distance the client was not lagging, it was absent.
-        self.tick = want;
+        // distance the client was not lagging, it was absent. **And the
+        // predictor is told**, as the `Ahead` branch always told it: without
+        // this its pending inputs kept their old tick numbers, every one of
+        // them behind what the server would accept, and the replay on the
+        // next correction moved the body through inputs the server had
+        // refused — a jolt after every stall long enough to hit the bound.
+        if self.tick != want {
+            self.tick = want;
+            if let Some(predictor) = self.predictor.as_mut() {
+                predictor.renumber(want);
+            }
+        }
     }
 
     /// The tick the client is predicting, and the last one the server applied.

@@ -389,7 +389,21 @@ impl Population {
     /// The chunk stops being "known", so it will be read again if it comes
     /// back. Returns them in slot order, which is the order they must be
     /// written in — see [`tiamat_core::persist::WorldDb::load_chunk_entities`].
-    pub fn freeze(&mut self, domain: &str, pos: ChunkPos) -> Vec<Entity> {
+    ///
+    /// `None` when there is nothing to write: somebody is standing in the
+    /// chunk, so it is not one to unload; or it was never loaded here and
+    /// holds nothing, so the rows on disk are the truth and an empty list
+    /// written over them would delete mobs nobody ever read. `Some` is the
+    /// list to write, empty included — a chunk that was loaded and whose mobs
+    /// have since left or died has rows that must go.
+    ///
+    /// **The caller writes it, now.** The chunk's dirty mark is cleared here
+    /// rather than left for the debounce: after this the store holds nothing
+    /// at that position, and the debounce would write that nothing, deleting
+    /// what the caller had just saved. Found when the sweep first called this
+    /// in production; the mark used to be SET here, for a debounce that would
+    /// have deleted every frozen mob two seconds after it was frozen.
+    pub fn freeze(&mut self, domain: &str, pos: ChunkPos) -> Option<Vec<Entity>> {
         // A chunk somebody is standing in is not a chunk to unload, and the
         // mirror in it is not something to write to disk. Refusing is the whole
         // guard: freezing removes everything anchored to the chunk, so without
@@ -402,11 +416,12 @@ impl Population {
                     .get(*id)
                     .is_some_and(|held| held.chunk() == pos)
         }) {
-            return Vec::new();
+            return None;
         }
-        if let Some(chunks) = self.loaded.get_mut(domain) {
-            chunks.remove(&pos);
-        }
+        let known = self
+            .loaded
+            .get_mut(domain)
+            .is_some_and(|chunks| chunks.remove(&pos));
         // **This domain's entities at that position, not every domain's.**
         // `Entities` is keyed by chunk alone, so taking the chunk outright
         // would empty the same coordinates in every space at once.
@@ -429,13 +444,13 @@ impl Population {
                 self.entities.despawn(id)
             })
             .collect();
-        if !frozen.is_empty() {
-            // Marked dirty even though the entities are leaving: what is on
-            // disk has to end up matching what was in memory, and the caller
-            // may be freezing a chunk whose contents changed since it loaded.
-            self.dirty_chunk(domain, pos);
+        if !known && frozen.is_empty() {
+            return None;
         }
-        frozen
+        if let Some(chunks) = self.dirty.get_mut(domain) {
+            chunks.remove(&pos);
+        }
+        Some(frozen)
     }
 
     /// Marks a chunk of a domain as needing a save.
@@ -1152,7 +1167,9 @@ mod tests {
         let away = population.spawn(mob(home, [9.0, 0.0, 8.0]));
         population.set_domain(away, "mod:ship/17");
 
-        let frozen = population.freeze(tiamat_core::domain::OVERWORLD, home);
+        let frozen = population
+            .freeze(tiamat_core::domain::OVERWORLD, home)
+            .expect("a chunk with a mob in it has something to write");
         assert_eq!(
             frozen.len(),
             1,
@@ -1693,7 +1710,7 @@ mod tests {
         assert!(
             population
                 .freeze(tiamat_core::domain::OVERWORLD, home)
-                .is_empty(),
+                .is_none(),
             "a chunk with a player in it was unloaded, taking their body with it"
         );
         assert_eq!(population.len(), 2, "freezing removed entities anyway");
@@ -1759,9 +1776,22 @@ mod tests {
             vec![mob(away, [3.0; 3])],
         );
 
-        let frozen = population.freeze(tiamat_core::domain::OVERWORLD, home);
+        let frozen = population
+            .freeze(tiamat_core::domain::OVERWORLD, home)
+            .expect("a loaded chunk has something to write");
         assert_eq!(frozen.len(), 2);
         assert_eq!(population.len(), 1, "the other chunk's mob stayed");
+        assert!(
+            population.take_dirty().is_empty(),
+            "a frozen chunk was left for the debounce, which would write it empty"
+        );
+        assert!(
+            population
+                .freeze(tiamat_core::domain::OVERWORLD, ChunkPos::new(9, 9, 9))
+                .is_none(),
+            "a chunk never loaded and holding nothing has nothing to write, and \
+             saying `Some(empty)` would delete its rows"
+        );
         assert!(
             !population.knows(tiamat_core::domain::OVERWORLD, home),
             "a frozen chunk must be re-read when it comes back, or its entities \

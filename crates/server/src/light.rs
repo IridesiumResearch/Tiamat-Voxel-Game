@@ -130,6 +130,14 @@ impl Lights {
         self.domains.get(domain)
     }
 
+    /// One domain's light to change, if anything has lit it.
+    ///
+    /// Beside [`Self::of`] for the caller that must not create a store — the
+    /// unload sweep forgetting a chunk in a domain nothing has lit.
+    pub fn get_mut(&mut self, domain: &str) -> Option<&mut Lighting> {
+        self.domains.get_mut(domain)
+    }
+
     /// How many chunks are lit across every domain.
     #[must_use]
     pub fn len(&self) -> usize {

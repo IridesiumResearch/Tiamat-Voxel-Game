@@ -1743,6 +1743,24 @@ impl Shared {
         bodies.get(uuid).map(|player| player.origin)
     }
 
+    /// Where every player is: their domain and the chunk under them.
+    ///
+    /// What the unload sweep keeps chunks around, one snapshot per sweep. From
+    /// the bodies rather than the entity mirrors, for the reason
+    /// [`Self::players_in`] gives.
+    #[must_use]
+    pub fn player_centres(&self) -> Vec<(String, tiamat_core::ChunkPos)> {
+        self.bodies.lock().map_or_else(
+            |_| Vec::new(),
+            |bodies| {
+                bodies
+                    .values()
+                    .map(|player| (player.domain.clone(), player.origin))
+                    .collect()
+            },
+        )
+    }
+
     /// How many connected players are in a domain.
     ///
     /// The other half of what `domain::Registry::destroy` asks: a mob inside is

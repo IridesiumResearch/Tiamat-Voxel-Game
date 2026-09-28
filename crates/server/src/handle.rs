@@ -352,6 +352,64 @@ fn group_by_domain<'a, T>(
 
 /// Writes each dirty chunk of entities into the domain it belongs to.
 ///
+/// Unloads up to [`MAX_UNLOADS_PER_TICK`] chunks from the front of the queue.
+///
+/// For each: the world drops it (or refuses it as dirty, and it waits for the
+/// debounce), its mobs are frozen and written, its fluid and light forgotten.
+/// **Written in one batch after the locks are dropped**, for the reason the
+/// debounce batches — a transaction per chunk on the tick thread is what made
+/// saving expensive — and mobs whose write failed are put back rather than
+/// lost: alive again in memory, and their chunk dirty so the debounce retries.
+///
+/// Returns how many chunks left memory.
+fn unload_some(
+    queue: &mut std::collections::VecDeque<(String, tiamat_core::ChunkPos)>,
+    world: &mut crate::world::World,
+    population: &std::sync::RwLock<crate::ent::Population>,
+    fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
+    lighting: &std::sync::RwLock<crate::light::Lights>,
+) -> usize {
+    let mut frozen: Vec<(String, tiamat_core::ChunkPos, Vec<tiamat_core::ent::Entity>)> =
+        Vec::new();
+    let mut unloaded = 0;
+    {
+        let mut mobs = population.write().expect("entity lock");
+        let mut ponds = fluidics.write().expect("fluid lock");
+        let mut lit = lighting.write().expect("lighting lock");
+        while unloaded < MAX_UNLOADS_PER_TICK
+            && let Some((domain, pos)) = queue.pop_front()
+        {
+            if ponds.get(&domain).is_some_and(|fluid| fluid.is_dirty(pos)) {
+                continue;
+            }
+            if !world.unload(&domain, pos) {
+                continue;
+            }
+            unloaded += 1;
+            if let Some(entities) = mobs.freeze(&domain, pos) {
+                frozen.push((domain.clone(), pos, entities));
+            }
+            if let Some(fluid) = ponds.get_mut(&domain) {
+                fluid.forget(pos);
+            }
+            if let Some(light) = lit.get_mut(&domain) {
+                light.forget(pos);
+            }
+        }
+    }
+    if !frozen.is_empty()
+        && let Err(err) = save_entities_by_domain(world, &frozen)
+    {
+        error!("could not save the mobs of unloaded chunks; keeping them: {err}");
+        let mut mobs = population.write().expect("entity lock");
+        for (domain, pos, entities) in frozen {
+            mobs.chunk_loaded(&domain, pos, entities);
+            mobs.mark_dirty(&domain, pos);
+        }
+    }
+    unloaded
+}
+
 /// **One call per `(domain, chunk)`, because that is what a row is.** A save
 /// that wrote every dirty chunk into the overworld would put a ship's mobs into
 /// the overworld's rows at the same coordinates, and delete whatever was
@@ -1209,6 +1267,38 @@ const fn edited_block(edit: &tiamat_core::proto::Edit) -> tiamat_core::BlockPos 
 /// enough that a player chiselling one block does not cause twenty writes a
 /// second of the same chunk.
 const SAVE_INTERVAL_TICKS: u64 = 40;
+
+/// Ticks between sweeps for chunks nobody is near: one second.
+///
+/// Often enough that a walk leaves no more than a second's worth of chunks
+/// behind it; seldom enough that walking the whole resident set against every
+/// player is not a per-tick cost.
+const UNLOAD_INTERVAL_TICKS: u64 = 20;
+
+/// Chunks unloaded per tick, at most.
+///
+/// Each is a freeze, three map removals and a share of one entity write.
+/// Bounded so a teleport across the world — every resident chunk at once — is
+/// spread over ticks rather than paid inside one.
+const MAX_UNLOADS_PER_TICK: usize = 32;
+
+/// Chunks past the view distance that stay resident, on every axis.
+///
+/// The physics under a player's feet and the streamer's next request both
+/// reach a little past the view, and a chunk unloaded at the edge is relit
+/// when it comes back — about 1.4 ms each, which a player pacing along a
+/// boundary would pay every second.
+const UNLOAD_MARGIN: u8 = 2;
+
+/// How far from a player a chunk may be and still stay in memory.
+fn unload_keep_distance(
+    view: tiamat_core::interest::ViewDistance,
+) -> tiamat_core::interest::ViewDistance {
+    tiamat_core::interest::ViewDistance {
+        horizontal: view.horizontal.saturating_add(UNLOAD_MARGIN),
+        vertical: view.vertical.saturating_add(UNLOAD_MARGIN),
+    }
+}
 
 /// How much of a tick one save may spend writing chunks.
 ///
@@ -3116,6 +3206,13 @@ impl ServerHandle {
                     // Whether the last save ran out of budget before it ran out
                     // of chunks. See the save itself, below.
                     let mut save_backlog = false;
+                    // Chunks the last sweep found nobody near, unloaded a few
+                    // a tick. Refilled each sweep rather than added to: a
+                    // player who walked back is near them again.
+                    let mut unload_queue: std::collections::VecDeque<(
+                        String,
+                        tiamat_core::ChunkPos,
+                    )> = std::collections::VecDeque::new();
 
                     // Where each tick's time goes. Allocated once and
                     // restarted per tick: a breakdown is only built for a tick
@@ -5543,6 +5640,59 @@ impl ServerHandle {
                         }
 
                         phases.mark("fluid");
+
+                        // **Chunks nobody is near leave memory.** Until this
+                        // sweep the cache only grew: every chunk a player ever
+                        // walked past stayed resident for the life of the
+                        // server, with its light, its fluid and its mobs
+                        // stepped every tick — a world a few hours old was
+                        // spending its budget on country nobody was in. That
+                        // reached the player as dropped ticks and a body the
+                        // client could not predict, and was reported as
+                        // prediction getting worse the longer a world was up.
+                        //
+                        // Kept: everything within the view distance and a
+                        // margin of any player, in the space they are in. A
+                        // domain with nobody in it keeps nothing. Refused this
+                        // sweep and taken next: a chunk with unsaved edits or
+                        // unsaved fluid, which the debounce writes first.
+                        if tick % UNLOAD_INTERVAL_TICKS == 0 {
+                            unload_queue.clear();
+                            let keep = unload_keep_distance(shared.view_distance);
+                            let centres = shared.player_centres();
+                            let domains: Vec<String> = world
+                                .resident_domains()
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect();
+                            for domain in domains {
+                                let near: Vec<tiamat_core::ChunkPos> = centres
+                                    .iter()
+                                    .filter(|(there, _)| *there == domain)
+                                    .map(|(_, centre)| *centre)
+                                    .collect();
+                                for pos in world.resident_positions(&domain) {
+                                    if near.iter().any(|centre| {
+                                        tiamat_core::interest::contains(*centre, keep, pos)
+                                    }) {
+                                        continue;
+                                    }
+                                    unload_queue.push_back((domain.clone(), pos));
+                                }
+                            }
+                        }
+                        if !unload_queue.is_empty() {
+                            let unloaded = unload_some(
+                                &mut unload_queue,
+                                &mut world,
+                                &population,
+                                &fluidics,
+                                &lighting,
+                            );
+                            control.note_unloaded(unloaded);
+                        }
+                        control.note_resident_chunks(world.cached());
+                        phases.mark("unload");
                         // The day advances once per tick, and is broadcast at
                         // a rate a person can read rather than at the rate it
                         // changes. Twenty updates a second of a float nobody
