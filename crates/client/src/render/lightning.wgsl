@@ -19,6 +19,23 @@
 // narrow core. Light adds, so the order the two land in is no matter and a
 // second draw with its own uniform would buy nothing.
 //
+// # Past the far plane
+//
+// The camera's far plane is 1000 blocks, set for the terrain, which never
+// reaches much past 750. A bolt is told to players up to a kilometre from its
+// top and may run four more from there, and clipped at the plane it would
+// vanish segment by segment while the flash it came with still lit the sky.
+// So the depth, and only the depth, is pinned just short of the plane: x, y
+// and w do not depend on it, so the bolt lands where it is on the screen and
+// is as wide as it should be; and a pinned depth still loses to anything the
+// terrain wrote, and still wins over the cleared sky.
+//
+// What it gets wrong is cloud. The deck writes its hit's depth, and past about
+// 980 blocks that is at or over the pin — so a far bolt is drawn over far
+// cloud in front of it. The buffer holds nothing to sort the two by out
+// there, and a bolt seen through the far edge of the deck is the lesser fault
+// than no bolt.
+//
 // # Unlit and unfogged
 //
 // A bolt is a light, not a surface: nothing here reads the sun or the block
@@ -61,6 +78,12 @@ const GLOW_LIGHT: f32 = 0.18;
 // hundred blocks off reads as a dotted line or not at all.
 const CORE_PIXELS: f32 = 1.5;
 const GLOW_PIXELS: f32 = 6.0;
+// The depth a bolt past the far plane is drawn at, where the plane itself is
+// 1: a millionth short, which survives the divide by w and the interpolation
+// without rounding up to the cleared 1 it must pass `Less` against. The
+// terrain never gets near it — the horizon's furthest corner, some 750
+// blocks off, is written at about 0.99998.
+const FAR_DEPTH: f32 = 0.999999;
 
 @vertex
 fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexOut {
@@ -101,6 +124,12 @@ fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexO
 
     var out: VertexOut;
     out.clip = view.view_projection * vec4<f32>(at + side * (corner.y * across * 0.5), 1.0);
+    // Pinned short of the far plane rather than clipped by it; see the top of
+    // the file. Only in front of the eye: behind it z is already negative and
+    // the near plane clips it as it should.
+    if (out.clip.w > 0.0) {
+        out.clip.z = min(out.clip.z, out.clip.w * FAR_DEPTH);
+    }
     out.across = corner.y;
     out.colour = instance.colour.rgb * select(GLOW_LIGHT, 1.0, core);
     return out;

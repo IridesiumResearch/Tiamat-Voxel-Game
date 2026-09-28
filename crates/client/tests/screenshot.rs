@@ -602,28 +602,51 @@ fn on_screen(camera: &Camera, world: [f64; 3]) -> (f32, f32) {
     )
 }
 
-#[test]
-fn a_bolt_four_hundred_blocks_off_is_a_line_by_day_and_by_night() {
-    // Weather ask W26's gate: "a bolt from y + 300 to the ground at 400
-    // blocks is visible as a line at night and by day." From three hundred
-    // above the floor's top to the floor's height, four hundred blocks
-    // ahead, against the sky. It must light nearly every row between its
-    // two ends as the camera sees them, near the straight line between
-    // them, and stay narrow doing it — a line, not a flash of the frame.
-    //
-    // At that range its 0.4 blocks are a sixth of a pixel here; drawn at its
-    // true width it would be a dotted line or nothing, which is what the
-    // pass's floor in pixels is for. Every mode, since mode 3 draws it into
-    // the float target and fogs and blooms it after.
-    let Some(gpu) = gpu() else { return };
-    let chunks = scene();
+/// How far in front of the camera the nearest point of a bolt's path is,
+/// along the view axis — what the far plane is measured in.
+fn nearest_depth(bolt: &tiamat_core::lightning::Lightning, camera: &Camera) -> f32 {
+    let origin = glam::Vec3::from_array(camera.position.offset_to(bolt.from));
+    let view = camera.view();
+    tiamat_core::lightning::build_path(bolt)
+        .segments
+        .iter()
+        .flat_map(|segment| [segment.a, segment.b])
+        .map(|offset| -(view * (origin + glam::Vec3::from_array(offset)).extend(1.0)).z)
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// The camera the bolts ahead are seen from: over the scene's floor, looking
+/// along it and up a little, so the frame holds a whole bolt.
+fn bolt_camera() -> Camera {
     let mut camera = Camera {
         position: Position::from_world(24.0, 18.0, 20.0),
         ..Camera::default()
     };
-    // Up a little, so the frame holds the whole bolt.
     camera.look(0.0, 0.2);
-    let bolt = bolt_between([24.0, 308.0, 420.0], [24.0, 8.0, 420.0]);
+    camera
+}
+
+/// A bolt `ahead` blocks in front of [`bolt_camera`], from the floor's height
+/// to three quarters of `ahead` above it.
+///
+/// Three quarters, so that at 400 it is the gate's three hundred and at any
+/// other range the same bolt scaled: its path is built in proportion to its
+/// length, so the frame holds the same shape and only the distance differs.
+fn bolt_ahead(ahead: f64) -> tiamat_core::lightning::Lightning {
+    bolt_between(
+        [24.0, 8.0 + ahead * 0.75, 20.0 + ahead],
+        [24.0, 8.0, 20.0 + ahead],
+    )
+}
+
+/// [`bolt_ahead`] must be a line in every mode by day and by night: lit in
+/// nearly every row between its two ends as the camera sees them, near the
+/// straight line between them, and narrow doing it — a line, not a flash of
+/// the frame.
+fn a_bolt_ahead_is_a_line(gpu: &Gpu, ahead: f64) {
+    let chunks = scene();
+    let camera = bolt_camera();
+    let bolt = bolt_ahead(ahead);
     let strokes = bolt_strokes(&bolt, &camera);
     let top = on_screen(&camera, bolt.from);
     let bottom = on_screen(&camera, bolt.to);
@@ -667,21 +690,59 @@ fn a_bolt_four_hundred_blocks_off_is_a_line_by_day_and_by_night() {
                 .count() as u32;
             let when = if dark { "night" } else { "day" };
             println!(
-                "{mode:?} by {when}: {} pixels lit, {on_line} of {rows} rows on the line",
+                "{ahead} ahead, {mode:?} by {when}: {} pixels lit, {on_line} of {rows} rows on \
+                 the line",
                 pixels.len()
             );
             assert!(
                 on_line * 10 >= rows * 9,
-                "{mode:?} by {when}: only {on_line} of the {rows} rows between the bolt's \
-                 ends are lit near it, so it is not a line"
+                "{ahead} ahead, {mode:?} by {when}: only {on_line} of the {rows} rows between \
+                 the bolt's ends are lit near it, so it is not a line"
             );
             assert!(
                 (pixels.len() as u32) < rows * 24,
-                "{mode:?} by {when}: {} pixels lit for {rows} rows is a smear, not a line",
+                "{ahead} ahead, {mode:?} by {when}: {} pixels lit for {rows} rows is a smear, \
+                 not a line",
                 pixels.len()
             );
         }
     }
+}
+
+#[test]
+fn a_bolt_four_hundred_blocks_off_is_a_line_by_day_and_by_night() {
+    // Weather ask W26's gate: "a bolt from y + 300 to the ground at 400
+    // blocks is visible as a line at night and by day." From three hundred
+    // above the floor's top to the floor's height, four hundred blocks
+    // ahead, against the sky.
+    //
+    // At that range its 0.4 blocks are a sixth of a pixel here; drawn at its
+    // true width it would be a dotted line or nothing, which is what the
+    // pass's floor in pixels is for. Every mode, since mode 3 draws it into
+    // the float target and fogs and blooms it after.
+    let Some(gpu) = gpu() else { return };
+    a_bolt_ahead_is_a_line(&gpu, 400.0);
+}
+
+#[test]
+fn a_bolt_past_the_far_plane_is_still_a_line() {
+    // A bolt is told to everyone within its radius of its top — up to 1024
+    // blocks — and runs up to 4096 from there, but the camera's far plane
+    // is 1000. Clipped by it, a player at the edge of the radius was told of
+    // the bolt, saw the sky flash, and was drawn no bolt at all. Eleven
+    // hundred blocks off, every point of this one is past the plane, so all
+    // of it is drawn only because the pass pins its depth short of it.
+    let Some(gpu) = gpu() else { return };
+    let ahead = 1100.0;
+    let camera = bolt_camera();
+    let nearest = nearest_depth(&bolt_ahead(ahead), &camera);
+    assert!(
+        nearest > camera.far,
+        "part of the bolt is {nearest} blocks off, inside the far plane at {}, so this \
+         would pass without the pin",
+        camera.far
+    );
+    a_bolt_ahead_is_a_line(&gpu, ahead);
 }
 
 #[test]
@@ -693,6 +754,10 @@ fn a_bolt_behind_a_hill_is_hidden_where_the_hill_is() {
     // shows the rest. Nothing may change on the wall — depth-tested against
     // the terrain, never drawn over it — and the part above it must still be
     // there, or "hidden" would be a pass that draws nothing at all.
+    //
+    // And again eleven hundred blocks behind, the same bolt scaled, all of
+    // it past the far plane: there its depth is pinned rather than true, and
+    // pinned it must still lose to the wall.
     let Some(gpu) = gpu() else { return };
     let chunks = wall_scene();
     let mut camera = Camera {
@@ -701,54 +766,71 @@ fn a_bolt_behind_a_hill_is_hidden_where_the_hill_is() {
     };
     // East, along +x, at the wall at world x = 16; and up a little.
     camera.look(-std::f32::consts::FRAC_PI_2, 0.15);
-    let bolt = bolt_between([404.0, 310.0, 24.0], [404.0, 10.0, 24.0]);
-    let strokes = bolt_strokes(&bolt, &camera);
     // The wall's top edge and its foot, as the camera sees them.
     let edge = on_screen(&camera, [16.0, 16.0, 24.0]).1;
     let foot = on_screen(&camera, [16.0, 8.0, 24.0]).1;
-    let top = on_screen(&camera, bolt.from).1;
-    assert!(
-        top < edge - 10.0 && foot < HEIGHT as f32,
-        "the bolt does not clear the wall: top {top}, edge {edge}, foot {foot}"
-    );
 
-    for mode in [
-        LightingMode::Simple,
-        LightingMode::Classic,
-        LightingMode::Beautiful,
-    ] {
-        for dark in [false, true] {
-            let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
-            renderer.set_lighting_mode(mode);
-            if dark {
-                night(&mut renderer);
-            }
-            let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
-            let bare = target.capture(&mut renderer, &camera).expect("capture");
-            renderer.set_lightning(&strokes);
-            let lit = target.capture(&mut renderer, &camera).expect("capture");
-            let pixels = brightened(&bare, &lit);
-            // Two rows of margin at the edge, where the wall's own pixels
-            // meet the sky.
-            let on_wall = pixels
-                .iter()
-                .filter(|&&(_, y)| (y as f32) > edge + 2.0 && (y as f32) < foot - 2.0)
-                .count();
-            let above = pixels
-                .iter()
-                .filter(|&&(_, y)| (y as f32) < edge - 2.0)
-                .count();
-            let when = if dark { "night" } else { "day" };
-            println!("{mode:?} by {when}: {above} pixels lit above the wall, {on_wall} on it");
-            assert_eq!(
-                on_wall, 0,
-                "{mode:?} by {when}: {on_wall} pixels of a bolt behind the wall reached the \
-                 frame, so it is not depth-tested"
-            );
+    for behind in [400.0, 1100.0] {
+        let bolt = bolt_between(
+            [4.0 + behind, 10.0 + behind * 0.75, 24.0],
+            [4.0 + behind, 10.0, 24.0],
+        );
+        let strokes = bolt_strokes(&bolt, &camera);
+        let top = on_screen(&camera, bolt.from).1;
+        assert!(
+            top < edge - 10.0 && foot < HEIGHT as f32,
+            "the bolt does not clear the wall: top {top}, edge {edge}, foot {foot}"
+        );
+        if behind > 1000.0 {
+            let nearest = nearest_depth(&bolt, &camera);
             assert!(
-                above > 20,
-                "{mode:?} by {when}: only {above} pixels of the part above the wall were drawn"
+                nearest > camera.far,
+                "part of the far bolt is {nearest} blocks off, inside the far plane"
             );
+        }
+
+        for mode in [
+            LightingMode::Simple,
+            LightingMode::Classic,
+            LightingMode::Beautiful,
+        ] {
+            for dark in [false, true] {
+                let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+                renderer.set_lighting_mode(mode);
+                if dark {
+                    night(&mut renderer);
+                }
+                let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+                let bare = target.capture(&mut renderer, &camera).expect("capture");
+                renderer.set_lightning(&strokes);
+                let lit = target.capture(&mut renderer, &camera).expect("capture");
+                let pixels = brightened(&bare, &lit);
+                // Two rows of margin at the edge, where the wall's own pixels
+                // meet the sky.
+                let on_wall = pixels
+                    .iter()
+                    .filter(|&&(_, y)| (y as f32) > edge + 2.0 && (y as f32) < foot - 2.0)
+                    .count();
+                let above = pixels
+                    .iter()
+                    .filter(|&&(_, y)| (y as f32) < edge - 2.0)
+                    .count();
+                let when = if dark { "night" } else { "day" };
+                println!(
+                    "{behind} behind, {mode:?} by {when}: {above} pixels lit above the wall, \
+                     {on_wall} on it"
+                );
+                assert_eq!(
+                    on_wall, 0,
+                    "{behind} behind, {mode:?} by {when}: {on_wall} pixels of a bolt behind the \
+                     wall reached the frame, so it is not depth-tested"
+                );
+                assert!(
+                    above > 20,
+                    "{behind} behind, {mode:?} by {when}: only {above} pixels of the part above \
+                     the wall were drawn"
+                );
+            }
         }
     }
 }

@@ -32,6 +32,17 @@
 //! a dotted line, or nothing. So the shader widens each ribbon to a floor in
 //! PIXELS and keeps its brightness: a real bolt at that range is far too
 //! bright for anyone to see how thin it is.
+//!
+//! # Never past the far plane
+//!
+//! The camera's far plane is a kilometre, set for the terrain; a bolt is
+//! told to players a kilometre from its top and may run four more. Clipped
+//! there, the bolt the stub's own example strikes would light the sky and
+//! draw nothing. The shader pins a far segment's depth just short of the
+//! plane instead — the pass's own projection in all but name, since only
+//! the depth depends on the far plane. `unclipped_depth` would do the same
+//! on the devices with `DEPTH_CLIP_CONTROL`, and a bolt must be drawn on
+//! all of them.
 
 use tiamat_core::lightning::{Lightning, MAX_SEGMENTS, Path};
 
