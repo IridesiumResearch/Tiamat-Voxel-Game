@@ -1070,13 +1070,22 @@ fn turn_arrows(rect: egui::Rect) -> (egui::Rect, egui::Rect) {
     (left, right)
 }
 
+/// The turn arrows' glyphs.
+///
+/// **Ones the interface's font has.** They were `◀` and `▶` (U+25C0, U+25B6),
+/// which Go Mono — the one font `install_fonts` gives egui — does not carry, so
+/// every shape editor showed two missing-glyph boxes where its arrows were.
+/// `◄` and `►` are the same arrows from the older code points that Go Mono
+/// does cover; `the_turn_arrows_are_glyphs_the_font_has` asks the font.
+const TURN_ARROWS: [&str; 2] = ["◄", "►"];
+
 /// One turn arrow, as a button. Reports whether it was pressed.
 ///
 /// Quiet on purpose: they are a way to look at the thing being made rather
 /// than part of making it, and drawing them as loudly as the Make button would
 /// say otherwise.
 fn turn_arrow(ui: &mut egui::Ui, rect: egui::Rect, pointing_left: bool) -> bool {
-    let glyph = if pointing_left { "◀" } else { "▶" };
+    let glyph = TURN_ARROWS[usize::from(!pointing_left)];
     ui.put(
         rect,
         egui::Button::new(egui::RichText::new(glyph).size(13.0).weak()),
@@ -1644,6 +1653,31 @@ mod tests {
     use tiamat_core::ui::{Align, Build, Direction};
 
     use super::*;
+
+    #[test]
+    fn the_turn_arrows_are_glyphs_the_font_has() {
+        // Reported from the shape editor's own test picture: two `?` boxes
+        // where the arrows should be. egui draws a glyph its fonts lack as a
+        // replacement box and says nothing, so this asks the font the window
+        // installs — its character map, through the parser `epaint` itself
+        // uses. Not `egui::Fonts::has_glyphs`: with one font in the family
+        // that font IS the replacement face, and egui answers no for every
+        // character there is.
+        use skrifa::MetadataProvider as _;
+        let font = skrifa::FontRef::new(crate::app::HUD_FONT).expect("the bundled font parses");
+        let charmap = font.charmap();
+        let has = |glyph: &str| glyph.chars().all(|c| charmap.map(c).is_some());
+        assert!(has("A"), "the character map was not read");
+        for glyph in TURN_ARROWS {
+            assert!(
+                has(glyph),
+                "the interface's font has no `{glyph}`: the shape editor draws a box for it"
+            );
+        }
+        // And the question can be answered no, or the check above proves
+        // nothing: the arrows these replaced.
+        assert!(!has("◀") && !has("▶"), "the font was asked nothing");
+    }
 
     #[test]
     fn a_widgets_own_fill_defers_to_what_the_mod_asked_for() {

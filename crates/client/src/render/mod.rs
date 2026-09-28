@@ -754,9 +754,11 @@ pub struct Gpu {
     /// Whether a texture can be viewed with and without its sRGB decode.
     ///
     /// What lets the interface sample the world's atlas as the bytes they are
-    /// — see [`Renderer::interface_atlas_view`]. Every Vulkan, Metal and DX12
-    /// device can; the GL backends cannot, and asking one to is a validation
-    /// error rather than a quiet no, so it is asked here where the adapter is.
+    /// without a second copy — see [`Renderer::interface_atlas_view`]. Every
+    /// Vulkan, Metal and DX12 device can; the GL backends cannot, and asking
+    /// one to is a validation error rather than a quiet no, so it is asked
+    /// here where the adapter is. Public so a test can take the GL path on a
+    /// device that is not GL.
     pub view_formats: bool,
 }
 
@@ -937,11 +939,12 @@ pub struct Renderer {
     ///
     /// The world's view is kept so its bind group can be rebuilt around it when
     /// the tints change; the pass itself reaches the atlas through
-    /// `bind_group`. The interface's is **a view, not a copy**: a slot in an
-    /// inventory has to draw the same pixels the world does, and a second
-    /// upload of the same image for the UI would double the atlas's memory just
-    /// to show a player what they are carrying. See
-    /// [`Renderer::interface_atlas_view`] for why there are two.
+    /// `bind_group`. The interface's is **a view, not a copy**, wherever the
+    /// device allows: a slot in an inventory has to draw the same pixels the
+    /// world does, and a second upload of the same image for the UI doubles
+    /// the atlas's memory just to show a player what they are carrying — which
+    /// only a GL device pays. See [`Renderer::interface_atlas_view`] for why
+    /// there are two.
     atlas: AtlasViews,
     /// What each material's colour does, and whether any of them does.
     ///
@@ -1726,9 +1729,9 @@ impl Renderer {
     ///
     /// So this is the same texture viewed as `Rgba8Unorm`: the bytes an artist
     /// wrote, which is what egui expects. On a device that cannot view one
-    /// texture two ways — the GL backends, see [`Gpu::view_formats`] — it is the
-    /// world's view after all: darker than it should be, but still the tile,
-    /// and not a second copy of the atlas kept just for the interface.
+    /// texture two ways — the GL backends, see [`Gpu::view_formats`] — it is a
+    /// second upload of the same bytes in that format, made from the same
+    /// `Atlas` at the same moment, so the two cannot drift apart.
     #[must_use]
     pub const fn interface_atlas_view(&self) -> &wgpu::TextureView {
         &self.atlas.interface
@@ -4968,7 +4971,10 @@ fn upload_tints(gpu: &Gpu, tints: &[MaterialTint]) -> wgpu::Buffer {
         })
 }
 
-/// One atlas texture, seen the two ways its two consumers need.
+/// The atlas, seen the two ways its two consumers need.
+///
+/// One texture viewed twice wherever the device allows it; two uploads of the
+/// same bytes where it does not — see [`upload_atlas`].
 struct AtlasViews {
     /// With the sRGB decode, as every world shader expects.
     world: wgpu::TextureView,
@@ -4987,19 +4993,62 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
     // Declared up front or the second view is refused: a texture may only be
     // viewed in the formats it was created to allow.
     let interface_format = gpu.view_formats.then_some(INTERFACE_FORMAT);
+    let texture = atlas_texture(
+        gpu,
+        atlas.side(),
+        &levels,
+        COLOUR_FORMAT,
+        interface_format.as_slice(),
+    );
+    let interface = if gpu.view_formats {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("atlas-interface"),
+            format: interface_format,
+            ..Default::default()
+        })
+    } else {
+        // **The same bytes a second time, on the one kind of device that has
+        // to have them.** The GL backends cannot view a texture in a format it
+        // was not made in (`DownlevelFlags::VIEW_FORMATS`), and handing egui
+        // the decoding view instead is UI ask 16's black cube all over again,
+        // for everybody on GL. The atlas costs its memory twice there and
+        // nowhere else; a slot and the wall built from it still show one
+        // image, uploaded from one `Atlas`.
+        atlas_texture(gpu, atlas.side(), &levels, INTERFACE_FORMAT, &[]).create_view(
+            &wgpu::TextureViewDescriptor {
+                label: Some("atlas-interface"),
+                ..Default::default()
+            },
+        )
+    };
+    let views = AtlasViews {
+        world: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        interface,
+    };
+    (views, atlas.grid, atlas.side())
+}
+
+/// One upload of the atlas and its mips, in `format`.
+fn atlas_texture(
+    gpu: &Gpu,
+    side: u32,
+    levels: &[crate::texture::Image],
+    format: wgpu::TextureFormat,
+    view_formats: &[wgpu::TextureFormat],
+) -> wgpu::Texture {
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("atlas"),
         size: wgpu::Extent3d {
-            width: atlas.side(),
-            height: atlas.side(),
+            width: side,
+            height: side,
             depth_or_array_layers: 1,
         },
         mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: COLOUR_FORMAT,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: interface_format.as_slice(),
+        view_formats,
     });
 
     for (level, image) in levels.iter().enumerate() {
@@ -5023,16 +5072,7 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
             },
         );
     }
-
-    let views = AtlasViews {
-        world: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-        interface: texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("atlas-interface"),
-            format: interface_format,
-            ..Default::default()
-        }),
-    };
-    (views, atlas.grid, atlas.side())
+    texture
 }
 
 /// The pictures the world's bind group samples: the atlas with its sampler,

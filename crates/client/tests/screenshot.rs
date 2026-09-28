@@ -9439,20 +9439,31 @@ fn a_shape_editor_is_drawn_in_its_materials_colour() {
     // The slot is drawn beside it through the same `Icons`: the fault was
     // never the editor's own, and a slot showing the same material in a
     // different colour from the editor next to it would be its own bug.
+    let Some(gpu) = gpu() else { return };
+    // **Both ways the interface can get the atlas**, whatever this device is.
+    // A GL device cannot view one texture with and without its sRGB decode, so
+    // there the interface's atlas is a second upload of the same bytes — see
+    // `Renderer::interface_atlas_view`. Any device can be made to take that
+    // path, so the GL path is checked here on every run rather than only on a
+    // machine CI does not have; and the shared view is checked wherever the
+    // device has one. Neither is skipped: this gate existed because a path
+    // nobody drew was a path nobody noticed was black.
+    if gpu.view_formats {
+        println!("the interface's atlas as a second view of the world's texture");
+        a_dialog_draws_dirt_as_dirt(gpu.clone());
+    }
+    println!("the interface's atlas as a second upload, as a GL device has it");
+    let mut copying = gpu;
+    copying.view_formats = false;
+    a_dialog_draws_dirt_as_dirt(copying);
+}
+
+/// The body of [`a_shape_editor_is_drawn_in_its_materials_colour`], on one
+/// device as it is configured.
+fn a_dialog_draws_dirt_as_dirt(gpu: Gpu) {
     use tiamat_core::ui::{Align, Build, Direction, Node, Widget};
 
     const DIRT: [u8; 4] = [98, 78, 58, 255];
-    let Some(gpu) = gpu() else { return };
-    // The one device the fix cannot reach, and says so: see
-    // `Renderer::interface_atlas_view` for what such a device draws instead.
-    if !gpu.view_formats {
-        println!(
-            "SKIPPING: `{}` via {} cannot view one texture with and without its sRGB decode, \
-             so the interface draws from the world's view and is darker than the tile",
-            gpu.adapter, gpu.backend
-        );
-        return;
-    }
     let atlas = Atlas::build(&[None, None, Some(Image::solid(16, 16, DIRT))]);
 
     let mut slot = Node::new(Widget::ItemSlot {
@@ -9492,11 +9503,16 @@ fn a_shape_editor_is_drawn_in_its_materials_colour() {
         },
     );
 
+    let picture = if gpu.view_formats {
+        "shape-editor.png"
+    } else {
+        "shape-editor-uploaded-twice.png"
+    };
     let (frame, faces) = draw_dialog(gpu, &atlas, tree, &views);
     if let Some(dir) = std::env::var_os("TIAMAT_DIALOG_PICTURES") {
         let dir = std::path::PathBuf::from(dir);
         let _ = std::fs::create_dir_all(&dir);
-        write_png(&dir.join("shape-editor.png"), &frame);
+        write_png(&dir.join(picture), &frame);
     }
     // The slot's whole block is three faces; the editor's is twenty-seven
     // cells of three. Painted in tree order, and each in its own draw order —
