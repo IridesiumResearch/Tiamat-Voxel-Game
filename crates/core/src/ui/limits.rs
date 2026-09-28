@@ -26,6 +26,14 @@ pub struct Limits {
     pub nodes: usize,
     /// Longest single string — a label, a placeholder, one dropdown option.
     pub text_bytes: usize,
+    /// Longest a [`Node::tooltip`] may be.
+    ///
+    /// The same number as [`crate::inventory::MAX_DETAIL`], and for the same
+    /// reason: refused rather than truncated. A truncated tooltip reads as the
+    /// mod's own mistake — a hint that stops mid-sentence — when the mod never
+    /// wrote one that long; refusing it instead puts the mistake in front of
+    /// the author, at `show_dialog`, where they can fix it.
+    pub tooltip_bytes: usize,
     /// Most options one dropdown may offer.
     pub options: usize,
     /// Most slots one [`Widget::ItemGrid`] may show.
@@ -46,6 +54,11 @@ impl Default for Limits {
             // A label is a sentence, not a document. Anything longer is either
             // a mistake or an attempt to make the client lay out a novel.
             text_bytes: 1024,
+            // Room for a mod's own hint text and a hard stop against a
+            // tooltip that is a document — [`crate::inventory::MAX_DETAIL`]'s
+            // reasoning, applied to the other opaque string a mod hands the
+            // engine.
+            tooltip_bytes: 256,
             // A dropdown a player has to scroll for a minute is already a
             // design problem; this is the runaway guard.
             options: 256,
@@ -214,6 +227,17 @@ fn check_node(node: &Node, limits: Limits) -> Result<(), UiError> {
         Ok(())
     };
     text("name", &node.name)?;
+    // Its own limit, not `text_bytes`: a tooltip is a hint, not a label, and
+    // the two are capped for different reasons ([`Limits::tooltip_bytes`]).
+    if let Some(tooltip) = &node.tooltip
+        && tooltip.len() > limits.tooltip_bytes
+    {
+        return Err(UiError::TextTooLong {
+            field: "tooltip",
+            found: tooltip.len(),
+            limit: limits.tooltip_bytes,
+        });
+    }
 
     match &node.widget {
         Widget::Label { text: value } => text("label", value)?,
@@ -504,6 +528,44 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_tooltip_is_refused_and_one_at_the_limit_passes() {
+        let limits = Limits::default();
+        let at_limit = "x".repeat(limits.tooltip_bytes);
+        let over = "x".repeat(limits.tooltip_bytes + 1);
+
+        let fine = Build::of(
+            Node {
+                tooltip: Some(at_limit),
+                ..Node::new(Widget::Spacer)
+            },
+            Vec::new(),
+        )
+        .flatten();
+        assert!(check(&fine, limits).is_ok(), "exactly at the limit");
+
+        let too_long = Build::of(
+            Node {
+                tooltip: Some(over),
+                ..Node::new(Widget::Spacer)
+            },
+            Vec::new(),
+        )
+        .flatten();
+        let err = check(&too_long, limits).expect_err("an oversized tooltip was accepted");
+        let UiError::TextTooLong {
+            field,
+            found,
+            limit,
+        } = err
+        else {
+            panic!("refused for the wrong reason: {err}");
+        };
+        assert_eq!(field, "tooltip", "the error named the wrong field");
+        assert_eq!(found, limits.tooltip_bytes + 1);
+        assert_eq!(limit, limits.tooltip_bytes);
+    }
+
+    #[test]
     fn a_widget_whose_own_fields_disagree_is_refused() {
         let limits = Limits::default();
         // Each of these is a mod's mistake that would otherwise reach a
@@ -605,6 +667,7 @@ mod tests {
                 Build::of(
                     Node {
                         name: "close".to_owned(),
+                        tooltip: Some("Leave the chest open".to_owned()),
                         ..Node::new(Widget::Button {
                             text: "Close".to_owned(),
                         })

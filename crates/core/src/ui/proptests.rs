@@ -105,11 +105,16 @@ fn any_node() -> impl Strategy<Value = Node> {
         any::<Option<u16>>(),
         any::<Option<u16>>(),
         (any::<u32>(), any::<u32>()),
+        // Past the checker's own cap (256), so `checking_any_tree_answers_
+        // rather_than_panicking` below exercises the refusal path and not just
+        // the `None` and in-bounds cases.
+        proptest::option::of(".{0,300}"),
     )
         .prop_map(
-            |(widget, name, style, grow, size, cross_size, (first, count))| Node {
+            |(widget, name, style, grow, size, cross_size, (first, count), tooltip)| Node {
                 widget,
                 name,
+                tooltip,
                 style,
                 grow,
                 size,

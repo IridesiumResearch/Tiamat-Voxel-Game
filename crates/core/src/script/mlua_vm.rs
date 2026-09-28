@@ -10417,6 +10417,7 @@ fn widget_build(spec: &Table, depth: usize) -> mlua::Result<crate::ui::Build> {
     let node = crate::ui::Node {
         widget,
         name: spec.get::<Option<String>>("name")?.unwrap_or_default(),
+        tooltip: spec.get::<Option<String>>("tooltip")?,
         style: widget_style(spec)?,
         grow: spec.get::<Option<u16>>("grow")?.unwrap_or(0),
         size: spec.get::<Option<u16>>("size")?,
@@ -10624,9 +10625,10 @@ fn content_hash(table: &Table, key: &str) -> mlua::Result<[u8; 32]> {
 
 /// Keys a widget table accepts. Same rule as `BLOCK_FIELDS`: a typo is an
 /// error, because the alternative is a silently ignored field.
-const WIDGET_FIELDS: [&str; 29] = [
+const WIDGET_FIELDS: [&str; 30] = [
     "type",
     "name",
+    "tooltip",
     "style",
     "grow",
     "size",
@@ -11523,6 +11525,53 @@ mod tests {
             }
         }
         assert_eq!(tree.nodes[2].name, "ok");
+    }
+
+    #[test]
+    fn a_widgets_tooltip_carries_into_the_tree_and_an_over_long_one_is_refused() {
+        // UI ask 15. Present, absent, and over the cap are the three shapes a
+        // mod's `tooltip` can take, and the tree it builds must tell them
+        // apart.
+        let shown = show(
+            r#"
+            game.show_dialog{
+              player = "abc",
+              form = "hint",
+              tree = { type = "button", name = "ok", text = "OK", tooltip = "needs 3 stone" },
+            }
+            "#,
+        )
+        .expect("load");
+        let tree = &shown[0].tree;
+        assert_eq!(
+            tree.nodes[0].tooltip.as_deref(),
+            Some("needs 3 stone"),
+            "the tooltip did not reach the tree"
+        );
+
+        // A widget that says nothing about it gets `None`, not `""` — the same
+        // shape `name` has, and for the same reason: a client that draws a
+        // hover box on an empty string draws an empty box.
+        let bare = show(
+            r#"game.show_dialog{ player = "abc", form = "bare", tree = { type = "spacer" } }"#,
+        )
+        .expect("load");
+        assert_eq!(bare[0].tree.nodes[0].tooltip, None);
+
+        // Over the cap: refused in the mod's own call stack, naming the field
+        // and the limit, the same way an over-long `name` or label already is.
+        let limit = crate::ui::Limits::default().tooltip_bytes;
+        let long = "x".repeat(limit + 1);
+        let source = format!(
+            r#"game.show_dialog{{ player = "a", form = "f",
+                tree = {{ type = "label", text = "hi", tooltip = "{long}" }} }}"#
+        );
+        let err = show(&source).expect_err("an over-long tooltip was accepted");
+        let (ScriptError::Load { detail, .. } | ScriptError::Runtime { detail, .. }) = &err else {
+            panic!("expected a script error carrying detail, got {err:?}");
+        };
+        assert!(detail.contains("tooltip"), "said: {detail}");
+        assert!(detail.contains(&limit.to_string()), "said: {detail}");
     }
 
     #[test]

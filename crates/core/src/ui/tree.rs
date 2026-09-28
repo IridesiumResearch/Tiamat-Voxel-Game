@@ -220,6 +220,14 @@ pub struct Node {
     /// The name events from this widget carry, so a mod can tell two buttons
     /// apart. Empty for widgets a mod never expects to hear from.
     pub name: String,
+    /// What hovers over it, or nothing.
+    ///
+    /// UI ask 15: a locked research node is a button, and it needs to say what
+    /// it requires without a status line taking room from the tree — so the
+    /// text goes on the node itself rather than on the sheet around it.
+    /// `None` is the ordinary case and costs a word, the same shape as
+    /// [`Node::name`] and [`Stack::detail`](crate::inventory::Stack::detail).
+    pub tooltip: Option<String>,
     /// How it looks.
     pub style: Style,
     /// Share of the parent's leftover space along its direction. `0` takes only
@@ -241,6 +249,7 @@ impl Node {
         Self {
             widget,
             name: String::new(),
+            tooltip: None,
             style: Style::default(),
             grow: 0,
             size: None,
