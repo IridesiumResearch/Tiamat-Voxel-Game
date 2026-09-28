@@ -12,7 +12,7 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W25 to W27, filed 2026-09-25. W24 landed 2026-09-26, W19 to W23
+Open: W28, filed 2026-09-28; W25 to W27, filed 2026-09-25. W24 landed 2026-09-26, W19 to W23
 2026-09-24, W17 and W18 the day before, below.
 
 ## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28)
