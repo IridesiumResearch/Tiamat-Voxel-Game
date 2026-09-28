@@ -505,9 +505,14 @@ fn server_messages() -> Vec<Vec<u8>> {
         // Protocol v77: a bolt, at the edge of every range it may have.
         ServerMessage::Lightning {
             lightning: tiamat_core::lightning::Lightning {
-                from: [-120_000.0, 380.0, 7.5],
+                from: [
+                    -tiamat_core::lightning::MAX_LIGHTNING_COORDINATE,
+                    380.0,
+                    7.5,
+                ],
                 to: [
-                    -120_000.0 + tiamat_core::lightning::MAX_LIGHTNING_REACH,
+                    tiamat_core::lightning::MAX_LIGHTNING_REACH
+                        - tiamat_core::lightning::MAX_LIGHTNING_COORDINATE,
                     380.0,
                     7.5,
                 ],

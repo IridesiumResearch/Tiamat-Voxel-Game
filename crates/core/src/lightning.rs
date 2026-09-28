@@ -66,6 +66,16 @@ pub const MAX_LIGHTNING_TICKS: u16 = 200;
 /// thousand. The cap also keeps every offset in the path small enough that
 /// an `f32` holds it to a fraction of a sub-node.
 pub const MAX_LIGHTNING_REACH: f64 = 4096.0;
+/// The farthest either end may be from the world's centre on any axis, in
+/// blocks: the world's own half extent and a bolt's reach beyond it.
+///
+/// **Bounded, not merely finite.** Two finite ends a few hundred orders of
+/// magnitude apart have a distance that is not, and a bolt whose length is
+/// infinity would pass the reach clamp as NaN and reach every client in
+/// range as a message each one refuses — and a refused message ends the
+/// connection. Inside this box every difference and every square is small.
+pub const MAX_LIGHTNING_COORDINATE: f64 =
+    crate::coords::WORLD_HALF_EXTENT_BLOCKS as f64 + MAX_LIGHTNING_REACH;
 
 /// How many times the trunk is halved: sixty-four segments.
 pub const TRUNK_LEVELS: u32 = 6;
@@ -137,7 +147,10 @@ impl Lightning {
     /// before trusting one a server sent (charter rule 14).
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.from.iter().chain(&self.to).all(|value| value.is_finite())
+        self.from
+            .iter()
+            .chain(&self.to)
+            .all(|value| (-MAX_LIGHTNING_COORDINATE..=MAX_LIGHTNING_COORDINATE).contains(value))
             // The clamp moves `to` by a scale whose rounding can leave the
             // length a hair past the cap; a square block of slack is a
             // million times that and still refuses a bolt that is not one.
@@ -186,17 +199,22 @@ pub fn sanitise_lightning(mut request: LightningRequest) -> LightningRequest {
         }
     };
     let bolt = &mut request.lightning;
+    let bound = |value: f64| value.clamp(-MAX_LIGHTNING_COORDINATE, MAX_LIGHTNING_COORDINATE);
     for value in &mut bolt.from {
-        if !value.is_finite() {
-            *value = 0.0;
-        }
+        *value = if value.is_finite() {
+            bound(*value)
+        } else {
+            0.0
+        };
     }
     // A `to` that is not a number in one axis is a bolt with no length that
     // way, rather than one reaching for the world origin.
     for (value, top) in bolt.to.iter_mut().zip(bolt.from) {
-        if !value.is_finite() {
-            *value = top;
-        }
+        *value = if value.is_finite() {
+            bound(*value)
+        } else {
+            top
+        };
     }
     let reach = reach_squared(bolt.from, bolt.to).sqrt();
     if reach > MAX_LIGHTNING_REACH {
@@ -577,9 +595,33 @@ mod tests {
     }
 
     #[test]
+    fn ends_too_far_apart_to_measure_are_brought_into_the_world() {
+        // Both finite, and their distance is not: without the box the reach
+        // clamp would scale an infinity to NaN and send every client in range
+        // a message it must refuse.
+        let tame = sanitise_lightning(LightningRequest {
+            lightning: Lightning {
+                from: [1.7e308, 300.0, 0.0],
+                to: [-1.7e308, 0.0, 0.0],
+                ..strike(8)
+            },
+            domain: "d".to_owned(),
+            radius: 256.0,
+            player: None,
+        });
+        assert!(tame.lightning.is_valid(), "{:?}", tame.lightning);
+        assert!((tame.lightning.from[0] - MAX_LIGHTNING_COORDINATE).abs() < 1e-9);
+    }
+
+    #[test]
     fn a_bolt_out_of_range_is_not_valid() {
         let good = strike(5);
         let bad = [
+            Lightning {
+                from: [MAX_LIGHTNING_COORDINATE + 1.0, 300.0, 0.0],
+                to: [MAX_LIGHTNING_COORDINATE + 1.0, 0.0, 0.0],
+                ..good
+            },
             Lightning {
                 from: [f64::NAN, 0.0, 0.0],
                 ..good

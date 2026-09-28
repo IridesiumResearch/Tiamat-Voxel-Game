@@ -4944,8 +4944,8 @@ mod tests {
         // Weather ask W26, protocol v77. Appended last, which the ordinal pins:
         // one place after `ShowOver`, the v72 tail.
         let bolt = crate::lightning::Lightning {
-            from: [-120_000.5, 380.0, 64.25],
-            to: [-120_040.0, 80.0, 30.0],
+            from: [-60_000.5, 380.0, 64.25],
+            to: [-60_040.0, 80.0, 30.0],
             seed: 16_099_289_709_293_836_018,
             colour: crate::lightning::DEFAULT_COLOUR,
             width: crate::lightning::MAX_LIGHTNING_WIDTH,
