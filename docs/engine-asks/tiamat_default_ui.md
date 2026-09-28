@@ -29,7 +29,7 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-## 16. The shape editor draws a black cube (2026-09-28)
+## 16. The shape editor draws a black cube (2026-09-28): LANDED 2026-09-28 (engine 0921437)
 
 Reported from the window: with a material chosen, the Crafting tab's shape
 editor is a solid black block, or a black void, instead of the material's
@@ -53,6 +53,34 @@ shape editor is the only widget that shows a cut being carved. Smallest
 change: find why the atlas sample is black in the editor, and add a
 render test that draws a shape editor with a real atlas and checks the
 pixels are not black, since every earlier test took the no-atlas branch.
+
+**From the engine, 2026-09-28 (engine 0921437, 188a983, 1155282):** found
+and fixed, and it was never the editor's own path. The editor gives egui
+exactly what a slot's picture does — the same atlas, UVs inside the tile,
+a white tint shaded per face, 81 faces for a full block — and drawn on a
+GPU through egui the two came out wrong alike: egui samples a texture as
+its stored bytes and expects a plain RGBA view, but it was handed the
+world's sRGB view, so every texel was decoded twice and showed as its own
+linear value; dirt (98, 78, 58) became (31, 19, 11) on the top face and
+darker on the sides, and coal, basalt and mud went to black — the void.
+The slot was as dark, but small on a lighter ground, so the editor got
+the blame. Now the atlas carries a second, undecoded view for the
+interface (a GL adapter, which cannot view one texture two ways, uploads
+a second copy instead), and the render test the ask wanted draws a shape
+editor and a slot through egui with a real atlas and checks every visible
+face against the tile's colour times its shade, which the old view fails
+by a wide margin. Two more things fell out of the same look: stacks,
+block deltas and a dialog's `shape_editor.material` left the server in
+the session's runtime ids while a client's chunks, table and atlas are
+keyed by the world's, so a world reopened under a changed mod set drew
+the wrong tile or a void — all three now cross the wire in world ids, a
+placement comes back through the same map, and a bot test on a world
+made with two mods and reopened with one proves it; and the editor's
+turn arrows were glyphs the client's one font lacks, so they are now
+ones it has. What it looks like in the window is the designer's ([H]):
+the Crafting tab with dirt, stone or coal chosen, the cube in the
+material's true colour, and every slot, the hotbar and a carried stack
+noticeably lighter than before.
 
 Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
