@@ -2387,11 +2387,24 @@ impl Bot {
     /// format for a script to match; this follows what the client actually
     /// shows.
     ///
-    /// **Bounded to the last [`MAX_HEARD_LINES`].** A script that never calls
-    /// this while a server is chatty must not turn a bot into an unbounded
-    /// log; anything older is dropped silently.
+    /// **Bounded to the last [`MAX_HEARD_LINES`] PER CALL**, not to what the
+    /// bot remembers — the full history a chunk stream fills is still kept,
+    /// for `received()` and everything built on it, and dropped lines are
+    /// not reported as dropped. A script polling this every tick that wants
+    /// a bound on the bot's own memory needs one there, not here.
+    ///
+    /// Reads `history` directly rather than through [`Self::received`],
+    /// which clones the whole session — chunk blobs included — on every
+    /// call. A script that polls this once a tick, which is the pattern
+    /// waiting on a chat line teaches, would otherwise pay for that clone on
+    /// every poll; this only clones the `Chat` text it actually returns.
     pub fn heard(&mut self) -> Vec<String> {
-        let history = self.received();
+        let Ok(history) = self.history.lock() else {
+            // A poisoned lock means the reader task panicked mid-push.
+            // Nothing more can arrive from it, so there is nothing new to
+            // report — matching `received()`'s own fallback.
+            return Vec::new();
+        };
         let start = self.heard_cursor.min(history.len());
         self.heard_cursor = history.len();
         let mut lines: Vec<String> = history[start..]
@@ -2401,6 +2414,7 @@ impl Bot {
                 _ => None,
             })
             .collect();
+        drop(history);
         if lines.len() > MAX_HEARD_LINES {
             let cut = lines.len() - MAX_HEARD_LINES;
             lines.drain(..cut);

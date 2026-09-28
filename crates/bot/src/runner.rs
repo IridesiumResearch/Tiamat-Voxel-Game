@@ -134,10 +134,11 @@ async fn execute(bot: &mut Bot, command: &Command) -> Result<Reply, BotError> {
             Ok(Reply::Inventory(stacks))
         }
         Command::ChunkReport(view) => Ok(Reply::Text(bot.chunk_report(*view))),
-        Command::Use(pos) => {
-            // The block's centre sub-node cell — see `Command::Use`'s docs for
-            // why there is no face or hit point to choose here.
-            bot.use_block(pos.subnode(1, 1, 1)).await?;
+        Command::Use(pos, dx, dy, dz) => {
+            // The named sub-node cell — the centre by default; see
+            // `Command::Use`'s docs for why there is no face or hit point to
+            // choose here, and why a script names another cell at all.
+            bot.use_block(pos.subnode(*dx, *dy, *dz)).await?;
             Ok(Reply::Done)
         }
         Command::Press(form, name) => {

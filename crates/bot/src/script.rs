@@ -90,11 +90,17 @@ pub enum Command {
     /// right-click with an empty hand, which reaches a mod's
     /// `register_on_use`.
     ///
-    /// **Progress ask 4.** Aimed at the block's CENTRE sub-node cell
-    /// (`BlockPos::subnode(1, 1, 1)`), the same cell `mod_hooks.rs`'s
-    /// `centre_of` computes by hand: a script names a block, not a face or a
-    /// hit point, because there is no screen here to have chosen one.
-    Use(BlockPos),
+    /// **Progress ask 4.** Aimed at one of the block's 27 sub-node cells,
+    /// `(dx, dy, dz)` each expected in `0..3`, because a script names a
+    /// block, not a face or a hit point — there is no screen here to have
+    /// chosen one. Defaults to the CENTRE cell (`1, 1, 1`), the same cell
+    /// `mod_hooks.rs`'s `centre_of` computes by hand, which is every
+    /// occupied cell of a whole block and none of a Partial block whose
+    /// middle happens to be air (a slab, a stair, a low crop). A script
+    /// that knows which cell of a Partial block is occupied names it here;
+    /// the server drops a use at an air cell exactly as it drops one out of
+    /// reach — the fallback line, never a mod's `on_use`.
+    Use(BlockPos, i32, i32, i32),
     /// Press a named button in a dialog this bot currently holds open, as
     /// `(qualified form, widget name)`.
     ///
@@ -299,10 +305,19 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
         Command::ExpectUnits(p.0, p.1, p.2)
     });
     // The place control with nothing to place, at the named block's centre
-    // sub-node cell — see `Command::Use`.
-    bind!("use", (i32, i32, i32), |_lua, p| Command::Use(
-        BlockPos::new(p.0, p.1, p.2)
-    ));
+    // sub-node cell unless the script names another — see `Command::Use`.
+    // The trailing three are optional and independent: a script that only
+    // cares about one axis of a Partial block's shape passes just that one.
+    bind!(
+        "use",
+        (i32, i32, i32, Option<i32>, Option<i32>, Option<i32>),
+        |_lua, p| Command::Use(
+            BlockPos::new(p.0, p.1, p.2),
+            p.3.unwrap_or(1),
+            p.4.unwrap_or(1),
+            p.5.unwrap_or(1),
+        )
+    );
     // A button, by the qualified form a `ShowDialog`/`UpdateDialog` named and
     // the widget's own name. Errors — see `Command::Press` — if the bot holds
     // no such form.
@@ -670,19 +685,48 @@ mod tests {
     }
 
     #[test]
-    fn a_use_names_the_block_not_a_face_or_a_hit_point() {
+    fn a_use_names_the_block_and_defaults_to_its_centre_cell() {
         // Progress ask 4: `bot.use(x, y, z)` takes a whole block, because a
         // script has no screen to have picked a face or a hit point with.
-        // `Command::Use`'s centre-sub-node choice is `runner.rs`'s job to
-        // apply; here it is only the command that must carry the right block.
+        // With no offset given the command still carries the centre cell —
+        // `runner.rs`'s job is only to hand it to `use_block` unchanged.
         let (outcome, commands) = run_with_stub("bot.join('Alice')\nbot.use(2, -1, 0)");
         assert!(outcome.passed, "{:?}", outcome.failure);
         assert_eq!(
             commands,
             vec![
                 Command::Join("Alice".to_owned()),
-                Command::Use(BlockPos::new(2, -1, 0)),
+                Command::Use(BlockPos::new(2, -1, 0), 1, 1, 1),
             ]
+        );
+    }
+
+    #[test]
+    fn a_use_can_name_an_occupied_cell_of_a_partial_block() {
+        // The centre cell is air on some Partial shapes (a slab, a stair, a
+        // low crop) — a script that knows which cell is occupied names it,
+        // rather than the server dropping the use for aiming at air.
+        let (outcome, commands) = run_with_stub("bot.join('Alice')\nbot.use(2, -1, 0, 0, 0, 2)");
+        assert!(outcome.passed, "{:?}", outcome.failure);
+        assert_eq!(
+            commands,
+            vec![
+                Command::Join("Alice".to_owned()),
+                Command::Use(BlockPos::new(2, -1, 0), 0, 0, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_use_offset_is_a_non_numeric_argument_error() {
+        // A script that passes something that is not a cell offset learns
+        // that at the call, as a script-stopping error — not a use silently
+        // aimed at the wrong cell.
+        let (outcome, _) = run_with_stub("bot.use(2, -1, 0, 'nowhere', 0, 0)");
+        assert!(!outcome.passed);
+        assert!(
+            outcome.failure.is_some(),
+            "a non-numeric offset must fail the script"
         );
     }
 
@@ -710,8 +754,13 @@ mod tests {
             });
         assert!(!outcome.passed);
         let failure = outcome.failure.expect("a failure message");
+        // Not merely `contains("warden:nope")` — `Command::Press`'s own
+        // `Debug` also contains the form name, so that alone would pass for
+        // any failure of the command whatsoever. Assert the actual
+        // `NoSuchForm` text a real bot produces, so this proves the message
+        // itself survives rather than that some failure occurred at all.
         assert!(
-            failure.contains("warden:nope"),
+            failure.contains("holds no open dialog for form `warden:nope`"),
             "the form must be named: {failure}"
         );
     }

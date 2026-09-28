@@ -57,7 +57,7 @@ fn write_station(name: &str) -> PathBuf {
         dir.join("init.lua"),
         r#"
 local ground = game.register_block{ id = "ground" }
-game.register_block{ id = "station" }
+local station = game.register_block{ id = "station" }
 game.register_on_generate(function(buf, pos)
     buf:fill_below_heightmap(game.flat_heightmap(0), ground)
 end)
@@ -87,7 +87,14 @@ game.register_on_player_join(function(event)
 end)
 
 game.register_on_use(function(e)
-    game.chat_to(e.player, "used: station")
+    -- Checked, not assumed: a use that landed on the ground beside the
+    -- station (wrong axis, off by one, a neighbour in reach) must not read
+    -- as "reached the station" just because SOME on_use fired. STATION
+    -- itself sits below the flat heightmap, so ground alone would otherwise
+    -- chat the same line even if `set_block` above had never run.
+    if e.x // 3 == 2 and e.y // 3 == -1 and e.z // 3 == 0 and e.material == station then
+        game.chat_to(e.player, "used: station")
+    end
 end)
 
 game.register_on_dialog_event(function(event)
@@ -181,6 +188,28 @@ fn wait_for_lua(var: &str, want: &str) -> String {
     )
 }
 
+/// Presses a button, retrying under a bounded number of ticks until the bot
+/// holds the dialog open rather than failing on the first attempt.
+///
+/// **The race this closes.** `ShowDialog` and a join hook's own chat line
+/// reach a connection through two separately-locked queues, taken a few
+/// lines apart in the tick pass (`endpoint.rs`'s `take_entity_messages` then
+/// `take_notices`). A hook that queues both between those two takes can have
+/// its chat land one pass before the `ShowDialog` it announces — so "the
+/// chat line arrived" proves the dialog is on its way, not that
+/// `open_dialogs()` holds it yet. Pressing on the strength of the chat line
+/// alone would then see `NoSuchForm` intermittently; this retries through
+/// that window instead of asserting on its timing.
+fn press_until_open(var: &str, form: &str, name: &str) -> String {
+    format!(
+        "local {var} = false\n\
+         for _i = 1, 100 do\n\
+         \x20   if pcall(bot.press, '{form}', '{name}') then {var} = true break end\n\
+         \x20   bot.sleep_ticks(1)\n\
+         end\n"
+    )
+}
+
 #[test]
 fn a_use_reaches_on_use_and_heard_returns_the_reply_then_drains() {
     let server = start("use-and-heard");
@@ -220,11 +249,13 @@ fn a_press_reaches_the_dialog_it_was_shown_and_the_mod_chats_back() {
     let source = format!(
         "{wait_shown}\
          bot.assert(shown, 'the join dialog never announced itself')\n\
-         bot.press('warden:panel', 'go')\n\
+         {press}\
+         bot.assert(pressed_ok, 'the press never reached an open dialog for warden:panel')\n\
          {wait_pressed}\
          bot.assert(pressed, 'the press never reached the mod')\n\
          bot.disconnect()\n",
         wait_shown = wait_for_lua("shown", "dialog: shown"),
+        press = press_until_open("pressed_ok", "warden:panel", "go"),
         wait_pressed = wait_for_lua("pressed", "pressed: go"),
     );
 
@@ -255,8 +286,14 @@ fn pressing_a_form_the_bot_was_never_shown_errors() {
         "pressing a form the bot never held must fail the script"
     );
     let failure = outcome.failure.expect("a failure message");
+    // Not merely `contains("warden:nosuchform")`: `drive()` formats every
+    // failure as `{command:?} failed: {err}`, and `Command::Press`'s own
+    // `Debug` already contains the form name, so that alone would pass for
+    // ANY failure of a press — a timeout, a dropped connection, anything.
+    // Assert the actual `NoSuchForm` text, which only `Bot::press` finding
+    // no open dialog produces, so this proves the right error fired.
     assert!(
-        failure.contains("warden:nosuchform"),
+        failure.contains("holds no open dialog for form `warden:nosuchform`"),
         "the failure should name the form that was never shown: {failure}"
     );
 

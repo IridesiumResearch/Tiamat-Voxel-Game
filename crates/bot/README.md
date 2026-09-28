@@ -104,9 +104,9 @@ measures the replayer rather than the server.
 | `bot.inventory()` | `{[material] = units}` — see below |
 | `bot.expect_units(material, units, timeout_ms)` | Block until the inventory holds at least that many units |
 | `bot.sleep_ticks(n)` | Wait roughly n server ticks |
-| `bot.use(x, y, z)` | The place control on a block with nothing to place — reaches `register_on_use`, at the block's centre sub-node cell |
+| `bot.use(x, y, z, dx?, dy?, dz?)` | The place control on a block with nothing to place — reaches `register_on_use`, at sub-node `(dx, dy, dz)` within the block (each `0..3`, default the centre `1, 1, 1`) |
 | `bot.press(form, name)` | Press a named button in a dialog the bot currently holds open; errors if it holds no such form |
-| `bot.heard()` | The chat lines sent to the bot since the last call, oldest first, then empties the buffer (last 256 kept) |
+| `bot.heard()` | The chat lines sent to the bot since the last call, oldest first, then empties the buffer (last 256 PER CALL; the session itself is not bounded) |
 | `bot.assert(cond, message)` | Assert, and count it |
 | `bot.disconnect()` | Close cleanly |
 | `bot.UNITS_PER_BLOCK` | 27 |
@@ -114,6 +114,24 @@ measures the replayer rather than the server.
 
 Calls **block until the server has confirmed**, so scripts read top to bottom
 and a failing assertion points at a line rather than at a continuation.
+
+### `bot.use` is a use, not a click — it has everything a use has
+
+There is no crosshair here, so `bot.use` cannot reproduce a click's aim; it
+only names a cell, and the server still enforces what it always enforces:
+
+- **Reach.** The cell must be within the bot's eye reach, the same distance a
+  real client is held to, or the use is refused with a chat line ("that is
+  too far away") rather than reaching a mod.
+- **Air is dropped, not delivered.** A named cell that is air — including the
+  default centre of a Partial block whose middle happens to be empty, such as
+  a slab, a stair or a low crop — never reaches `register_on_use`; the bot
+  hears the engine's own fallback line instead. Pass the offset of a cell the
+  script knows is occupied.
+- **An entity in the way goes first.** The server aims by the bot's own look
+  direction against nearby entities before it looks at the block (Life ask
+  17) — `bot.use` does not turn the bot to face the cell it names, so this
+  matters only when something else is on the bot's current look ray.
 
 ### Inventories are in units
 
