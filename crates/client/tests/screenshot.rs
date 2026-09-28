@@ -8227,7 +8227,8 @@ fn skipping_the_decks_clear_cells_changes_no_pixel() {
     // `Medium`, where the rind and the self-shadow are on and the detail the
     // occupancy leaves out is in the picture. Then a cover map, a wet square
     // with a storm in it over a clear sky, since the map is where the weather
-    // changes cell by cell.
+    // changes cell by cell. Then the camera inside the heaps, where the fog
+    // is read from the occupancy rather than asked by every pixel.
     //
     // `TIAMAT_DECK_FRAMES=dir` writes every frame with the skip on as a PNG,
     // so a change to the march that both paths share can be held against
@@ -8274,6 +8275,7 @@ fn skipping_the_decks_clear_cells_changes_no_pixel() {
         if cloud > 0 {
             clouded += 1;
         }
+        on
     };
     let deck = |layer, clouds, quality| client::render::clouds::Deck {
         layer,
@@ -8322,6 +8324,56 @@ fn skipping_the_decks_clear_cells_changes_no_pixel() {
         );
     }
     renderer.set_cloud_map(None);
+    // Inside the deck. Whether the camera stands in cloud is asked once a
+    // frame, into the occupancy's corner, and read there by every pixel,
+    // which each asked for itself before; a corner the pass and the deck
+    // disagreed about would fog clear air or clear a cloud, and none of the
+    // views above stands in one. So the camera is walked through the floor
+    // of the cloudy sky's heaps, looking level, and some of those frames
+    // must be the fog and nothing else — the same bytes either way — and
+    // some not.
+    let (_, cover, strato, alto, cb) = WEATHER_SKIES
+        .into_iter()
+        .find(|sky| sky.0 == "cloudy")
+        .expect("the cloudy sky");
+    let (mut fogged, mut seeing) = (0, 0);
+    for (x, z) in [
+        (24.0, 20.0),
+        (300.0, -200.0),
+        (-450.0, 380.0),
+        (800.0, 800.0),
+    ] {
+        for height in [510.0, 530.0, 560.0] {
+            let mut camera = Camera {
+                position: Position::from_world(x, height, z),
+                ..Camera::default()
+            };
+            camera.look(0.0, 0.0);
+            renderer.set_clouds(deck(None, None, quality));
+            let bare = target.capture(&mut renderer, &camera).expect("capture");
+            renderer.set_clouds(deck(
+                Some(shipped_deck()),
+                Some(sky_of(cover, strato, alto, cb)),
+                quality,
+            ));
+            let on = compare(
+                &mut renderer,
+                &format!("{quality:?} inside {x} {height} {z}"),
+                &camera,
+                &bare,
+            );
+            if on.rgba.chunks(4).all(|pixel| pixel == &on.rgba[..4]) {
+                fogged += 1;
+            } else {
+                seeing += 1;
+            }
+        }
+    }
+    assert!(
+        fogged > 0 && seeing > 0,
+        "of the frames through the heaps' floor {fogged} were the fog alone and {seeing} \
+         were not; both must be, or the camera's texel was never read both ways"
+    );
     // Identical frames of an empty sky would prove nothing.
     assert!(
         clouded * 4 >= shots * 3,
@@ -8332,17 +8384,29 @@ fn skipping_the_decks_clear_cells_changes_no_pixel() {
 #[test]
 #[ignore = "the measurement for weather ask W27; run with --ignored --nocapture"]
 fn how_long_the_shipped_deck_costs_on_low() {
-    // **Weather ask W27's gate**: `Low` at 1080p, the six skies and three
-    // views, at most half of today's median, with the storm seen from above
-    // no worse than today's level view. "Today" is the march with the skip
-    // off, which asks the field in every cell as it did before W27; the two
-    // are timed capture by capture, alternating, so whatever else the
-    // machine is doing lands on both. Two warm-up captures of each and the
-    // median of nine, as W19's probe times, and the deck's cost is what it
-    // adds over a bare sky — timed again for every shot, just before it,
-    // since one bare frame per view caught by a busy machine made a whole
-    // view's numbers negative. `TIAMAT_PROBE_SIZE=WxH` picks the frame,
-    // 1920x1080 when unset.
+    // **The instrument for weather ask W27's gate**: `Low` at 1080p, the
+    // six skies and three views, at most half of today's median, with the
+    // storm seen from above no worse than today's level view.
+    //
+    // **It times this build against itself, not against today.** "Skip
+    // off" is this build's march asking the field in every cell, and that
+    // march is not today's: the steps W27 took that every ray shares — the
+    // grid asked only near where it can grow, the camera's cloud asked once
+    // — are in it with the skip off too, and measured it runs at about 0.96
+    // of the commit before the ask. So the ratio it prints is the skip's
+    // alone, and pessimistic against the gate; the gate itself is this probe
+    // run on 29db686 as well — with a `set_cloud_skip` that does nothing,
+    // so both of its columns are today's march — alternating builds round
+    // by round on one machine, each shot's median across rounds held
+    // against today's.
+    //
+    // Off and on are timed capture by capture, alternating, so whatever
+    // else the machine is doing lands on both. Two warm-up captures of each
+    // and the median of nine, as W19's probe times, and the deck's cost is
+    // what it adds over a bare sky — timed again for every shot, just before
+    // it, since one bare frame per view caught by a busy machine made a
+    // whole view's numbers negative. `TIAMAT_PROBE_SIZE=WxH` picks the
+    // frame, 1920x1080 when unset.
     let Some(gpu) = gpu() else { return };
     let chunks = scene();
     let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
@@ -8378,7 +8442,8 @@ fn how_long_the_shipped_deck_costs_on_low() {
     };
     println!(
         "PROBE W27 {w}x{h}, {quality:?}, Beautiful, Weather's shipped deck, median of 9; \
-         off and on are what the deck adds over a bare sky"
+         skip off and on are what the deck adds over a bare sky, both this build — \
+         the gate against today needs 29db686 run the same way"
     );
     let (mut all_off, mut all_on) = (Vec::new(), Vec::new());
     let mut level_off = 0.0;
@@ -8408,7 +8473,10 @@ fn how_long_the_shipped_deck_costs_on_low() {
             });
             let (off, on) = both(&mut renderer, &camera);
             let (off, on) = (off - bare, on - bare);
-            println!("PROBE W27 {view} {sky}: off {off:.2} ms, on {on:.2} ms (bare {bare:.2} ms)");
+            println!(
+                "PROBE W27 {view} {sky}: skip off (this build) {off:.2} ms, skip on {on:.2} ms \
+                 (bare {bare:.2} ms)"
+            );
             view_off.push(off);
             view_on.push(on);
             if view == "above" && sky == "storm" {
@@ -8417,7 +8485,8 @@ fn how_long_the_shipped_deck_costs_on_low() {
         }
         let (off, on) = (median_of(&view_off), median_of(&view_on));
         println!(
-            "PROBE W27 view {view} median: off {off:.2} ms, on {on:.2} ms, on/off {:.2}",
+            "PROBE W27 view {view} median: skip off (this build) {off:.2} ms, skip on {on:.2} ms, \
+             on/off {:.2}",
             on / off.max(1e-6)
         );
         if view == "level" {
@@ -8428,14 +8497,16 @@ fn how_long_the_shipped_deck_costs_on_low() {
     }
     let (off, on) = (median_of(&all_off), median_of(&all_on));
     println!(
-        "PROBE W27 all {} shots median: off {off:.2} ms, on {on:.2} ms, on/off {:.2} \
-         (gate: at most 0.50)",
+        "PROBE W27 all {} shots median: skip off (this build) {off:.2} ms, skip on {on:.2} ms, \
+         on/off {:.2} (the skip's own share; the gate, at most 0.50 of today, is against \
+         29db686)",
         all_off.len(),
         on / off.max(1e-6)
     );
     println!(
-        "PROBE W27 storm from above: on {storm_above_on:.2} ms against today's level view, \
-         the median off, {level_off:.2} ms (gate: no worse)"
+        "PROBE W27 storm from above: skip on {storm_above_on:.2} ms against this build's level \
+         view with the skip off, {level_off:.2} ms (the gate holds it against 29db686's level \
+         view)"
     );
 }
 
