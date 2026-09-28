@@ -116,6 +116,23 @@ pub struct Shared {
     /// Built once at startup and never changed: registries freeze before the
     /// world opens (charter rule 9), so there is nothing that could change it.
     pub materials: Vec<tiamat_core::proto::MaterialDef>,
+    /// This world's runtime ⇄ world material ids, for everything that crosses
+    /// the wire.
+    ///
+    /// **The wire speaks world ids, both ways.** A chunk blob carries them
+    /// (the codec translates on the way out), [`Shared::materials`] is keyed by
+    /// them, and a client's atlas slot IS one. Everything held here is in this
+    /// session's runtime ids — an inventory, a chunk in memory, what a mod's
+    /// `game.get_block_id` hands out — which are registration order. The two
+    /// agree on a world opened by the mod set that made it and come apart the
+    /// moment that set changes (charter rule 8). A stack sent in runtime ids
+    /// then drew some other material's tile in its slot and in the shape
+    /// editor, and a placement's delta put some other block in the client's
+    /// chunk.
+    ///
+    /// A copy, not a lock: the registries freeze before the world opens
+    /// (charter rule 9), so there is nothing that could change it.
+    pub id_map: tiamat_core::persist::idmap::MaterialMap,
     /// The same tools, in the shape a client is sent on join.
     ///
     /// Separate from [`Shared::tools`], which is a lookup keyed by id for the
@@ -908,7 +925,9 @@ pub struct PlacementRequest {
     pub actor: PlayerUuid,
     /// The cell they want filled.
     pub target: tiamat_core::SubNodePos,
-    /// The material they claim to be holding.
+    /// The material they claim to be holding, as the wire names it: the
+    /// world's id. The tick turns it into this session's before it looks in an
+    /// inventory — see [`Shared::runtime_material`].
     pub material: u16,
     /// The cut they claim to be holding, or `0` for loose material.
     ///
@@ -1110,6 +1129,110 @@ impl Shared {
     /// The current tick, for stamping outbound messages.
     fn tick(&self) -> u64 {
         self.control.tick()
+    }
+
+    /// A runtime material id as the wire carries it: the world's own.
+    ///
+    /// See [`Shared::id_map`]. A runtime id with no world id is a material
+    /// registered after the world opened, which the freeze makes impossible;
+    /// it leaves as `engine:unknown`, which a client draws as the placeholder,
+    /// rather than as a number that means some other material over there.
+    #[must_use]
+    pub fn wire_material(&self, runtime: tiamat_core::MaterialId) -> u16 {
+        self.id_map
+            .to_world(runtime)
+            .unwrap_or(tiamat_core::MaterialId::UNKNOWN.get())
+    }
+
+    /// A material id off the wire, in this session's runtime ids.
+    ///
+    /// `None` for a number this world has no material for — a client that is
+    /// wrong or hostile, and either way asking for nothing it holds.
+    #[must_use]
+    pub fn runtime_material(&self, world: u16) -> Option<tiamat_core::MaterialId> {
+        self.id_map.to_runtime(world).ok()
+    }
+
+    /// One stack as the wire carries it.
+    ///
+    /// **The one place a stack is written for a client.** Three messages send
+    /// stacks — what an entity IS, what it is HOLDING, and what is in a view or
+    /// an inventory — and there were three copies of these lines, none of
+    /// which translated the material. One function is where they cannot stop
+    /// matching.
+    #[must_use]
+    pub fn wire_stack(
+        &self,
+        stack: &tiamat_core::inventory::Stack,
+    ) -> tiamat_core::proto::StackDef {
+        tiamat_core::proto::StackDef {
+            material: self.wire_material(stack.material),
+            units: stack.units,
+            shape: stack
+                .shape
+                .map_or(0, tiamat_core::inventory::Shape::occupancy),
+            detail: stack.detail.clone(),
+        }
+    }
+
+    /// One edit as the wire carries it: the same cells, the world's id.
+    ///
+    /// The tick applies an edit in runtime ids, because that is what a chunk
+    /// in memory holds; a client's chunk arrived as a blob in world ids, and a
+    /// delta has to name what that chunk calls the material.
+    #[must_use]
+    pub fn wire_edit(&self, edit: Edit) -> Edit {
+        match edit {
+            Edit::Block { pos, material } => Edit::Block {
+                pos,
+                material: self.wire_material(tiamat_core::MaterialId(material)),
+            },
+            Edit::SubNode { pos, material } => Edit::SubNode {
+                pos,
+                material: self.wire_material(tiamat_core::MaterialId(material)),
+            },
+            Edit::Partial {
+                pos,
+                material,
+                occupancy,
+            } => Edit::Partial {
+                pos,
+                material: self.wire_material(tiamat_core::MaterialId(material)),
+                occupancy,
+            },
+        }
+    }
+
+    /// A mod's dialog as the wire carries it.
+    ///
+    /// A mod builds its tree in the ids its own `game.get_block_id` gave it,
+    /// which are runtime ids; the client draws a shape editor's cells from the
+    /// atlas slot the number names, which is a world id. Only the shape editor
+    /// carries a material — a slot names a view, and the view's stacks go
+    /// through [`Shared::wire_stack`].
+    #[must_use]
+    pub fn wire_tree(&self, mut tree: tiamat_core::ui::Tree) -> tiamat_core::ui::Tree {
+        for node in &mut tree.nodes {
+            if let tiamat_core::ui::Widget::ShapeEditor { material, .. } = &mut node.widget {
+                *material = self.wire_material(tiamat_core::MaterialId(*material));
+            }
+        }
+        tree
+    }
+
+    /// A message leaving through [`Shared::broadcast`], as the wire carries it.
+    ///
+    /// Every block delta leaves through a broadcast, so this is where one is
+    /// put in world ids — at the one door, rather than at each of the half a
+    /// dozen places the tick writes the world.
+    fn to_wire(&self, message: ServerMessage) -> ServerMessage {
+        match message {
+            ServerMessage::BlockDelta { edit, actor } => ServerMessage::BlockDelta {
+                edit: self.wire_edit(edit),
+                actor,
+            },
+            other => other,
+        }
     }
 
     /// Queues an edit for the simulation to apply.
@@ -2326,14 +2449,7 @@ impl Shared {
         let Some(slots) = self.slots_of(uuid) else {
             return Vec::new();
         };
-        let wire = |stack: &tiamat_core::inventory::Stack| tiamat_core::proto::StackDef {
-            material: stack.material.0,
-            units: stack.units,
-            shape: stack
-                .shape
-                .map_or(0, tiamat_core::inventory::Shape::occupancy),
-            detail: stack.detail.clone(),
-        };
+        let wire = |stack: &tiamat_core::inventory::Stack| self.wire_stack(stack);
         let held = slots.grab.held.as_ref().map(wire);
         slots
             .views
@@ -2545,10 +2661,13 @@ impl Shared {
     /// Fans a message out to every connected player.
     ///
     /// A send with no receivers is not an error — it means nobody is connected.
+    ///
+    /// A block delta is handed over in the tick's runtime ids and leaves in
+    /// world ids; see [`Shared::wire_edit`].
     pub fn broadcast(&self, message: ServerMessage) {
         let _ = self.outbound.send(Broadcast {
             only: None,
-            message,
+            message: self.to_wire(message),
         });
     }
 
@@ -2566,7 +2685,7 @@ impl Shared {
     pub fn broadcast_in(&self, domain: &str, message: ServerMessage) {
         let _ = self.outbound.send(Broadcast {
             only: Some(domain.to_owned()),
-            message,
+            message: self.to_wire(message),
         });
     }
 
@@ -3138,13 +3257,8 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 {
                     let stacks = shared
                         .inventory_of(&uuid)
-                        .into_iter()
-                        .map(|stack| tiamat_core::proto::StackDef {
-                            material: stack.material.0,
-                            units: stack.units,
-                            shape: stack.shape.map_or(0, tiamat_core::inventory::Shape::occupancy),
-                            detail: stack.detail,
-                        })
+                        .iter()
+                        .map(|stack| shared.wire_stack(stack))
                         .collect();
                     frame::write(&mut send, &ServerMessage::InventoryUpdate { stacks }).await?;
                     // **And where it all is**, on the same flag. The two are
@@ -4078,6 +4192,8 @@ mod tests {
             mods: Vec::new(),
             mod_set_fingerprint: 0,
             materials: Vec::new(),
+            // The identity: nothing here has a world to disagree with.
+            id_map: tiamat_core::persist::idmap::MaterialMap::passthrough(),
             tool_table: Vec::new(),
             views: Vec::new(),
             items: std::collections::BTreeSet::new(),
@@ -4138,6 +4254,105 @@ mod tests {
             material_ids: std::collections::BTreeMap::new(),
             main_slots: None,
         }
+    }
+
+    #[test]
+    fn what_leaves_for_a_client_names_a_material_as_the_world_does() {
+        // **Charter rule 8 at the wire.** A client's chunks arrive in world ids
+        // and its atlas slot IS a world id; everything the tick holds is in
+        // runtime ids. They agree on a world opened by the mod set that made
+        // it, which is how stacks, deltas and a shape editor's material went
+        // out untranslated and nothing noticed. So the two spaces differ here,
+        // as they do on a world reopened without a mod that loaded in front:
+        // runtime 2 is world 7, and runtime 3 is world 2.
+        use tiamat_core::MaterialId;
+        let mut shared = shared();
+        shared.id_map = tiamat_core::persist::idmap::MaterialMap::from_pairs(&[
+            (MaterialId::AIR, 0),
+            (MaterialId::UNKNOWN, 1),
+            (MaterialId(2), 7),
+            (MaterialId(3), 2),
+        ]);
+        let (uuid, _) = player(1);
+        let stack = tiamat_core::inventory::Stack::new(MaterialId(2), 27).expect("a stack");
+
+        // A stack, however it leaves: on its own, and in a view.
+        assert_eq!(shared.wire_stack(&stack).material, 7);
+        shared.credit(uuid, vec![stack]);
+        let slots: Vec<u16> = shared
+            .view_updates(&uuid)
+            .into_iter()
+            .flat_map(|message| match message {
+                ServerMessage::ViewUpdate { slots, .. } => slots,
+                _ => Vec::new(),
+            })
+            .flatten()
+            .map(|stack| stack.material)
+            .collect();
+        assert_eq!(slots, vec![7], "a view sent the stack in runtime ids");
+
+        // An edit, through both doors every delta leaves by, whole and cut.
+        let mut heard = shared.outbound.subscribe();
+        let pos = tiamat_core::BlockPos::new(1, 2, 3);
+        shared.broadcast(ServerMessage::BlockDelta {
+            edit: Edit::Partial {
+                pos,
+                material: 2,
+                occupancy: 0b101,
+            },
+            actor: None,
+        });
+        shared.broadcast_in(
+            "somewhere:else",
+            ServerMessage::BlockDelta {
+                edit: Edit::Block { pos, material: 3 },
+                actor: None,
+            },
+        );
+        let delta = |heard: &mut tokio::sync::broadcast::Receiver<Broadcast>| match heard
+            .try_recv()
+            .expect("a delta")
+            .message
+        {
+            ServerMessage::BlockDelta { edit, .. } => edit,
+            other => panic!("not a delta: {other:?}"),
+        };
+        assert_eq!(
+            delta(&mut heard),
+            Edit::Partial {
+                pos,
+                material: 7,
+                occupancy: 0b101,
+            }
+        );
+        assert_eq!(delta(&mut heard), Edit::Block { pos, material: 2 });
+
+        // A mod's shape editor, which names its material with the number
+        // `game.get_block_id` gave it.
+        let tree = shared.wire_tree(tiamat_core::ui::Tree::leaf(
+            tiamat_core::ui::Widget::ShapeEditor {
+                shape: 0b111,
+                material: 2,
+            },
+        ));
+        assert_eq!(
+            tree.nodes[0].widget,
+            tiamat_core::ui::Widget::ShapeEditor {
+                shape: 0b111,
+                material: 7,
+            }
+        );
+
+        // And back: what a client names, in the ids its stack was sent in.
+        assert_eq!(shared.runtime_material(7), Some(MaterialId(2)));
+        assert_eq!(shared.runtime_material(2), Some(MaterialId(3)));
+        assert_eq!(shared.runtime_material(5), None, "world 5 is nothing here");
+        // A runtime id with no world id cannot be sent as a number that means
+        // something else over there.
+        assert_eq!(
+            shared.wire_material(MaterialId(9)),
+            MaterialId::UNKNOWN.get()
+        );
     }
 
     #[test]

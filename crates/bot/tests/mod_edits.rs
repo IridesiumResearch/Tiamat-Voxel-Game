@@ -844,21 +844,7 @@ fn two_items_a_mod_says_are_different_stay_different() {
 fn write_pair(name: &str, with_first: bool) -> PathBuf {
     let root = scratch(name);
     if with_first {
-        let dir = root.join("first");
-        std::fs::create_dir_all(&dir).expect("mod dir");
-        std::fs::write(
-            dir.join("mod.toml"),
-            "id = \"first\"\nname = \"First\"\nversion = \"0.1.0\"\n\
-             license = \"GPL-3.0-only\"\n",
-        )
-        .expect("manifest");
-        // Several blocks, so removing this mod shifts the other's ids by more
-        // than one and a coincidence is that much less likely.
-        std::fs::write(
-            dir.join("init.lua"),
-            "for n = 1, 5 do game.register_block{ id = \"filler_\" .. n } end\n",
-        )
-        .expect("script");
+        write_first(&root);
     }
 
     let dir = root.join("second");
@@ -911,6 +897,25 @@ end)
     )
     .expect("script");
     root
+}
+
+/// The mod that loads in front and is later removed: see [`write_pair`].
+fn write_first(root: &std::path::Path) {
+    let dir = root.join("first");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"first\"\nname = \"First\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    // Several blocks, so removing this mod shifts the other's ids by more
+    // than one and a coincidence is that much less likely.
+    std::fs::write(
+        dir.join("init.lua"),
+        "for n = 1, 5 do game.register_block{ id = \"filler_\" .. n } end\n",
+    )
+    .expect("script");
 }
 
 #[test]
@@ -986,6 +991,166 @@ fn a_block_read_back_is_in_the_id_space_a_mod_speaks() {
                 "`game.get_block` reported a material a mod cannot compare against — \
                  a runtime id translated as though it were a world id",
             );
+    });
+    server.stop();
+}
+
+/// The second mod of a pair as a bench: bricks for a player who joins, and a
+/// shape editor on the brick for one who asks.
+///
+/// The editor names its material the way a mod does, with the number
+/// `game.get_block_id` gave it — which is a runtime id.
+fn write_bench_pair(name: &str, with_first: bool) -> PathBuf {
+    let root = scratch(name);
+    if with_first {
+        write_first(&root);
+    }
+    let dir = root.join("second");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"second\"\nname = \"Second\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+game.register_block{ id = "brick" }
+
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+
+game.register_on_player_join(function(event)
+    game.give(event.player, { material = "second:brick", count = 2 })
+end)
+
+game.register_on_chat(function(event)
+    if event.text ~= "bench" then
+        return
+    end
+    game.show_dialog{
+        player = event.player,
+        form = "cut",
+        tree = { type = "shape_editor", name = "cut", material = game.get_block_id("second:brick") },
+    }
+    return false
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
+#[test]
+fn a_client_is_told_a_material_by_the_number_its_chunks_use() {
+    // **Charter rule 8 at the wire**, and the other half of UI ask 16's black
+    // shape editor. A client's chunks arrive in world ids and its atlas slot IS
+    // a world id; the server holds inventories, chunks in memory and a mod's
+    // numbers in runtime ids. Stacks, a placement's delta and a shape editor's
+    // material all went out in runtime ids, which is the same number on a world
+    // opened by the mod set that made it — so nothing noticed — and some other
+    // material's tile on one reopened without a mod that loaded in front.
+    //
+    // So the world is made with two mods and reopened with one, and every one
+    // of those is checked against the id the material table gives the brick.
+    let world = scratch("wire-ids-world");
+
+    // First run: both mods, so the brick's world id comes after the fillers.
+    // Nobody needs to join; opening the world is what writes its id table.
+    let server = start_at(
+        "wire-ids-1",
+        write_bench_pair("wire-ids-1", true),
+        world.clone(),
+    );
+    assert!(server.stop(), "the world did not flush cleanly");
+
+    // Second run: the fillers are gone, so the brick's runtime id is five lower
+    // than the world id every client is told it by.
+    let server = start_at("wire-ids-2", write_bench_pair("wire-ids-2", false), world);
+    block_on(async {
+        let mut bot = Bot::connect(
+            server.local_addr(),
+            Identity::generate().expect("identity"),
+            server.cert_fingerprint(),
+        )
+        .await
+        .expect("connect");
+        bot.join("Mason").await.expect("join");
+        let brick = bot
+            .material_table()
+            .expect("a material table")
+            .into_iter()
+            .find(|entry| entry.name == "second:brick")
+            .map(|entry| entry.id)
+            .expect("the mod registers a brick");
+
+        // What the player was given, in both of the messages that carry it.
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while bot.units_of(brick) < 54 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the two bricks never arrived as the brick: {:?} (the table says {brick})",
+                bot.inventory()
+            );
+            bot.recv().await.expect("recv");
+        }
+        let main: Vec<u16> = bot
+            .view("player:main")
+            .expect("the player's slots")
+            .into_iter()
+            .flatten()
+            .map(|stack| stack.material)
+            .collect();
+        assert_eq!(
+            main,
+            vec![brick],
+            "a slot names the brick by a number the atlas does not"
+        );
+
+        // The shape editor a mod opens on it.
+        bot.chat("bench").await.expect("chat");
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        let editor = loop {
+            let found = bot.dialogs().into_iter().find_map(|(_, tree)| {
+                tree.nodes.iter().find_map(|node| match node.widget {
+                    tiamat_core::ui::Widget::ShapeEditor { material, .. } => Some(material),
+                    _ => None,
+                })
+            });
+            if let Some(material) = found {
+                break material;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the bench never opened"
+            );
+            bot.recv().await.expect("recv");
+        };
+        assert_eq!(
+            editor, brick,
+            "the shape editor draws the brick from another material's tile"
+        );
+
+        // And a placement: named as the stack was sent, and told back as the
+        // chunk the client holds calls it.
+        let target = BlockPos::new(-2, 0, 0);
+        bot.place_from_inventory(
+            tiamat_core::SubNodePos::new(target.x * 3 + 1, target.y * 3 + 1, target.z * 3 + 1),
+            brick,
+        )
+        .await
+        .expect("place");
+        bot.expect_block(target, brick, PATIENCE)
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "the placed brick did not come back as the brick: {err}; {:?}",
+                    bot.notices()
+                )
+            });
     });
     server.stop();
 }

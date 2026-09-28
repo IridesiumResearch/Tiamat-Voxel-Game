@@ -294,7 +294,8 @@ impl tiamat_core::fluid::Access for Shared {
 /// the tick having to be re-entrant. The edit lands on the next tick.
 pub struct Edits {
     shared: std::sync::Arc<crate::transport::Shared>,
-    /// Block name to WORLD material id, resolved once at startup.
+    /// Block name to RUNTIME material id, resolved once at startup: the id a
+    /// chunk in memory holds, which is what the queued edit is written as.
     ///
     /// Names rather than numbers at the API boundary — charter rule 8 makes
     /// runtime and world ids different numbers, and handing a mod either one

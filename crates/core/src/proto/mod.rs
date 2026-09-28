@@ -1554,7 +1554,8 @@ pub enum ServerMessage {
     },
     /// A block or sub-node changed.
     BlockDelta {
-        /// The edit.
+        /// The edit, its material in **world** ids — what the client's chunk
+        /// blobs hold — though the server applied it in its own runtime ones.
         edit: Edit,
         /// Who made it, or `None` for the engine.
         actor: Option<[u8; 32]>,

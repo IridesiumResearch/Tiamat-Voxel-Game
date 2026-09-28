@@ -67,6 +67,9 @@ pub const MAX_PENDING: usize = 8;
 /// the two agree by construction (charter rule 8): a plan holds NAMES, and a
 /// house captured under one mod set and stamped under another must not come
 /// back made of whatever those numbers mean today.
+///
+/// The numbers are this session's RUNTIME ids, which is what a plan reads out
+/// of a chunk in memory and what a stamp's edits are written as.
 pub struct Names {
     by_name: BTreeMap<String, u16>,
     by_id: BTreeMap<u16, String>,
@@ -543,18 +546,12 @@ mod tests {
             .map(|name| registry.register(name).expect("register"))
             .collect();
         let db = tiamat_core::WorldDb::open(&path, &mut registry).expect("open");
-        // The world's own numbering, which is what a chunk holds and what an
-        // edit names — NOT the runtime ids above (charter rule 8).
+        // The runtime ids above: what a chunk in memory holds and what an edit
+        // is applied in, which is how the server builds the real table.
         let by_name = MATERIALS
             .iter()
             .zip(&ids)
-            .map(|(name, id)| {
-                let world_id = db
-                    .materials()
-                    .to_world(*id)
-                    .expect("every registered material has a world id");
-                ((*name).to_owned(), world_id)
-            })
+            .map(|(name, id)| ((*name).to_owned(), id.get()))
             .collect();
         (
             World::open(db, 99).expect("open world"),

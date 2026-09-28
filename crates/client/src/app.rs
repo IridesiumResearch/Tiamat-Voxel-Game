@@ -3828,7 +3828,8 @@ impl App {
         &self.items
     }
 
-    /// What each material is called, by runtime id.
+    /// What each material is called, by the id the wire names it with: the
+    /// world's, which is what a chunk, a stack and an atlas slot all use.
     ///
     /// Read by whatever has to SAY what something is — a slot's tooltip, the
     /// hotbar's label — rather than draw it. Empty until the material table

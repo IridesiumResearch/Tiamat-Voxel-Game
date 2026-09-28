@@ -484,22 +484,6 @@ fn save_entities_by_domain(
 ///
 /// `None` rather than a placeholder: a client that is sent no label draws none,
 /// and inventing `"<unnamed>"` would put engine copy on somebody's head.
-/// One stack, as the wire carries it.
-///
-/// Its own function because three messages send stacks now — what an entity IS,
-/// what it is HOLDING, and what is in a view — and three copies of the same
-/// four lines is where one of them quietly stops matching.
-fn stack_def(stack: &tiamat_core::inventory::Stack) -> tiamat_core::proto::StackDef {
-    tiamat_core::proto::StackDef {
-        material: stack.material.0,
-        units: stack.units,
-        shape: stack
-            .shape
-            .map_or(0, tiamat_core::inventory::Shape::occupancy),
-        detail: stack.detail.clone(),
-    }
-}
-
 fn resolve_nametag(label: &tiamat_core::ent::Nametag, shared: &Shared) -> Option<String> {
     match label {
         tiamat_core::ent::Nametag::Text(text) => Some(text.clone()),
@@ -549,10 +533,18 @@ fn entity_messages(
                 anim: spawn.anim.0,
                 model: spawn.model,
                 collider: spawn.collider.map(|box_| [box_.width, box_.height]),
-                item: spawn.item.as_ref().map(stack_def),
+                item: spawn.item.as_ref().map(|stack| shared.wire_stack(stack)),
                 hands: [
-                    spawn.hands.main.as_ref().map(stack_def),
-                    spawn.hands.off.as_ref().map(stack_def),
+                    spawn
+                        .hands
+                        .main
+                        .as_ref()
+                        .map(|stack| shared.wire_stack(stack)),
+                    spawn
+                        .hands
+                        .off
+                        .as_ref()
+                        .map(|stack| shared.wire_stack(stack)),
                 ],
                 // Resolved here, where the roster is. Charter rule 13: a
                 // display name is a per-server claim bound to a UUID, so the
@@ -602,15 +594,22 @@ fn entity_messages(
             .map(|armed| tiamat_core::proto::EntityHands {
                 id: armed.id.0,
                 hands: [
-                    armed.hands.main.as_ref().map(stack_def),
-                    armed.hands.off.as_ref().map(stack_def),
+                    armed
+                        .hands
+                        .main
+                        .as_ref()
+                        .map(|stack| shared.wire_stack(stack)),
+                    armed
+                        .hands
+                        .off
+                        .as_ref()
+                        .map(|stack| shared.wire_stack(stack)),
                 ],
             })
             .collect();
         messages.push(ServerMessage::EntityArmed { entities });
     }
 
-    let _ = shared;
     messages
 }
 
@@ -2083,14 +2082,24 @@ impl ServerHandle {
             "material table built"
         );
 
-        // The same table, the way `game.set_block` needs it: a mod names a
-        // block and the engine resolves the number. Built from `materials`
-        // rather than from the registry so that both sides of the API agree by
-        // construction — a mod placing what a client is told about cannot be
-        // one number out (charter rule 8).
-        let block_names: std::collections::BTreeMap<String, u16> = materials
+        // The names `game.set_block` and a plan resolve, in RUNTIME ids.
+        //
+        // What a name resolves to is written into a chunk in memory by
+        // `World::apply`, the door a player's placement goes through, and a
+        // chunk in memory holds runtime ids: `persist::codec` translates on
+        // every load and save. This was built from the material table — world
+        // ids — while that was thought to be what a chunk held, and on a world
+        // whose mod set had changed `set_block("brick")` wrote whatever this
+        // session numbers as the brick's WORLD id, saved that, and told every
+        // client it was a brick. A plan read the same way, through its inverse.
+        // The client is told in world ids at the wire (`Shared::wire_edit`).
+        //
+        // Only what the world has an id for, like the material table: nothing
+        // else can be saved, and `World::apply` refuses it.
+        let block_names: std::collections::BTreeMap<String, u16> = registry
             .iter()
-            .map(|material| (material.name.clone(), material.id))
+            .filter(|(runtime, _)| world.materials().to_world(*runtime).is_ok())
+            .map(|(runtime, name)| (name.to_owned(), runtime.get()))
             .collect();
 
         // Breaking rules, keyed by WORLD id because that is what a chunk holds.
@@ -2652,6 +2661,7 @@ impl ServerHandle {
             mod_set_fingerprint: mod_set_fingerprint(&mods),
             mods,
             materials,
+            id_map: world.materials().clone(),
             tool_table,
             views,
             action_table,
@@ -4190,7 +4200,18 @@ impl ServerHandle {
                             // reason a dig needs it: what is checked for being
                             // occupied and what is written have to be one world.
                             let building_in = shared.player_domain(&request.actor);
-                            let material = tiamat_core::MaterialId(request.material);
+                            // **Named in world ids**, as the client's stacks
+                            // were sent; held, charged and written in runtime
+                            // ids, as the inventory and the chunk in memory
+                            // are. A number this world has no material for is
+                            // nothing anybody can be carrying.
+                            let Some(material) = shared.runtime_material(request.material) else {
+                                shared.tell(
+                                    &request.actor,
+                                    tiamat_core::place::Refusal::NothingHeld.to_string(),
+                                );
+                                continue;
+                            };
                             // **What they hold of THIS stack**, not of this
                             // material. A player with one named block and
                             // sixty plain ones has sixty-one of neither, and
@@ -4476,7 +4497,7 @@ impl ServerHandle {
                             let edits = tiamat_core::place::writes(
                                 plan.block,
                                 cells,
-                                request.material,
+                                material.get(),
                                 filled,
                                 same,
                             );
@@ -6097,6 +6118,10 @@ impl ServerHandle {
     ///
     /// Applied on the next tick and broadcast like any other edit, so a
     /// connected client sees it arrive. Returns whether it was queued.
+    ///
+    /// `material` is this session's runtime id, as every edit the tick applies
+    /// is; the delta a client receives names it by the world's. The two are
+    /// one number on a world opened by the mod set that made it.
     pub fn seed_block(&self, pos: tiamat_core::BlockPos, material: u16) -> bool {
         self.shared.queue_seed(
             tiamat_core::domain::OVERWORLD,
@@ -6429,16 +6454,20 @@ impl tiamat_core::ui::host::Access for Screens {
             .form
             .split_once(':')
             .map_or_else(|| request.form.clone(), |(owner, _)| owner.to_owned());
+        // In world ids: a shape editor's material is what the mod's
+        // `game.get_block_id` gave it, and the client's atlas is numbered by
+        // the world (UI ask 16's black cube, on a world whose mod set changed).
+        let tree = self.shared.wire_tree(request.tree.clone());
         let message = if request.update {
             tiamat_core::proto::ServerMessage::UpdateDialog {
                 form: request.form.clone(),
-                tree: request.tree.clone(),
+                tree,
                 compact: request.compact,
             }
         } else {
             tiamat_core::proto::ServerMessage::ShowDialog {
                 form: request.form.clone(),
-                tree: request.tree.clone(),
+                tree,
                 compact: request.compact,
             }
         };
