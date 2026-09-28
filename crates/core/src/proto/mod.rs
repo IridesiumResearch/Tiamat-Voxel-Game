@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 76;
+pub const PROTOCOL_VERSION: u32 = 77;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 76;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v77: tooltip on a dialog Node (UI ask 15) and ServerMessage::Lightning
+// appended (Weather W26) — a sibling branch lands the lightning half under the
+// same number, so this line covers both and the merge is trivial.
 // v76 (Life, right-click to eat): `ClientMessage::Use` carries an
 // `Option<SubNodePos>`. The place control pressed at NOTHING in reach — open
 // sky, or a block too far — is a use too, sent without a cell. The server hands
@@ -4627,6 +4630,57 @@ mod tests {
         // Protocol v65: the models a mod pushed.
         let models = encode(&ServerMessage::ModelTable { models: Vec::new() }).expect("encode");
         assert_eq!(models[0], 51);
+    }
+
+    #[test]
+    fn a_dialogs_tooltip_round_trips_and_an_oversized_one_is_refused() {
+        // UI ask 15, protocol v77. `Node::tooltip` changes `Node`'s postcard
+        // layout, so the wire form itself — not just the checker — is worth a
+        // named test rather than trusting `derive(Serialize, Deserialize)` to
+        // have got it right.
+        let node = |tooltip: Option<&str>| crate::ui::Node {
+            tooltip: tooltip.map(str::to_owned),
+            ..crate::ui::Node::new(crate::ui::Widget::Button {
+                text: "Locked".to_owned(),
+            })
+        };
+        let show = ServerMessage::ShowDialog {
+            form: "f".to_owned(),
+            tree: crate::ui::Tree {
+                nodes: vec![node(Some("needs 3 stone"))],
+            },
+            compact: false,
+        };
+        let bytes = encode(&show).expect("encode");
+        let ServerMessage::ShowDialog { tree: back, .. } =
+            decode::<ServerMessage>(&bytes).expect("decode")
+        else {
+            panic!("decoded to a different variant");
+        };
+        assert_eq!(
+            back,
+            crate::ui::Tree {
+                nodes: vec![node(Some("needs 3 stone"))]
+            }
+        );
+        assert!(validate_server_message(&show).is_ok());
+
+        // Over the cap: `check_dialog` runs `crate::ui::check` on arrival, the
+        // same call the mod's own `show_dialog` makes, so a server that skipped
+        // the mod-side check (or lied about the tree some other way) is still
+        // refused here.
+        let limit = crate::ui::Limits::default().tooltip_bytes;
+        let oversized = ServerMessage::ShowDialog {
+            form: "f".to_owned(),
+            tree: crate::ui::Tree {
+                nodes: vec![node(Some(&"x".repeat(limit + 1)))],
+            },
+            compact: false,
+        };
+        assert!(
+            validate_server_message(&oversized).is_err(),
+            "an oversized tooltip reached the client unrefused"
+        );
     }
 
     #[test]
