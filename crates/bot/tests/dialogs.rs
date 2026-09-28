@@ -732,3 +732,114 @@ fn a_forged_slot_move_cannot_invent_items() {
     });
     server.stop();
 }
+
+/// A mod with one button that carries a hint, and a chat command that
+/// provokes the engine's own refusal of an over-long one.
+///
+/// UI ask 15. The refusal is behind `pcall` rather than left to disable the
+/// mod: a mod that wants to answer its own mistake — telling a player their
+/// hint was too long, rather than going silent — needs the error as a value,
+/// and this is what asking for one looks like from Lua.
+fn write_tooltips(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("tooltips");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"tooltips\"\nname = \"Tooltips\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+local counter = game.register_block{ id = "counter" }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+game.register_tool{ id = "hand", brush = "block", speed_multiplier = 1.0, default = true }
+
+game.register_on_player_join(function(event)
+    game.show_dialog{
+        player = event.player,
+        form = "hint",
+        tree = {
+            type = "button", name = "locked", text = "Locked",
+            tooltip = "needs 3 stone",
+        },
+    }
+end)
+
+-- Provoked by chat rather than at join, so the tree the first test reads back
+-- is never the one this refusal tried to build.
+game.register_on_chat(function(event)
+    if event.text == "oversized" then
+        local ok, err = pcall(game.show_dialog, {
+            player = event.player,
+            form = "bad",
+            tree = { type = "label", text = "hi", tooltip = string.rep("x", 300) },
+        })
+        if (not ok) and tostring(err):find("tooltip", 1, true) then
+            game.set_block({ x = 0, y = 4, z = 0 }, "tooltips:counter")
+        end
+        return ""
+    end
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
+#[test]
+fn a_dialogs_tooltip_reaches_the_bot() {
+    let server = start("tooltip", write_tooltips("tooltip"));
+    block_on(async {
+        let mut bot = join(&server, "Reader").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+
+        let dialogs = bot.dialogs();
+        let (form, tree) = &dialogs[0];
+        assert_eq!(form, "tooltips:hint");
+        assert_eq!(
+            tree.nodes[0].tooltip.as_deref(),
+            Some("needs 3 stone"),
+            "the button's tooltip did not reach the bot"
+        );
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
+#[test]
+fn an_oversized_tooltip_fails_the_mods_own_pcall_and_names_the_field() {
+    let server = start("tooltipbad", write_tooltips("tooltipbad"));
+    block_on(async {
+        let mut bot = join(&server, "Writer").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+
+        bot.chat("oversized").await.expect("send");
+
+        // The mod marks the world at y=4 only when its own `pcall` failed with
+        // "tooltip" somewhere in the message — the block is the one channel a
+        // bot has to see what a mod's error said (see `write_shop`'s docs).
+        let counter = bot
+            .material_table()
+            .expect("a material table")
+            .into_iter()
+            .find(|entry| entry.name == "tooltips:counter")
+            .map(|entry| entry.id)
+            .expect("the mod registers a counter");
+        bot.expect_block(PRESSED, counter, PATIENCE)
+            .await
+            .expect("the mod's own pcall(game.show_dialog, ..) never failed naming \"tooltip\"");
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
