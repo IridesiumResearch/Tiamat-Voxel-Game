@@ -29,42 +29,20 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-## 14. A fixed size for `player:main` (2026-09-25): LANDED 2026-09-28 (engine 896fb30)
-
-The inventory is 28 fillable slots: 1-9 quick access, 10-27 the pack, 28 the
-off-hand. Worn slots are views of their own and not counted. The screen now
-draws exactly those 28 and nothing past them.
-
-But `player:main` grows: `game.give` never refuses, and a pickup into a full
-28 lands in slot 29, which no screen shows and no key selects. The item is
-kept but cannot be reached. The mod cannot prevent it: `register_view` is
-fixed-size but cannot replace `player:main`, there is no hook on a pickup, and
-`game.inventory` reports consolidated stacks rather than slots, so a tick
-cannot even find what is in 29 to move it back out.
-
-Smallest change: a size for `player:main`, set once at registration (say
-`game.set_main_slots(28)`, or `slots` on a view that replaces it). At that size
-`give` answers what did not fit, as `container_give` already does, and a
-pickup that does not fit stays on the ground. Nothing else here changes: the
-first 28 keep the engine's meaning.
-
-**From the engine, 2026-09-28 (engine 896fb30):** `game.set_main_slots(28)`,
-registration window only, one size for the server (a second mod naming a
-different one is an error at load). With it set the main view never grows
-past the size; `game.give` answers two values, `gave` (true only when all
-of it went in, as before) and `left` (units that did not fit, zero on
-success); and a dig whose yield would not fit is refused before the block
-comes apart, with the player told "you cannot carry any more". An
-inventory saved before the size was set keeps what it had. **Life's pickup
-must read the second value** (`drops.lua` despawns the entity whatever
-`give` answered): give `left` units back to the ground stack rather than
-despawning it, or the leftover is lost the day this mod calls
-`set_main_slots`. Filed on Life's sheet as a sibling note by this mod is
-the right place for that; the engine sheet says it here so nobody is
-surprised.
-
-Landed so far, asserted by the native check except 11 and 12,
+No open asks. Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
+
+- **15**, a tooltip on any dialog node (engine 2655837, protocol v77, drawn
+  in 663bb70): `tooltip` is among the fields `screen.lua` copies from another
+  mod's tree, and `widgets.tip(widget, text)` answers a copy of any widget
+  with one, because a widget the builders hand back reaches its caller
+  read-only. Asked for Progress's U5; the native check carries one through.
+- **14**, a fixed size for `player:main` (engine 896fb30): `init.lua` calls
+  `game.set_main_slots(28)`, so a full pack refuses a pickup rather than
+  hiding it in slot 29. `game.give` now answers what did not fit, and the
+  crafter takes back any part of a stack that fitted before it refunds the
+  material, so a full pack can neither lose units nor make them; the native
+  check drives that path.
 
 - **13**, `conflicts` in `mod.toml` (engine 57e5d6f), and the engine's mods
   made secondary the same day: a mod that replaces another names it. Against

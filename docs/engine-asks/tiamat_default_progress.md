@@ -17,7 +17,24 @@ Newest first. Items are removed when they land.
 Started 2026-09-27, scaffolded by the engine session from the designer's
 two-path design. Asks 1 to 3 copied from the mod's own sheet on 2026-09-28,
 after its 0.1.0 (the brief's steps 1 to 7), and landed the same day (engine
-cbbbc5e). Nothing is open.
+cbbbc5e). Ask 4 copied on 2026-09-28, with the pacing model; it is open.
+
+## 4. A bot that can play a station: OPEN
+
+**Seen.** The mod's brief has its pacing measured by a bot playing
+Craft's loop without a screen. The bot can join, chat, move, dig, place
+and press action keys, and nothing more: it cannot light a fire, open a
+kiln or read "Discovered: ..." back, so it can neither play the loop nor
+see what it earned. Today the pacing is a model (the mod's
+`docs/pacing.md`) and a per-source ledger a person's session fills.
+
+**Smallest change.** Three calls on the `bot` script API, each a message
+the client already sends or receives: `bot.use(x, y, z)` (the place
+control on a block with nothing to place, reaching `register_on_use`),
+`bot.press(form, name)` (a button in a dialog a mod showed the bot), and
+`bot.heard()` (the chat lines sent to the bot since the last call). With
+them a script plays the first hours and reads `progress sources` at the
+end.
 
 ## 3. A position-change event: LANDED 2026-09-28 (engine cbbbc5e)
 

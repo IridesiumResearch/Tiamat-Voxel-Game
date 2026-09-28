@@ -18,7 +18,61 @@ Started 2026-09-26, from the mod's first plan, relayed by the designer.
 Asks 2 to 7 copied from the mod's own sheet on 2026-09-28, where the
 history stays; all six landed the same day (engine c83fbc9). Asks 8 and 9
 added 2026-09-28 from the mod's sheet and landed the same day (engine
-cbbbc5e). Nothing is open.
+cbbbc5e). Ask 10 added 2026-09-28 and landed the same day (engine
+7cf1c73). Ask 11 added 2026-09-28: **one is open.**
+
+## 11. The blocks carrying a tag (2026-09-28): OPEN
+
+**Seen.** Ask 6 gave `game.tags(material)`, and the world now tags its
+blocks, so this mod classes them by rule: `stone` is rock, `hard` hard
+rock, `soil` loose. What it cannot do is go the other way — ask which
+blocks are `soil` — and a tool's per-material speeds (ask 2) are a table
+registered at load, block by block. So a pick's slower speed on earth
+still needs a list of the world's loose blocks by name, the one table of
+another mod's blocks this mod still keeps.
+
+**Smallest change.** `game.tagged(tag)`: the qualified ids of every block
+registered so far with that tag, in registration order — callable in the
+registration window, after the mods one depends on have registered.
+Or `speeds` on `register_tool` accepting `{ tag = "soil" }` keys,
+resolved at freeze.
+
+## 10. A listed use handler beside an unlisted one (2026-09-28): LANDED 2026-09-28 (engine 7cf1c73)
+
+**Seen.** Ask 8 landed as asked: `register_on_use(fn, { materials = {...} })`
+is heard first at those blocks — and, by the same design, at no other
+block. A mod has one `on_use` (a second is refused: "One callback per hook
+per mod"). Craft hears uses at far more blocks than its fires: every
+station block the registry holds, its own and other mods' — Tiamat Default
+Progress's research table opens because Craft handles a use at it, and that
+block is registered after Craft loads, so Craft cannot name it in a list.
+So Craft can list its fires and lose every station another mod adds, or
+list nothing and lose the gesture ask 8 was for: raw meat held out over a
+fire is still eaten by Life, which loads first.
+
+**Meanwhile.** Craft registers `on_use` without a list, as before; cooking
+is the fire's box, opened with an empty hand.
+
+**Smallest change.** Let a mod register `on_use` twice when exactly one of
+the two carries `materials`: the listed one asked first at its blocks, the
+unlisted one in its ordinary place for every other block. Each is still
+one callback, so nothing about a veto's order changes.
+
+**From the engine, 2026-09-28 (engine 7cf1c73):** as asked. `on_use` alone
+has two slots, one for a registration with `materials` and one for a
+registration without, so a mod may hold both; a second of either, or a
+third call, is refused with a message naming the slot it collided with.
+The listed callback is asked first at its blocks and nowhere else; the
+unlisted one is asked in load order at every other block, and it is no
+longer stood down at a block merely because its mod has some list — only
+where its own list matched. `anywhere` belongs to the unlisted callback:
+naming it beside `materials` is refused at load ("`anywhere` is for the
+handler with no `materials`"), which is the one change of meaning here —
+before, the pair loaded and reached one callback; no shipped mod wrote
+it. Registration order does not matter. Unit-tested in the VM and end to
+end with a Life-like mod loaded first eating anywhere: a use at the fire
+reaches Craft's listed handler before it, a use elsewhere reaches Craft's
+unlisted one after it. `api/AGENTS.md` and the stub say the rule.
 
 ## 9. Reading one slot of a player's view (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
 

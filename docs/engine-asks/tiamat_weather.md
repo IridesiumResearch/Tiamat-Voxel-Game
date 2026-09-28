@@ -12,7 +12,8 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W26 and W27, filed 2026-09-25. W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
+Open: none. W27's first step landed 2026-09-28 with the gate not yet met (see it),
+W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 ## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
@@ -49,7 +50,7 @@ not a broadcast. The gate is a bot test each way (`atmosphere.rs`,
 `sound.rs`): two players in range of every strike, each strike addressed
 to one, the other's client receives nothing.
 
-## W27. The deck still lags; the mod is out of knobs (2026-09-25)
+## W27. The deck still lags; the mod is out of knobs (2026-09-25): STEP 1 LANDED 2026-09-28 (engine f4ceb53), gate not yet met
 
 **Seen.** The designer, on the default rung: the clouds are "a bit too
 laggy — let's try to optimize and cut some corners". It is the frame, not
@@ -97,7 +98,40 @@ is the one that can show (ghosting under a fast camera) and wants the
 designer's eye on it. The cheaper look from above only if the storm view
 is still the outlier after those three.
 
-## W26. A lightning bolt that is drawn (2026-09-25)
+**From the engine, 2026-09-28 (engine f4ceb53, 48f7c81, 84355b5, 5080853,
+e619f59):** empty-space skipping, built where the sky is uniform as much as
+where a map says a cell is clear — the probe skies have no map, so a
+per-map-cell occupancy would have measured nothing. Each frame a small
+pass draws an occupancy pyramid: one texel per march cube at every grid
+the march can walk (the cube, twice it, four times, up to thirty-two),
+each level sized to where its grid is walked and centred on the camera,
+holding the heights the field reaches in that column; the march reads the
+texel before it asks the field, and a clear cube is a texel read rather
+than a column of lattice tests. It is exact by construction — the pass
+evaluates the same field at the same point the march would — and the
+decisions near a threshold are marked undecided and left to the march, so
+a driver that rounds the two entry points differently cannot lose a cube;
+`skipping_the_decks_clear_cells_changes_no_pixel` renders the six skies
+by three views at Low and Medium, a map, and the camera inside a heap,
+and requires the skip-on frame to equal the skip-off frame byte for byte
+(51 frames, all equal on llvmpipe). `how_long_the_shipped_deck_costs_on_low`
+is the probe, on the deck as the mod registers it.
+
+The gate, on llvmpipe at 1080p Low, the six skies by three views: the
+median shot is 0.53 of the day's before (7.62 ms to 4.03 ms; the view
+from above 16.0 to 4.9, level 4.6 to 4.0, 45 up 7.2 to 3.6), and the
+storm from above is 5.28 ms against the before level view's 4.62 — both
+short of the ask's half and no-worse. Not met, and the next rungs are the
+designer's: distance LOD past a kilometre and the temporal checkerboard
+both change the picture, and the ask put them behind the eye. Two [H]
+gates ride with what landed: the exactness test on a real GPU compiler
+(Vulkan, DX12 and Metal — run the test named above with
+`TIAMAT_REQUIRE_GPU=1`; it must say 0 differ for every frame), and the
+probe's numbers on a real card, where the ratio is expected to be better
+than a software rasteriser's, whose fixed per-pass cost is what keeps the
+level view at 0.87.
+
+## W26. A lightning bolt that is drawn (2026-09-25): LANDED 2026-09-28 (engine 1eccb62), awaiting the eye
 
 **Seen.** A strike is a flash on the sky (`game.flash`, W3), sparks where it
 lands and thunder after its distance. Nothing is drawn between the cloud and
@@ -136,19 +170,33 @@ ground point and the cloud floor (`floor_at`), so it calls
 `game.lightning{ from = { x, floor, z }, to = at, seed = ... }` beside its
 `flash` and each flicker, feature-detected like every call since W2.
 
-**From the engine, 2026-09-28 — still open, and how it will be built.** As
-asked, `game.lightning{ from, to, seed?, colour?, width?, branches?,
-ticks?, radius?, player? }`, addressed like `game.flash` (the `player`
-narrowing landed with W28 and carries over). It is a new message on the
-wire — a protocol bump to 77 — so it waits for 0.2.2 (protocol 76) to
-ship rather than move that release's number again. On the client: the
-path from `seed` by midpoint displacement, `branches` forks that fade
-before the ground, drawn as unlit additive camera-facing ribbons in a
-pass of its own after the terrain and before the fog, depth-tested, over
-`ticks`. The gate as written: the same seed draws the same path on two
-clients (a hash over the built path, unit-tested), a bolt at 400 blocks is
-a line by day and by night (screenshot test), and a hill hides what it
-should (depth test).
+**From the engine, 2026-09-28 (engine 1eccb62, e0e47c8, bfe108b, ad8927b,
+7820f82, 7a8596a):** `game.lightning{ from, to, seed?, colour?, width?,
+branches?, ticks?, radius?, player? }`, as asked, addressed like
+`game.flash` (the domain from `from`, `radius` up to the flash's 1024,
+`player` narrowing) and answering how many were told. Defaults: colour
+{0.85, 0.8, 1.0}, width 0.4, branches 3, ticks 8, radius 256; wrong
+numbers are clamped, and a bolt longer than 4096 blocks keeps its top and
+heading. A `seed` is read by its bits (a seed past 2^63 arrives whole); an
+absent one is picked by the engine so two unseeded bolts differ. The
+client builds the path once from the seed — midpoint displacement six
+levels deep, the forks splitting off partway, thinner, tapering and ending
+above the ground — with integer hashing and the deterministic subset, so
+every client watching draws the same bolt (`path_hash`, unit-tested, and a
+bot test in which two clients given one bolt hash the same path). Drawn as
+unlit additive ribbons, a core and a glow four times wider, with a
+floor of a pixel and a half so a bolt at four hundred blocks is still a
+line; depth-tested and never written, so a hill hides what it should;
+never clipped by the far plane, so a bolt a kilometre off is drawn whole;
+over `ticks`, full at once and then two or three seeded dips. The gates as
+written are screenshot-tested by day and by night in every lighting mode:
+a bolt from y + 300 to the ground at 400 blocks is a line, the same at
+1100, and behind a wall nothing of it shows on the wall. On the wire it is
+`ServerMessage::Lightning`, appended, and the protocol is 77 from this
+commit (0.2.2 ships at 77; the tooltip of UI ask 15 rides the same bump).
+How it reads against the reference is the designer's ([H]): a storm over
+the next valley, seen through rain. `fx.lua`'s `bolt()` adopts it beside
+its `flash_at` and each flicker, feature-detected as every call since W2.
 
 ## W24. A settled fluid never evaporates (2026-09-25): LANDED 2026-09-26 (engine 1c475a8)
 
