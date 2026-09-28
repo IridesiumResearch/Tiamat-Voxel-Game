@@ -203,33 +203,40 @@ fn upload_seeing(
         chunks.iter().map(|chunk| (chunk.pos(), chunk)).collect();
 
     for chunk in chunks {
-        let pos = chunk.pos();
-        let mut neighbours = Neighbours::none();
-        for (index, (dx, dy, dz)) in [
-            (-1, 0, 0),
-            (1, 0, 0),
-            (0, -1, 0),
-            (0, 1, 0),
-            (0, 0, -1),
-            (0, 0, 1),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            neighbours.sides[index] = by_pos
-                .get(&ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
-                .copied();
-        }
         let mesh = mesher::mesh_chunk(
             chunk,
-            &neighbours,
+            &neighbours_of(&by_pos, chunk.pos()),
             Absent::Air,
             light,
             &mesher::NoFluid,
             sight,
         );
-        renderer.set_chunk(pos, &mesh);
+        renderer.set_chunk(chunk.pos(), &mesh);
     }
+}
+
+/// A chunk's six neighbours among a scene's chunks, in the mesher's order.
+fn neighbours_of<'a>(
+    by_pos: &std::collections::BTreeMap<ChunkPos, &'a Chunk>,
+    pos: ChunkPos,
+) -> Neighbours<'a> {
+    let mut neighbours = Neighbours::none();
+    for (index, (dx, dy, dz)) in [
+        (-1, 0, 0),
+        (1, 0, 0),
+        (0, -1, 0),
+        (0, 1, 0),
+        (0, 0, -1),
+        (0, 0, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        neighbours.sides[index] = by_pos
+            .get(&ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
+            .copied();
+    }
+    neighbours
 }
 
 /// The average colour of a rectangle, as fractions of full brightness.
@@ -505,6 +512,7 @@ fn particles_are_drawn_in_every_mode_and_hidden_behind_the_ground() {
                             size: 1.2,
                             colour: [1.0, 0.0, 0.0, 1.0],
                             texture: None,
+                            sky: 1.0,
                         });
                     }
                 }
@@ -895,6 +903,7 @@ fn a_particle_with_a_picture_on_it_draws_the_picture_the_right_way_up() {
             size: 5.0,
             colour: [1.0, 0.0, 0.0, 1.0],
             texture: hash,
+            sky: 1.0,
         }]);
         let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
         let frame = target.capture(&mut renderer, &camera).expect("capture");
@@ -1108,6 +1117,336 @@ fn fog_reaches_up_and_down_as_far_as_the_loaded_world_does() {
         "ground under the eye did not fog with a vertical reach of two blocks and no sideways \
          fog at all: {near_hazy:?} against {near_clear:?}"
     );
+}
+
+/// Where the tunnel of [`tunnel_scene`] opens: every block at or past this z
+/// is under the open sky.
+const TUNNEL_MOUTH_Z: i32 = 32;
+
+/// Where the daylit cliff past the tunnel's mouth stands, facing back down it.
+const TUNNEL_CLIFF_Z: i32 = 38;
+
+/// Whether a block of [`tunnel_scene`] is stone, by its world position.
+///
+/// A hill over the first thirty-two blocks of z, with a tunnel ten wide and
+/// eight tall bored along z through it from z = 2 to the mouth; open ground
+/// past the mouth; and a cliff six blocks on, so what is seen through the
+/// mouth is a sky-lit surface at a known distance rather than the sky itself.
+fn tunnel_solid(x: i32, y: i32, z: i32) -> bool {
+    if z < TUNNEL_MOUTH_Z {
+        let bore = (19..29).contains(&x) && (4..12).contains(&y) && z >= 2;
+        !bore
+    } else if z < TUNNEL_CLIFF_Z {
+        y < 4
+    } else {
+        true
+    }
+}
+
+/// A tunnel whose far end opens to daylight — weather ask W29's gate.
+///
+/// Three chunks by three, one high. See [`tunnel_solid`] for its shape and
+/// [`TunnelLight`] for its sky light.
+fn tunnel_scene() -> Vec<Chunk> {
+    let mut chunks = Vec::with_capacity(9);
+    for cx in 0..3 {
+        for cz in 0..3 {
+            let pos = ChunkPos::new(cx, 0, cz);
+            let corner = BlockPos::from_chunk_corner(pos);
+            let mut chunk = Chunk::new(pos, MaterialId::AIR);
+            for x in 0..16 {
+                for y in 0..16 {
+                    for z in 0..16 {
+                        let at = BlockPos::new(corner.x + x, corner.y + y, corner.z + z);
+                        if tunnel_solid(at.x, at.y, at.z) {
+                            chunk
+                                .set_block(at, BlockValue::Uniform(STONE))
+                                .expect("in chunk");
+                        }
+                    }
+                }
+            }
+            chunks.push(chunk);
+        }
+    }
+    chunks
+}
+
+/// The tunnel scene's sky light, for one chunk: full at and past the mouth
+/// and over the hill, none inside it, no block light anywhere.
+///
+/// **A step at the mouth rather than the server's one level a block**, and on
+/// purpose: the gate reads the fog on the tunnel's walls and the fog through
+/// its mouth in one frame, and the power curve makes fog thin near the eye —
+/// so both have to sit well out along the fog's reach, which a fifteen-block
+/// ramp would push past the far end of a scene this size. What is under test
+/// is what the shader does with a sky light, not how the server spreads one.
+struct TunnelLight {
+    corner: BlockPos,
+}
+
+impl client::shade::BlockLight for TunnelLight {
+    fn at(&self, _x: i32, y: i32, z: i32) -> tiamat_core::light::Light {
+        let open = self.corner.z + z >= TUNNEL_MOUTH_Z || self.corner.y + y >= 16;
+        tiamat_core::light::Light::new(if open { 15 } else { 0 }, 0, 0, 0)
+    }
+}
+
+/// Meshes [`tunnel_scene`] under its own sky light and uploads it.
+fn upload_tunnel(renderer: &mut Renderer, chunks: &[Chunk]) {
+    let by_pos: std::collections::BTreeMap<ChunkPos, &Chunk> =
+        chunks.iter().map(|chunk| (chunk.pos(), chunk)).collect();
+    for chunk in chunks {
+        let light = TunnelLight {
+            corner: BlockPos::from_chunk_corner(chunk.pos()),
+        };
+        let mesh = mesher::mesh_chunk(
+            chunk,
+            &neighbours_of(&by_pos, chunk.pos()),
+            Absent::Air,
+            &light,
+            &mesher::NoFluid,
+            &mesher::Sight::default(),
+        );
+        renderer.set_chunk(chunk.pos(), &mesh);
+    }
+}
+
+#[test]
+fn a_tunnels_fog_is_the_caves_at_noon_and_midnight_and_its_mouth_is_the_days() {
+    // **Weather ask W29.** Fog faded to the keyframed sky's colour, so the fog
+    // down a tunnel was pale blue at noon and black at midnight; now each
+    // fragment's fog runs from the sky's colour at full sky light to the cave
+    // fog at none. The gate as the ask words it: a tunnel whose far end opens
+    // to daylight, at noon and at midnight — the fog on the tunnel's walls is
+    // the same colour at both, and the daylit ground seen through the mouth
+    // is fogged in the sky's colour. Every lighting mode, because modes 1
+    // and 2 fog in the world shader and mode 3 in the post chain, from a mark
+    // the world pass leaves in the scene's alpha.
+    let Some(gpu) = gpu() else { return };
+    let chunks = tunnel_scene();
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    renderer.set_atlas(&Atlas::build(&[
+        None,
+        None,
+        Some(Image::white_with_border()),
+    ]));
+    upload_tunnel(&mut renderer, &chunks);
+    // A rust red nothing else in the frame is, so the fog on the walls can be
+    // told from the wall and from either sky by its hue alone.
+    renderer.set_cave_fog([0.35, 0.12, 0.06]);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // In the middle of the bore, six blocks in, looking out along it.
+    let camera = Camera {
+        position: Position::from_world(24.0, 8.0, 6.0),
+        ..Camera::default()
+    };
+
+    // Fog total at forty blocks. The walls read below sit 16 to 22 blocks out
+    // (0.41 to 0.55 of the reach) and the cliff through the mouth at 32
+    // (0.80): both well fogged, and both short of `CAVE_FOG_EDGE`, where the
+    // sky's colour takes over whatever the sky light — so what decides here is
+    // the sky light at each fragment, and nothing else.
+    const FAR: f32 = 40.0;
+    let noon = |renderer: &mut Renderer, far: f32| {
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
+        renderer.set_sky([0.53, 0.81, 0.92], far);
+    };
+    let midnight = |renderer: &mut Renderer, far: f32| {
+        renderer.set_sun(0.0, [0.0; 3], [0.0, 1.0, 0.0]);
+        renderer.set_sky([0.02, 0.03, 0.06], far);
+    };
+
+    // The mouth is 26 blocks out and five either side, so it spans 33 pixels
+    // each way of the centre and the cliff fills its middle. A side wall at
+    // 40 to 55 pixels off the centre stands 16 to 22 blocks out, deep in the
+    // bore and at a sky light of zero.
+    let walls = |frame: &Image| {
+        let left = average(frame, 105, 110, 120, 130);
+        let right = average(frame, 200, 110, 215, 130);
+        [0, 1, 2].map(|channel| (left[channel] + right[channel]) / 2.0)
+    };
+    let cliff = |frame: &Image| average(frame, 150, 110, 170, 130);
+    let redness = |colour: [f32; 3]| colour[0] - colour[2];
+    let furthest = |a: [f32; 3], b: [f32; 3]| {
+        (0..3)
+            .map(|channel| (a[channel] - b[channel]).abs())
+            .fold(0.0_f32, f32::max)
+    };
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        let mut shot = |set: &dyn Fn(&mut Renderer, f32), far: f32| {
+            set(&mut renderer, far);
+            target.capture(&mut renderer, &camera).expect("capture")
+        };
+        let noon_fogged = shot(&noon, FAR);
+        let noon_clear = shot(&noon, 100_000.0);
+        let night_fogged = shot(&midnight, FAR);
+        let night_clear = shot(&midnight, 100_000.0);
+
+        // The fog is on the walls, and it is the cave's: at both hours the
+        // walls lean to the cave fog's red, which neither sky has.
+        for (hour, fogged, clear) in [
+            ("noon", &noon_fogged, &noon_clear),
+            ("midnight", &night_fogged, &night_clear),
+        ] {
+            let (fogged, clear) = (walls(fogged), walls(clear));
+            assert!(
+                redness(fogged) > redness(clear) + 0.05,
+                "{mode:?} at {hour}: the tunnel's walls read {fogged:?} fogged and {clear:?} \
+                 clear — they are not fogged in the cave's colour"
+            );
+        }
+
+        // **The same colour at noon and at midnight.** Not identical pixels in
+        // every mode: modes 2 and 3 tint the ambient floor by the sky's hue on
+        // purpose (see `lighting` in `world.wgsl`), so the unfogged walls
+        // already differ a little between the hours. What the fog must not do
+        // is add to that — the sky's colour moving from day blue to night
+        // black was a third of the frame's range here.
+        let apart_fogged = furthest(walls(&noon_fogged), walls(&night_fogged));
+        let apart_clear = furthest(walls(&noon_clear), walls(&night_clear));
+        assert!(
+            apart_fogged <= apart_clear + 0.01,
+            "{mode:?}: the tunnel's walls are {apart_fogged} apart between noon and midnight \
+             fogged and {apart_clear} unfogged — the fog down the tunnel follows the clock ({:?} \
+             at noon, {:?} at midnight)",
+            walls(&noon_fogged),
+            walls(&night_fogged)
+        );
+
+        // The daylit cliff through the mouth is fogged in the SKY's colour:
+        // at noon it moves toward the day's blue, and away from the cave's
+        // red, against the same frame unfogged.
+        let (fogged, clear) = (cliff(&noon_fogged), cliff(&noon_clear));
+        assert!(
+            redness(fogged) < redness(clear) - 0.03,
+            "{mode:?} at noon: the daylit cliff through the mouth reads {fogged:?} fogged and \
+             {clear:?} clear — it is not fogged in the sky's colour"
+        );
+        assert!(
+            redness(fogged) < 0.0,
+            "{mode:?} at noon: the daylit cliff through the mouth took the cave's red: \
+             {fogged:?}"
+        );
+        // And the two fogs in one frame are not one colour.
+        assert!(
+            redness(walls(&noon_fogged)) > redness(fogged) + 0.1,
+            "{mode:?} at noon: the walls ({:?}) and the view out of the mouth ({fogged:?}) are \
+             fogged alike",
+            walls(&noon_fogged)
+        );
+    }
+}
+
+#[test]
+fn a_cave_past_the_fogs_reach_is_the_skys_colour_so_the_worlds_edge_stays_hidden() {
+    // **The fog exists to hide the edge of the loaded world** (see
+    // `distant_terrain_fades_into_the_sky`), and only the sky's colour can: a
+    // cave mouth on a far cliff fogged in the cave's colour would stand in the
+    // haze as a dark hole where everything round it had dissolved. So past
+    // `CAVE_FOG_EDGE` the fog is the sky's whatever the sky light. The same
+    // tunnel with the fog total at fourteen blocks: its walls, 16 to 22 out
+    // and at a sky light of zero, are the colour the daylit cliff is.
+    let Some(gpu) = gpu() else { return };
+    let chunks = tunnel_scene();
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    renderer.set_atlas(&Atlas::build(&[
+        None,
+        None,
+        Some(Image::white_with_border()),
+    ]));
+    upload_tunnel(&mut renderer, &chunks);
+    renderer.set_cave_fog([0.35, 0.12, 0.06]);
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
+    renderer.set_sky([0.53, 0.81, 0.92], 14.0);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let camera = Camera {
+        position: Position::from_world(24.0, 8.0, 6.0),
+        ..Camera::default()
+    };
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        let frame = target.capture(&mut renderer, &camera).expect("capture");
+        let left = average(&frame, 105, 110, 120, 130);
+        let right = average(&frame, 200, 110, 215, 130);
+        let cliff = average(&frame, 150, 110, 170, 130);
+        for (side, wall) in [("left", left), ("right", right)] {
+            let apart = (0..3)
+                .map(|channel| (wall[channel] - cliff[channel]).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                apart < 0.03,
+                "{mode:?}: the {side} wall past the fog's reach reads {wall:?} against the \
+                 daylit cliff's {cliff:?} — a cave at the edge of the loaded world is standing \
+                 out of the haze"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_particle_scattered_where_no_sky_reaches_fogs_to_the_caves_colour() {
+    // Weather ask W29 for the particle pass, which fogs its own sprites in
+    // modes 1 and 2: a drip in a cave is lit once, where it was scattered,
+    // and the sky that reached it there decides its fog as a surface's sky
+    // light decides the surface's. Mode 3 is not here because it does not fog
+    // particles itself — the composite fogs a pixel by what the world pass
+    // marked under it, and a particle writes no mark.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let camera = viewpoint();
+    let forward = camera.forward();
+
+    for mode in [LightingMode::Simple, LightingMode::Classic] {
+        let fogged = |sky: f32| {
+            let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+            renderer.set_lighting_mode(mode);
+            // Nine blocks out along the view with the fog total at seven
+            // sideways: 0.8 of the reach, well fogged and short of the edge.
+            renderer.set_sky([0.53, 0.81, 0.92], 7.0);
+            renderer.set_cave_fog([0.35, 0.12, 0.06]);
+            renderer.set_particles(&[client::render::particle::Sprite {
+                centre: [forward.x * 9.0, forward.y * 9.0, forward.z * 9.0],
+                size: 3.0,
+                colour: [1.0, 1.0, 1.0, 1.0],
+                texture: None,
+                sky,
+            }]);
+            let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+            let frame = target.capture(&mut renderer, &camera).expect("capture");
+            average(
+                &frame,
+                WIDTH / 2 - 5,
+                HEIGHT / 2 - 5,
+                WIDTH / 2 + 5,
+                HEIGHT / 2 + 5,
+            )
+        };
+        let redness = |colour: [f32; 3]| colour[0] - colour[2];
+        let open = fogged(1.0);
+        let cave = fogged(0.0);
+        assert!(
+            redness(cave) > redness(open) + 0.1,
+            "{mode:?}: a white particle with no sky over it reads {cave:?} and one under the \
+             open sky {open:?} — the first is not fogged in the cave's colour"
+        );
+        assert!(
+            redness(open) < 0.0,
+            "{mode:?}: a particle under the open sky took the cave's red: {open:?}"
+        );
+    }
 }
 
 #[test]
@@ -5560,6 +5899,7 @@ fn a_frame_with_particles_and_a_selection_in_it_draws_at_all() {
                 1 => Some([0x5E; 32]),
                 _ => None,
             },
+            sky: 1.0,
         })
         .collect();
     renderer.set_particles(&sprites);

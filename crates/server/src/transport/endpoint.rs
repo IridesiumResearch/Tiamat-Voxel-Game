@@ -3385,7 +3385,12 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     let (day_length_ticks, keyframes) =
                         shared.skies.frames_for(tiamat_core::domain::OVERWORLD);
                     let home = shared.world_position();
-                    (day_length_ticks, keyframes, [home.x, home.y, home.z])
+                    (
+                        day_length_ticks,
+                        keyframes,
+                        [home.x, home.y, home.z],
+                        shared.skies.cave_fog_for(tiamat_core::domain::OVERWORLD),
+                    )
                 },
                 allowlist: &allowlist,
                 max_players: shared.max_players,

@@ -32,6 +32,9 @@ struct View {
     // down when this pass fogs (modes 1 and 2), and negative when the post
     // chain does (mode 3).
     sky: vec4<f32>,
+    // What the fog fades towards where no sky reaches, in xyz — weather ask
+    // W29; w unused.
+    cave_fog: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -41,6 +44,8 @@ struct Instance {
     @location(0) centre: vec4<f32>,
     // Lit colour and opacity now.
     @location(1) colour: vec4<f32>,
+    // How much sky reached it where it was scattered, 0 to 1.
+    @location(2) sky: f32,
 };
 
 struct VertexOut {
@@ -48,9 +53,24 @@ struct VertexOut {
     @location(0) local: vec2<f32>,
     @location(1) colour: vec4<f32>,
     // How far along the fog's ellipsoid the centre sits, 0 at the eye and 1
-    // where the fog is total — `world.wgsl`'s `fog_amount` before the curve.
+    // where the fog is total — `world.wgsl`'s `fog_reach`.
     @location(2) reach: f32,
+    // What its fog fades towards: see `fog_colour`.
+    @location(3) @interpolate(flat) fog: vec3<f32>,
 };
+
+// Where along the fog's reach a cave's fog gives way to the sky's whatever
+// the sky light. Must match `world.wgsl`, whose `CAVE_FOG_EDGE` says why.
+const CAVE_FOG_EDGE: f32 = 0.85;
+
+// `world.wgsl`'s `fog_colour`, for a particle: the sky's colour by the share
+// of the sky that reached it, the cave's by the rest (weather ask W29). Once
+// a particle, in the vertex stage — it is lit once a burst, and its centre's
+// reach is the whole quad's.
+fn fog_colour(sky_light: f32, reach: f32) -> vec3<f32> {
+    let open = max(clamp(sky_light, 0.0, 1.0), smoothstep(CAVE_FOG_EDGE, 1.0, reach));
+    return mix(view.cave_fog.rgb, view.sky.rgb, open);
+}
 
 @vertex
 fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexOut {
@@ -73,6 +93,7 @@ fn vertex_main(@builtin(vertex_index) index: u32, instance: Instance) -> VertexO
     let sideways = length(instance.centre.xz) / max(view.right.w, 0.001);
     let vertical = abs(instance.centre.y) / max(abs(view.sky.w), 0.001);
     out.reach = sqrt(sideways * sideways + vertical * vertical);
+    out.fog = fog_colour(instance.sky, out.reach);
     return out;
 }
 
@@ -90,7 +111,7 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
         // The sky fog's power curve, as `world.wgsl` has it: a spray at the
         // edge of the view fades with the terrain behind it.
         let haze = pow(clamp(input.reach, 0.0, 1.0), view.up.w);
-        colour = mix(colour, view.sky.rgb, haze);
+        colour = mix(colour, input.fog, haze);
     }
     return vec4<f32>(colour, alpha);
 }
@@ -123,7 +144,7 @@ fn fragment_textured(input: VertexOut) -> @location(0) vec4<f32> {
     var colour = texel.rgb * input.colour.rgb;
     if (view.sky.w > 0.0) {
         let haze = pow(clamp(input.reach, 0.0, 1.0), view.up.w);
-        colour = mix(colour, view.sky.rgb, haze);
+        colour = mix(colour, input.fog, haze);
     }
     return vec4<f32>(colour, alpha);
 }

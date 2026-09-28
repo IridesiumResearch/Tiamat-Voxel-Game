@@ -255,6 +255,9 @@ fn badge_row(
                     channel(badge.colour[3]) * fade,
                 ],
                 texture: Some(badge.picture),
+                // A label, not part of the scene: fogged as the sky, the way
+                // it is unlit.
+                sky: 1.0,
             }
         })
         .collect()
@@ -5190,9 +5193,9 @@ impl App {
         // through the surface is milk, not sky.
         // Under water the water's murk is the whole view, and a forest's mist
         // behind it is not something anybody down there can see.
-        self.renderer
-            .set_place_fog_visible(self.submerged_in().is_none());
-        let (sky, far, up) = match self.submerged_in() {
+        let submerged = self.submerged_in();
+        self.renderer.set_place_fog_visible(submerged.is_none());
+        let (sky, far, up) = match submerged {
             Some(fluid) => (
                 self.store.fluid_colour(fluid),
                 UNDERWATER_VISIBILITY,
@@ -5227,6 +5230,16 @@ impl App {
             ),
         };
         self.renderer.set_sky(sky, far);
+        // **A cave's fog is the sky owner's, and not the clock's** (weather
+        // ask W29): the renderer blends each fragment's fog from `sky` at full
+        // sky light to this at none. Under the milk the milk is the whole
+        // view, lit or not, so the murk stays one colour — it never followed
+        // the clock anyway.
+        self.renderer.set_cave_fog(if submerged.is_some() {
+            sky
+        } else {
+            self.sky.cave_fog()
+        });
         self.renderer.set_fog_height(up);
         self.renderer.set_grade(moment.grade);
 
@@ -5580,8 +5593,8 @@ impl App {
     /// Makes the particles of bursts a server sent, each lit where it starts.
     fn adopt_particles(&mut self, bursts: &[tiamat_core::particle::Burst]) {
         for burst in bursts {
-            let light = self.particle_light(burst.pos);
-            self.particles.spawn(burst, light);
+            let (light, sky) = self.particle_light(burst.pos);
+            self.particles.spawn(burst, light, sky);
         }
     }
 
@@ -5660,8 +5673,8 @@ impl App {
                 ..burst
             };
             if burst.count > 0 {
-                let light = self.particle_light(burst.pos);
-                self.particles.spawn(&burst, light);
+                let (light, sky) = self.particle_light(burst.pos);
+                self.particles.spawn(&burst, light, sky);
             }
         }
         let store = &self.store;
@@ -5689,6 +5702,7 @@ impl App {
                 // Life ask 15: the picture this burst named, if any. The pass
                 // groups by it, so one picture is one draw.
                 texture: particle.texture,
+                sky: particle.sky,
             })
             .collect();
         // Badges share the particle pass: they are camera-facing textured
@@ -5701,17 +5715,25 @@ impl App {
 
     /// What a burst at `pos` is lit by: the sky's light, dimmed by the time of
     /// day, or the block light there, whichever is brighter — the same `max`
-    /// the world shader takes — and never quite black.
-    fn particle_light(&self, pos: [f64; 3]) -> [f32; 3] {
+    /// the world shader takes — and never quite black. And beside it how much
+    /// sky reaches there at all, which its fog is blended by.
+    fn particle_light(&self, pos: [f64; 3]) -> ([f32; 3], f32) {
         let cell = particle_cell(pos);
         let light = self.store.light_at(cell.block());
-        let sun = f32::from(light.sun()) / 15.0 * self.renderer.sun_intensity();
+        // The stored sky light, before the clock scales it: how much sky
+        // reaches the place, which is what the fog is blended by (weather
+        // ask W29) — a cave is a cave at noon.
+        let sky = f32::from(light.sun()) / 15.0;
+        let sun = sky * self.renderer.sun_intensity();
         let channel = |level: u8| (f32::from(level) / 15.0).max(sun).max(PARTICLE_FLOOR);
-        [
-            channel(light.red()),
-            channel(light.green()),
-            channel(light.blue()),
-        ]
+        (
+            [
+                channel(light.red()),
+                channel(light.green()),
+                channel(light.blue()),
+            ],
+            sky,
+        )
     }
 
     fn place_blobs(&mut self) {

@@ -706,6 +706,24 @@ pub struct Sky {
     /// world opens on is content — how long the day is and what colour it goes
     /// already are — so the mod says.
     pub start_time: f32,
+    /// The fog's colour where no sky reaches, `{r, g, b}` in `0.0..=1.0` —
+    /// weather ask W29.
+    ///
+    /// **Not a keyframe's, on purpose.** Fog fades towards the sky's colour,
+    /// and the sky's colour follows the clock, so the fog down a tunnel was
+    /// pale blue at noon and black at midnight. The client blends each
+    /// fragment's fog from the sky's colour at full sky light to this at
+    /// none, so a cave's fog is one colour at every hour while the view out
+    /// of its mouth is still the day's. [`Sky::DEFAULT_CAVE_FOG`] where the
+    /// mod says nothing.
+    pub cave_fog: [f32; 3],
+}
+
+impl Sky {
+    /// A cave's fog when the sky's owner names none: a dark neutral, a shade
+    /// bluer than grey so it sits beside the ambient floor's sky tint rather
+    /// than reading warm against it.
+    pub const DEFAULT_CAVE_FOG: [f32; 3] = [0.05, 0.05, 0.06];
 }
 
 /// A named action a mod registered.

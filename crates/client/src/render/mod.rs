@@ -238,6 +238,13 @@ struct Globals {
     cloud_shadow: [f32; 4],
     /// How much of the sun the deck takes in x, zero for none; three spare.
     cloud_shadow_light: [f32; 4],
+    /// What fog fades towards where no sky reaches, in `xyz` — weather ask
+    /// W29; `w` unused. See [`Renderer::set_cave_fog`].
+    ///
+    /// **Appended**, for the reason `light_view_projection` documents. The
+    /// shaders that copy a prefix of this struct and never fog by sky light —
+    /// the prop, figure and hand passes — need not declare it.
+    cave_fog: [f32; 4],
 }
 
 /// How far a view of the sky is taken to cross a place's fog, in blocks.
@@ -1007,6 +1014,14 @@ pub struct Renderer {
     stars: (f32, (f32, f32)),
     /// The sky's colour now, which fog fades towards.
     sky_colour: [f32; 3],
+    /// What fog fades towards where no sky reaches — weather ask W29. The
+    /// sky's owner's, and not the clock's: see [`Renderer::set_cave_fog`].
+    ///
+    /// The engine's dark neutral until a sky's table names its own, which is
+    /// what a world with no sky mod gets too, since it still has caves.
+    /// Nothing fogs until a view distance is set, so a scene that never sets
+    /// one draws exactly what it did before W29.
+    cave_fog: [f32; 3],
     /// How the finished frame is graded now.
     ///
     /// Mode 3 only — grading lives in the post chain, and the other two modes
@@ -1119,13 +1134,7 @@ impl Renderer {
         // against a format the surface refuses is a crash at `configure`, which
         // is what macOS gave: Metal has no `Rgba8UnormSrgb` surface at all.
         let target = gpu.surface_format();
-        let TerrainPipelines {
-            pipeline,
-            fluid_pipeline,
-            glass_pipeline,
-            cutout_pipeline,
-            sprite_pipeline,
-        } = build_terrain_pipelines(&gpu, &shader, &bind_layout, mode, target);
+        let terrain = build_terrain_pipelines(&gpu, &shader, &bind_layout, mode, target);
 
         let (blob_pipeline, blob_pipeline_hdr, blobs) = build_blobs(&gpu, &bind_layout);
         let (prop_pipeline, prop_pipeline_hdr, props) = build_props(&gpu, &bind_layout);
@@ -1158,11 +1167,11 @@ impl Renderer {
             skinned,
             skinned_pipeline,
             skinned_shadow: None,
-            pipeline,
-            fluid_pipeline,
-            glass_pipeline,
-            sprite_pipeline,
-            cutout_pipeline,
+            pipeline: terrain.pipeline,
+            fluid_pipeline: terrain.fluid_pipeline,
+            glass_pipeline: terrain.glass_pipeline,
+            sprite_pipeline: terrain.sprite_pipeline,
+            cutout_pipeline: terrain.cutout_pipeline,
             elapsed: 0.0,
             camera_right: [1.0, 0.0, 0.0, 0.0],
             globals,
@@ -1212,6 +1221,7 @@ impl Renderer {
             sun_direction: NOON,
             stars: (0.0, (1.0, 0.0)),
             sky_colour: sky_colour(),
+            cave_fog: tiamat_core::script::Sky::DEFAULT_CAVE_FOG,
             // Ungraded until a sky says otherwise, which keeps a world with no
             // sky mod exactly what it was before grading existed.
             grade: tiamat_core::proto::SkyGrade::NONE,
@@ -1293,6 +1303,20 @@ impl Renderer {
         self.sky_colour = colour;
         self.fog_end = far.max(1.0);
         self.fog_curve = FOG_CURVE;
+    }
+
+    /// Sets what fog fades towards where no sky reaches — weather ask W29.
+    ///
+    /// **Each fragment's fog is blended by the sky light at it**, from the
+    /// sky's colour ([`Self::set_sky`]) at full sky light to this at none, so
+    /// the fog down a tunnel is the cave's and the daylit ground seen out of
+    /// its mouth is the day's, in the same frame. The sky light is the stored
+    /// sunlight channel the mesh already carries for lighting, so this costs
+    /// a mix per fragment and nothing per vertex. Whatever leans the sky's
+    /// colour — the clock, a storm's modifier, a flash — leans only the
+    /// sky-lit share, which is what keeps lightning out of caves.
+    pub const fn set_cave_fog(&mut self, colour: [f32; 3]) {
+        self.cave_fog = colour;
     }
 
     /// Sets where fog is total straight up or down, in blocks — normally the
@@ -1697,6 +1721,7 @@ impl Renderer {
                 fog_up: self.fog_up,
                 fog_curve: self.fog_curve,
                 fogs: self.post.is_none(),
+                cave_fog: self.cave_fog,
             },
         );
     }
@@ -2366,6 +2391,7 @@ impl Renderer {
             place_fog: self.fog_here,
             cloud_shadow: self.clouds.shadow_frame(),
             cloud_shadow_light: [self.clouds.shadow_strength(), 0.0, 0.0, 0.0],
+            cave_fog: [self.cave_fog[0], self.cave_fog[1], self.cave_fog[2], 0.0],
         }
     }
 
@@ -2623,6 +2649,7 @@ impl Renderer {
                 fog_up: self.fog_up,
                 grade: self.grade,
                 place_fog: self.fog_here,
+                cave_fog: self.cave_fog,
             },
             self.place_fog.buffer(),
         );
@@ -4289,9 +4316,12 @@ fn build_pipeline(
 /// The glass pipeline for mode 3, which has shadow bindings or does not.
 ///
 /// Mirrors `graph::world_pipeline_for`: glass is lit by the same shader as the
-/// opaque world, so it needs the same bind groups and the same fragment entry —
-/// a pane lit differently from the wall it sits in would read as a bug in the
-/// lighting rather than in the pass.
+/// opaque world, so it needs the same bind groups and the same surface — a
+/// pane lit differently from the wall it sits in would read as a bug in the
+/// lighting rather than in the pass. Its own entry points (`fragment_glass`,
+/// `fragment_glass_shadowed`) only so mode 3's sky-light mark, which an
+/// opaque fragment writes in alpha, stays off a surface whose alpha is what
+/// it blends by (weather ask W29).
 /// The pipelines that draw terrain into the window's own format.
 struct TerrainPipelines {
     pipeline: wgpu::RenderPipeline,
@@ -4317,7 +4347,7 @@ fn build_terrain_pipelines(
             gpu,
             shader,
             &[Some(bind_layout)],
-            "fragment_main",
+            "fragment_glass",
             mode,
             target,
         ),
@@ -4522,7 +4552,7 @@ pub(crate) fn glass_pipeline_for(
             gpu,
             shader,
             &[Some(layout), Some(shadows.sample_layout())],
-            "fragment_shadowed",
+            "fragment_glass_shadowed",
             mode,
             graph::HDR_FORMAT,
         ),
@@ -4530,7 +4560,7 @@ pub(crate) fn glass_pipeline_for(
             gpu,
             shader,
             &[Some(layout)],
-            "fragment_main",
+            "fragment_glass",
             mode,
             graph::HDR_FORMAT,
         ),
@@ -4702,22 +4732,26 @@ fn build_world_pipeline(
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: blended.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                    // **Opaque geometry does not write alpha.** In mode 3 the
-                    // scene's alpha is not coverage but a MARK the composite
-                    // reads: `CLOUD_MARK` where the cloud pass drew, and the
-                    // clear's 1.0 everywhere else, so a cloud is fogged as the
-                    // sky beside it and not by its depth (weather ask W15).
-                    // `surface()` returns the texture's alpha, and a solid
-                    // pipeline that wrote it put every leaf drawn beyond
-                    // `CUTOUT_DRAW_BLOCKS` — and every horizon summary cell —
-                    // into the scene with a texel alpha under 1, which the
+                    // **Opaque geometry writes its sky light as alpha in mode
+                    // 3, and nothing in modes 1 and 2.** Mode 3's scene alpha
+                    // is not coverage but a MARK the composite reads:
+                    // `CLOUD_MARK` where the cloud pass drew, so a cloud is
+                    // fogged as the sky beside it and not by its depth
+                    // (weather ask W15), and from `SKY_MARK` at full sky light
+                    // to `CAVE_MARK` at none where the world did, so a cave's
+                    // fog is the cave's (ask W29) — see `marked` in
+                    // `world.wgsl`, which writes that rather than the
+                    // texture's alpha. The texture's alpha is what a solid
+                    // pipeline must never write here: every leaf drawn beyond
+                    // `CUTOUT_DRAW_BLOCKS`, and every horizon summary cell,
+                    // reached the scene with a texel alpha under 1, which the
                     // composite took for a share of cloud and left that share
-                    // of the distance fog off: dark, unfogged speckle where
-                    // the terrain beside it faded. Glass keeps all four
-                    // channels because its alpha is what it blends by, and a
-                    // pane over a cloud pixel raising the mark is what W15
-                    // asks for.
-                    write_mask: if blended {
+                    // of the distance fog off. Glass keeps all four channels
+                    // because its alpha is what it blends by, and a pane over
+                    // a cloud pixel raising the mark is what W15 asks for. In
+                    // modes 1 and 2 the target is the window, whose alpha is
+                    // not ours.
+                    write_mask: if blended || format == graph::HDR_FORMAT {
                         wgpu::ColorWrites::ALL
                     } else {
                         wgpu::ColorWrites::COLOR

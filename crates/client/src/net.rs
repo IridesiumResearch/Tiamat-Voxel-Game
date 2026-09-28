@@ -1489,12 +1489,16 @@ async fn session(
                 day_length_ticks,
                 keyframes,
                 observer,
+                cave_fog,
             } => {
-                let _ = events.send(Event::Sky(crate::sky::Sky::new(
-                    day_length_ticks,
-                    keyframes,
-                    tiamat_core::sky::UniversalPos::new(observer[0], observer[1], observer[2]),
-                )));
+                let _ = events.send(Event::Sky(
+                    crate::sky::Sky::new(
+                        day_length_ticks,
+                        keyframes,
+                        tiamat_core::sky::UniversalPos::new(observer[0], observer[1], observer[2]),
+                    )
+                    .with_cave_fog(cave_fog),
+                ));
             }
 
             ServerMessage::TimeOfDay { time } => {

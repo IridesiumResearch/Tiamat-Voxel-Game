@@ -85,6 +85,9 @@ struct Globals {
     // How much of the sun the deck takes in x: zero when there is no deck,
     // in Simple, or with clouds off, and then no sample is taken at all.
     cloud_shadow_light: vec4<f32>,
+    // What fog fades towards where no sky reaches, in xyz — weather ask W29;
+    // w unused. See `fog_colour`. **Appended**, for `cloud_shadow`'s reason.
+    cave_fog: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -558,12 +561,85 @@ fn vertex_main(input: VertexIn) -> VertexOut {
 // arrives at the sky at the top of the box exactly as it does at the far edge;
 // a level ray is what it always was.
 fn fog_amount(relative: vec3<f32>) -> f32 {
+    return pow(clamp(fog_reach(relative), 0.0, 1.0), globals.fog_curve);
+}
+
+// How far along the fog's ellipsoid a point sits: 0 at the eye, 1 where the
+// fog is total. `fog_amount` before its power curve.
+fn fog_reach(relative: vec3<f32>) -> f32 {
     let far = max(globals.sky_colour.w, 0.001);
     let up = max(globals.sun_direction.w, 0.001);
     let sideways = length(relative.xz) / far;
     let vertical = abs(relative.y) / up;
-    let reach = sqrt(sideways * sideways + vertical * vertical);
-    return pow(clamp(reach, 0.0, 1.0), globals.fog_curve);
+    return sqrt(sideways * sideways + vertical * vertical);
+}
+
+// Where along the fog's reach a cave's fog starts giving way to the sky's,
+// whatever the sky light. Must match `post.wgsl`.
+//
+// **The fog exists to hide the edge of the loaded world**, and it can only do
+// that in the colour of what is behind the edge, which is the sky: a cave
+// mouth on a far cliff fogged in the cave's colour would stand in the haze as
+// a dark hole exactly where everything round it has dissolved, and a tunnel
+// longer than the view distance would end in a hard line against the sky the
+// frame is cleared to. So the last stretch before the fog is total goes to
+// the sky's colour, the way the cloud deck's last stretch does before its
+// reach. Nearer than this, the sky light alone decides.
+const CAVE_FOG_EDGE: f32 = 0.85;
+
+// What the fog fades towards at a fragment — weather ask W29.
+//
+// **The sky's colour where the sky reaches, a cave's where it does not.** Fog
+// used to be the sky's colour everywhere, and the sky's colour follows the
+// clock, so the fog down a tunnel was pale blue at noon, orange at dusk and
+// black at midnight, and leaned with a storm and a flash. Blended by the sky
+// light at the fragment — the stored sunlight channel the mesh already
+// carries, in quarter levels, so a tunnel's fog shades from the day's at the
+// mouth to the cave's a few blocks in — from `sky_colour` at full sky light
+// to `cave_fog`, the sky owner's colour for every hour, at none. Whatever
+// leans the sky's colour leans only the sky-lit share, which is what keeps
+// lightning out of a cave without anyone having to be told.
+//
+// **A fragment's own sky light, not the air's between it and the eye.** The
+// daylit ground seen out of a tunnel's mouth is fogged in the day's colour
+// from deep inside it, which is the view the ask describes; the price is
+// that a surface dark for another reason — a sea floor under deep water, a
+// forest floor under a thick canopy — fogs towards the cave's colour too.
+// `CAVE_FOG_EDGE` keeps both out of the horizon.
+fn fog_colour(sky_light: f32, reach: f32) -> vec3<f32> {
+    let open = max(clamp(sky_light, 0.0, 1.0), smoothstep(CAVE_FOG_EDGE, 1.0, reach));
+    return mix(globals.cave_fog.rgb, globals.sky_colour.rgb, open);
+}
+
+// What mode 3's scene keeps in alpha for an opaque fragment: how much sky
+// reaches it, for the composite's fog — weather ask W29. Must match
+// `post.wgsl`.
+//
+// **Above `SKY_MARK`, where the cloud mark cannot reach.** The alpha was
+// already a mark (ask W15): `CLOUD_MARK`, 0, where the deck drew, and 1
+// everywhere else. So a fragment in full sky light writes `SKY_MARK`, which is
+// exactly what every opaque fragment used to leave there, and one with none
+// writes `CAVE_MARK` — the composite reads a cloud below 1 and a cave above it,
+// and a float target keeps both. The sky the deck paints is `SKY_MARK` too,
+// which is the right answer for it.
+//
+// A pane or a pond blends its own coverage over this with ordinary alpha
+// blending, which reads as a sky-lit surface in proportion to how much of the
+// pixel it covers: exact for the sea, which is under the sky, and short for a
+// pool underground, where the fog at a cave's distances is thin. Its own sky
+// light cannot reach the alpha — the blend's source alpha is its coverage —
+// without a second target every pass in the frame would have to draw into.
+const SKY_MARK: f32 = 1.0;
+const CAVE_MARK: f32 = 2.0;
+
+// An opaque fragment's colour with mode 3's mark in its alpha, and exactly the
+// colour it was in modes 1 and 2, whose alpha is the window's and is not
+// written. See `SKY_MARK`.
+fn marked(colour: vec4<f32>, sky_light: f32) -> vec4<f32> {
+    if (globals.lighting_mode != 2u) {
+        return colour;
+    }
+    return vec4<f32>(colour.rgb, mix(CAVE_MARK, SKY_MARK, clamp(sky_light, 0.0, 1.0)));
 }
 
 // What one fragment's light comes to, as a colour multiplier.
@@ -1076,9 +1152,10 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     //
     // The alpha returned here reaches the scene only from a BLENDED pipeline
     // (glass), which needs it to blend by. In mode 3 the scene's alpha is the
-    // composite's cloud mark, and a solid pipeline masks its alpha off: a leaf
-    // drawn solid at a distance would otherwise hand the composite its mip's
-    // partial alpha, be taken for that much cloud, and lose that much fog.
+    // composite's mark, and an opaque entry point replaces it with the
+    // fragment's sky light (`marked`): a leaf drawn solid at a distance would
+    // otherwise hand the composite its mip's partial alpha, be taken for that
+    // much cloud, and lose that much fog.
     if (globals.lighting_mode == 2u) {
         return vec4<f32>(lit, texel.a);
     }
@@ -1092,7 +1169,8 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     // front of that.
     let misted = place_fog(lit, input.world, input.distance);
     let haze = fog_amount(input.world);
-    return vec4<f32>(mix(misted, globals.sky_colour.rgb, haze), texel.a);
+    let fog = fog_colour(input.sun, fog_reach(input.world));
+    return vec4<f32>(mix(misted, fog, haze), texel.a);
 }
 
 // Mode 2's shadows, which are not shadows.
@@ -1397,8 +1475,32 @@ fn sprite_vertex(@builtin(vertex_index) index: u32, sprite: SpriteIn) -> VertexO
 }
 
 // Modes 1 and 2. Neither has a shadow map; mode 2 has an opinion anyway.
+// Mode 3 with its shadows off, too, which is why this marks.
 @fragment
 fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
+    return marked(unshadowed(input), input.sun);
+}
+
+// Mode 3: the same surface, with the cascades consulted.
+@fragment
+fn fragment_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
+    return marked(shadowed(input), input.sun);
+}
+
+// Glass: `fragment_main` and `fragment_shadowed` without the mark, because a
+// blended surface's alpha is what it blends by. See `SKY_MARK`.
+@fragment
+fn fragment_glass(input: VertexOut) -> @location(0) vec4<f32> {
+    return unshadowed(input);
+}
+
+@fragment
+fn fragment_glass_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
+    return shadowed(input);
+}
+
+// The surface without cascades: mode 1 flat, mode 2's generic shadow.
+fn unshadowed(input: VertexOut) -> vec4<f32> {
     // Mode 1 is flat by construction — it has no sun direction in its lighting
     // at all, only the axis constants in `face_shade` — so handing it a facing
     // term would be shading it twice by two different rules.
@@ -1412,9 +1514,8 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     );
 }
 
-// Mode 3: the same surface, with the cascades consulted.
-@fragment
-fn fragment_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
+// The surface with the cascades consulted.
+fn shadowed(input: VertexOut) -> vec4<f32> {
     return surface(
         input,
         shadow_factor(input),
@@ -1474,5 +1575,5 @@ fn cut_out(input: VertexOut, shadow: f32) -> vec4<f32> {
     if (colour.a < 0.5) {
         discard;
     }
-    return vec4<f32>(colour.rgb, 1.0);
+    return marked(vec4<f32>(colour.rgb, 1.0), input.sun);
 }

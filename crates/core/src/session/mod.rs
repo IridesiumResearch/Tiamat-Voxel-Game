@@ -361,12 +361,13 @@ pub struct JoinContext<'a> {
     /// See [`crate::proto::HudScriptDef`].
     pub hud_scripts: &'a [crate::proto::HudScriptDef],
     /// The sky a mod registered for the domain the player joins into: how
-    /// long a day is, its keyframes, and where in the universe that domain
-    /// sits — the point the star catalog is drawn from.
+    /// long a day is, its keyframes, where in the universe that domain sits —
+    /// the point the star catalog is drawn from — and the colour its fog
+    /// takes where no sky reaches (weather ask W29).
     ///
     /// A day length of zero with no keyframes means no mod registered one,
     /// which is a world without a day rather than an error.
-    pub sky: (u32, &'a [crate::proto::SkyFrame], [i64; 3]),
+    pub sky: (u32, &'a [crate::proto::SkyFrame], [i64; 3], [f32; 3]),
     /// Who is permitted to join.
     pub allowlist: &'a Allowlist,
     /// Maximum simultaneous players.
@@ -993,6 +994,7 @@ fn join_burst(context: &JoinContext<'_>) -> Response {
                 day_length_ticks: context.sky.0,
                 keyframes: context.sky.1.to_vec(),
                 observer: context.sky.2,
+                cave_fog: context.sky.3,
             },
             // Last of the registration tables, and appended here rather
             // than slotted in beside the tools it resembles: the join
@@ -1093,7 +1095,7 @@ mod tests {
             pictures: &[],
             sound_bindings: &[],
             hud_scripts: &[],
-            sky: (0, &[], [0; 3]),
+            sky: (0, &[], [0; 3], crate::script::Sky::DEFAULT_CAVE_FOG),
             allowlist,
             max_players: 50,
             current_players: 0,

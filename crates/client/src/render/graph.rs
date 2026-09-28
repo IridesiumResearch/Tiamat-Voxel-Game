@@ -98,6 +98,9 @@ struct Uniforms {
     ///
     /// **Appended**, so every field above stays where `post.wgsl` reads it.
     place_fog: super::place_fog::Uniforms,
+    /// What the fog fades towards where no sky reaches, in `xyz` — weather
+    /// ask W29; `w` unused. **Appended**, for `place_fog`'s reason.
+    cave_fog: [f32; 4],
 }
 
 /// What the frame's sky is doing, as the composite needs it.
@@ -127,6 +130,11 @@ pub struct Frame {
     /// Where the camera stands among the places' fogs. Mode 3 applies them
     /// here, from depth, so they reach the sky; see `super::place_fog`.
     pub place_fog: super::place_fog::Uniforms,
+    /// What the fog fades towards where no sky reaches — weather ask W29.
+    /// The composite blends it in by the sky light the world pass wrote
+    /// into the scene's alpha; see `SKY_MARK` and `CAVE_MARK` in
+    /// `post.wgsl`.
+    pub cave_fog: [f32; 3],
 }
 
 /// How much of the sun's colour the haze takes on where the view points at it.
@@ -773,6 +781,7 @@ impl Post {
                 graded: f32::from(u8::from(frame.grade != tiamat_core::proto::SkyGrade::NONE)),
                 fog_up: frame.fog_up,
                 place_fog: frame.place_fog,
+                cave_fog: [frame.cave_fog[0], frame.cave_fog[1], frame.cave_fog[2], 0.0],
             }),
         );
     }

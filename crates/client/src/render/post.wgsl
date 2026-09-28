@@ -49,6 +49,9 @@ struct Post {
     fog_here: vec4<f32>,
     fog_frame: vec4<f32>,
     fog_grid: vec4<f32>,
+    // What fog fades towards where no sky reaches, in xyz — weather ask W29;
+    // w unused. See `world.wgsl`'s `fog_colour`.
+    cave_fog: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> post: Post;
@@ -75,6 +78,17 @@ const SKY_FOG_REACH: f32 = 512.0;
 
 // Must match `place_fog::FALLOFF`.
 const FOG_FALLOFF: f32 = 4.0;
+
+// The scene's alpha above the cloud mark: how much sky reaches the surface
+// under a pixel, written by the world pass's opaque fragments — `SKY_MARK` at
+// full sky light, `CAVE_MARK` at none. Must match `world.wgsl`, whose
+// `marked` says why the two sit above the cloud's.
+const SKY_MARK: f32 = 1.0;
+const CAVE_MARK: f32 = 2.0;
+
+// Where along the fog's reach a cave's fog gives way to the sky's whatever
+// the sky light. Must match `world.wgsl`, whose `CAVE_FOG_EDGE` says why.
+const CAVE_FOG_EDGE: f32 = 0.85;
 
 // `place_fog_at`, `fog_height_integral` and `place_fog` from `world.wgsl`, word
 // for word but for where the uniforms live. WGSL has no includes, and the two
@@ -353,6 +367,11 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // afterwards — a particle, a fluid's surface — raises the alpha and takes
     // its share of the terrain's fog with it.
     let is_cloud = 1.0 - clamp(source_texel.a, 0.0, 1.0);
+    // **And above the cloud mark, how much sky reaches the surface** (weather
+    // ask W29): the world pass writes `SKY_MARK` at full sky light up to
+    // `CAVE_MARK` at none, so the fog below can be the cave's where the sky is
+    // not. The sky and a cloud read as fully sky-lit, which they are.
+    let sky_light = 1.0 - clamp((source_texel.a - SKY_MARK) / (CAVE_MARK - SKY_MARK), 0.0, 1.0);
     let glow = textureSample(bloom, source_sampler, input.uv).rgb;
     // Added rather than mixed: bloom is light that scattered on its way to the
     // eye, so it arrives IN ADDITION to what the surface sent. Mixing would
@@ -381,7 +400,14 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     let vertical = abs(point.y) / max(post.fog_up, 0.001);
     let reach = sqrt(sideways * sideways + vertical * vertical);
     let haze = pow(clamp(reach, 0.0, 1.0), curve);
-    let fogged = mix(mix(misted, scattered_fog(input.uv), haze), misted, is_cloud);
+    // The sky's fog where the sky reaches and the cave's where it does not,
+    // by `world.wgsl`'s `fog_colour` rule and for its reasons — the sun's
+    // halo, the clock and a flash are the sky's, so they lean the sky-lit
+    // share alone, and the last stretch before the fog is total is the sky's
+    // whatever the sky light, so the loaded world's edge is still hidden.
+    let open = max(sky_light, smoothstep(CAVE_FOG_EDGE, 1.0, reach));
+    let fog = mix(post.cave_fog.rgb, scattered_fog(input.uv), open);
+    let fogged = mix(mix(misted, fog, haze), misted, is_cloud);
 
     // Graded last, on the display-referred result. The table's domain is 0..1
     // and this is where the frame first lives in it: grading before the tonemap

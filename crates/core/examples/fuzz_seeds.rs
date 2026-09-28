@@ -764,6 +764,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 stars: 0.0,
             }],
             observer: [1, -2, 3],
+            cave_fog: [0.05, 0.05, 0.06],
         },
         ServerMessage::TimeOfDay { time: 0.25 },
         ServerMessage::ChunkFluid {

@@ -552,6 +552,10 @@ pub struct Sky {
     /// Where in the universe this sky is seen from — the domain's place,
     /// which is what the star catalog is drawn from.
     observer: tiamat_core::sky::UniversalPos,
+    /// The fog's colour where no sky reaches — weather ask W29. The sky's
+    /// owner sets it once and it does not follow the clock; see
+    /// [`Sky::cave_fog`].
+    cave_fog: [f32; 3],
 }
 
 /// What the sky looks like at one moment.
@@ -595,6 +599,7 @@ impl Sky {
             keyframes: Vec::new(),
             time: 0.0,
             observer: tiamat_core::sky::UniversalPos::CENTRE,
+            cave_fog: tiamat_core::script::Sky::DEFAULT_CAVE_FOG,
         }
     }
 
@@ -614,7 +619,40 @@ impl Sky {
             keyframes,
             time: 0.0,
             observer,
+            cave_fog: tiamat_core::script::Sky::DEFAULT_CAVE_FOG,
         }
+    }
+
+    /// The same sky, with the cave fog its table carried.
+    ///
+    /// **Sanitised on the way in**, like the grade: the table is from a peer
+    /// (charter rule 14) and the wire check already refuses a channel out of
+    /// `0.0..=1.0`, but the check and the draw are a module apart, and a
+    /// `NaN` here is every cave in the frame one flat colour. A channel that
+    /// is not a number takes the default's.
+    #[must_use]
+    pub fn with_cave_fog(mut self, colour: [f32; 3]) -> Self {
+        let fallback = tiamat_core::script::Sky::DEFAULT_CAVE_FOG;
+        for channel in 0..3 {
+            self.cave_fog[channel] = if colour[channel].is_finite() {
+                colour[channel].clamp(0.0, 1.0)
+            } else {
+                fallback[channel]
+            };
+        }
+        self
+    }
+
+    /// The fog's colour where no sky reaches, for every hour of the day.
+    ///
+    /// **Not part of [`Moment`], because it has no moment.** A moment is
+    /// what the clock, the weather and a flash make of the keyframes; this is
+    /// the colour the fog takes where none of those can reach, which is the
+    /// whole of weather ask W29 — the fog down a tunnel was the sky's colour,
+    /// so it was pale blue at noon and black at midnight.
+    #[must_use]
+    pub const fn cave_fog(&self) -> [f32; 3] {
+        self.cave_fog
     }
 
     /// Where in the universe this sky is seen from.
@@ -910,6 +948,33 @@ mod tests {
             "a world with no sky should be lit by a white sun: {:?}",
             moment.sun
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_caves_fog_is_one_colour_at_every_hour_and_a_poisoned_one_is_sanitised() {
+        // Weather ask W29: the sky's colour follows the clock and a cave's
+        // fog must not, so it is the sky's, not the moment's.
+        let mut sky = Sky::new(100, frames(), HERE).with_cave_fog([0.1, 0.2, 0.3]);
+        sky.set_time(0.0);
+        let midnight = (sky.moment().sky, sky.cave_fog());
+        sky.set_time(0.5);
+        let noon = (sky.moment().sky, sky.cave_fog());
+        assert_ne!(midnight.0, noon.0, "the fixture's sky should move");
+        assert_eq!(midnight.1, [0.1, 0.2, 0.3]);
+        assert_eq!(noon.1, midnight.1, "the cave's fog followed the clock");
+
+        // A peer's word, checked on the wire and again here: not a number is
+        // the default's channel, and out of range is clamped.
+        let poisoned = Sky::new(100, frames(), HERE).with_cave_fog([f32::NAN, 2.0, -1.0]);
+        let fallback = tiamat_core::script::Sky::DEFAULT_CAVE_FOG;
+        assert_eq!(poisoned.cave_fog(), [fallback[0], 1.0, 0.0]);
+        // And a world with no sky mod still has caves with a fog of their own.
+        assert_eq!(Sky::none().cave_fog(), fallback);
+        assert_eq!(Sky::new(100, frames(), HERE).cave_fog(), fallback);
     }
 
     #[test]

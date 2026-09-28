@@ -144,6 +144,7 @@ fn arrival(bot: &Bot) -> Option<(String, u32, Vec<tiamat_core::proto::SkyFrame>,
             day_length_ticks,
             keyframes,
             observer,
+            ..
         } => Some((
             domain.clone(),
             *day_length_ticks,

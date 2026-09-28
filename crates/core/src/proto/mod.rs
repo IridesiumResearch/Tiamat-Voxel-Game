@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 77;
+pub const PROTOCOL_VERSION: u32 = 78;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,12 @@ pub const PROTOCOL_VERSION: u32 = 77;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v78 (weather W29): `SkyTable` carries `cave_fog`, the fog's colour where no
+// sky reaches, appended after `observer`. Fog faded to the keyframed sky's
+// colour, so the fog down a tunnel followed the clock; the client now blends
+// each fragment's fog from the sky's colour at full sky light to this at
+// none. **A field on an existing message**, the unsafe kind of change, so the
+// version check is what keeps a v77 peer from reading past the observer.
 // v77: two changes under one number, landed the same day. `Node` (a dialog
 // widget) gained `tooltip` (UI ask 15) — a field on an existing struct, the
 // unsafe kind of change. And `ServerMessage::Lightning` was appended (weather
@@ -1710,6 +1716,15 @@ pub enum ServerMessage {
         keyframes: Vec<SkyFrame>,
         /// Where the sky is seen from, in universal blocks.
         observer: [i64; 3],
+        /// The fog's colour where no sky reaches, `{r, g, b}` in `0.0..=1.0`
+        /// (protocol v78, weather ask W29).
+        ///
+        /// One colour for the whole day, and the domain's own: the client
+        /// blends each fragment's fog from the sky's colour at full sky light
+        /// to this at none, so a cave's fog does not follow the clock.
+        /// Checked by [`validate_server_message`] before a client draws with
+        /// it (charter rule 14).
+        cave_fog: [f32; 3],
     },
 
     /// Where the server's clock stands in the day.
@@ -2857,8 +2872,16 @@ fn check_mod_settings(settings: &[SettingDef]) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Whether a cave's fog is a colour a client can draw: every channel a
+/// number in `0.0..=1.0`, the range `register_sky` clamps it to.
+#[must_use]
+pub fn cave_fog_is_valid(colour: [f32; 3]) -> bool {
+    colour.iter().all(|channel| (0.0..=1.0).contains(channel))
+}
+
 /// The weather messages: a sky modifier's, a flash's and a bolt's numbers are the
-/// client's to trust only in range. One function for all of them, because
+/// client's to trust only in range — and the sky table's cave fog, which is
+/// the one number of its own a registered sky sends that is not a keyframe's. One function for all of them, because
 /// `validate_server_message` is at clippy's line ceiling.
 fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
     let valid = match message {
@@ -2866,6 +2889,10 @@ fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
             .as_ref()
             .is_none_or(crate::atmosphere::SkyModifier::is_valid),
         ServerMessage::Flash { flash } => flash.is_valid(),
+        // **A cave's fog reaches every fogged fragment** (weather ask W29):
+        // a `NaN` channel there is a frame whose caves are one flat colour,
+        // and a server's word for it is not a mod's.
+        ServerMessage::SkyTable { cave_fog, .. } => cave_fog_is_valid(*cave_fog),
         // **A fork count reaches the client's path builder**, and ends that
         // are not numbers reach its arithmetic: checked before either is
         // trusted, since a server's word for them is not a mod's.
@@ -3410,6 +3437,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::HudScripts { scripts } => check_hud_scripts(scripts)?,
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
         ServerMessage::SkyModifier { .. }
+        | ServerMessage::SkyTable { .. }
         | ServerMessage::Flash { .. }
         | ServerMessage::Lightning { .. }
         | ServerMessage::Precipitation { .. }
@@ -3452,7 +3480,6 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         | ServerMessage::ChunkLight { .. }
         | ServerMessage::ChunkFluid { .. }
         | ServerMessage::FluidTable { .. }
-        | ServerMessage::SkyTable { .. }
         | ServerMessage::ViewDistance { .. }
         // A `u16` slot needs no cap: every value it can hold is either a slot
         // the player has or one they do not, and the client ignores the second
@@ -4201,6 +4228,7 @@ mod tests {
                     day_length_ticks: 0,
                     keyframes: Vec::new(),
                     observer: [0; 3],
+                    cave_fog: [0.0; 3],
                 },
                 17,
             ),
@@ -4993,6 +5021,53 @@ mod tests {
             assert!(
                 validate_server_message(&ServerMessage::Lightning { lightning: poison }).is_err(),
                 "{poison:?}"
+            );
+        }
+    }
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_sky_tables_cave_fog_round_trips_and_one_that_is_not_a_colour_is_refused() {
+        // Weather ask W29, protocol v78: appended after the observer, so the
+        // bytes before it are what a v77 table's were, and the version check
+        // is what stops a v77 peer reading one field past its end.
+        let table = |cave_fog: [f32; 3]| ServerMessage::SkyTable {
+            day_length_ticks: 24_000,
+            keyframes: vec![SkyFrame {
+                time: 0.5,
+                sky: [0.4, 0.6, 0.9],
+                sun: [1.0, 0.98, 0.9],
+                intensity: 1.0,
+                grade: SkyGrade::NONE,
+                stars: 0.0,
+            }],
+            observer: [1, -2, 3],
+            cave_fog,
+        };
+        let message = table([0.05, 0.05, 0.06]);
+        assert!(validate_server_message(&message).is_ok());
+        let bytes = encode(&message).expect("encode");
+        let decoded: ServerMessage = decode(&bytes).expect("decode");
+        assert_eq!(decoded, message);
+        let ServerMessage::SkyTable { cave_fog, .. } = decoded else {
+            panic!("a sky table decoded as {decoded:?}");
+        };
+        assert_eq!(cave_fog, [0.05, 0.05, 0.06]);
+
+        // Every fogged fragment reads it, so a channel that is not a number,
+        // or one past white, is a server not to be trusted.
+        for poison in [
+            [f32::NAN, 0.0, 0.0],
+            [0.0, f32::INFINITY, 0.0],
+            [0.0, 0.0, f32::NEG_INFINITY],
+            [0.0, 0.0, 1.5],
+            [-0.25, 0.0, 0.0],
+        ] {
+            assert!(
+                validate_server_message(&table(poison)).is_err(),
+                "a cave fog of {poison:?} was let through"
             );
         }
     }

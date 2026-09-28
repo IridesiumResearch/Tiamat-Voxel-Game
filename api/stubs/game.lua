@@ -528,6 +528,7 @@ function Stream:next_bool() end
 ---@field domain string? Which domain this sky is for — a domain id, or a template's, which every instance made from it inherits. Omit it and this is the sky for every domain not named, which is every domain a mod written before this existed has. A space between worlds has no dawn, and a body a player lands on has a sky of its own; the client is sent the right one when a player arrives.
 ---@field keyframes Tiamat.SkyKeyframe[]
 ---@field start_time number? Where a fresh world's clock starts, 0..1. Defaults to mid-morning: a counter left at zero opens every world at midnight, which is the one hour with no sun in it. Required, and not empty. Need not be sorted — the engine sorts them, because an out-of-order list would make the sky walk backwards partway through the day.
+---@field cave_fog number[]? `{r, g, b}` (or `{ r =, g =, b = }`), each 0 to 1: the colour distance fog takes where no sky reaches. Defaults to a dark neutral, `{0.05, 0.05, 0.06}`. **One colour for every hour**, not a keyframe's: each fragment's fog is blended by the sky light at it, from the keyframe's `sky` at full sky light to this at none, so the fog down a tunnel is the cave's at noon and at midnight while the daylit ground seen out of its mouth is fogged in the day's colour, in the same frame. Whatever leans the sky's colour — the clock, `set_sky_modifier`, a `flash` — leans only the sky-lit share, so none of them reaches a cave. The last stretch before the fog is total is the sky's whatever the sky light, so the edge of the loaded world is still hidden. Per sky, so a domain's sky has caves of its own colour. A missing channel or one that is not a number is an error; a number out of range is clamped.
 
 ---One moment in your day.
 ---
@@ -536,7 +537,7 @@ function Stream:next_bool() end
 ---at the moment the clock wraps.
 ---@class Tiamat.SkyKeyframe
 ---@field time number Required. When in the day, 0 to 1, where 0 is midnight and 0.5 is noon.
----@field sky number[] Required. `{r, g, b}` for the sky itself. Distance fog fades towards this, so it is also the horizon.
+---@field sky number[] Required. `{r, g, b}` for the sky itself. Distance fog fades towards this wherever the sky reaches, so it is also the horizon; where it does not, fog fades towards the sky's `cave_fog` instead.
 ---@field sun number[] Required. `{r, g, b}` tinting the sunlight stored in the world.
 ---@field intensity number Required, 0 to 1. Scales stored sunlight at DRAW time — which is why a day/night cycle costs nothing: the world's sunlight is always full daylight and never needs relighting.
 ---@field grade Tiamat.SkyGrade? Optional. How the finished picture is graded at this moment. Omit it and nothing is graded.

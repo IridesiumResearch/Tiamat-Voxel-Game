@@ -26,8 +26,8 @@ use tiamat_core::particle::Burst;
 /// The most particles alive at once.
 ///
 /// Enough for a storm of spray and a forest's worth of drips together; one
-/// instance each is 32 bytes, so the whole budget is a quarter of a megabyte
-/// of vertex buffer.
+/// instance each is 36 bytes, so the whole budget is under three tenths of a
+/// megabyte of vertex buffer.
 pub const MAX_LIVE: usize = 8192;
 
 /// One particle, in flight.
@@ -46,6 +46,11 @@ pub struct Particle {
     pub lifetime: f32,
     /// Its colour, already lit, and its opacity at birth.
     pub colour: [f32; 4],
+    /// How much sky reached where it was scattered, `0.0..=1.0` — weather
+    /// ask W29. Its fog is that share of the sky's colour and the rest the
+    /// cave's, by the world's own rule, so a drip in a cave does not haze
+    /// towards the day at the edge of the view.
+    pub sky: f32,
     /// Blocks across.
     pub size: f32,
     /// Whether it dies on reaching a solid cell.
@@ -105,10 +110,16 @@ impl System {
     /// Makes a burst's particles, up to the budget.
     ///
     /// `light` is what the burst's centre is lit by, `0.0..=1.0` a channel,
-    /// sampled once for the whole burst: a particle is small and short-lived,
-    /// and a light lookup per particle per frame would cost more than the
-    /// particle does.
-    pub fn spawn(&mut self, burst: &Burst, light: [f32; 3]) {
+    /// and `sky` how much of the sky reaches it, `0.0..=1.0`, both sampled
+    /// once for the whole burst: a particle is small and short-lived, and a
+    /// light lookup per particle per frame would cost more than the particle
+    /// does.
+    pub fn spawn(&mut self, burst: &Burst, light: [f32; 3], sky: f32) {
+        let sky = if sky.is_finite() {
+            sky.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         let room = MAX_LIVE.saturating_sub(self.live.len());
         let count = usize::from(burst.count).min(room);
         let channel = |index: usize| f32::from(burst.colour[index]) / 255.0;
@@ -144,6 +155,7 @@ impl System {
                 // rather than vanishing on one frame.
                 lifetime,
                 colour,
+                sky,
                 size: burst.size,
                 collide: burst.collide,
                 texture: burst.texture,
@@ -307,7 +319,7 @@ mod tests {
     #[test]
     fn a_burst_starts_where_it_was_asked_and_scatters_within_its_box() {
         let mut system = System::new(7);
-        system.spawn(&burst(64), [1.0, 0.5, 1.0]);
+        system.spawn(&burst(64), [1.0, 0.5, 1.0], 1.0);
         assert_eq!(system.live().len(), 64);
         for particle in system.live() {
             assert!(
@@ -347,12 +359,30 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_keeps_the_sky_it_was_scattered_under_and_a_poisoned_one_is_open_sky() {
+        // Weather ask W29: a particle's fog is the cave's where no sky reached
+        // it, so what reached it rides with it. Sanitised like the light it
+        // is sampled beside: out of range is clamped, not a number is sky.
+        for (given, kept) in [(0.25, 0.25), (-1.0, 0.0), (7.0, 1.0), (f32::NAN, 1.0)] {
+            let mut system = System::new(5);
+            system.spawn(&burst(4), [1.0; 3], given);
+            assert!(
+                system
+                    .live()
+                    .iter()
+                    .all(|particle| (particle.sky - kept).abs() < 1e-6),
+                "a sky of {given} should be kept as {kept}"
+            );
+        }
+    }
+
+    #[test]
     fn a_particle_rises_slows_falls_and_fades_out() {
         let mut system = System::new(3);
         let mut one = burst(1);
         one.spread = 0.0;
         one.area = [0.0; 3];
-        system.spawn(&one, [1.0; 3]);
+        system.spawn(&one, [1.0; 3], 1.0);
         let start = system.live()[0];
 
         system.advance(0.25, |_| false);
@@ -396,9 +426,9 @@ mod tests {
         mist.collide = false;
 
         let mut drips = System::new(1);
-        drips.spawn(&drip, [1.0; 3]);
+        drips.spawn(&drip, [1.0; 3], 1.0);
         let mut mists = System::new(1);
-        mists.spawn(&mist, [1.0; 3]);
+        mists.spawn(&mist, [1.0; 3], 1.0);
         for _ in 0..8 {
             drips.advance(0.1, floor);
             mists.advance(0.1, floor);
@@ -415,7 +445,7 @@ mod tests {
     fn the_budget_holds_however_much_a_server_sends() {
         let mut system = System::new(9);
         for _ in 0..100 {
-            system.spawn(&burst(256), [1.0; 3]);
+            system.spawn(&burst(256), [1.0; 3], 1.0);
         }
         assert_eq!(system.live().len(), MAX_LIVE);
         system.clear();

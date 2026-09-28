@@ -30,6 +30,9 @@ pub struct SkyWire {
     pub keyframes: Vec<SkyFrame>,
     /// Where a fresh world's clock starts, `0.0..1.0`.
     pub start_time: f32,
+    /// The fog's colour where no sky reaches — weather ask W29. Per sky,
+    /// so a body a player lands on can have caves of its own colour.
+    pub cave_fog: [f32; 3],
 }
 
 /// Every sky a world has, by domain.
@@ -52,6 +55,7 @@ impl SkyBook {
             let wire = SkyWire {
                 keyframes: sky.keyframes.iter().map(frame_on_the_wire).collect(),
                 start_time: sky.start_time,
+                cave_fog: sky.cave_fog,
             };
             if book.day_length_ticks == 0 || sky.domain.is_none() {
                 book.day_length_ticks = sky.day_length_ticks;
@@ -112,6 +116,15 @@ impl SkyBook {
         })
     }
 
+    /// The fog's colour where no sky reaches in a domain: its sky's, or the
+    /// engine's dark neutral for a domain with no sky — never a keyframe's,
+    /// which is the colour that follows the clock (weather ask W29).
+    #[must_use]
+    pub fn cave_fog_for(&self, domain: &str) -> [f32; 3] {
+        self.wire_for(domain)
+            .map_or(Sky::DEFAULT_CAVE_FOG, |wire| wire.cave_fog)
+    }
+
     /// The table to send for a domain seen from `observer`.
     #[must_use]
     pub fn table_for(&self, domain: &str, observer: UniversalPos) -> ServerMessage {
@@ -120,6 +133,7 @@ impl SkyBook {
             day_length_ticks,
             keyframes: keyframes.to_vec(),
             observer: [observer.x, observer.y, observer.z],
+            cave_fog: self.cave_fog_for(domain),
         }
     }
 }
@@ -162,10 +176,15 @@ mod tests {
                 stars,
             }],
             start_time: 0.4,
+            cave_fog: [stars, 0.0, 0.0],
         }
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
     fn a_domain_gets_its_own_sky_an_instance_its_templates_and_the_rest_the_default() {
         let book = SkyBook::from_registered(vec![
             sky(None, 24_000, 0.0),
@@ -186,6 +205,17 @@ mod tests {
         // One clock: every table carries the default's day.
         assert_eq!(book.frames_for("space:void").0, 24_000);
         assert_eq!(book.day_length_ticks(), 24_000);
+        // And each its own cave fog, by the same rule (weather ask W29).
+        assert_eq!(book.cave_fog_for("space:void"), [1.0, 0.0, 0.0]);
+        assert_eq!(book.cave_fog_for("space:body/17"), [0.5, 0.0, 0.0]);
+        assert_eq!(book.cave_fog_for("overworld"), [0.0; 3]);
+        assert!(matches!(
+            book.table_for("space:body/17", UniversalPos::CENTRE),
+            ServerMessage::SkyTable {
+                cave_fog: [0.5, 0.0, 0.0],
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -205,10 +235,17 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
     fn no_sky_at_all_is_a_world_without_a_day() {
         let book = SkyBook::from_registered(Vec::new());
         assert!(book.is_empty());
         assert_eq!(book.day_length_ticks(), 0);
         assert!((book.start_time() - 0.0).abs() < f32::EPSILON);
+        // A world without a day still has caves, and their fog is the
+        // engine's dark neutral rather than nothing.
+        assert_eq!(book.cave_fog_for("overworld"), Sky::DEFAULT_CAVE_FOG);
     }
 }

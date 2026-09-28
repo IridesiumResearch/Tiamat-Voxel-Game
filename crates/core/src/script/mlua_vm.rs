@@ -10142,6 +10142,11 @@ fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         }
         entry.set("start_time", start_time)?;
     }
+    // Weather ask W29: stored clamped, so what the wire carries is already
+    // in range and `sky_for` has nothing left to decide but the default.
+    if let Some(cave_fog) = cave_fog_of(spec)? {
+        entry.set("cave_fog", cave_fog.to_vec())?;
+    }
     // One sky per mod per domain: a second registration for the same domain
     // replaces the first, as it always has.
     registry.set(
@@ -10149,6 +10154,39 @@ fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         entry,
     )?;
     Ok(())
+}
+
+/// A sky's `cave_fog`, or `None` where the mod named none — weather ask W29.
+///
+/// `{r, g, b}` or `{ r =, g =, b = }`, as `set_sky_modifier`'s `sky` takes
+/// it. A missing channel or one that is not a number is an error at
+/// registration, like the rest of `register_sky`, because a colour guessed
+/// for a mod is a colour nobody can explain; a number out of range is
+/// clamped to `0..=1`, because fog brighter than white is not a cave's.
+fn cave_fog_of(spec: &Table) -> mlua::Result<Option<[f32; 3]>> {
+    let Some(table) = spec.get::<Option<Table>>("cave_fog").map_err(|_| {
+        mlua::Error::external("register_sky: `cave_fog` must be three numbers, {r, g, b}")
+    })?
+    else {
+        return Ok(None);
+    };
+    let mut colour = [0.0; 3];
+    for (index, (name, position)) in [("r", 1), ("g", 2), ("b", 3)].into_iter().enumerate() {
+        let value = table
+            .get::<Option<f32>>(name)
+            .ok()
+            .flatten()
+            .or_else(|| table.get::<Option<f32>>(position).ok().flatten())
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                mlua::Error::external(format!(
+                    "register_sky: `cave_fog` must be three numbers, {{r, g, b}}; `{name}` is \
+                     missing or not a number"
+                ))
+            })?;
+        colour[index] = value.clamp(0.0, 1.0);
+    }
+    Ok(Some(colour))
 }
 
 /// Checks one keyframe, so a mistake in it is a registration error rather
@@ -10311,7 +10349,13 @@ const GRADE_MIN_GAMMA: f32 = 0.1;
 /// has no sky at all, which is exactly what happened when `start_time` was
 /// added: no day, no sun, no shadows, and every graphics setting looking the
 /// same because there was nothing lit to tell them apart.
-const SKY_FIELDS: [&str; 4] = ["day_length_ticks", "keyframes", "start_time", "domain"];
+const SKY_FIELDS: [&str; 5] = [
+    "day_length_ticks",
+    "keyframes",
+    "start_time",
+    "domain",
+    "cave_fog",
+];
 
 /// Fields `register_model` accepts.
 const MODEL_FIELDS: [&str; 4] = ["id", "file", "scale", "texture"];
@@ -11603,6 +11647,16 @@ impl MluaVm {
                 .flatten()
                 .unwrap_or(DEFAULT_START_TIME)
                 .rem_euclid(1.0),
+            // Clamped when it was registered; absent is the default, never
+            // the sky's own colour, which is exactly what W29 took away.
+            cave_fog: entry
+                .get::<Option<Table>>("cave_fog")
+                .ok()
+                .flatten()
+                .and_then(|table| {
+                    Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?])
+                })
+                .unwrap_or(Sky::DEFAULT_CAVE_FOG),
         })
     }
 }
@@ -18854,6 +18908,82 @@ mod space_tests {
             "start_time {}",
             sky.start_time
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_skys_cave_fog_is_kept_in_either_spelling_and_clamped() {
+        // Weather ask W29. The allowlist is the half `start_time` taught: a
+        // field it did not list would have refused the whole sky.
+        for spelling in ["{ 0.1, 0.2, 1.5 }", "{ r = 0.1, g = 0.2, b = 1.5 }"] {
+            let mut vm = vm();
+            load(
+                &mut vm,
+                "space",
+                &format!(
+                    "game.register_sky{{ day_length_ticks = 100, cave_fog = {spelling}, \
+                     keyframes = {{ {{ time = 0, sky = {{0,0,0}}, sun = {{0,0,0}}, intensity \
+                     = 0 }} }} }}"
+                ),
+            )
+            .expect("load");
+            let sky = vm.registered_sky().expect("a sky");
+            assert_eq!(
+                sky.cave_fog,
+                [0.1, 0.2, 1.0],
+                "`cave_fog = {spelling}` should be kept, its blue clamped to white"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_sky_that_names_no_cave_fog_gets_the_dark_neutral() {
+        // Never the sky's own colour: that is the clock-following fog W29
+        // exists to take out of a cave.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "space",
+            r"game.register_sky{ day_length_ticks = 100, keyframes = {
+                { time = 0, sky = {0.5,0.7,0.9}, sun = {1,1,1}, intensity = 1 },
+            } }",
+        )
+        .expect("load");
+        let sky = vm.registered_sky().expect("a sky");
+        assert_eq!(sky.cave_fog, Sky::DEFAULT_CAVE_FOG);
+    }
+
+    #[test]
+    fn a_cave_fog_that_is_not_three_numbers_is_refused() {
+        // A colour guessed for a mod is a colour nobody can explain: wrong
+        // shapes are errors at registration, as the keyframes' are.
+        for spec in [
+            "cave_fog = { 0.1, 0.2 }",
+            "cave_fog = 0.5",
+            "cave_fog = { 0, 'x', 0 }",
+        ] {
+            let mut vm = vm();
+            let err = load(
+                &mut vm,
+                "space",
+                &format!(
+                    "game.register_sky{{ day_length_ticks = 100, {spec}, keyframes = {{ {{ time \
+                     = 0, sky = {{0,0,0}}, sun = {{0,0,0}}, intensity = 0 }} }} }}"
+                ),
+            )
+            .expect_err("should refuse");
+            assert!(
+                detail_of(&err).contains("cave_fog"),
+                "`{spec}` should be refused naming the field: {err:?}"
+            );
+        }
     }
 
     #[test]

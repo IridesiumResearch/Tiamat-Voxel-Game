@@ -28,6 +28,11 @@ pub struct Sprite {
     /// each picture is one bind and one draw — a particle is a hot path and a
     /// bind group per particle would be worse than the pixels it replaces.
     pub texture: Option<tiamat_core::proto::ContentHash>,
+    /// How much sky reached it, `0.0..=1.0` — weather ask W29. Its fog is
+    /// this share of the sky's colour and the rest the cave's, as a surface's
+    /// is by its own sky light. `1.0` for anything that is not part of the
+    /// scene, a badge above all.
+    pub sky: f32,
 }
 
 /// One particle, as the shader reads it.
@@ -36,6 +41,8 @@ pub struct Sprite {
 struct Instance {
     centre: [f32; 4],
     colour: [f32; 4],
+    /// See [`Sprite::sky`].
+    sky: f32,
 }
 
 /// `View` in `particle.wgsl`, field for field.
@@ -46,6 +53,7 @@ struct Uniforms {
     right: [f32; 4],
     up: [f32; 4],
     sky: [f32; 4],
+    cave_fog: [f32; 4],
 }
 
 /// What the pass needs to know about the frame.
@@ -64,6 +72,8 @@ pub struct Frame {
     /// Whether this pass fogs particles, which is every mode without a post
     /// chain; mode 3 fogs from depth after the fact.
     pub fogs: bool,
+    /// What the fog fades towards where no sky reaches — weather ask W29.
+    pub cave_fog: [f32; 3],
 }
 
 /// The pipelines, buffers and bindings.
@@ -273,6 +283,7 @@ impl Pass {
                     sprite.size,
                 ],
                 colour: sprite.colour,
+                sky: sprite.sky,
             });
         }
         self.count = u32::try_from(instances.len()).unwrap_or(0);
@@ -310,6 +321,7 @@ impl Pass {
                 // number when the post chain does: one slot, two facts.
                 if frame.fogs { frame.fog_up } else { -1.0 },
             ],
+            cave_fog: [frame.cave_fog[0], frame.cave_fog[1], frame.cave_fog[2], 0.0],
         };
         gpu.queue
             .write_buffer(&self.view, 0, bytemuck::bytes_of(&view));
@@ -382,6 +394,11 @@ fn pipeline(
                             offset: size_of::<[f32; 4]>() as u64,
                             shader_location: 1,
                         },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: size_of::<[f32; 8]>() as u64,
+                            shader_location: 2,
+                        },
                     ],
                 }],
             },
@@ -449,7 +466,11 @@ fn textured_pipeline(
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: size_of::<Instance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,
+                        1 => Float32x4,
+                        2 => Float32
+                    ],
                 }],
             },
             primitive: wgpu::PrimitiveState {
