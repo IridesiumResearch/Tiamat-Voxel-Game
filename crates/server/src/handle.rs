@@ -2535,7 +2535,7 @@ impl ServerHandle {
         // same resolution the hardness table gets, so the dig loop's material
         // finds them (Craft ask 2). A name nobody registered is dropped: the
         // tool digs that at its general speed, which is what the mod wrote.
-        // A `"tag:<name>"` key (Craft ask 11) is resolved here too, against
+        // A `"#<name>"` key (Craft ask 11) is resolved here too, against
         // the same block rules the hardness table reads, once every mod has
         // registered — see `resolve_tool_speeds` for the precedence between a
         // tag and a named material, and between two tags.

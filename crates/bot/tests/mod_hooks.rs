@@ -102,9 +102,9 @@ fn write_warden_without_tools(name: &str) -> PathBuf {
 
 /// Two mods for the tag-speed test (Craft ask 11).
 ///
-/// `smithy` registers a pick whose only per-material speed is
-/// `"tag:hard"`, and loads FIRST — topological order ties break
-/// alphabetically, and `smithy` sorts before `world` — so the block that
+/// `smithy` registers a pick whose only per-material speed is `"#hard"`,
+/// and loads FIRST — topological order ties break alphabetically, and
+/// `smithy` sorts before `world` — so the block that
 /// speed reaches is one `world` registers after `smithy` has already
 /// finished loading. If the speed only resolved when `register_tool` ran,
 /// it would find nothing to attach to and this test's fast dig would not be
@@ -129,7 +129,7 @@ fn write_tag_speed_mods(name: &str) -> PathBuf {
          \x20   brush = \"block\",\n\
          \x20   speed_multiplier = 1.0,\n\
          \x20   default = true,\n\
-         \x20   speeds = { [\"tag:hard\"] = 6.0 },\n\
+         \x20   speeds = { [\"#hard\"] = 6.0 },\n\
          }\n",
     )
     .expect("script");
@@ -232,31 +232,55 @@ async fn dig_and_see(bot: &mut Bot, server: &ServerHandle, pos: BlockPos, materi
 }
 
 /// Seeds a block, digs it with whatever tool is already selected, and
-/// reports how long the removal took — or `None` if it never came off.
+/// reports how many ticks the removal took — or `None` if it never came off.
 ///
-/// The Craft ask 11 tag-speed test needs the TIME, not just whether the dig
-/// finished: two blocks of the same hardness taking different times with the
-/// same tool selected is the only observable difference a tag speed makes.
-async fn dig_and_time(
+/// The Craft ask 11 tag-speed test needs a measure of how long the dig took
+/// that a difference in tool speed shows up in and a loaded CI runner cannot
+/// swamp. Wall-clock elapsed time is the wrong tool for that: the seed round
+/// trip, the `StartDig` network hop and this loop's own polling all add a
+/// fixed overhead to EVERY dig regardless of how many ticks the server
+/// actually spent on it, so a ratio like "half the time" is really a ratio
+/// of `ticks * tick_length + overhead`, and a slow runner inflating
+/// `overhead` can push that ratio outside the assertion even though the
+/// feature works exactly as intended (a real flake class here — see the
+/// `settled_inventory` doc comment above for another one). Ticks side-step
+/// it: the server emits one `DigProgress` for the target per tick a dig is
+/// running (`endpoint.rs`, alongside `PlayerState`, every tick), so counting
+/// them measures server-side work directly, independent of how long the
+/// client took to notice any of it.
+async fn dig_and_count_ticks(
     bot: &mut Bot,
     server: &ServerHandle,
     pos: BlockPos,
     material: u16,
     patience: Duration,
-) -> Option<Duration> {
+) -> Option<usize> {
     assert!(server.seed_block(pos, material), "seed queue full");
     bot.expect_block(pos, material, Duration::from_secs(10))
         .await
         .expect("the seed should land");
 
-    let started = tokio::time::Instant::now();
-    bot.start_dig(centre_of(pos)).await.expect("start dig");
+    let target = centre_of(pos);
+    let since = bot.received().len();
+    bot.start_dig(target).await.expect("start dig");
 
-    let deadline = started + patience;
+    let deadline = tokio::time::Instant::now() + patience;
     while tokio::time::Instant::now() < deadline {
         let _ = tokio::time::timeout(Duration::from_millis(50), bot.recv()).await;
         if bot.block_is_empty(pos) {
-            return Some(started.elapsed());
+            let ticks = bot
+                .received()
+                .iter()
+                .skip(since)
+                .filter(|message| {
+                    matches!(
+                        message,
+                        tiamat_core::proto::ServerMessage::DigProgress { target: t, .. }
+                            if *t == target
+                    )
+                })
+                .count();
+            return Some(ticks);
         }
     }
     None
@@ -644,13 +668,13 @@ fn a_blocks_registered_drops_apply_and_may_name_another_mods_block() {
 
 #[test]
 fn a_tag_speed_digs_a_later_registered_tagged_block_faster() {
-    // Craft ask 11(b): `register_tool{ speeds = { ["tag:hard"] = 6.0 } }`
+    // Craft ask 11(b): `register_tool{ speeds = { ["#hard"] = 6.0 } }`
     // resolves at freeze, once every mod has registered — not when
     // `register_tool` ran — so it still reaches `world:stone_hard`, a block
     // named only by `world`, a mod that loads AFTER `smithy`. Comparing
     // against `world:stone_plain`, the SAME hardness but no tag, is what
-    // rules out "the tool just digs everything faster than three seconds
-    // suggests": nothing differs between the two digs but the tag.
+    // rules out "the tool just digs everything faster than usual": nothing
+    // differs between the two digs but the tag.
     let server = start("tag-speed", write_tag_speed_mods("tag-speed"));
 
     block_on(async {
@@ -660,21 +684,25 @@ fn a_tag_speed_digs_a_later_registered_tagged_block_faster() {
 
         bot.select_tool(None).await.expect("the default pick");
 
-        // Generous relative to either expected time (0.5s tagged, 3s plain
-        // at 20 ticks/s) so CI jitter cannot itself explain a miss.
+        // A wall-clock ceiling only — generous enough that CI jitter alone
+        // cannot time either dig out. The comparison below is on ticks, not
+        // this, so a slow runner cannot make it flaky (`dig_and_count_ticks`
+        // explains why).
         let patience = Duration::from_secs(8);
-        let tagged = dig_and_time(&mut bot, &server, BlockPos::new(2, -1, 0), hard, patience)
-            .await
-            .expect("the tag-sped block should come apart");
-        let untagged = dig_and_time(&mut bot, &server, BlockPos::new(-2, -1, 0), plain, patience)
-            .await
-            .expect("the plain block of the same hardness should come apart too");
+        let tagged =
+            dig_and_count_ticks(&mut bot, &server, BlockPos::new(2, -1, 0), hard, patience)
+                .await
+                .expect("the tag-sped block should come apart");
+        let untagged =
+            dig_and_count_ticks(&mut bot, &server, BlockPos::new(-2, -1, 0), plain, patience)
+                .await
+                .expect("the plain block of the same hardness should come apart too");
 
         assert!(
             tagged * 2 < untagged,
-            "a tag:hard speed of 6x on hardness 3.0 should dig in roughly a \
-             sixth of the untagged time, not something comparable: tagged \
-             {tagged:?}, untagged {untagged:?}"
+            "a #hard speed of 6x on hardness 3.0 should dig in roughly a \
+             sixth of the tick count, not something comparable: tagged \
+             {tagged} ticks, untagged {untagged} ticks"
         );
     });
 

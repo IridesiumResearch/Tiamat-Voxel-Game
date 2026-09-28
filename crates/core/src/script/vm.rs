@@ -770,12 +770,21 @@ pub struct Tool {
     /// rock and slow on earth. Resolved to runtime ids by whoever holds the
     /// registry.
     ///
-    /// A key of the form `"tag:<name>"` (Craft ask 11) names every block
+    /// A key of the form `"#<name>"` (Craft ask 11) names every block
     /// carrying that tag rather than one material, and is expanded at the
     /// same resolution, once, after every mod has registered — so a block
     /// registered by a mod that loaded after this tool's still gets the
     /// speed. Where a tag and a named material both reach one block, the
     /// material wins; where two tags both reach it, the higher speed does.
+    ///
+    /// `#` rather than a `"tag:"` prefix: a qualified id is always
+    /// `<mod id>:<name>`, and [`crate::modload::is_valid_id`] never allows a
+    /// mod id to contain `#`, so no material key this table can ever
+    /// legitimately hold — bare or already-qualified — starts with it.
+    /// A `"tag:"` prefix cannot make that promise: `tag` is itself a
+    /// syntactically valid mod id, so a mod that happened to be named `tag`
+    /// would have its own bare material keys qualified to `tag:<name>` and
+    /// silently reinterpreted as tags below.
     pub speeds: Vec<(String, f32)>,
     /// Whether this is what a player digs with holding nothing.
     ///
@@ -790,9 +799,9 @@ pub struct Tool {
     pub default: bool,
 }
 
-/// Resolves every tool's [`Tool::speeds`] — material names and
-/// `"tag:<name>"` tag keys alike — to the world's runtime material ids, once
-/// (Craft ask 11).
+/// Resolves every tool's [`Tool::speeds`] — material names and `"#<name>"`
+/// tag keys alike — to the world's runtime material ids, once (Craft ask
+/// 11).
 ///
 /// This is the freeze-time step [`Tool::speeds`] promises: called after
 /// every mod has registered (`block_rules` and `material_ids` are the
@@ -815,7 +824,7 @@ pub struct Tool {
 ///
 /// # Unknown tags and materials
 ///
-/// A `"tag:<name>"` no registered block carries is logged with
+/// A `"#<name>"` no registered block carries is logged with
 /// [`tracing::warn!`], naming the tool and the tag, and otherwise ignored —
 /// the tool simply gets no speed from it, exactly like a material name
 /// nobody registered (Craft ask 2's rule, unchanged: dropped without a
@@ -834,7 +843,7 @@ pub fn resolve_tool_speeds(
                 std::collections::BTreeMap::new();
             // Tags first, lower precedence.
             for (key, factor) in &tool.speeds {
-                let Some(tag) = key.strip_prefix("tag:") else {
+                let Some(tag) = key.strip_prefix('#') else {
                     continue;
                 };
                 let mut carried = false;
@@ -861,7 +870,7 @@ pub fn resolve_tool_speeds(
             // Materials named directly, higher precedence: overwrite
             // whatever a tag gave that same block.
             for (block, factor) in &tool.speeds {
-                if block.starts_with("tag:") {
+                if block.starts_with('#') {
                     continue;
                 }
                 if let Some(&id) = material_ids.get(block) {

@@ -8287,19 +8287,28 @@ impl MluaVm {
         // block was registered — the same fact `registered_block_rules`
         // relies on for the wire (see its own sort).
         //
-        // Items never come back. `register_item`'s field list has no `tags`
-        // (`ITEM_FIELDS`), so nothing ever writes one for an item — blocks
-        // and items share one id table and one rules table, and it is
-        // simply the case that only a block's entry can ever hold a `tags`
-        // list. Nothing here has to know which is which.
+        // Items never come back. Blocks and items share one id table
+        // (`tiamat.blocks`) and one rules table, but the registry DOES
+        // distinguish them — `register_item` writes `tiamat.items`
+        // (`registered_items` reads it back) — and this checks that set
+        // directly rather than leaning on the indirect fact that only
+        // `register_block`'s field list has a `tags` key. Belt and braces:
+        // today no item entry can hold a `tags` list because `ITEM_FIELDS`
+        // has no such field, but that is an invariant of `register_item`,
+        // not of `game.tagged`, and a future field for item classes should
+        // not have to remember to come back here and add a filter.
         let tagged = self
             .lua
             .create_function(|lua, tag: String| {
                 let blocks: Table = lua.named_registry_value("tiamat.blocks")?;
                 let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
+                let items: Table = lua.named_registry_value("tiamat.items")?;
                 let mut matches: Vec<(u16, String)> = Vec::new();
                 for pair in blocks.pairs::<String, u16>() {
                     let (id, numeric) = pair?;
+                    if items.contains_key(id.as_str())? {
+                        continue;
+                    }
                     let entry: Option<Table> = rules.get(id.as_str())?;
                     if tags_of(entry.as_ref()).contains(&tag) {
                         matches.push((numeric, id));
@@ -10004,13 +10013,22 @@ fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     // on earth. A bare name is the mod's own; a namespaced one may be another
     // mod's block, and one nobody registered is simply never asked about.
     //
-    // A key of the form `"tag:<name>"` (Craft ask 11) names a TAG rather than
-    // a material — `speeds = { ["tag:soil"] = 2.0 }` — and is kept exactly as
-    // written, like any other namespaced key: it already contains a colon, so
-    // the branch below that qualifies a bare name never touches it. Nothing
-    // here resolves it; a tag names no material until every mod has
+    // A key of the form `"#<name>"` (Craft ask 11) names a TAG rather than a
+    // material — `speeds = { ["#soil"] = 2.0 }` — and is kept exactly as
+    // written: the branch below that qualifies a bare name never touches it.
+    // Nothing here resolves it; a tag names no material until every mod has
     // registered, so that happens once at freeze (`handle.rs`, alongside the
     // rest of this table's resolution to the world's ids), not here.
+    //
+    // `#` rather than a `"tag:"` prefix, deliberately: `manifest::is_valid_id`
+    // never allows `#` in a mod id, so no qualified material id (`<mod
+    // id>:<name>`) can ever start with it, and a bare key can never collide
+    // with it either — the check below is `starts_with('#')`, checked BEFORE
+    // the colon check, so a bare name is qualified exactly as before no
+    // matter what it is spelled. A `"tag:"` prefix could not make the same
+    // promise: `tag` is itself a valid mod id, so a mod actually named `tag`
+    // would have had its own bare `speeds` keys qualified to `tag:<name>` by
+    // the branch below and silently reread as tags by the resolver.
     let speeds = lua.create_table()?;
     if let Some(table) = spec.get::<Option<Table>>("speeds")? {
         for pair in table.pairs::<String, f32>() {
@@ -10021,7 +10039,7 @@ fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
                      number, got {factor}"
                 )));
             }
-            let block = if block.contains(':') {
+            let block = if block.starts_with('#') || block.contains(':') {
                 block
             } else {
                 qualify_id(owner, &block).map_err(mlua::Error::external)?
@@ -17856,14 +17874,36 @@ mod entity_tests {
     #[test]
     fn game_tagged_never_answers_an_item() {
         // Craft ask 11(a): "materials that are not blocks (items) are
-        // excluded unless the registry does not distinguish". It does not —
-        // `register_item` and `register_block` share one id table and one
-        // rules table — but only `register_block`'s field list has `tags`,
-        // so nothing ever writes one for an item, and `game.tagged` needs
-        // no filter of its own to leave items out.
+        // excluded unless the registry does not distinguish". It DOES
+        // distinguish — `register_item` writes `tiamat.items`, and
+        // `game.tagged` checks that set directly (see its own comment) — so
+        // this calls `game.tagged` itself, next to an item that has a
+        // `tiamat.block_rules` entry of its own (`name` writes one), rather
+        // than only checking that `register_item` refuses a `tags` field,
+        // which proves nothing about what `game.tagged` does with what
+        // manages to register.
         let mut vm = vm();
-        let err = load(
+        load(
             &mut vm,
+            "world",
+            "game.register_block{ id = 'granite', tags = { 'stone' } }\n\
+             game.register_item{ id = 'coin', name = 'Coin' }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        vm.eval_in(
+            "world",
+            "local stone = game.tagged('stone')\n\
+             assert(#stone == 1 and stone[1] == 'world:granite', \
+                    'the tagged block, and only it — the item is absent')",
+        )
+        .expect("lookup");
+
+        // Unchanged: an item still has no `tags` field to register one with.
+        let mut other = self::vm();
+        let err = load(
+            &mut other,
             "world",
             "game.register_item{ id = 'coin', tags = { 'currency' } }",
         )
@@ -17888,7 +17928,7 @@ mod entity_tests {
             &mut vm,
             "smithy",
             "game.register_tool{ id = 'pick', speed_multiplier = 1, \
-                 speeds = { ['tag:soil'] = 2.0 } }\n\
+                 speeds = { ['#soil'] = 2.0 } }\n\
              game.register_on_tick(function() end)",
         )
         .expect("load");
@@ -17924,7 +17964,7 @@ mod entity_tests {
             &mut vm,
             "smithy",
             "game.register_tool{ id = 'pick', speed_multiplier = 1, \
-                 speeds = { ['tag:soil'] = 2.0, ['world:sand'] = 0.5 } }\n\
+                 speeds = { ['#soil'] = 2.0, ['world:sand'] = 0.5 } }\n\
              game.register_on_tick(function() end)",
         )
         .expect("load");
@@ -17960,7 +18000,7 @@ mod entity_tests {
             &mut vm,
             "smithy",
             "game.register_tool{ id = 'pick', speed_multiplier = 1, \
-                 speeds = { ['tag:soil'] = 2.0, ['tag:loose'] = 5.0 } }\n\
+                 speeds = { ['#soil'] = 2.0, ['#loose'] = 5.0 } }\n\
              game.register_on_tick(function() end)",
         )
         .expect("load");
@@ -18029,7 +18069,7 @@ mod entity_tests {
             &mut vm,
             "smithy",
             "game.register_tool{ id = 'pick', speed_multiplier = 1, \
-                 speeds = { ['tag:nonexistent'] = 3.0 } }\n\
+                 speeds = { ['#nonexistent'] = 3.0 } }\n\
              game.register_on_tick(function() end)",
         )
         .expect("an unknown tag is a warning, not a load error");
