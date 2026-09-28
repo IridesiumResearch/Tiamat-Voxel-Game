@@ -19,9 +19,10 @@ Asks 2 to 7 copied from the mod's own sheet on 2026-09-28, where the
 history stays; all six landed the same day (engine c83fbc9). Asks 8 and 9
 added 2026-09-28 from the mod's sheet and landed the same day (engine
 cbbbc5e). Ask 10 added 2026-09-28 and landed the same day (engine
-7cf1c73). Ask 11 added 2026-09-28: **one is open.**
+7cf1c73). Ask 11 added 2026-09-28 and landed the same day (engine
+f2cbc36). Nothing is open.
 
-## 11. The blocks carrying a tag (2026-09-28): OPEN
+## 11. The blocks carrying a tag (2026-09-28): LANDED 2026-09-28 (engine f2cbc36)
 
 **Seen.** Ask 6 gave `game.tags(material)`, and the world now tags its
 blocks, so this mod classes them by rule: `stone` is rock, `hard` hard
@@ -36,6 +37,24 @@ registered so far with that tag, in registration order — callable in the
 registration window, after the mods one depends on have registered.
 Or `speeds` on `register_tool` accepting `{ tag = "soil" }` keys,
 resolved at freeze.
+
+**From the engine, 2026-09-28 (engine f2cbc36, 71d731d):** both halves,
+because each covers what the other cannot. `game.tagged(tag)` answers the
+qualified ids of every block registered so far with that tag, in
+registration order (numeric ids are handed out in sequence, so the order
+is the registry's, not a hash map's), callable in the registration window
+and complete after freeze; a tag nobody carries answers an empty table;
+items never appear, since an item cannot carry tags. And `speeds` on
+`register_tool` takes tag keys written `["#soil"] = 2.0` — a leading `#`,
+which no mod id may contain, so the key can never be mistaken for a
+mod's block — resolved once at freeze into the same per-material table
+ask 2 built, so a block a later mod registers still takes the speed and
+nothing at dig time changes. A speed named for the material itself beats
+a tag's; two tags on one block, the higher wins; a tag no block carries is
+a warning naming the tool and the tag, not an error. Unit-tested in the VM
+and end to end: a tool with `#soil` digs a block registered by a mod that
+loads after it in half the ticks. The stub has `game.tagged` beside
+`game.tags` and the key form on `speeds` with the precedence rule.
 
 ## 10. A listed use handler beside an unlisted one (2026-09-28): LANDED 2026-09-28 (engine 7cf1c73)
 

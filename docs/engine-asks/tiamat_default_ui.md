@@ -29,7 +29,32 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-No open asks. Landed so far, asserted by the native check except 11 and 12,
+## 16. The shape editor draws a black cube (2026-09-28)
+
+Reported from the window: with a material chosen, the Crafting tab's shape
+editor is a solid black block, or a black void, instead of the material's
+cells. Nothing the mod sends explains it. The tree carries
+`{ type = "shape_editor", shape = game.OCCUPANCY_FULL, material = <the
+numeric id game.inventory reported> }`, and the native check asserts both
+reach `Widget::ShapeEditor` through the engine's own parser and checker.
+
+On the client, `paint_shape_editor` -> `Icons::paint_cells` ->
+`paint_cell_face`, which, when the atlas is registered with egui
+(`register_atlas`, `register_native_texture` on `atlas_view`), draws a mesh
+sampling that view with a white vertex tint scaled per face. A black cube
+means that sample answers black: the wrong texture, a view egui cannot
+sample as it expects, or UVs off the tile. A void means no cells at all.
+Worth a look: whether an inventory slot's picture, which goes through the
+same `Icons`, is right in the same window; if it is, the difference is the
+editor's own path.
+
+The mod cannot work around it: the cells are the client's to draw, and the
+shape editor is the only widget that shows a cut being carved. Smallest
+change: find why the atlas sample is black in the editor, and add a
+render test that draws a shape editor with a real atlas and checks the
+pixels are not black, since every earlier test took the no-atlas branch.
+
+Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
 
 - **15**, a tooltip on any dialog node (engine 2655837, protocol v77, drawn

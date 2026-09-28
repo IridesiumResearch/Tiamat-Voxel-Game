@@ -17,9 +17,10 @@ Newest first. Items are removed when they land.
 Started 2026-09-27, scaffolded by the engine session from the designer's
 two-path design. Asks 1 to 3 copied from the mod's own sheet on 2026-09-28,
 after its 0.1.0 (the brief's steps 1 to 7), and landed the same day (engine
-cbbbc5e). Ask 4 copied on 2026-09-28, with the pacing model; it is open.
+cbbbc5e). Ask 4 copied on 2026-09-28, with the pacing model, and landed
+the same day (engine ff0bbda). Nothing is open.
 
-## 4. A bot that can play a station: OPEN
+## 4. A bot that can play a station: LANDED 2026-09-28 (engine ff0bbda)
 
 **Seen.** The mod's brief has its pacing measured by a bot playing
 Craft's loop without a screen. The bot can join, chat, move, dig, place
@@ -35,6 +36,21 @@ control on a block with nothing to place, reaching `register_on_use`),
 `bot.heard()` (the chat lines sent to the bot since the last call). With
 them a script plays the first hours and reads `progress sources` at the
 end.
+
+**From the engine, 2026-09-28 (engine ff0bbda):** the three calls, each a
+message the client already sends or receives, so nothing moved on the
+wire. `bot.use(x, y, z, dx?, dy?, dz?)` sends the client's own use at
+the block's centre cell, or at the cell named — the server drops a use
+at air before any mod hears it, so a partial block wants its cell named
+— and the server's rules still hold: reach, and an entity on the look
+ray is asked first. `bot.press(form, name)` presses a button in a
+dialog the bot was shown; a form it does not hold is a script error
+naming it, rather than an event the server would drop. `bot.heard()`
+answers the chat lines received since the last call, oldest first, the
+text as the client shows it, at most the last 256, and reads them in
+place rather than copying the session. Proven end to end against a real
+server by a fixture station that answers each call in chat; the bot's
+README carries the three rows.
 
 ## 3. A position-change event: LANDED 2026-09-28 (engine cbbbc5e)
 
