@@ -10417,7 +10417,15 @@ fn widget_build(spec: &Table, depth: usize) -> mlua::Result<crate::ui::Build> {
     let node = crate::ui::Node {
         widget,
         name: spec.get::<Option<String>>("name")?.unwrap_or_default(),
-        tooltip: spec.get::<Option<String>>("tooltip")?,
+        // An empty string is not "no tooltip" to a mod writing the common
+        // `cond and msg or ""` idiom, but it is to the client: `on_hover_text`
+        // has no notion of "nothing to show" and would paint an empty box
+        // under the pointer. Normalise it to `None` here so every consumer
+        // (the checker, the wire, the client) only ever sees a real tooltip
+        // or none at all.
+        tooltip: spec
+            .get::<Option<String>>("tooltip")?
+            .filter(|t| !t.is_empty()),
         style: widget_style(spec)?,
         grow: spec.get::<Option<u16>>("grow")?.unwrap_or(0),
         size: spec.get::<Option<u16>>("size")?,
@@ -11549,14 +11557,23 @@ mod tests {
             "the tooltip did not reach the tree"
         );
 
-        // A widget that says nothing about it gets `None`, not `""` — the same
-        // shape `name` has, and for the same reason: a client that draws a
-        // hover box on an empty string draws an empty box.
+        // A widget that says nothing about it gets `None`, not `""`: a client
+        // that draws a hover box on an empty string draws an empty box.
         let bare = show(
             r#"game.show_dialog{ player = "abc", form = "bare", tree = { type = "spacer" } }"#,
         )
         .expect("load");
         assert_eq!(bare[0].tree.nodes[0].tooltip, None);
+
+        // A mod's `cond and msg or ""` idiom hands `widget_build` an empty
+        // string rather than omitting the field outright; that must land on
+        // the same `None` as leaving it out, for the same reason as above.
+        let empty = show(
+            r#"game.show_dialog{ player = "abc", form = "empty",
+                tree = { type = "spacer", tooltip = "" } }"#,
+        )
+        .expect("load");
+        assert_eq!(empty[0].tree.nodes[0].tooltip, None);
 
         // Over the cap: refused in the mod's own call stack, naming the field
         // and the limit, the same way an over-long `name` or label already is.
