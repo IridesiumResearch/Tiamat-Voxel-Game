@@ -619,6 +619,9 @@ fn draw_form(
 }
 
 /// Paints one node and everything under it.
+///
+/// Returns whether this node or a descendant is showing a tooltip for the
+/// pointer's current position this frame — see the tooltip block below.
 #[expect(
     clippy::too_many_arguments,
     reason = "a paint walk carries its context; grouping it would hide the recursion"
@@ -635,9 +638,9 @@ fn paint(
     icons: Icons<'_>,
     look: Look<'_>,
     raised: &mut Vec<Raised>,
-) {
+) -> bool {
     let Some(node) = tree.nodes.get(index) else {
-        return;
+        return false;
     };
     let rect = egui::Rect::from_min_size(
         origin + egui::vec2(laid.rect.x as f32, laid.rect.y as f32),
@@ -665,8 +668,12 @@ fn paint(
     });
     let child_origin = origin - egui::vec2(0.0, scrolled.map_or(0.0, |(_, offset)| offset));
 
+    // **Children first, so a descendant's tooltip can be told from ours.** The
+    // fold, not a short-circuiting `any`: every child still has to be painted
+    // even after one of them claims the tooltip.
+    let mut claimed_by_child = false;
     for (child, child_laid) in tree.children_of(index).zip(&laid.children) {
-        paint(
+        let child_claimed = paint(
             ui,
             child_origin,
             tree,
@@ -679,11 +686,38 @@ fn paint(
             look,
             raised,
         );
+        claimed_by_child |= child_claimed;
     }
 
     if let Some((saved, _)) = scrolled {
         ui.set_clip_rect(saved);
     }
+
+    // **UI ask 15: a tooltip on any node, and a child's wins.** `Sense::hover`
+    // only — it neither steals the widget's own clicks (which never sense
+    // hover in the first place) nor claims layout space the way
+    // `allocate_rect` would, so this can be attached after the widget and its
+    // children are already painted and laid out.
+    //
+    // A container's tooltip would otherwise fight its children for the same
+    // screen space: hovering a slot inside a tooltipped panel should show the
+    // slot's own hint, not the panel's, so the panel is checked only once
+    // nothing under it already claimed the pointer.
+    let mut claimed = claimed_by_child;
+    if !claimed_by_child && let Some(tooltip) = &node.tooltip {
+        // A plain `&str` into `on_hover_text`, the same call `paint_slot`
+        // already makes for a stack's name — it renders as a `Label`, whose
+        // default style is `TextStyle::Body`, and `Theme::apply` retargets
+        // every non-heading style (`Body` included) to the mod's own
+        // `text_font`. A tooltip drawn this way already wears the theme's
+        // face; nothing extra is needed here to get it.
+        let response = ui.interact(rect, ui.id().with(index), egui::Sense::hover());
+        if response.hovered() {
+            response.on_hover_text(tooltip.as_str());
+            claimed = true;
+        }
+    }
+    claimed
 }
 
 /// The style tokens that apply to any widget.
@@ -1704,6 +1738,173 @@ mod tests {
             claimed <= height + 1.0,
             "a screen claimed {claimed} points for a {height}-point tree, which is \
              the double count that makes a sheet scroll"
+        );
+    }
+
+    /// Every `Shape::Text` egui painted this pass, concatenated.
+    ///
+    /// A tooltip is its own `Area`, on its own layer, painted by `on_hover_text`
+    /// rather than by anything in this module — so the only way to see whether
+    /// one appeared is to read back what egui actually drew, the way
+    /// `drawn_extent` reads back bounds rather than trusting the walk that
+    /// produced them.
+    fn painted_text(shapes: &[egui::epaint::ClippedShape]) -> String {
+        fn walk(shape: &egui::epaint::Shape, out: &mut String) {
+            match shape {
+                egui::epaint::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                egui::epaint::Shape::Text(text) => {
+                    out.push_str(text.galley.text());
+                    out.push('\n');
+                }
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// Paints `tree` into a `size`-point box with the pointer at `pointer`, and
+    /// returns everything egui drew as text.
+    ///
+    /// Tooltips have their own delay and "has the mouse gone still" gate
+    /// (`Style::interaction`), which exist so a tooltip does not flash under a
+    /// pointer passing through — real behaviour this harness has no frames to
+    /// spare simulating. Both are turned off rather than faked with a run of
+    /// empty frames, so the single pass with `pointer` already in
+    /// `RawInput::events` is the frame that would show the tooltip on a real
+    /// client too, once the mouse had actually rested.
+    fn paint_at(tree: &Tree, size: (i32, i32), pointer: egui::Pos2) -> String {
+        let ctx = egui::Context::default();
+        crate::app::install_fonts(&ctx);
+        ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let art = crate::pictures::Resolved::default();
+        let fonts = crate::fonts::Fonts::new();
+        let look = Look {
+            art: &art,
+            fonts: &fonts,
+        };
+        let ruler = EguiRuler { ctx: &ctx, look };
+        let views = BTreeMap::new();
+        let mut local = Local::default();
+        let mut raised = Vec::new();
+        let raw = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            events: vec![egui::Event::PointerMoved(pointer)],
+            ..Default::default()
+        };
+        let mut pass = |raised: &mut Vec<Raised>| {
+            ctx.run_ui(raw(), |root| {
+                paint_tree(
+                    root,
+                    size,
+                    tree,
+                    &ruler,
+                    "mod:screen",
+                    &mut local,
+                    &views,
+                    Icons::default(),
+                    look,
+                    raised,
+                );
+            })
+        };
+        // **Three passes, pointer already in place every time.** egui answers
+        // `hovered()` from the widget rectangles a PREVIOUS pass registered —
+        // the pass being painted cannot yet say what ends up on top of what —
+        // so a widget's hover needs a pass to exist in before it can be found,
+        // and one more for that to reach `Tooltip::should_show_tooltip`'s own
+        // "was this id hovered last pass" bookkeeping. Measured empirically
+        // against this harness: one and two passes both painted no tooltip at
+        // all; three is the first steady frame, the same number
+        // `Editor::new`'s doc comment reaches for on a smaller version of the
+        // same fact (fonts, not hover, but "nothing is where a player would
+        // find it" until a second pass exists to find it against).
+        let _ = pass(&mut raised);
+        let _ = pass(&mut raised);
+        let output = pass(&mut raised);
+        painted_text(&output.shapes)
+    }
+
+    #[test]
+    fn a_hovered_nodes_tooltip_is_painted_and_an_unhovered_ones_is_not() {
+        // UI ask 15. The root fills exactly the box `paint_tree` is given
+        // (`core::ui::layout` places node 0 into the whole area it is handed),
+        // so its rectangle is `(0, 0)..(100, 40)` regardless of the widget
+        // inside it — known without measuring any text.
+        let tree = Build::of(
+            Node {
+                tooltip: Some("needs 3 stone".to_owned()),
+                ..Node::new(Widget::Label {
+                    text: "Locked".to_owned(),
+                })
+            },
+            Vec::new(),
+        )
+        .flatten();
+
+        let inside = paint_at(&tree, (100, 40), egui::pos2(50.0, 20.0));
+        assert!(
+            inside.contains("needs 3 stone"),
+            "a hovered node's tooltip did not paint: {inside:?}"
+        );
+
+        let outside = paint_at(&tree, (100, 40), egui::pos2(500.0, 500.0));
+        assert!(
+            !outside.contains("needs 3 stone"),
+            "a tooltip painted for a node nobody is pointing at: {outside:?}"
+        );
+    }
+
+    #[test]
+    fn a_childs_tooltip_wins_over_its_containers() {
+        // A one-child, no-padding, `Stretch` column hands the child the exact
+        // same rectangle as the container — the case the rule exists for,
+        // where "which of these two is the mod pointing at" cannot be answered
+        // from the rectangles alone and has to be answered by depth instead.
+        let tree = Build::of(
+            Node {
+                tooltip: Some("outer".to_owned()),
+                ..Node::new(Widget::Container {
+                    direction: Direction::Column,
+                    gap: 0,
+                    padding: 0,
+                    align: Align::Stretch,
+                })
+            },
+            vec![Build::of(
+                Node {
+                    size: Some(40),
+                    tooltip: Some("inner".to_owned()),
+                    ..Node::new(Widget::Label {
+                        text: "X".to_owned(),
+                    })
+                },
+                Vec::new(),
+            )],
+        )
+        .flatten();
+
+        let painted = paint_at(&tree, (100, 40), egui::pos2(50.0, 20.0));
+        assert!(
+            painted.contains("inner"),
+            "the child's own tooltip did not paint: {painted:?}"
+        );
+        assert!(
+            !painted.contains("outer"),
+            "the container's tooltip painted over its child's: {painted:?}"
         );
     }
 
