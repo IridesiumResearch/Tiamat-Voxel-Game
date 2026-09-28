@@ -1463,7 +1463,11 @@ greys the grade, eased on that player's client — and `nil` puts the plain sky
 back. It multiplies and mixes rather than replacing, so it is right at every
 hour. `game.flash{ pos, radius, intensity, colour, attack_ticks, decay_ticks }`
 is lightning: a moment's light on the sun and sky of everyone in reach, with no
-relight. The sun's direction and the keyframes themselves cannot be moved.
+relight. `game.lightning{ from, to, seed, colour, width, branches, ticks,
+radius, player }` draws the bolt itself — a forked line every client builds
+from `seed`, so everyone watching sees the same one; its `radius` is measured
+from `from`, the top, so a tall bolt needs a radius taller than it. The sun's
+direction and the keyframes themselves cannot be moved.
 
 **Stars are places, and the sky is per domain.** A keyframe's `stars` (0 to 1)
 says how much of the catalog shows at that hour — omit it and none do; the

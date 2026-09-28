@@ -102,6 +102,206 @@ end)
     root
 }
 
+/// A storm that draws a bolt for each player who joins, to that player
+/// alone — weather ask W26, addressed as W28 addresses a flash.
+fn write_aimed_bolts(name: &str) -> PathBuf {
+    write_mod(
+        name,
+        r#"
+game.register_on_player_join(function(event)
+    -- Straight down on spawn, so everybody is in range of its top; addressed
+    -- to the one who just arrived, so nobody else sees it.
+    game.lightning{ from = { x = 0, y = 300, z = 0 }, to = { x = 0, y = 0, z = 0 },
+                    radius = 512, player = event.player }
+end)
+"#,
+    )
+}
+
+/// A storm that strikes twice over everybody once two players are in: one
+/// bolt with a seed past 2^63, and one the engine picks a seed for.
+fn write_shared_bolts(name: &str, seed: u64) -> PathBuf {
+    write_mod(
+        name,
+        &format!(
+            r#"
+local joined = 0
+game.register_on_player_join(function(event)
+    joined = joined + 1
+    if joined == 2 then
+        game.lightning{{ from = {{ x = 30, y = 300, z = 0 }}, to = {{ x = 40, y = 0, z = 10 }},
+                        seed = {seed}, branches = 8, radius = 1024 }}
+        game.lightning{{ from = {{ x = 30, y = 300, z = 0 }}, to = {{ x = 40, y = 0, z = 10 }},
+                        radius = 1024 }}
+    end
+end)
+"#,
+            // A seed past 2^63 is a negative integer in Lua; by its bits it is
+            // the seed.
+            seed = seed.cast_signed()
+        ),
+    )
+}
+
+/// A mod named `storm` with a flat floor and `script` after it.
+fn write_mod(name: &str, script: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("storm");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"storm\"\nname = \"Storm\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        format!(
+            r#"
+local ground = game.register_block{{ id = "ground" }}
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+{script}"#
+        ),
+    )
+    .expect("script");
+    root
+}
+
+/// A server over the mods in `mods`, with room for four.
+fn serve(mods: &std::path::Path, world: &str) -> ServerHandle {
+    ServerHandle::start(&Settings {
+        bind_addr: "127.0.0.1:0".parse().expect("loopback"),
+        world_path: scratch(world),
+        identity_path: None,
+        max_players: 4,
+        allowlist: Allowlist::open(),
+        operators: Vec::new(),
+        view_distance: ViewDistance::MINIMUM,
+        mods_path: Some(mods.to_path_buf()),
+        enabled_mods: bot::fixture::enabled_mods_for(mods).expect("the mod's manifest"),
+        seed: Some(5),
+        rcon: None,
+        materials: Vec::new(),
+        world_options: Vec::new(),
+    })
+    .expect("start")
+}
+
+/// A bot joined to `server` as `name`.
+async fn joined(server: &ServerHandle, name: &str) -> Bot {
+    let mut bot = Bot::connect(
+        server.local_addr(),
+        Identity::generate().expect("identity"),
+        server.cert_fingerprint(),
+    )
+    .await
+    .expect("connect");
+    bot.join(name).await.expect("join");
+    bot
+}
+
+/// Receives on `bot` until it holds `count` bolts or ten seconds pass,
+/// keeping `other` drained meanwhile.
+async fn await_bolts(bot: &mut Bot, other: Option<&mut Bot>, count: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut other = other;
+    while tokio::time::Instant::now() < deadline && bot.lightning_received().len() < count {
+        let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        if let Some(other) = other.as_deref_mut() {
+            let _ = tokio::time::timeout(Duration::from_millis(20), other.recv()).await;
+        }
+    }
+}
+
+#[test]
+fn a_bolt_addressed_to_one_player_reaches_nobody_else() {
+    // Weather ask W26, addressed as W28 addresses a flash: two players in
+    // range of every bolt, each bolt addressed to one of them, and the
+    // other's client receives nothing.
+    let mods = write_aimed_bolts("aimed-bolts");
+    let server = serve(&mods, "aimed-bolts-world");
+
+    block_on(async {
+        let mut first = joined(&server, "First").await;
+        await_bolts(&mut first, None, 1).await;
+        assert_eq!(
+            first.lightning_received().len(),
+            1,
+            "the bolt addressed to the first"
+        );
+
+        let mut second = joined(&server, "Second").await;
+        await_bolts(&mut second, Some(&mut first), 1).await;
+        assert_eq!(
+            second.lightning_received().len(),
+            1,
+            "the bolt addressed to the second"
+        );
+        // Twenty server ticks more for anything wrongly sent to the first,
+        // in real time, for the reason the flash's test gives.
+        first.sleep_ticks(20).await;
+        for _ in 0..10 {
+            let _ = tokio::time::timeout(Duration::from_millis(20), first.recv()).await;
+        }
+        assert_eq!(
+            first.lightning_received().len(),
+            1,
+            "a bolt addressed to the second player reached the first"
+        );
+    });
+
+    assert!(server.stop());
+}
+
+#[test]
+fn two_players_given_the_same_bolt_build_the_same_path() {
+    // The gate's middle clause: "two clients given the same seed draw the
+    // same path." The path never travels, so this is the whole chain — the
+    // mod's seed through Lua by its bits, the server's relay, the wire, and
+    // each client building the path on its own — ending in two hashes that
+    // must agree. The second bolt names no seed: the engine picks one, and
+    // everyone watching must still be handed the same.
+    let seed = 16_099_289_709_293_836_018_u64;
+    let mods = write_shared_bolts("shared-bolts", seed);
+    let server = serve(&mods, "shared-bolts-world");
+
+    block_on(async {
+        let mut first = joined(&server, "First").await;
+        let mut second = joined(&server, "Second").await;
+        await_bolts(&mut second, Some(&mut first), 2).await;
+        await_bolts(&mut first, Some(&mut second), 2).await;
+        let (mine, theirs) = (first.lightning_received(), second.lightning_received());
+        assert_eq!(mine.len(), 2, "both bolts reach the first: {mine:?}");
+        assert_eq!(theirs.len(), 2, "both bolts reach the second: {theirs:?}");
+
+        assert_eq!(mine[0].seed, seed, "the seed crossed Lua by its bits");
+        assert_eq!(mine[0].branches, 8);
+        assert_ne!(mine[1].seed, 0, "the engine picked a seed");
+        assert_ne!(mine[1].seed, mine[0].seed);
+        for (index, (a, b)) in mine.iter().zip(&theirs).enumerate() {
+            assert_eq!(a, b, "bolt {index} differs on the wire");
+            let (one, other) = (
+                tiamat_core::lightning::build_path(a),
+                tiamat_core::lightning::build_path(b),
+            );
+            assert_eq!(
+                tiamat_core::lightning::path_hash(&one),
+                tiamat_core::lightning::path_hash(&other),
+                "bolt {index} was drawn two ways"
+            );
+            println!(
+                "bolt {index}: seed {:#018x}, {} segments, path hash {:#018x}",
+                a.seed,
+                one.segments.len(),
+                tiamat_core::lightning::path_hash(&one)
+            );
+        }
+    });
+
+    assert!(server.stop());
+}
+
 #[test]
 fn a_flash_addressed_to_one_player_reaches_nobody_else() {
     // Weather ask W28: thunder and a flash kept out of a cave. Two players

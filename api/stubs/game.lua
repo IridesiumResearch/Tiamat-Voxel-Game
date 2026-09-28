@@ -669,6 +669,50 @@ function game.set_sky_modifier(player, modifier) end
 ---@return integer told
 function game.flash(spec) end
 
+---Lightning, drawn: a jagged, forked bolt from `from` to `to`, shown to every
+---player within `radius` of `from` in its domain. Returns how many were told.
+---
+---**Why this and not particles.** A particle is lit by the world, so a bolt at
+---night comes out grey; a burst fills an axis-aligned box, so a jagged line is
+---dozens of bursts of dozens of particles; and bursts are dropped first under
+---load, which is exactly when a storm is on. This sends two ends and a seed.
+---Each client builds the path from `seed` — a trunk from `from` to `to` bent by
+---midpoint displacement, `branches` forks that leave it partway down and fade
+---out before the ground — and draws it unlit and additive, a narrow core in a
+---wider glow, hidden by the terrain in front of it. Full at once, then two or
+---three dips and returns, then gone after `ticks`. The same seed is the same
+---bolt for everyone watching; nothing collides with it or is lit by it, so
+---send a `game.flash` beside it for the light on the sky.
+---
+---```lua
+---game.lightning{ from = { x = x, y = cloud_base, z = z }, to = ground,
+---                seed = game.world_seed + strikes, radius = 1024 }
+---game.flash{ pos = ground, radius = 1024, colour = { 0.9, 0.92, 1.0 } }
+---```
+---
+---Defaults: violet-white `{ 0.85, 0.8, 1.0 }`, `width` 0.4 blocks, three
+---`branches`, eight `ticks`, `radius` 256, and a seed the engine picks — a
+---different one every call, so two unseeded bolts between the same two points
+---are two bolts. Wrong numbers are clamped (colour channels 0 to 2, width up to
+---8, branches up to 8, ticks 1 to 200, radius up to 1024, and a `to` more than
+---4096 blocks from `from` is moved along the bolt towards it); wrong types are
+---errors, and so is a `to` that names a different domain from `from`'s.
+---
+---`seed` is read by its bits: an integer from `game.world_seed` or a mod's own
+---generator crosses exactly, including one past 2^63 that Lua shows as
+---negative. A float that is not a whole number is an error, not a seed.
+---
+---**`radius` is measured from `from`, the top.** A bolt whose top is 300 blocks
+---above the players under it reaches none of them at the default 256 — give a
+---tall bolt the radius you give its flash.
+---
+---`player` sends the bolt to that one player and nobody else, provided they are
+---in the domain and within `radius` — it narrows, never widens, as a flash's
+---does, so a player in a cave under the storm is not shown the sky's bolts.
+---@param spec { from: Tiamat.BlockPos, to: Tiamat.BlockPos, seed?: integer, colour?: number[]|{ r: number, g: number, b: number }, width?: number, branches?: integer, ticks?: integer, radius?: number, player?: string }
+---@return integer told
+function game.lightning(spec) end
+
 ---Sets the rain around one player: an emitter their client runs. Returns
 ---whether the player is here.
 ---

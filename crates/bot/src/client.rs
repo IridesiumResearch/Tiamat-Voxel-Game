@@ -655,6 +655,20 @@ impl Bot {
             .collect()
     }
 
+    /// Every lightning bolt received so far, in arrival order — weather ask
+    /// W26. The path is not on the wire; build it with
+    /// `tiamat_core::lightning::build_path`, as a client does.
+    #[must_use]
+    pub fn lightning_received(&self) -> Vec<tiamat_core::lightning::Lightning> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Lightning { lightning } => Some(lightning),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every particle burst received so far, in arrival order.
     #[must_use]
     pub fn particles_received(&self) -> Vec<tiamat_core::particle::Burst> {
