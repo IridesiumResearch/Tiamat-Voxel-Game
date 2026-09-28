@@ -475,7 +475,10 @@ pub struct Pass {
     /// The same and the occupancy, for the deck itself — ask W27. Two
     /// groups because the occupancy's own pass cannot bind what it draws.
     deck_bind: wgpu::BindGroup,
-    /// Which of the march's cells hold any cloud — weather ask W27.
+    /// Its layout, for making it again when the occupancy's texture grows.
+    deck_layout: wgpu::BindGroupLayout,
+    /// Where in the march's cells there is any cloud, and whether the camera
+    /// stands in it — weather ask W27.
     occupancy: Occupancy,
     /// Whether this frame has a deck to draw.
     draws: bool,
@@ -517,30 +520,17 @@ impl Pass {
         });
         let starfield = Starfield::new(gpu);
         let occupancy = Occupancy::new(gpu, &shader, &layout);
-        let map_entries = map_textures.bind_entries();
-        let shared = [
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            },
-            starfield.bind_entry(STAR_BINS_BINDING),
-            starfield.bind_entry(STAR_LIST_BINDING),
-            map_entries[0].clone(),
-            map_entries[1].clone(),
-            map_entries[2].clone(),
-        ];
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("clouds"),
             layout: &layout,
-            entries: &shared,
+            entries: &shared_entries(&uniforms, &starfield, &map_textures),
         });
-        let mut deck_entries = shared.to_vec();
-        deck_entries.push(occupancy.bind_entry());
-        let deck_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("clouds-deck"),
-            layout: &deck_layout,
-            entries: &deck_entries,
-        });
+        let deck_bind = deck_bind_group(
+            gpu,
+            &deck_layout,
+            &shared_entries(&uniforms, &starfield, &map_textures),
+            &occupancy,
+        );
         let (shadow_view, shadow_sampler) = shade_target(gpu);
         let resolve_layout = resolve_layout(gpu);
         Self {
@@ -564,6 +554,7 @@ impl Pass {
             uniforms,
             bind,
             deck_bind,
+            deck_layout,
             occupancy,
             draws: false,
             deck: Deck::default(),
@@ -683,6 +674,7 @@ impl Pass {
         )]
         let seed = (self.deck.seed & 0xFFFF) as f32;
         let shadow_origin = self.place_shade(camera, base, cell, frame.mode);
+        let occupancy = self.place_occupancy(gpu, camera, cell, quality.reach());
         let (descriptor, most) = self.map_descriptor();
         let reach = |own: f32, index: usize| own.max(most[index]);
         let uniforms = Uniforms {
@@ -738,7 +730,7 @@ impl Pass {
                 0.0,
             ],
             shadow: [shadow_origin[0], shadow_origin[1], SHADOW_EXTENT, 0.0],
-            occupancy: self.occupancy.place(camera, cell, quality.reach()),
+            occupancy,
             quality: [
                 quality.reach(),
                 quality.detail_reach(),
@@ -843,6 +835,22 @@ impl Pass {
             0.0
         };
         origin
+    }
+
+    /// Places this frame's occupancy — weather ask W27 — and returns it as
+    /// the uniform carries it. Its texture grows when a larger square is
+    /// asked for, and the deck's bind group is made again with it.
+    fn place_occupancy(&mut self, gpu: &Gpu, camera: [f32; 3], cell: f32, reach: f32) -> [f32; 4] {
+        let (occupancy, grew) = self.occupancy.place(gpu, camera, cell, reach);
+        if grew {
+            self.deck_bind = deck_bind_group(
+                gpu,
+                &self.deck_layout,
+                &shared_entries(&self.uniforms, &self.starfield, &self.map_textures),
+                &self.occupancy,
+            );
+        }
+        occupancy
     }
 
     /// The shade map and the sampler the world pass reads it with, for its
@@ -960,9 +968,10 @@ impl Pass {
         pass.draw(0..3, 0..1);
     }
 
-    /// Draws which of the march's cells hold any cloud — weather ask W27 —
-    /// for the deck to read. Before the deck's own pass and the world's,
-    /// either of which may march it; nothing when there is no deck.
+    /// Draws where in the march's cells there is any cloud, and whether the
+    /// camera stands in it — weather ask W27 — for the deck to read. Before
+    /// the deck's own pass and the world's, either of which may march it;
+    /// nothing when there is no deck.
     pub fn render_occupancy(&self, encoder: &mut wgpu::CommandEncoder) {
         if !self.draws {
             return;
@@ -1403,6 +1412,44 @@ fn shade_target(gpu: &Gpu) -> (wgpu::TextureView, wgpu::Sampler) {
         ..Default::default()
     });
     (view, sampler)
+}
+
+/// What both of the field's bind groups hold: the uniform, the stars and
+/// the map.
+fn shared_entries<'a>(
+    uniforms: &'a wgpu::Buffer,
+    starfield: &'a Starfield,
+    map_textures: &'a MapTextures,
+) -> [wgpu::BindGroupEntry<'a>; 6] {
+    let [cells, storm, sampler] = map_textures.bind_entries();
+    [
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniforms.as_entire_binding(),
+        },
+        starfield.bind_entry(STAR_BINS_BINDING),
+        starfield.bind_entry(STAR_LIST_BINDING),
+        cells,
+        storm,
+        sampler,
+    ]
+}
+
+/// The deck's bind group: `shared` and the occupancy. Made again whenever
+/// the occupancy's texture grows.
+fn deck_bind_group(
+    gpu: &Gpu,
+    layout: &wgpu::BindGroupLayout,
+    shared: &[wgpu::BindGroupEntry<'_>],
+    occupancy: &Occupancy,
+) -> wgpu::BindGroup {
+    let mut entries = shared.to_vec();
+    entries.push(occupancy.bind_entry());
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("clouds-deck"),
+        layout,
+        entries: &entries,
+    })
 }
 
 /// The two layouts the field's pipelines bind: the uniform, the stars and

@@ -128,19 +128,29 @@ const STAR_BINS_PER_AXIS: u32 = 32u;
 // Texels a side of the map textures: the biggest map a mod may send.
 const MAP_TEXELS: f32 = 16.0;
 
-// Which of the march's cells hold any cloud at all — weather ask W27. One
-// level per grid the march can walk, side by side in one texture (see
-// `occupancy_slot`): level k's texel is one cell of the base cube times 2^k,
-// which is the grid `grid_level` puts a ray on. Drawn every frame by
-// `occupancy_main` and read by `march` alone, so only the deck's own
-// pipelines bind it; the pass that draws it could not, since a texture
-// cannot be drawn into and read in one pass.
+// Where in each of the march's cells there is cloud at all — weather ask
+// W27: per cell, the heights the low cloud spans, and the heights the
+// altocumulus and an anvil span together, or nothing. One level per grid
+// the march can walk, side by side in one texture (see `occupancy_slot`):
+// level k's texel is one cell of the base cube times 2^k, which is the grid
+// `grid_level` puts a ray on — and one texel more, whether the camera stands
+// in cloud. Drawn every frame by `occupancy_main` and read by `march` and
+// `fragment_main` alone, so only the deck's own pipelines bind it; the pass
+// that draws it could not, since a texture cannot be drawn into and read in
+// one pass.
 @group(0) @binding(8) var occupancy: texture_2d<f32>;
 
 // The occupancy's levels: the base cube and five doublings, since
 // `grid_level` never asks for a cell more than 32 base cubes wide.
 // `cloud_occupancy.rs` reads this number and the 32 back out of this file.
 const OCCUPANCY_LEVELS: f32 = 6.0;
+
+// How far past its column's own each span in the occupancy reaches, in
+// blocks: thousands of times the last bit of any height the deck has, so a
+// top the occupancy's pass and the march's work out a bit apart — two
+// shaders, and a compiler free to fuse a multiply and an add in one and not
+// the other — cannot put a hit outside the span the march reads.
+const OCCUPANCY_PAD: f32 = 0.0625;
 
 // The octahedral map's (u, v) in 0..1 for a direction: `clouds.rs::oct_encode`.
 fn oct_encode(d: vec3<f32>) -> vec2<f32> {
@@ -1034,29 +1044,119 @@ fn occupancy_slot(level: u32, side: i32) -> vec2<i32> {
     return vec2<i32>(side, side - (side >> (level - 1u)));
 }
 
-// Whether the occupancy says the march cell `cell_index`, on the grid
-// `level` doublings over the base cube, holds no cloud at any height —
-// weather ask W27. False wherever it cannot say: switched off, or a cell
-// outside the square it covers, which the march then asks the field about
-// as it always did.
-//
-// Integer arithmetic from here on. The corner is a whole number of the
-// coarsest cells, so at every level it is a whole number of that level's
-// cells and a shift finds it: no division, and no cell that rounds onto its
-// neighbour's texel.
-fn occupancy_clear(cell_index: vec2<f32>, level: f32) -> bool {
-    if (clouds.occupancy.w < 0.5 || level >= OCCUPANCY_LEVELS) {
+// Where the occupancy keeps whether the camera stands in cloud: the foot of
+// the column the coarser levels stand in, which the coarsest leaves free.
+// `cloud_occupancy.rs::camera_texel` is the same.
+fn occupancy_camera() -> vec2<i32> {
+    let side = i32(clouds.occupancy.z);
+    return vec2<i32>(side, side - 1);
+}
+
+// Whether the camera stands inside solid cloud: the column over it, asked
+// at its own height with the rind on. The same answer for every pixel of a
+// frame, which is why the occupancy asks it once (weather ask W27) and
+// `fragment_main` reads it — and asks it itself only when the occupancy is
+// not drawn.
+fn camera_in_cloud() -> bool {
+    let origin = clouds.camera.xyz;
+    let cell = clouds.colour.w;
+    let here = column_at(floor(origin.xz / cell) * cell + cell * 0.5, 1.0, origin.y, origin.y);
+    return inside(here, origin.y);
+}
+
+// Whether a ray's segment from `t0` to `t1` meets the heights `span`, by the
+// arithmetic `enter_column` uses for one of its intervals. So a span that
+// holds the column's own interval meets every segment that interval does:
+// each step of it only ever widens with the span.
+fn span_met(span: vec2<f32>, origin_y: f32, dir_y: f32, t0: f32, t1: f32) -> bool {
+    if (span.y <= span.x) {
         return false;
+    }
+    if (abs(dir_y) < 0.00001) {
+        return origin_y >= span.x && origin_y <= span.y;
+    }
+    let a = (span.x - origin_y) / dir_y;
+    let b = (span.y - origin_y) / dir_y;
+    return min(t1, max(a, b)) >= max(t0, min(a, b));
+}
+
+// The occupancy's level for the grid a ray is walking, worked out once per
+// grid rather than once per step: where the level's square starts, in its
+// own cells; how many cells a side; and where it stands in the texture. A
+// side of zero reads nothing — the occupancy switched off, or a grid it has
+// no level for.
+//
+// Integer arithmetic. The corner is a whole number of the coarsest cells,
+// so at every level it is a whole number of that level's cells and a shift
+// finds it: no division, and no cell that rounds onto its neighbour's texel.
+struct OccupancyLevel {
+    corner: vec2<i32>,
+    side: i32,
+    slot: vec2<i32>,
+};
+
+fn occupancy_level(level: f32) -> OccupancyLevel {
+    var out: OccupancyLevel;
+    out.side = 0;
+    if (clouds.occupancy.w < 0.5 || level >= OCCUPANCY_LEVELS) {
+        return out;
     }
     let shift = u32(level);
-    let corner = vec2<i32>(clouds.occupancy.xy) >> vec2<u32>(shift);
     let whole = i32(clouds.occupancy.z);
-    let side = whole >> shift;
-    let texel = vec2<i32>(cell_index) - corner;
-    if (any(texel < vec2<i32>(0)) || any(texel >= vec2<i32>(side))) {
+    out.corner = vec2<i32>(clouds.occupancy.xy) >> vec2<u32>(shift);
+    out.side = whole >> shift;
+    out.slot = occupancy_slot(shift, whole);
+    return out;
+}
+
+// Whether the occupancy says the march cell `cell_index`, on the grid `at`
+// is the level of, holds no cloud the ray's segment from `t0` to `t1` could
+// meet — weather ask W27. False wherever it cannot say, and a cell outside
+// the square is asked of the field as it always was.
+//
+// **No cloud at any height** is enough wherever the ray is. **No cloud at
+// the heights this segment crosses** is enough only where the march asks
+// the column with no detail: the rind and the buds can lift a top or sink a
+// floor past the detail-free column's, and the occupancy has none. That is
+// everywhere past the first block at Low, and past the detail's reach on
+// the other rungs.
+fn occupancy_clear(
+    at: OccupancyLevel,
+    cell_index: vec2<f32>,
+    detail_mix: f32,
+    origin_y: f32,
+    dir_y: f32,
+    t0: f32,
+    t1: f32,
+) -> bool {
+    let texel = vec2<i32>(cell_index) - at.corner;
+    if (any(texel < vec2<i32>(0)) || any(texel >= vec2<i32>(at.side))) {
         return false;
     }
-    return textureLoad(occupancy, occupancy_slot(shift, whole) + texel, 0).x < 0.5;
+    let spans = textureLoad(occupancy, at.slot + texel, 0);
+    if (spans.y <= spans.x && spans.w <= spans.z) {
+        return true;
+    }
+    if (detail_mix > 0.0) {
+        return false;
+    }
+    return !span_met(spans.xy, origin_y, dir_y, t0, t1)
+        && !span_met(spans.zw, origin_y, dir_y, t0, t1);
+}
+
+// How far along a ray walking the grid `level` the grid could first grow:
+// a thousandth short of where `grid_level` passes `level`, which is where
+// `want * t * view.x / base_cell` passes 2^level. Weather ask W27: the
+// march asked `grid_level` — a division, a log and an exp — at every step,
+// to learn at nearly every one that the grid had not grown. Short of this
+// it cannot have, by a margin thousands of times any rounding in either;
+// past it the march asks exactly as before, so the grid grows at the same
+// step it always did. The coarsest grid never grows.
+fn coarsen_from(base_cell: f32, level: f32, want: f32) -> f32 {
+    if (level >= OCCUPANCY_LEVELS - 1.0) {
+        return 1e30;
+    }
+    return level_cell(base_cell, level) / (want * max(clouds.view.x, 0.000001)) * 0.999;
 }
 
 // Marches the grid and returns the first solid cell.
@@ -1141,6 +1241,8 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
     let want = 9.0;
     var level = grid_level(base_cell, t_enter, want);
     var cell = level_cell(base_cell, level);
+    var occupied = occupancy_level(level);
+    var grows_at = coarsen_from(base_cell, level, want);
     out.cell = cell;
 
     // Set the analyser up on the cell the ray enters the slab in.
@@ -1176,15 +1278,15 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
         }
         guard = guard + 1;
         let leave = min(min(next.x, next.y), t_leave);
+        let detail_mix = clamp(1.0 - t / max(detail_reach, 1.0), 0.0, 1.0);
         // **A cell the occupancy calls clear is crossed without asking the
         // field** (weather ask W27). The field is nearly all of a step's
-        // cost and most cells of most skies are air; the occupancy asked
-        // this cell's column once this frame, at every height and with no
-        // detail, which finds every interval any asking of it here could
-        // (see `occupancy_main`), so a clear cell is one this step could
-        // only have walked through.
-        if (!occupancy_clear(cell_index, level)) {
-            let detail_mix = clamp(1.0 - t / max(detail_reach, 1.0), 0.0, 1.0);
+        // cost and most cells of most skies are air, or cloud above or
+        // below the ray; the occupancy asked this cell's column once this
+        // frame, at every height and with no detail, which finds every
+        // interval any asking of it here could (see `occupancy_main`), so a
+        // clear cell is one this step could only have walked through.
+        if (!occupancy_clear(occupied, cell_index, detail_mix, origin.y, direction.y, t, leave)) {
             let cell_xz = cell_centre(cell_index, cell);
             // The heights this segment of the ray passes through, so the
             // column asks only the genera that can be there.
@@ -1231,29 +1333,35 @@ fn march(origin: vec3<f32>, direction: vec3<f32>, far: f32) -> Hit {
         // grid chosen once at entry walks hundreds of fine cells through air
         // it can only ever see as a pixel or two — which is most of the cost
         // of the worst view there is. When the cell it is walking has dropped
-        // under the pixel target, double it and re-seat.
-        let wanted_level = grid_level(base_cell, t, want);
-        let wanted = level_cell(base_cell, wanted_level);
-        if (wanted > cell) {
-            cell = wanted;
-            level = wanted_level;
-            out.cell = cell;
-            entry = origin + direction * t;
-            cell_index = floor(entry.xz / cell);
-            delta = select(
-                vec2<f32>(1e30, 1e30),
-                abs(vec2<f32>(cell, cell) / direction.xz),
-                abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
-            );
-            let edge = (cell_index + max(step, vec2<f32>(0.0, 0.0))) * cell;
-            next = select(
-                vec2<f32>(1e30, 1e30),
-                t + (edge - entry.xz) / direction.xz,
-                abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
-            );
-            // The re-seat crossed no wall, so the next hit's face comes from
-            // the slab rather than from a boundary this grid never had.
-            entered = -1;
+        // under the pixel target, double it and re-seat. Asked only once the
+        // ray is near where that can happen (`coarsen_from`).
+        if (t >= grows_at) {
+            let wanted_level = grid_level(base_cell, t, want);
+            let wanted = level_cell(base_cell, wanted_level);
+            if (wanted > cell) {
+                cell = wanted;
+                level = wanted_level;
+                occupied = occupancy_level(level);
+                grows_at = coarsen_from(base_cell, level, want);
+                out.cell = cell;
+                entry = origin + direction * t;
+                cell_index = floor(entry.xz / cell);
+                delta = select(
+                    vec2<f32>(1e30, 1e30),
+                    abs(vec2<f32>(cell, cell) / direction.xz),
+                    abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
+                );
+                let edge = (cell_index + max(step, vec2<f32>(0.0, 0.0))) * cell;
+                next = select(
+                    vec2<f32>(1e30, 1e30),
+                    t + (edge - entry.xz) / direction.xz,
+                    abs(direction.xz) > vec2<f32>(0.00001, 0.00001),
+                );
+                // The re-seat crossed no wall, so the next hit's face comes
+                // from the slab rather than from a boundary this grid never
+                // had.
+                entered = -1;
+            }
         }
     }
     return out;
@@ -1397,9 +1505,16 @@ fn fragment_main(in: Varyings) -> Painted {
 
     // **Inside the deck is fog**, not the inside face of a cube. A player can
     // fly up through this, and the moment the camera enters a filled cell the
-    // honest picture is that they cannot see.
-    let here = column_at(floor(origin.xz / cell) * cell + cell * 0.5, 1.0, origin.y, origin.y);
-    if (inside(here, origin.y)) {
+    // honest picture is that they cannot see. Read from the occupancy, which
+    // asked it once this frame, rather than asked again for every pixel: a
+    // whole column of the field wherever the camera is in the slab.
+    var in_cloud = false;
+    if (clouds.occupancy.w > 0.5) {
+        in_cloud = textureLoad(occupancy, occupancy_camera(), 0).x > 0.5;
+    } else {
+        in_cloud = camera_in_cloud();
+    }
+    if (in_cloud) {
         let tint = mix(clouds.colour.xyz * clouds.sun.xyz, clouds.shade.xyz, 0.5);
         out.colour = vec4<f32>(mix(tint, clouds.sky.xyz, 0.4), CLOUD_MARK);
         // Far, so the haze never occludes the world: it is weather, not a
@@ -1577,10 +1692,10 @@ fn shadow_main(in: Varyings) -> @location(0) vec4<f32> {
     return vec4<f32>(shade, 0.0, 0.0, 1.0);
 }
 
-// The fullscreen triangle again, for one level of the occupancy: the level
-// comes in as the instance, and goes out as a flat float — a number the
-// fragment's compiler cannot see is whole, so `level_cell` is the same
-// `exp2` of an opaque float there as in the march.
+// The fullscreen triangle again, for one level of the occupancy or for its
+// camera texel: the level comes in as the instance, and goes out as a flat
+// float — a number the fragment's compiler cannot see is whole, so
+// `level_cell` is the same `exp2` of an opaque float there as in the march.
 struct Leveled {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) level: f32,
@@ -1598,8 +1713,11 @@ fn occupancy_vertex(
     return out;
 }
 
-// One texel of the occupancy: 1 where the march cell it stands for holds
-// any cloud at any height, 0 where it is air — weather ask W27.
+// One texel of the occupancy — weather ask W27: the heights the march
+// cell it stands for holds low cloud over (xy), and the heights its
+// altocumulus and anvil hold together (zw), each empty as `Column`'s are,
+// with its top at or under its bottom. Or, for the one instance past the
+// levels, whether the camera stands in cloud (x).
 //
 // **Exact, not a guess.** It asks `column_at` at the cell's centre, the
 // point the march asks it at, over the whole slab and with no detail. The
@@ -1609,19 +1727,23 @@ fn occupancy_vertex(
 // - The heights only GATE: each genus is asked or not by whether the span
 //   reaches its layer, and nothing else in `column_at` reads them. Over the
 //   whole slab every genus the sky has is asked, since the slab is grown by
-//   exactly those.
+//   exactly those. So where the march asks with no detail, each interval
+//   it finds lies inside the one here: the low cloud is the lowest floor
+//   to the highest top of the genera asked, and here all of them are.
 // - Detail — the rind, the grain, the buds — only moves the top and bottom
 //   of an interval its genus already decided on. A heap's interval exists
 //   wherever its crown is over zero, a sheet's and a cloudlet's are at least
-//   a cube deep, and an anvil takes no rind at all. The one place the rind
-//   is added to a bare floor is a tower's top, which is its floor plus its
-//   body plus the rind; the body is a few blocks even at the rim, but so the
-//   argument does not rest on that, `density` counts as well, and a tower
-//   reaching the column sets it whatever the rind does.
+//   a cube deep, and an anvil takes no rind at all. So where the march asks
+//   WITH detail, an empty texel is still an empty column (and the heights
+//   are not trusted, which `occupancy_clear` sees to). The one place the
+//   rind is added to a bare floor is a tower's top, which is its floor plus
+//   its body plus the rind; the body is a few blocks even at the rim, but
+//   so the argument does not rest on that, a column with density and no
+//   interval is written as cloud at every height.
 //
-// So a 0 here is a column every march step would have found empty, and
-// skipping it changes no pixel — which `screenshot.rs` asserts, byte for
-// byte, with the skip on and off.
+// So a cell `occupancy_clear` calls clear is one every march step would
+// have walked through, and skipping it changes no pixel — which
+// `screenshot.rs` asserts, byte for byte, with the skip on and off.
 //
 // **Its cost**: one column a texel, and the texels are four thirds of the
 // finest level, all drawn in one pass. At Low on Weather's deck that is 128
@@ -1629,6 +1751,10 @@ fn occupancy_vertex(
 // map's sixty-five thousand, and the march's millions.
 @fragment
 fn occupancy_main(in: Leveled) -> @location(0) vec4<f32> {
+    // The instance past the last level is the camera's texel.
+    if (in.level >= OCCUPANCY_LEVELS) {
+        return vec4<f32>(select(0.0, 1.0, camera_in_cloud()), 0.0, 0.0, 0.0);
+    }
     let cell = level_cell(clouds.colour.w, in.level);
     let shift = u32(in.level);
     let corner = vec2<i32>(clouds.occupancy.xy) >> vec2<u32>(shift);
@@ -1636,11 +1762,24 @@ fn occupancy_main(in: Leveled) -> @location(0) vec4<f32> {
     let cell_index = vec2<f32>(texel + corner);
     let slab = deck_slab();
     let column = column_at(cell_centre(cell_index, cell), 0.0, slab.x, slab.y);
-    let some = column.lower.y > column.lower.x
-        || column.upper.y > column.upper.x
-        || column.mid.y > column.mid.x
-        || column.density > 0.0;
-    return vec4<f32>(select(0.0, 1.0, some), 0.0, 0.0, 1.0);
+    let pad = vec2<f32>(-OCCUPANCY_PAD, OCCUPANCY_PAD);
+    let none = vec2<f32>(0.0, -1.0);
+    var low = none;
+    if (column.lower.y > column.lower.x) {
+        low = column.lower + pad;
+    }
+    var high = none;
+    if (column.upper.y > column.upper.x) {
+        high = column.upper + pad;
+    }
+    if (column.mid.y > column.mid.x) {
+        let mid = column.mid + pad;
+        high = select(vec2<f32>(min(high.x, mid.x), max(high.y, mid.y)), mid, high.y <= high.x);
+    }
+    if (low.y <= low.x && high.y <= high.x && column.density > 0.0) {
+        low = vec2<f32>(-1e30, 1e30);
+    }
+    return vec4<f32>(low, high);
 }
 
 struct Resolved {

@@ -8228,6 +8228,10 @@ fn skipping_the_decks_clear_cells_changes_no_pixel() {
     // occupancy leaves out is in the picture. Then a cover map, a wet square
     // with a storm in it over a clear sky, since the map is where the weather
     // changes cell by cell.
+    //
+    // `TIAMAT_DECK_FRAMES=dir` writes every frame with the skip on as a PNG,
+    // so a change to the march that both paths share can be held against
+    // the commit before it, byte for byte, by comparing two directories.
     let Some(gpu) = gpu() else { return };
     let chunks = scene();
     let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
@@ -8240,6 +8244,11 @@ fn skipping_the_decks_clear_cells_changes_no_pixel() {
         let off = target.capture(renderer, camera).expect("capture");
         renderer.set_cloud_skip(true);
         let on = target.capture(renderer, camera).expect("capture");
+        if let Some(dir) = std::env::var_os("TIAMAT_DECK_FRAMES") {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            write_png(&dir.join(format!("{}.png", label.replace(' ', "-"))), &on);
+        }
         let differ = off
             .rgba
             .chunks(4)

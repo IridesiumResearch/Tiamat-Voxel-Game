@@ -1,15 +1,27 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Which of the cloud march's cells hold any cloud at all — weather ask W27.
+//! Where in the cloud march's cells there is any cloud at all — weather ask
+//! W27.
 //!
 //! # Why
 //!
 //! A step of the march is one asking of the field — the heap search, the
 //! sheet's cells, the storm lattice — and a ray takes a step for every cell
-//! it crosses. Most cells of most skies are air. Asking every cell ONCE a
-//! frame, into a small texture, and letting the march read a texel before it
-//! asks the field, turns a clear stretch of a ray into texture reads.
+//! it crosses. Most cells of most skies are air, or hold their cloud above
+//! or below where the ray passes: from over the heaps, every column with a
+//! heap in it under the ray, or an anvil or a mackerel sky over it. Asking
+//! every cell ONCE a frame, into a small texture, for the heights its cloud
+//! spans, and letting the march read a texel before it asks the field,
+//! turns those stretches of a ray into texture reads.
+//!
+//! # What a texel holds
+//!
+//! Two spans of height: the low cloud's — heaps, the sheet, a tower — and
+//! the altocumulus and an anvil's together, as one span from the lowest of
+//! them to the highest. A yes or no was the first version, and measured it
+//! did nothing for the view from over the deck, where nearly every column
+//! has cloud in it somewhere and the ray passes over it or under it.
 //!
 //! # The shape
 //!
@@ -26,6 +38,20 @@
 //! the six passes cost more than the whole march at `Low` saves. One pass,
 //! a viewport and a draw per level, and the march reads one level of one
 //! texture rather than choosing a mip per step.
+//!
+//! **A draw, not a dispatch.** The software renderer shades a pass a 64-pixel
+//! tile to a thread, and the finest level at `Low` is four tiles, so a
+//! compute dispatch — which hands its groups to every thread — was tried
+//! too. Measured at 480 x 270, where the pass is most of what the deck
+//! costs, it was half a millisecond slower: what it gains in threads the
+//! dispatch spends on its own overhead and on the groups of the coarse
+//! levels, which have almost nothing to do.
+//!
+//! **And one texel more: whether the camera stands in cloud.** Every pixel
+//! of the deck asked the field that, at the camera's own column, and every
+//! pixel got the same answer — a whole column of the field per pixel,
+//! wherever the camera is inside the slab, which is every view from over the
+//! heaps. It is asked once, beside the levels, in the same pass.
 //!
 //! # Exact
 //!
@@ -46,16 +72,23 @@ pub const LEVELS: u32 = 6;
 /// are whole numbers of, so that every level divides them exactly.
 const COARSEST: u32 = 1 << (LEVELS - 1);
 
-/// The most base cells a side: the finest level's most, and the texture's
-/// height. The coarser levels stand in a column beside it, half as wide.
+/// The most base cells a side the square may be.
 ///
 /// Enough for the reach at every rung on Weather's deck — 128 at `Low`, 288
 /// at `Medium`, 416 at `High` — and a deck of smaller cubes than that is
 /// covered to this and asks the field past it, as every cell did before.
 pub const MOST: u32 = 512;
 
-/// One channel is all a yes or no needs.
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Two spans of height, in blocks: the low cloud's bottom and top, and the
+/// altocumulus's and anvil's together. Full floats, because a height is
+/// hundreds of blocks and the march compares it against the ray's own.
+///
+/// Sixteen bytes a texel, so the texture is made for the square a frame
+/// asks for and grows only when a larger one is asked: the finest level
+/// `side` a side, the rest in a column half as wide beside it — under four
+/// hundred kilobytes at `Low` on Weather's deck, and six megabytes at the
+/// very most.
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
 /// Where the deck's pipelines find it.
 pub const BINDING: u32 = 8;
@@ -65,6 +98,8 @@ pub struct Occupancy {
     pipeline: wgpu::RenderPipeline,
     /// Every level, to draw into and for the march to read.
     view: wgpu::TextureView,
+    /// The largest side the texture holds, in base cells.
+    room: u32,
     /// This frame's side, in base cells: zero when there is nothing to draw.
     side: u32,
     /// Whether the march reads it. Always, but for the test that compares.
@@ -72,28 +107,15 @@ pub struct Occupancy {
 }
 
 impl Occupancy {
-    /// Allocates the texture at its most and builds the pipeline that draws
-    /// a level of it: `occupancy_vertex` and `occupancy_main` in `shader`,
+    /// Makes the smallest texture and builds the pipeline that draws a
+    /// level of it: `occupancy_vertex` and `occupancy_main` in `shader`,
     /// against `layout` — which must NOT hold the occupancy itself, since a
     /// pass cannot read what it draws into.
     pub fn new(gpu: &Gpu, shader: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> Self {
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cloud-occupancy"),
-            size: wgpu::Extent3d {
-                width: MOST + MOST / 2,
-                height: MOST,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
         Self {
             pipeline: pipeline(gpu, shader, layout),
-            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            view: texture(gpu, COARSEST),
+            room: COARSEST,
             side: 0,
             on: true,
         }
@@ -131,17 +153,29 @@ impl Occupancy {
 
     /// Places this frame's square around the camera for a deck of base cell
     /// `cell` drawn to `reach` blocks, and returns it as the uniform carries
-    /// it: the corner x and z in base cells, the side in base cells, and 1
-    /// if the march reads it. A `cell` of zero is no deck, and nothing is
-    /// drawn.
-    pub fn place(&mut self, camera: [f32; 3], cell: f32, reach: f32) -> [f32; 4] {
+    /// it — the corner x and z in base cells, the side in base cells, and 1
+    /// if the march reads it — and whether the texture had to grow for it,
+    /// in which case the deck's bind group must be made again. A `cell` of
+    /// zero is no deck, and nothing is drawn.
+    pub fn place(
+        &mut self,
+        gpu: &Gpu,
+        camera: [f32; 3],
+        cell: f32,
+        reach: f32,
+    ) -> ([f32; 4], bool) {
         if !self.on || cell <= 0.0 {
             self.side = 0;
-            return [0.0; 4];
+            return ([0.0; 4], false);
         }
         let (corner, side) = square([camera[0], camera[2]], cell, reach);
         self.side = side;
-        [corner[0] as f32, corner[1] as f32, side as f32, 1.0]
+        let grew = side > self.room;
+        if grew {
+            self.room = side;
+            self.view = texture(gpu, side);
+        }
+        ([corner[0] as f32, corner[1] as f32, side as f32, 1.0], grew)
     }
 
     /// Draws every level, if the march is to read them this frame: one
@@ -183,7 +217,39 @@ impl Occupancy {
             // The level rides in as the instance.
             pass.draw(0..3, level..level + 1);
         }
+        // And the camera's texel, as the instance past the last level.
+        let [x, y] = camera_texel(self.side);
+        pass.set_viewport(x as f32, y as f32, 1.0, 1.0, 0.0, 1.0);
+        pass.draw(0..3, LEVELS..LEVELS + 1);
     }
+}
+
+/// A texture for squares up to `room` base cells a side: the finest level,
+/// and the column beside it.
+fn texture(gpu: &Gpu, room: u32) -> wgpu::TextureView {
+    gpu.device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud-occupancy"),
+            size: wgpu::Extent3d {
+                width: room + room / 2,
+                height: room,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Where the camera's texel stands for a square `side` a side: the foot of
+/// the column the coarser levels stand in, which the coarsest leaves free.
+/// `occupancy_camera` in `clouds.wgsl` is the same.
+const fn camera_texel(side: u32) -> [u32; 2] {
+    [side, side - 1]
 }
 
 /// Where level `level` of a square `side` base cells wide stands in the
@@ -338,15 +404,24 @@ mod tests {
 
     #[test]
     fn the_levels_fit_the_texture_side_by_side_and_never_overlap() {
-        // Every level of the largest square inside the texture, and no two
-        // levels sharing a texel, or one level's cells would read another's.
+        // Every level of a square inside a texture made for it, the camera's
+        // texel too, and no two sharing a texel, or one level's cells would
+        // read another's. The places are the shader's, so its arithmetic is
+        // read back out of it first.
+        let shader = include_str!("clouds.wgsl");
+        assert!(
+            shader.contains("return vec2<i32>(side, side - (side >> (level - 1u)));")
+                && shader.contains("return vec2<i32>(side, side - 1);"),
+            "clouds.wgsl places the levels, or the camera's texel, elsewhere"
+        );
         for side in [COARSEST, 128, 288, 416, MOST] {
             let squares: Vec<([u32; 2], u32)> = (0..LEVELS)
                 .map(|level| (slot(level, side), side >> level))
+                .chain([(camera_texel(side), 1)])
                 .collect();
             for (index, &([x, y], wide)) in squares.iter().enumerate() {
                 assert!(wide >= 1, "{side}: level {index} is empty");
-                assert!(x + wide <= MOST + MOST / 2 && y + wide <= MOST);
+                assert!(x + wide <= side + side / 2 && y + wide <= side);
                 for &([ox, oy], other) in &squares[index + 1..] {
                     let apart =
                         x + wide <= ox || ox + other <= x || y + wide <= oy || oy + other <= y;
