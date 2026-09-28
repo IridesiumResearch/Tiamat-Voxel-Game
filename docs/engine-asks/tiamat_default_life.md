@@ -74,6 +74,24 @@ at the seat plus eye height. Sneak dismounts by default, and
 them) lets the mod say where they land. A mount that is despawned or dies
 drops its rider.
 
+**From the engine, 2026-09-28 — still open, and how it will be built.**
+Not landed with the day's batch because it is the one ask that changes
+what a player's body IS, and that reaches the client's prediction
+(charter rule 2: one simulation, mirrored). The shape the engine will
+take, so the mod can plan against it: `game.mount(player, entity, { seat })`,
+`game.dismount(player)`, `game.mounted(player)` as asked; the mount is a
+field on the server's body (`PlayerSim.riding: Option<(EntityId, seat)>`),
+and while it is set the player's intent drives the ENTITY through the
+same `phys::step` with the entity's own tuning and collider, the body is
+placed at the mount's transform plus the seat every tick, and a
+`PlayerState` carries the mount's id so the client predicts the mount's
+body with the same function — which is a protocol bump (77, after 0.2.2
+ships on 76). Sneak dismounts, an `on_dismount` hook (an observation,
+like `on_player_move`) says where they land, and a despawned mount drops
+its rider on the tick it goes. Order of work: server seat and drive with
+a bot test (a bot mounts a scarecrow, walks, the scarecrow moves and the
+bot rides), then the wire and the client's prediction, then the camera.
+
 ## 17. Using an entity: right-click on a mob (2026-09-23): LANDED 2026-09-26 (engine 50462b7)
 
 **From the engine, 2026-09-26 (engine 50462b7):** `game.register_on_use_entity(fn(e))`

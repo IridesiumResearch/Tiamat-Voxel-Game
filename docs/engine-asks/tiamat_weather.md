@@ -12,7 +12,7 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W25 to W27, filed 2026-09-25. W28 landed 2026-09-28 (the day it was filed),
+Open: W26 and W27, filed 2026-09-25. W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 ## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
@@ -85,6 +85,18 @@ Gate: `Low` at 1080p, the six skies and three views, at most half of
 today's median, with the storm view from above no worse than today's level
 view.
 
+**From the engine, 2026-09-28 — still open, and the order it will be
+taken in.** Measured work, not guessed: each step is gated by the W19
+probe (`how_long_weathers_deck_costs_by_knob`) on `Low` before the next
+is started. First empty-space skipping — a coarse occupancy per map cell
+built where the cover map is uploaded, so a ray crosses a clear cell in
+one step; it is the cheapest to build and the six skies are mostly clear
+stretches. Then distance LOD (double the cube past a kilometre, skip the
+rind). Temporal amortisation last, because the checkerboard reprojection
+is the one that can show (ghosting under a fast camera) and wants the
+designer's eye on it. The cheaper look from above only if the storm view
+is still the outlier after those three.
+
 ## W26. A lightning bolt that is drawn (2026-09-25)
 
 **Seen.** A strike is a flash on the sky (`game.flash`, W3), sparks where it
@@ -123,6 +135,20 @@ player behind a hill does not see the part the hill hides.
 ground point and the cloud floor (`floor_at`), so it calls
 `game.lightning{ from = { x, floor, z }, to = at, seed = ... }` beside its
 `flash` and each flicker, feature-detected like every call since W2.
+
+**From the engine, 2026-09-28 — still open, and how it will be built.** As
+asked, `game.lightning{ from, to, seed?, colour?, width?, branches?,
+ticks?, radius?, player? }`, addressed like `game.flash` (the `player`
+narrowing landed with W28 and carries over). It is a new message on the
+wire — a protocol bump to 77 — so it waits for 0.2.2 (protocol 76) to
+ship rather than move that release's number again. On the client: the
+path from `seed` by midpoint displacement, `branches` forks that fade
+before the ground, drawn as unlit additive camera-facing ribbons in a
+pass of its own after the terrain and before the fog, depth-tested, over
+`ticks`. The gate as written: the same seed draws the same path on two
+clients (a hash over the built path, unit-tested), a bolt at 400 blocks is
+a line by day and by night (screenshot test), and a hill hides what it
+should (depth test).
 
 ## W24. A settled fluid never evaporates (2026-09-25): LANDED 2026-09-26 (engine 1c475a8)
 
@@ -180,7 +206,7 @@ retire that.
 in 32, not 8; 4 cells in a storm, not 6), and the ground sampler clears any
 rainwater it finds near a player once the rain has been gone half a minute.
 
-## W25. Clouds at sunset: a brown sunward face (2026-09-25)
+## W25. Clouds at sunset: a brown sunward face (2026-09-25): LANDED 2026-09-28 (engine 7020552), awaiting the eye
 
 **Seen.** Towards sunset, under a storm deck, the faces of the clouds that
 face the sun are a flat brown-orange slab against violet-grey sides
@@ -394,6 +420,19 @@ most of each genus anywhere in the sky. The uniform stays at 2 KiB, the five
 bytes packed into two words a cell. Gate: a `cumulonimbus` cell two cells out
 raises an anvil over the horizon on its side and none on the other, mirrored
 with the cell, and a map without the arrays raises none.
+
+**From the engine, 2026-09-28 (engine 7020552):** the ask's own shape,
+in `clouds.wgsl`'s mode-1 lighting. The sun's colour is split into a hue
+(the sun normalised to its brightest channel) and a brightness (that
+channel). Every face takes a share of the hue — `mix(white, sun_hue,
+0.35 * horizon)` over both the cool and the warm term — and the sunward
+term now mixes towards `colour * tint * brightness` rather than
+`colour * sun`, so what the sunward face gains is luminance over the
+shared tint, not a hue swap on a face boundary. Under a storm's
+darkness the sunward face goes a warm grey. The shader compiles under
+the screenshot suite; the gate — a sun three degrees up, darkness 0.9,
+the sunward and side faces of one heap differing more in luminance than
+in hue — is the designer's screenshot to take (an [H] gate).
 
 ## Landed
 

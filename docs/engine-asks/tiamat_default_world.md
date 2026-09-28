@@ -84,7 +84,7 @@ Filed 2026-09-23, from the designer's fly-round (giant summary slabs beside
 the player, a dry river, a water sheet over the Obsidian Barrens) and the
 investigation behind the world's performance pass.
 
-## 42. A summary draws its fluid as an opaque slab
+## 42. A summary draws its fluid as an opaque slab: LANDED 2026-09-28 (engine 7020552), awaiting the eye
 
 **Seen:** a translucent grey-blue sheet standing over the Obsidian
 Barrens' lava field. A summary paints a terrain-free block holding fluid
@@ -99,6 +99,16 @@ has no say in how a summary cell is drawn.
 **Smallest change:** draw a summary's fluid-family cells in the blended
 pass (or tint-and-blend the quad by the material's own alpha). Cosmetic,
 and the lowest of these four.
+
+**From the engine, 2026-09-28 (engine 7020552):** the summary mesher now
+sends a fluid-family cell's faces to the blended fluid pass — the same
+vertices and the same per-material opacity the detail water uses, full to
+the cell and still — and a solid face under such a cell is exposed through
+it, so the bed shows under a far sea as it does under a near one. Two
+cells of one sea share no face. Unit-tested on the mesh; what it looks
+like over the Obsidian Barrens' lava and a far sea is the designer's to
+say (an [H] gate): fly to where the slab was and look for a blended
+sheet that agrees with the water beside it when detail arrives.
 
 ## 41. Near summaries are stuck coarse while detail lags: LANDED 2026-09-25 (engine c537df8)
 
