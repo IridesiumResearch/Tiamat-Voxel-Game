@@ -27,6 +27,7 @@
 //! exercise the same code the window does, which is the only way a screenshot
 //! test is worth having.
 
+mod cloud_occupancy;
 pub mod clouds;
 pub mod frustum;
 pub mod grade;
@@ -1765,6 +1766,14 @@ impl Renderer {
         self.clouds.set_map(&gpu, map);
     }
 
+    /// Whether the cloud march skips the cells its occupancy calls clear —
+    /// weather ask W27. **For tests and the W27 probe alone**: it is on by
+    /// default at every quality, and off draws the same picture slower,
+    /// which is the comparison that proves the skip is only an optimisation.
+    pub const fn set_cloud_skip(&mut self, on: bool) {
+        self.clouds.set_skip(on);
+    }
+
     /// Advances the deck's own clock.
     ///
     /// Seconds rather than ticks: drift and evolution are presentation and run
@@ -3073,6 +3082,8 @@ impl Renderer {
         self.fill_cascades(&mut encoder, &culled);
         // The deck from below, for the terrain to shade by — ask W11.
         self.clouds.render_shadow(&mut encoder);
+        // Which of the deck's cells hold cloud, for the march — ask W27.
+        self.clouds.render_occupancy(&mut encoder);
         // And the deck itself, smaller than the frame when the quality says
         // so, for the world pass to lift into place — ask W15.
         self.clouds.render_half(&mut encoder);

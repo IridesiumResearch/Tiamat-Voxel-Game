@@ -32,6 +32,7 @@
 
 use tiamat_core::atmosphere::{CloudLayer, Clouds};
 
+use super::cloud_occupancy::Occupancy;
 use super::{DEPTH_FORMAT, Gpu, graph};
 
 /// How many texels a side the deck's shade map has — weather ask W11.
@@ -232,6 +233,10 @@ struct Uniforms {
     /// and whether `fragment_main` draws the stars (1) or the resolve does
     /// (0), which is the case when the deck is at a lower resolution.
     stars: [f32; 4],
+    /// The occupancy's corner x and z and its side, in the march's base
+    /// cells, and whether the march reads it — weather ask W27. Last, as it
+    /// is in the shader, so nothing before it moved.
+    occupancy: [f32; 4],
 }
 
 /// Texels a side of the cover map's textures: the biggest map a mod may
@@ -464,7 +469,14 @@ pub struct Pass {
     /// The smaller target, when the quality asks for one.
     half: Option<HalfTarget>,
     uniforms: wgpu::Buffer,
+    /// The uniform, the stars and the map: what the shade map and the
+    /// occupancy are drawn with.
     bind: wgpu::BindGroup,
+    /// The same and the occupancy, for the deck itself — ask W27. Two
+    /// groups because the occupancy's own pass cannot bind what it draws.
+    deck_bind: wgpu::BindGroup,
+    /// Which of the march's cells hold any cloud — weather ask W27.
+    occupancy: Occupancy,
     /// Whether this frame has a deck to draw.
     draws: bool,
     /// The deck, the weather over it, the player's quality and the seed.
@@ -495,30 +507,8 @@ impl Pass {
         let shader = gpu
             .device
             .create_shader_module(wgpu::include_wgsl!("clouds.wgsl"));
-        let map_layout = MapTextures::layout_entries();
         let map_textures = MapTextures::new(gpu);
-        let layout = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("cloud-bind-layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    star_layout_entry(STAR_BINS_BINDING),
-                    star_layout_entry(STAR_LIST_BINDING),
-                    map_layout[0],
-                    map_layout[1],
-                    map_layout[2],
-                ],
-            });
+        let (layout, deck_layout) = bind_layouts(gpu);
         let uniforms = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cloud-uniforms"),
             size: size_of::<Uniforms>() as u64,
@@ -526,27 +516,36 @@ impl Pass {
             mapped_at_creation: false,
         });
         let starfield = Starfield::new(gpu);
+        let occupancy = Occupancy::new(gpu, &shader, &layout);
         let map_entries = map_textures.bind_entries();
+        let shared = [
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            starfield.bind_entry(STAR_BINS_BINDING),
+            starfield.bind_entry(STAR_LIST_BINDING),
+            map_entries[0].clone(),
+            map_entries[1].clone(),
+            map_entries[2].clone(),
+        ];
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("clouds"),
             layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                starfield.bind_entry(STAR_BINS_BINDING),
-                starfield.bind_entry(STAR_LIST_BINDING),
-                map_entries[0].clone(),
-                map_entries[1].clone(),
-                map_entries[2].clone(),
-            ],
+            entries: &shared,
+        });
+        let mut deck_entries = shared.to_vec();
+        deck_entries.push(occupancy.bind_entry());
+        let deck_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("clouds-deck"),
+            layout: &deck_layout,
+            entries: &deck_entries,
         });
         let (shadow_view, shadow_sampler) = shade_target(gpu);
         let resolve_layout = resolve_layout(gpu);
         Self {
-            direct: pipeline(gpu, &shader, &layout, gpu.surface_format(), false),
-            hdr: pipeline(gpu, &shader, &layout, graph::HDR_FORMAT, true),
+            direct: pipeline(gpu, &shader, &deck_layout, gpu.surface_format(), false),
+            hdr: pipeline(gpu, &shader, &deck_layout, graph::HDR_FORMAT, true),
             shadow: shadow_pipeline(gpu, &shader, &layout),
             shadow_view,
             shadow_sampler,
@@ -564,6 +563,8 @@ impl Pass {
             half: None,
             uniforms,
             bind,
+            deck_bind,
+            occupancy,
             draws: false,
             deck: Deck::default(),
             map: None,
@@ -737,6 +738,7 @@ impl Pass {
                 0.0,
             ],
             shadow: [shadow_origin[0], shadow_origin[1], SHADOW_EXTENT, 0.0],
+            occupancy: self.occupancy.place(camera, cell, quality.reach()),
             quality: [
                 quality.reach(),
                 quality.detail_reach(),
@@ -913,7 +915,7 @@ impl Pass {
             return;
         }
         pass.set_pipeline(if hdr { &self.hdr } else { &self.direct });
-        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_bind_group(0, &self.deck_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -954,8 +956,26 @@ impl Pass {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.hdr);
-        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_bind_group(0, &self.deck_bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Draws which of the march's cells hold any cloud — weather ask W27 —
+    /// for the deck to read. Before the deck's own pass and the world's,
+    /// either of which may march it; nothing when there is no deck.
+    pub fn render_occupancy(&self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.draws {
+            return;
+        }
+        self.occupancy.render(encoder, &self.bind);
+    }
+
+    /// Whether the march skips the cells the occupancy calls clear — **for
+    /// tests alone**. It is on unless a test turns it off: off, every cell is
+    /// asked of the field as before weather ask W27, which is how the test
+    /// that proves the skip changes no pixel has something to compare.
+    pub const fn set_skip(&mut self, on: bool) {
+        self.occupancy.set_on(on);
     }
 
     /// Makes the smaller target the frame's size over `divisor`, drops it for
@@ -1385,6 +1405,47 @@ fn shade_target(gpu: &Gpu) -> (wgpu::TextureView, wgpu::Sampler) {
     (view, sampler)
 }
 
+/// The two layouts the field's pipelines bind: the uniform, the stars and
+/// the map, for the shade map and the occupancy; and the same with the
+/// occupancy, for the deck — weather ask W27. The occupancy's own pass draws
+/// into it, and a pass may not read a texture it draws into, so the pipeline
+/// that draws it cannot be given a layout that holds it.
+fn bind_layouts(gpu: &Gpu) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
+    let map_layout = MapTextures::layout_entries();
+    let shared = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        star_layout_entry(STAR_BINS_BINDING),
+        star_layout_entry(STAR_LIST_BINDING),
+        map_layout[0],
+        map_layout[1],
+        map_layout[2],
+    ];
+    let layout = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cloud-bind-layout"),
+            entries: &shared,
+        });
+    let mut deck = shared.to_vec();
+    deck.push(Occupancy::layout_entry());
+    let deck_layout = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cloud-deck-bind-layout"),
+            entries: &deck,
+        });
+    (layout, deck_layout)
+}
+
 /// What the resolve reads: the uniform, and the smaller target's colour and
 /// depth. Loaded by texel rather than sampled, so no sampler.
 fn resolve_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
@@ -1667,6 +1728,65 @@ mod tests {
             "a heap can reach {reach} cells, past the three-by-three the search looks in"
         );
         assert!(top >= 0.53, "the curve's top is {top}; W20 asked for 0.53");
+    }
+
+    #[test]
+    fn the_uniform_is_laid_out_as_the_shader_reads_it() {
+        // **A field at two different offsets does not fail to compile**:
+        // every field after it reads its neighbour's bytes and the sky
+        // empties (`clouds.wgsl`, at `view`). So the fields are read out of
+        // the shader in order, and each one's offset there is checked
+        // against the Rust struct's — which is what let weather ask W27 add
+        // one without trusting its own care.
+        let shader = include_str!("clouds.wgsl");
+        let start = shader.find("struct Clouds {").expect("the uniform struct");
+        let body = &shader[start..];
+        let body = &body[..body.find("\n}").expect("its end")];
+        let fields: Vec<(&str, usize)> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .filter_map(|line| {
+                let (name, ty) = line.split_once(':')?;
+                Some((name.trim(), if ty.contains("mat4x4") { 64 } else { 16 }))
+            })
+            .collect();
+        macro_rules! offsets {
+            ($($field:ident),*) => {
+                [$((stringify!($field), std::mem::offset_of!(Uniforms, $field))),*]
+            };
+        }
+        let rust = offsets!(
+            inverse_view_projection,
+            view_projection,
+            camera,
+            view,
+            sun_direction,
+            sun,
+            sky,
+            colour,
+            shade,
+            weather,
+            motion,
+            quality,
+            genera,
+            genera_reach,
+            shadow,
+            map,
+            stars,
+            occupancy
+        );
+        assert_eq!(fields.len(), rust.len(), "{fields:?}");
+        let mut at = 0;
+        for ((name, size), (rust_name, offset)) in fields.iter().zip(rust) {
+            assert_eq!(*name, rust_name, "the shader's fields are in another order");
+            assert_eq!(
+                at, offset,
+                "`{name}` is at {at} in the shader and {offset} in Rust"
+            );
+            at += size;
+        }
+        assert_eq!(at, size_of::<Uniforms>());
     }
 
     #[test]
