@@ -769,6 +769,13 @@ pub struct Tool {
     /// not [`Self::speed_multiplier`] (Craft ask 2): a bronze pick fast on
     /// rock and slow on earth. Resolved to runtime ids by whoever holds the
     /// registry.
+    ///
+    /// A key of the form `"tag:<name>"` (Craft ask 11) names every block
+    /// carrying that tag rather than one material, and is expanded at the
+    /// same resolution, once, after every mod has registered — so a block
+    /// registered by a mod that loaded after this tool's still gets the
+    /// speed. Where a tag and a named material both reach one block, the
+    /// material wins; where two tags both reach it, the higher speed does.
     pub speeds: Vec<(String, f32)>,
     /// Whether this is what a player digs with holding nothing.
     ///
@@ -781,6 +788,89 @@ pub struct Tool {
     /// Several mods may each mark one; the lowest id wins, so the result does
     /// not depend on load order.
     pub default: bool,
+}
+
+/// Resolves every tool's [`Tool::speeds`] — material names and
+/// `"tag:<name>"` tag keys alike — to the world's runtime material ids, once
+/// (Craft ask 11).
+///
+/// This is the freeze-time step [`Tool::speeds`] promises: called after
+/// every mod has registered (`block_rules` and `material_ids` are the
+/// complete, final registry), so a tag named by one mod's tool still reaches
+/// a block a DIFFERENT, later-loading mod registered — the whole point of
+/// resolving here rather than when `register_tool` is called. Nothing at dig
+/// time calls this again; the result IS the per-material speed table looked
+/// up on every bite (Craft ask 2), keyed by tool id exactly as
+/// [`Tool::speeds`] entries are keyed by material.
+///
+/// # Precedence
+///
+/// A material named directly always beats a tag reaching the same block,
+/// because the mod said something more specific about it — tags are folded
+/// in first and named materials are applied over them, never the reverse.
+/// Where two tags both reach one block, the HIGHER speed wins: a `max` fold
+/// over a fixed pass through `speeds`, not "whichever was written last",
+/// because a Lua table's pair order is unspecified (charter rule 4) and this
+/// answer must not depend on it.
+///
+/// # Unknown tags and materials
+///
+/// A `"tag:<name>"` no registered block carries is logged with
+/// [`tracing::warn!`], naming the tool and the tag, and otherwise ignored —
+/// the tool simply gets no speed from it, exactly like a material name
+/// nobody registered (Craft ask 2's rule, unchanged: dropped without a
+/// warning, because an ordinary typo in a material id is exactly as likely
+/// to be another mod's block that is simply not loaded this run).
+#[must_use]
+pub fn resolve_tool_speeds(
+    tools: &[Tool],
+    block_rules: &[BlockRules],
+    material_ids: &std::collections::BTreeMap<String, MaterialId>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<MaterialId, f32>> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut speeds: std::collections::BTreeMap<MaterialId, f32> =
+                std::collections::BTreeMap::new();
+            // Tags first, lower precedence.
+            for (key, factor) in &tool.speeds {
+                let Some(tag) = key.strip_prefix("tag:") else {
+                    continue;
+                };
+                let mut carried = false;
+                for rules in block_rules {
+                    if !rules.tags.iter().any(|held| held == tag) {
+                        continue;
+                    }
+                    carried = true;
+                    if let Some(&id) = material_ids.get(&rules.block) {
+                        speeds
+                            .entry(id)
+                            .and_modify(|speed: &mut f32| *speed = speed.max(*factor))
+                            .or_insert(*factor);
+                    }
+                }
+                if !carried {
+                    tracing::warn!(
+                        tool = %tool.id,
+                        tag,
+                        "register_tool: speeds names a tag no block carries; ignored"
+                    );
+                }
+            }
+            // Materials named directly, higher precedence: overwrite
+            // whatever a tag gave that same block.
+            for (block, factor) in &tool.speeds {
+                if block.starts_with("tag:") {
+                    continue;
+                }
+                if let Some(&id) = material_ids.get(block) {
+                    speeds.insert(id, *factor);
+                }
+            }
+            (tool.id.clone(), speeds)
+        })
+        .collect()
 }
 
 /// A dig the server is about to carry out.

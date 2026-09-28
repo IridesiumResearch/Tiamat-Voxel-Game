@@ -515,7 +515,7 @@ function Stream:next_bool() end
 ---@field name string? Display name.
 ---@field brush string? What shape it removes: `"block"` (default) or `"subnode"`.
 ---@field speed_multiplier number? How much faster than a bare hand. Default 1.0, must be positive.
----@field speeds table<string, number>? Its speed on particular blocks, by id, where it is not `speed_multiplier`: `{ ["tiamat_default_world:stone"] = 4.5, dirt = 0.5 }` — a bare name is your own. Each must be positive. A block nobody registered is dropped, and digs at the general speed.
+---@field speeds table<string, number>? Its speed on particular blocks, by id, where it is not `speed_multiplier`: `{ ["tiamat_default_world:stone"] = 4.5, dirt = 0.5 }` — a bare name is your own. Each must be positive. A block nobody registered is dropped, and digs at the general speed. A key of the form `["tag:<name>"]` — `{ ["tag:soil"] = 2.0 }` — names every block carrying that tag (see `game.tags` and `game.tagged`) instead of one material, and is resolved once every mod has registered, so a block registered by a mod that loaded after yours still gets the speed. Precedence, at that same resolution: a speed named for the material itself always beats one reached through a tag; where two tags both reach one block, the higher speed wins. A tag nothing carries is a load-time warning naming the tool and the tag, not an error — the tool simply gets no speed from it, like a material name nobody registered.
 ---@field default boolean? Whether this is what a player digs with holding nothing. The engine has no bare hand of its own, so a world whose mods register no default is one nobody can dig in. Lowest id wins if several mods mark one.
 
 ---Fields accepted by `game.register_sky`.
@@ -3604,6 +3604,24 @@ function game.hardness(material) end
 ---@param material integer
 ---@return string[]|nil tags
 function game.tags(material) end
+
+---The qualified ids of every block registered so far that carries a tag, in
+---the order they were registered — the other direction from `game.tags`: not
+---what a block is tagged, but which blocks a tag names.
+---
+---Callable in the registration window as well as after freeze. In the
+---window it answers only what has registered before this call: a mod sees
+---the blocks the mods it `depends` on have already registered, and nothing a
+---mod loading after it adds yet — arranging that is what `depends` is for.
+---Called again once every mod has registered, the answer is complete.
+---
+---An unknown tag answers an empty table, not an error or `nil` — a mod
+---classing "every hard block" should not have to guess which tags anything
+---actually uses first. Only blocks can carry a tag (`register_item` has no
+---`tags` field), so nothing here ever names an item.
+---@param tag string
+---@return string[] blocks
+function game.tagged(tag) end
 
 ---Generates a heightmap for a chunk from fractal noise.
 ---

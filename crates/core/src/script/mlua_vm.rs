@@ -8274,6 +8274,53 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("tags", tags).map_err(|err| self.vm_error(&err))?;
 
+        // The other direction from `game.tags` (Craft ask 11): not what a
+        // block is tagged, but which blocks a tag names. Reads `tiamat.blocks`
+        // and `tiamat.block_rules` live, so it answers whatever is registered
+        // AT THE MOMENT it is called — every block so far, in the window, and
+        // every block there is once frozen. That is also why it needs no
+        // freeze check of its own: nothing here mutates the registry.
+        //
+        // Registration order is numeric-id order: `tiamat.next_material`
+        // hands ids out one at a time, in the order `register_block` and
+        // `register_item` are called, so sorting by id sorts by when each
+        // block was registered — the same fact `registered_block_rules`
+        // relies on for the wire (see its own sort).
+        //
+        // Items never come back. `register_item`'s field list has no `tags`
+        // (`ITEM_FIELDS`), so nothing ever writes one for an item — blocks
+        // and items share one id table and one rules table, and it is
+        // simply the case that only a block's entry can ever hold a `tags`
+        // list. Nothing here has to know which is which.
+        let tagged = self
+            .lua
+            .create_function(|lua, tag: String| {
+                let blocks: Table = lua.named_registry_value("tiamat.blocks")?;
+                let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
+                let mut matches: Vec<(u16, String)> = Vec::new();
+                for pair in blocks.pairs::<String, u16>() {
+                    let (id, numeric) = pair?;
+                    let entry: Option<Table> = rules.get(id.as_str())?;
+                    if tags_of(entry.as_ref()).contains(&tag) {
+                        matches.push((numeric, id));
+                    }
+                }
+                // Lua table iteration order is unspecified (charter rule 4);
+                // the numeric id is not.
+                matches.sort_by_key(|(numeric, _)| *numeric);
+                let list = lua.create_table()?;
+                for (_, id) in matches {
+                    list.push(id)?;
+                }
+                // An unknown tag is an empty table, not an error or `nil`: a
+                // mod asking "every hard block" should not have to guess
+                // which tags anything actually uses first.
+                Ok(list)
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("tagged", tagged)
+            .map_err(|err| self.vm_error(&err))?;
+
         Ok(())
     }
 
@@ -9956,6 +10003,14 @@ fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     // A speed per material (Craft ask 2): a bronze pick fast on rock and slow
     // on earth. A bare name is the mod's own; a namespaced one may be another
     // mod's block, and one nobody registered is simply never asked about.
+    //
+    // A key of the form `"tag:<name>"` (Craft ask 11) names a TAG rather than
+    // a material — `speeds = { ["tag:soil"] = 2.0 }` — and is kept exactly as
+    // written, like any other namespaced key: it already contains a colon, so
+    // the branch below that qualifies a bare name never touches it. Nothing
+    // here resolves it; a tag names no material until every mod has
+    // registered, so that happens once at freeze (`handle.rs`, alongside the
+    // rest of this table's resolution to the world's ids), not here.
     let speeds = lua.create_table()?;
     if let Some(table) = spec.get::<Option<Table>>("speeds")? {
         for pair in table.pairs::<String, f32>() {
@@ -17748,6 +17803,257 @@ mod entity_tests {
             other => other.to_string(),
         };
         assert!(detail.contains("must be a positive"), "{detail}");
+    }
+
+    #[test]
+    fn game_tagged_answers_registration_order_and_only_so_far() {
+        // Craft ask 11(a): the other direction from `game.tags` — which
+        // blocks carry a tag, not what a block is tagged. Callable in the
+        // registration window, where it answers only what has registered
+        // before the call; a mod that loads after adds blocks the caller
+        // never hears of, which is the mod's own load order to arrange
+        // (`depends`).
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "world",
+            "game.register_block{ id = 'granite', tags = { 'stone', 'hard' } }\n\
+             game.register_block{ id = 'clay', tags = { 'soil' } }\n\
+             local before = game.tagged('stone')\n\
+             assert(#before == 1 and before[1] == 'world:granite', \
+                    'only what is registered so far')\n\
+             game.register_block{ id = 'basalt', tags = { 'stone', 'hard' } }\n\
+             local after = game.tagged('stone')\n\
+             assert(#after == 2 and after[1] == 'world:granite' and after[2] == 'world:basalt', \
+                    'registration order, not alphabetical')\n\
+             assert(#game.tagged('nonexistent') == 0, 'an unknown tag is empty')\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+
+        // A mod loading after `world` sees every block `world` registered,
+        // and can add to the same tag itself.
+        load(
+            &mut vm,
+            "later",
+            "local stone = game.tagged('stone')\n\
+             assert(#stone == 2, 'a later mod sees what registered before it')\n\
+             game.register_block{ id = 'schist', tags = { 'stone' } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+
+        let _ = vm.freeze();
+        vm.eval_in(
+            "world",
+            "local complete = game.tagged('stone')\n\
+             assert(#complete == 3 and complete[3] == 'later:schist', \
+                    'complete once frozen, including a block a later mod named')",
+        )
+        .expect("frozen lookup");
+    }
+
+    #[test]
+    fn game_tagged_never_answers_an_item() {
+        // Craft ask 11(a): "materials that are not blocks (items) are
+        // excluded unless the registry does not distinguish". It does not —
+        // `register_item` and `register_block` share one id table and one
+        // rules table — but only `register_block`'s field list has `tags`,
+        // so nothing ever writes one for an item, and `game.tagged` needs
+        // no filter of its own to leave items out.
+        let mut vm = vm();
+        let err = load(
+            &mut vm,
+            "world",
+            "game.register_item{ id = 'coin', tags = { 'currency' } }",
+        )
+        .expect_err("an item has no `tags` field to register one with");
+        let detail = match &err {
+            ScriptError::Vm { detail, .. }
+            | ScriptError::Load { detail, .. }
+            | ScriptError::Runtime { detail, .. } => detail.clone(),
+            other => other.to_string(),
+        };
+        assert!(detail.contains("unknown field"), "{detail}");
+    }
+
+    #[test]
+    fn a_tag_speed_resolves_at_freeze_to_a_block_a_later_mod_registers() {
+        // Craft ask 11(b): resolution happens once, after every mod has
+        // registered — not when `register_tool` is called — so a tag named
+        // by a tool loaded early still reaches a block a mod loading AFTER
+        // it registers.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "smithy",
+            "game.register_tool{ id = 'pick', speed_multiplier = 1, \
+                 speeds = { ['tag:soil'] = 2.0 } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "world",
+            "game.register_block{ id = 'sand', tags = { 'soil' } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+
+        let tools = vm.registered_tools();
+        let rules = vm.registered_block_rules();
+        let material_ids = vm.block_ids();
+        let speeds = crate::script::resolve_tool_speeds(&tools, &rules, &material_ids);
+
+        let sand = material_ids["world:sand"];
+        assert_eq!(
+            speeds["smithy:pick"].get(&sand),
+            Some(&2.0),
+            "a block a later mod registers still gets the tag's speed"
+        );
+    }
+
+    #[test]
+    fn a_speed_named_for_the_material_beats_a_tags_for_the_same_block() {
+        // Craft ask 11(b): "a speed named for the material itself beats a
+        // tag's" — the mod said something more specific about that one
+        // block.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "smithy",
+            "game.register_tool{ id = 'pick', speed_multiplier = 1, \
+                 speeds = { ['tag:soil'] = 2.0, ['world:sand'] = 0.5 } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "world",
+            "game.register_block{ id = 'sand', tags = { 'soil' } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+
+        let tools = vm.registered_tools();
+        let rules = vm.registered_block_rules();
+        let material_ids = vm.block_ids();
+        let speeds = crate::script::resolve_tool_speeds(&tools, &rules, &material_ids);
+
+        let sand = material_ids["world:sand"];
+        assert_eq!(
+            speeds["smithy:pick"].get(&sand),
+            Some(&0.5),
+            "the material's own speed, not the tag's"
+        );
+    }
+
+    #[test]
+    fn two_tags_reaching_one_block_the_higher_speed_wins() {
+        // Craft ask 11(b): "two tags matching one material — the higher
+        // speed wins" — a deterministic rule that cannot depend on Lua's
+        // unspecified pair order.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "smithy",
+            "game.register_tool{ id = 'pick', speed_multiplier = 1, \
+                 speeds = { ['tag:soil'] = 2.0, ['tag:loose'] = 5.0 } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        load(
+            &mut vm,
+            "world",
+            "game.register_block{ id = 'silt', tags = { 'soil', 'loose' } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+
+        let tools = vm.registered_tools();
+        let rules = vm.registered_block_rules();
+        let material_ids = vm.block_ids();
+        let speeds = crate::script::resolve_tool_speeds(&tools, &rules, &material_ids);
+
+        let silt = material_ids["world:silt"];
+        assert_eq!(
+            speeds["smithy:pick"].get(&silt),
+            Some(&5.0),
+            "the higher of the two tags' speeds"
+        );
+    }
+
+    /// A single captured event, as `" field=value"` pairs — enough to check
+    /// that a warning named the right tool and tag without pulling in
+    /// `tracing-subscriber` as a dev-dependency just for one test.
+    struct RecordedLine(String);
+
+    impl tracing::field::Visit for RecordedLine {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    /// A minimal [`tracing::Subscriber`] that records every event's fields
+    /// into a shared buffer a test can read afterwards.
+    struct EventRecorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for EventRecorder {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut line = RecordedLine(String::new());
+            event.record(&mut line);
+            self.0.lock().expect("lock").push(line.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn an_unknown_tag_speed_warns_and_still_loads() {
+        // Craft ask 11(b): "unknown tags at freeze are a load-time warning
+        // naming the tool and tag, not an error."
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "smithy",
+            "game.register_tool{ id = 'pick', speed_multiplier = 1, \
+                 speeds = { ['tag:nonexistent'] = 3.0 } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("an unknown tag is a warning, not a load error");
+        let _ = vm.freeze();
+
+        let tools = vm.registered_tools();
+        let rules = vm.registered_block_rules();
+        let material_ids = vm.block_ids();
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = EventRecorder(events.clone());
+        let speeds = tracing::subscriber::with_default(recorder, || {
+            crate::script::resolve_tool_speeds(&tools, &rules, &material_ids)
+        });
+
+        assert!(
+            speeds["smithy:pick"].is_empty(),
+            "a tag nothing carries gives the tool no speed"
+        );
+        let log = events.lock().expect("lock").join("\n");
+        assert!(
+            log.contains("smithy:pick") && log.contains("nonexistent"),
+            "the warning should name the tool and the tag: {log}"
+        );
     }
 
     #[test]

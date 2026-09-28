@@ -100,6 +100,62 @@ fn write_warden_without_tools(name: &str) -> PathBuf {
     root
 }
 
+/// Two mods for the tag-speed test (Craft ask 11).
+///
+/// `smithy` registers a pick whose only per-material speed is
+/// `"tag:hard"`, and loads FIRST — topological order ties break
+/// alphabetically, and `smithy` sorts before `world` — so the block that
+/// speed reaches is one `world` registers after `smithy` has already
+/// finished loading. If the speed only resolved when `register_tool` ran,
+/// it would find nothing to attach to and this test's fast dig would not be
+/// fast. `world` registers the ground, one `hard`-tagged block and one
+/// plain block of the SAME hardness, so a difference in dig time between
+/// them cannot be explained by anything but the tag.
+fn write_tag_speed_mods(name: &str) -> PathBuf {
+    let root = scratch(name);
+
+    let smithy = root.join("smithy");
+    std::fs::create_dir_all(&smithy).expect("mod dir");
+    std::fs::write(
+        smithy.join("mod.toml"),
+        "id = \"smithy\"\nname = \"Smithy\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        smithy.join("init.lua"),
+        "game.register_tool{\n\
+         \x20   id = \"pick\",\n\
+         \x20   brush = \"block\",\n\
+         \x20   speed_multiplier = 1.0,\n\
+         \x20   default = true,\n\
+         \x20   speeds = { [\"tag:hard\"] = 6.0 },\n\
+         }\n",
+    )
+    .expect("script");
+
+    let world = root.join("world");
+    std::fs::create_dir_all(&world).expect("mod dir");
+    std::fs::write(
+        world.join("mod.toml"),
+        "id = \"world\"\nname = \"World\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        world.join("init.lua"),
+        "local ground = game.register_block{ id = \"ground\" }\n\
+         game.register_block{ id = \"stone_hard\", hardness = 3.0, tags = { \"hard\" } }\n\
+         game.register_block{ id = \"stone_plain\", hardness = 3.0 }\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
+         end)\n",
+    )
+    .expect("script");
+
+    root
+}
+
 fn start(name: &str, mods: PathBuf) -> ServerHandle {
     ServerHandle::start(&Settings {
         world_options: Vec::new(),
@@ -173,6 +229,37 @@ async fn dig_and_see(bot: &mut Bot, server: &ServerHandle, pos: BlockPos, materi
         }
     }
     false
+}
+
+/// Seeds a block, digs it with whatever tool is already selected, and
+/// reports how long the removal took — or `None` if it never came off.
+///
+/// The Craft ask 11 tag-speed test needs the TIME, not just whether the dig
+/// finished: two blocks of the same hardness taking different times with the
+/// same tool selected is the only observable difference a tag speed makes.
+async fn dig_and_time(
+    bot: &mut Bot,
+    server: &ServerHandle,
+    pos: BlockPos,
+    material: u16,
+    patience: Duration,
+) -> Option<Duration> {
+    assert!(server.seed_block(pos, material), "seed queue full");
+    bot.expect_block(pos, material, Duration::from_secs(10))
+        .await
+        .expect("the seed should land");
+
+    let started = tokio::time::Instant::now();
+    bot.start_dig(centre_of(pos)).await.expect("start dig");
+
+    let deadline = started + patience;
+    while tokio::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(50), bot.recv()).await;
+        if bot.block_is_empty(pos) {
+            return Some(started.elapsed());
+        }
+    }
+    None
 }
 
 #[test]
@@ -549,6 +636,45 @@ fn a_blocks_registered_drops_apply_and_may_name_another_mods_block() {
             units_of(&stacks, ore),
             0,
             "the ore itself was paid as well: {stacks:?}"
+        );
+    });
+
+    assert!(server.stop());
+}
+
+#[test]
+fn a_tag_speed_digs_a_later_registered_tagged_block_faster() {
+    // Craft ask 11(b): `register_tool{ speeds = { ["tag:hard"] = 6.0 } }`
+    // resolves at freeze, once every mod has registered — not when
+    // `register_tool` ran — so it still reaches `world:stone_hard`, a block
+    // named only by `world`, a mod that loads AFTER `smithy`. Comparing
+    // against `world:stone_plain`, the SAME hardness but no tag, is what
+    // rules out "the tool just digs everything faster than three seconds
+    // suggests": nothing differs between the two digs but the tag.
+    let server = start("tag-speed", write_tag_speed_mods("tag-speed"));
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let hard = material_named(&bot, "world:stone_hard");
+        let plain = material_named(&bot, "world:stone_plain");
+
+        bot.select_tool(None).await.expect("the default pick");
+
+        // Generous relative to either expected time (0.5s tagged, 3s plain
+        // at 20 ticks/s) so CI jitter cannot itself explain a miss.
+        let patience = Duration::from_secs(8);
+        let tagged = dig_and_time(&mut bot, &server, BlockPos::new(2, -1, 0), hard, patience)
+            .await
+            .expect("the tag-sped block should come apart");
+        let untagged = dig_and_time(&mut bot, &server, BlockPos::new(-2, -1, 0), plain, patience)
+            .await
+            .expect("the plain block of the same hardness should come apart too");
+
+        assert!(
+            tagged * 2 < untagged,
+            "a tag:hard speed of 6x on hardness 3.0 should dig in roughly a \
+             sixth of the untagged time, not something comparable: tagged \
+             {tagged:?}, untagged {untagged:?}"
         );
     });
 

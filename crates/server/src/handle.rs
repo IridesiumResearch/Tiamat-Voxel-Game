@@ -2535,17 +2535,18 @@ impl ServerHandle {
         // same resolution the hardness table gets, so the dig loop's material
         // finds them (Craft ask 2). A name nobody registered is dropped: the
         // tool digs that at its general speed, which is what the mod wrote.
-        let tool_speeds = tools
-            .values()
-            .map(|tool| {
-                let speeds = tool
-                    .speeds
-                    .iter()
-                    .filter_map(|(block, factor)| Some((*material_ids.get(block)?, *factor)))
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                (tool.id.clone(), speeds)
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+        // A `"tag:<name>"` key (Craft ask 11) is resolved here too, against
+        // the same block rules the hardness table reads, once every mod has
+        // registered — see `resolve_tool_speeds` for the precedence between a
+        // tag and a named material, and between two tags.
+        let tool_speeds = tiamat_core::script::resolve_tool_speeds(
+            &tools.values().cloned().collect::<Vec<_>>(),
+            &host
+                .as_ref()
+                .map(|loaded| loaded.vm().registered_block_rules())
+                .unwrap_or_default(),
+            &material_ids,
+        );
         // The extra places a mod wants stacks to be able to sit. Read here for
         // the same reason the tools are: the registries are frozen (charter
         // rule 9), so this is settled once and cannot change under a player.
