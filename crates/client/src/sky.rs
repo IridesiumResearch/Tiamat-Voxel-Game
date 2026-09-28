@@ -480,6 +480,16 @@ impl Bolts {
     pub fn is_empty(&self) -> bool {
         self.active.is_empty()
     }
+
+    /// Forgets every bolt, for a domain that is not this one.
+    ///
+    /// A bolt is drawn at a world position, as a particle is, so one struck
+    /// in the space a player has just left would go on striking the same
+    /// coordinates in the space they entered. A flash has no position and
+    /// is left to finish.
+    pub fn clear(&mut self) {
+        self.active.clear();
+    }
 }
 
 /// How many bolts a client will draw at once.
@@ -1226,6 +1236,10 @@ mod tests {
             bolts.strike(bolt);
         }
         assert_eq!(bolts.live().count(), MAX_BOLTS);
+
+        // And all of them at once, for a player who has changed domain.
+        bolts.clear();
+        assert!(bolts.is_empty());
     }
 
     #[test]

@@ -3933,6 +3933,9 @@ impl App {
         self.store.clear();
         self.entities.clear();
         self.particles.clear();
+        // A bolt is drawn where it struck, like a particle, so one from the
+        // space left behind would strike the one entered for its last ticks.
+        self.weather.bolts.clear();
         tracing::info!(%domain, "moved to another domain");
     }
 
