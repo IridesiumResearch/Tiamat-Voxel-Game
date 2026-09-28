@@ -82,7 +82,10 @@ fn sample_tree() -> tiamat_core::ui::Tree {
                     text: "Inventory".to_owned(),
                 },
                 name: "title".to_owned(),
-                tooltip: None,
+                // UI ask 15: one `Some` among the rest of this tree's `None`s,
+                // so a mutation reaching `Node::tooltip` has both a length to
+                // grow past the cap and a `None` elsewhere to compare it to.
+                tooltip: Some("what you're carrying".to_owned()),
                 style: Style::default(),
                 grow: 0,
                 size: None,

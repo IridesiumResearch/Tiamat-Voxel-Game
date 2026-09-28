@@ -199,6 +199,11 @@ fn seeds() -> Vec<(&'static str, Tree)> {
                         text_size: Some(16),
                         font: Some("seeds:display".to_owned()),
                     },
+                    // UI ask 15, alongside the rest of this seed's non-`None`
+                    // optional fields: a tree with no tooltip in it never
+                    // mutates one into existence, only ever loses the one it
+                    // starts with.
+                    tooltip: Some("styled, and hinted".to_owned()),
                     grow: 1,
                     size: Some(320),
                     cross_size: Some(200),
