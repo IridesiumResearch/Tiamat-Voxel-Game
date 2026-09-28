@@ -3985,6 +3985,8 @@ impl App {
         match event {
             crate::net::Event::SkyModifier(modifier) => self.weather.modifier.set(*modifier),
             crate::net::Event::Flash(flash) => self.weather.flashes.strike(*flash),
+            // Built from its seed here, once; drawn by `place_lightning`.
+            crate::net::Event::Lightning(bolt) => self.weather.bolts.strike(*bolt),
             crate::net::Event::Precipitation(rain) => self.weather.rain.set(*rain),
             crate::net::Event::CloudLayer(layer) => self.cloud_layer = *layer,
             // Eased on the client over the ticks the message names, as it
@@ -5150,6 +5152,7 @@ impl App {
         let moment = crate::sky::modified(self.sky.moment(), &modifier);
         // And lightning over that: a moment's light, no relight.
         self.weather.flashes.advance(dt);
+        self.weather.bolts.advance(dt);
         self.weather.deck.advance(dt);
         self.weather.map.advance(dt);
         let moment = crate::sky::flashed(moment, &self.weather.flashes);
@@ -5478,6 +5481,21 @@ impl App {
         // of those would be two things to keep in step.
         self.place_props(Some(&figure));
         self.place_particles(dt);
+        self.place_lightning();
+    }
+
+    /// Hands the renderer every bolt in the sky, where it is from this
+    /// camera and how bright it is at its age — weather ask W26.
+    ///
+    /// Each bolt's top is taken to the camera in `f64` by `offset_to`, and
+    /// its path, relative to that top, is added in `f32` (charter rule 7).
+    fn place_lightning(&mut self) {
+        let mut strokes = Vec::new();
+        for (bolt, path, age) in self.weather.bolts.live() {
+            let origin = self.camera.position.offset_to(bolt.from);
+            crate::render::lightning::strokes(bolt, path, age, origin, &mut strokes);
+        }
+        self.renderer.set_lightning(&strokes);
     }
 
     /// Places every entity in view for this frame.

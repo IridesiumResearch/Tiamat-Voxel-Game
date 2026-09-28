@@ -31,6 +31,7 @@ pub mod clouds;
 pub mod frustum;
 pub mod grade;
 pub mod graph;
+pub mod lightning;
 pub mod offscreen;
 pub mod particle;
 pub mod place_fog;
@@ -928,6 +929,8 @@ pub struct Renderer {
     place_fog: place_fog::PlaceFog,
     /// Every live particle, drawn last in the world pass. See `crate::particles`.
     particles: particle::Pass,
+    /// Every bolt in the sky, drawn after the particles — weather ask W26.
+    lightning: lightning::Pass,
     /// The cloud deck, and what this player is under. See `clouds`.
     clouds: clouds::Pass,
     /// This frame's view of it: where the camera stands, and the fog there.
@@ -1133,13 +1136,11 @@ impl Renderer {
 
         // One tint entry, meaning nothing varies: no material does until a
         // table says one does, and the shader's first test is the scale.
-        let (place_fog, particles, clouds) = build_atmosphere(&gpu);
+        let (place_fog, particles, lightning, clouds) = build_atmosphere(&gpu);
         let (view, grid, side, tints, bind_group) =
             build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, &place_fog, &clouds);
 
         let instances = build_instance_buffer(&gpu, 64);
-
-        let depth = make_depth(&gpu, width, height);
 
         // The engine's own rig, built in Rust and uploaded once. A mod-supplied
         // model goes through the same constructor — see `core::model`.
@@ -1148,6 +1149,9 @@ impl Renderer {
         let skinned_pipeline = skinned::colour_pipeline(&gpu, &skinned, &bind_layout, mode, target);
 
         Ok(Self {
+            // Built here, before `gpu` moves in below: a struct's fields are
+            // evaluated in the order they are written.
+            depth: make_depth(&gpu, width, height),
             hands,
             gpu,
             skinned,
@@ -1181,7 +1185,6 @@ impl Renderer {
             selection_capacity: SELECTION_CAPACITY,
             instances,
             instance_capacity: 64,
-            depth,
             depth_size: (width, height),
             mode,
             // Classic until told otherwise: a client with no config gets the
@@ -1219,6 +1222,7 @@ impl Renderer {
             fog_up: f32::MAX,
             place_fog,
             particles,
+            lightning,
             clouds,
             fog_here: place_fog::Uniforms::NONE,
             drawn: 0,
@@ -1676,8 +1680,12 @@ impl Renderer {
         self.place_fog.set((pos.x, pos.z), fog);
     }
 
-    /// Writes the particle pass's view of this frame.
-    fn prepare_particles(&self, camera: &Camera, view_projection: glam::Mat4) {
+    /// Writes the particle pass's and the lightning pass's view of this
+    /// frame. `height` is the target's, in pixels, which is what keeps a far
+    /// bolt from falling between them.
+    fn prepare_air(&self, camera: &Camera, view_projection: glam::Mat4, height: u32) {
+        self.lightning
+            .prepare(&self.gpu, camera, view_projection, height);
         self.particles.prepare(
             &self.gpu,
             camera,
@@ -1717,6 +1725,21 @@ impl Renderer {
     #[must_use]
     pub const fn particle_count(&self) -> u32 {
         self.particles.count()
+    }
+
+    /// Sets the bolts to draw this frame, segment by segment, already
+    /// camera-relative and lit by their flicker — weather ask W26.
+    ///
+    /// **Every frame, like the particles.** The camera moves, and a bolt's
+    /// brightness is a function of its age.
+    pub fn set_lightning(&mut self, strokes: &[lightning::Instance]) {
+        self.lightning.set(&self.gpu, strokes);
+    }
+
+    /// How many bolt segments the next frame draws.
+    #[must_use]
+    pub const fn lightning_count(&self) -> u32 {
+        self.lightning.count()
     }
 
     /// Sets the cloud deck, the weather over it, and the player's own quality.
@@ -3029,7 +3052,7 @@ impl Renderer {
             .prepare(&self.gpu, camera.projection(aspect), &hands);
         self.hands_at = hands;
 
-        self.prepare_particles(camera, view_projection);
+        self.prepare_air(camera, view_projection, size.1);
 
         let culled = self.cull_and_upload(camera, view_projection);
         self.upload_chunk_borders(camera, &culled.visible);
@@ -3154,6 +3177,13 @@ impl Renderer {
             // Particles last of the blended things: they are in front of the
             // water as often as behind it, and unsorted either way.
             self.particles.draw(&mut pass, self.post.is_some());
+
+            // Lightning after them — weather ask W26. Additive, so it is the
+            // same over the water and the particles in whichever order they
+            // landed, and tested against the terrain's depth so a hill hides
+            // the part of a bolt behind it; before the post chain, so mode 3
+            // fogs and blooms it with the rest of the scene.
+            self.lightning.draw(&mut pass, self.post.is_some());
 
             self.draw_overlays(&mut pass, pass_targets.selection);
         }
@@ -4721,12 +4751,20 @@ fn build_world_pipeline(
 /// Split out of `Renderer::new`, which is at clippy's line ceiling — and split
 /// HERE because these five things are one decision: what the world shader reads
 /// before any material table has arrived.
-/// The three passes that draw the air: a place's fog, the particles and
-/// the sky with its deck and its stars.
-fn build_atmosphere(gpu: &Gpu) -> (place_fog::PlaceFog, particle::Pass, clouds::Pass) {
+/// The four passes that draw the air: a place's fog, the particles, the
+/// lightning, and the sky with its deck and its stars.
+fn build_atmosphere(
+    gpu: &Gpu,
+) -> (
+    place_fog::PlaceFog,
+    particle::Pass,
+    lightning::Pass,
+    clouds::Pass,
+) {
     (
         place_fog::PlaceFog::new(gpu),
         particle::Pass::new(gpu),
+        lightning::Pass::new(gpu),
         clouds::Pass::new(gpu),
     )
 }

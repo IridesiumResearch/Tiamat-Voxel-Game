@@ -541,6 +541,218 @@ fn particles_are_drawn_in_every_mode_and_hidden_behind_the_ground() {
     }
 }
 
+/// A bolt of the ask's own defaults between two world points.
+fn bolt_between(from: [f64; 3], to: [f64; 3]) -> tiamat_core::lightning::Lightning {
+    tiamat_core::lightning::Lightning {
+        from,
+        to,
+        seed: 0x5EED_B017,
+        colour: tiamat_core::lightning::DEFAULT_COLOUR,
+        width: tiamat_core::lightning::DEFAULT_WIDTH,
+        branches: tiamat_core::lightning::DEFAULT_BRANCHES,
+        ticks: tiamat_core::lightning::DEFAULT_TICKS,
+    }
+}
+
+/// A bolt as the client places it: its path from its seed, lit as it is the
+/// moment it strikes, relative to `camera` — `App::place_lightning`, minus
+/// the app.
+fn bolt_strokes(
+    bolt: &tiamat_core::lightning::Lightning,
+    camera: &Camera,
+) -> Vec<client::render::lightning::Instance> {
+    let path = tiamat_core::lightning::build_path(bolt);
+    let mut strokes = Vec::new();
+    client::render::lightning::strokes(
+        bolt,
+        &path,
+        0.0,
+        camera.position.offset_to(bolt.from),
+        &mut strokes,
+    );
+    strokes
+}
+
+/// Every pixel a bolt brightened: any channel up by at least a sixth of full
+/// over the same frame without it.
+fn brightened(bare: &Image, lit: &Image) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let (Some(before), Some(after)) = (bare.pixel(x, y), lit.pixel(x, y)) else {
+                continue;
+            };
+            if (0..3).any(|channel| after[channel] >= before[channel].saturating_add(40)) {
+                out.push((x, y));
+            }
+        }
+    }
+    out
+}
+
+/// Where a world point lands on the frame, in pixels.
+fn on_screen(camera: &Camera, world: [f64; 3]) -> (f32, f32) {
+    let aspect = WIDTH as f32 / HEIGHT as f32;
+    let clip = camera.view_projection(aspect)
+        * glam::Vec3::from_array(camera.position.offset_to(world)).extend(1.0);
+    let ndc = clip.truncate() / clip.w;
+    (
+        (ndc.x * 0.5 + 0.5) * WIDTH as f32,
+        (0.5 - ndc.y * 0.5) * HEIGHT as f32,
+    )
+}
+
+#[test]
+fn a_bolt_four_hundred_blocks_off_is_a_line_by_day_and_by_night() {
+    // Weather ask W26's gate: "a bolt from y + 300 to the ground at 400
+    // blocks is visible as a line at night and by day." From three hundred
+    // above the floor's top to the floor's height, four hundred blocks
+    // ahead, against the sky. It must light nearly every row between its
+    // two ends as the camera sees them, near the straight line between
+    // them, and stay narrow doing it — a line, not a flash of the frame.
+    //
+    // At that range its 0.4 blocks are a sixth of a pixel here; drawn at its
+    // true width it would be a dotted line or nothing, which is what the
+    // pass's floor in pixels is for. Every mode, since mode 3 draws it into
+    // the float target and fogs and blooms it after.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
+    };
+    // Up a little, so the frame holds the whole bolt.
+    camera.look(0.0, 0.2);
+    let bolt = bolt_between([24.0, 308.0, 420.0], [24.0, 8.0, 420.0]);
+    let strokes = bolt_strokes(&bolt, &camera);
+    let top = on_screen(&camera, bolt.from);
+    let bottom = on_screen(&camera, bolt.to);
+    assert!(
+        top.1 > 0.0 && bottom.1 < HEIGHT as f32,
+        "the bolt is not in frame: {top:?} to {bottom:?}"
+    );
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        for dark in [false, true] {
+            let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+            renderer.set_lighting_mode(mode);
+            if dark {
+                night(&mut renderer);
+            }
+            let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+            let bare = target.capture(&mut renderer, &camera).expect("capture");
+            renderer.set_lightning(&strokes);
+            let lit = target.capture(&mut renderer, &camera).expect("capture");
+            let pixels = brightened(&bare, &lit);
+
+            // Truncated rather than rounded: both ends are on the frame, so
+            // the cast is the floor, and the first whole row is the next.
+            let (first, last) = (top.1 as u32 + 1, bottom.1 as u32);
+            let rows = last - first + 1;
+            // A row is on the line if something near the straight line
+            // between the ends lit in it. Near is wide enough for the
+            // trunk's bends, which wander a sixth of its length at most.
+            let on_line = (first..=last)
+                .filter(|&row| {
+                    let along = (row as f32 - top.1) / (bottom.1 - top.1);
+                    let column = top.0 + (bottom.0 - top.0) * along;
+                    pixels
+                        .iter()
+                        .any(|&(x, y)| y == row && (x as f32 - column).abs() <= WIDTH as f32 / 6.0)
+                })
+                .count() as u32;
+            let when = if dark { "night" } else { "day" };
+            println!(
+                "{mode:?} by {when}: {} pixels lit, {on_line} of {rows} rows on the line",
+                pixels.len()
+            );
+            assert!(
+                on_line * 10 >= rows * 9,
+                "{mode:?} by {when}: only {on_line} of the {rows} rows between the bolt's \
+                 ends are lit near it, so it is not a line"
+            );
+            assert!(
+                (pixels.len() as u32) < rows * 24,
+                "{mode:?} by {when}: {} pixels lit for {rows} rows is a smear, not a line",
+                pixels.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bolt_behind_a_hill_is_hidden_where_the_hill_is() {
+    // The gate's other half: "a player behind a hill does not see the part
+    // the hill hides." A wall eight blocks tall stands twelve blocks ahead,
+    // and a bolt four hundred blocks behind it rises from the wall's foot to
+    // three hundred above: the wall covers its lower two thirds, the sky
+    // shows the rest. Nothing may change on the wall — depth-tested against
+    // the terrain, never drawn over it — and the part above it must still be
+    // there, or "hidden" would be a pass that draws nothing at all.
+    let Some(gpu) = gpu() else { return };
+    let chunks = wall_scene();
+    let mut camera = Camera {
+        position: Position::from_world(4.0, 10.0, 24.0),
+        ..Camera::default()
+    };
+    // East, along +x, at the wall at world x = 16; and up a little.
+    camera.look(-std::f32::consts::FRAC_PI_2, 0.15);
+    let bolt = bolt_between([404.0, 310.0, 24.0], [404.0, 10.0, 24.0]);
+    let strokes = bolt_strokes(&bolt, &camera);
+    // The wall's top edge and its foot, as the camera sees them.
+    let edge = on_screen(&camera, [16.0, 16.0, 24.0]).1;
+    let foot = on_screen(&camera, [16.0, 8.0, 24.0]).1;
+    let top = on_screen(&camera, bolt.from).1;
+    assert!(
+        top < edge - 10.0 && foot < HEIGHT as f32,
+        "the bolt does not clear the wall: top {top}, edge {edge}, foot {foot}"
+    );
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        for dark in [false, true] {
+            let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+            renderer.set_lighting_mode(mode);
+            if dark {
+                night(&mut renderer);
+            }
+            let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+            let bare = target.capture(&mut renderer, &camera).expect("capture");
+            renderer.set_lightning(&strokes);
+            let lit = target.capture(&mut renderer, &camera).expect("capture");
+            let pixels = brightened(&bare, &lit);
+            // Two rows of margin at the edge, where the wall's own pixels
+            // meet the sky.
+            let on_wall = pixels
+                .iter()
+                .filter(|&&(_, y)| (y as f32) > edge + 2.0 && (y as f32) < foot - 2.0)
+                .count();
+            let above = pixels
+                .iter()
+                .filter(|&&(_, y)| (y as f32) < edge - 2.0)
+                .count();
+            let when = if dark { "night" } else { "day" };
+            println!("{mode:?} by {when}: {above} pixels lit above the wall, {on_wall} on it");
+            assert_eq!(
+                on_wall, 0,
+                "{mode:?} by {when}: {on_wall} pixels of a bolt behind the wall reached the \
+                 frame, so it is not depth-tested"
+            );
+            assert!(
+                above > 20,
+                "{mode:?} by {when}: only {above} pixels of the part above the wall were drawn"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_particle_with_a_picture_on_it_draws_the_picture_the_right_way_up() {
     // `emit_particles{ texture = ... }` — Life ask 15. "13 particles a heart,

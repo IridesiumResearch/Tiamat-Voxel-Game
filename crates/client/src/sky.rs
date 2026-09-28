@@ -20,6 +20,7 @@
 //! players standing together must see the same sky.
 
 use tiamat_core::atmosphere::{CloudMap, Clouds, Flash, SkyModifier};
+use tiamat_core::lightning::{Lightning, Path};
 use tiamat_core::proto::{SkyFrame, SkyGrade};
 
 /// Everything a mod's weather does to this player's sky: the standing
@@ -31,6 +32,8 @@ pub struct Weather {
     pub modifier: Eased,
     /// Lightning, seen.
     pub flashes: Flashes,
+    /// Lightning, drawn — weather ask W26.
+    pub bolts: Bolts,
     /// The rain around this client, spawned here from the shape the server
     /// sent.
     pub rain: crate::particles::Emitter,
@@ -429,6 +432,61 @@ impl Flashes {
 
 /// How many strikes a client will hold at once; more than this is one storm.
 const MAX_FLASHES: usize = 16;
+
+/// The bolts drawn in this player's sky right now — weather ask W26.
+///
+/// Each is kept with the path built from its seed, once, when it strikes: a
+/// bolt's shape does not change while it flickers, and building it every
+/// frame would be sixty identical builds a second. Aged on frame time, like
+/// the flashes, and forgotten when its ticks are up.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Bolts {
+    /// Each with its path and its age in seconds.
+    active: Vec<(Lightning, Path, f32)>,
+}
+
+impl Bolts {
+    /// A bolt, just now. Past [`MAX_BOLTS`] it is not drawn, as a flash past
+    /// its cap is not lit: one more line in a storm already that busy is not
+    /// one anybody misses.
+    pub fn strike(&mut self, bolt: Lightning) {
+        if self.active.len() < MAX_BOLTS {
+            let path = tiamat_core::lightning::build_path(&bolt);
+            self.active.push((bolt, path, 0.0));
+        }
+    }
+
+    /// Advances by a frame and forgets what has gone out.
+    pub fn advance(&mut self, dt: f32) {
+        let tick = tiamat_core::tick::TICK_DURATION.as_secs_f32();
+        for (_, _, age) in &mut self.active {
+            *age += dt.max(0.0);
+        }
+        self.active
+            .retain(|(bolt, _, age)| *age < f32::from(bolt.ticks) * tick);
+    }
+
+    /// Every bolt still in the sky, with its path and its age in ticks —
+    /// the unit its flicker is written in.
+    pub fn live(&self) -> impl Iterator<Item = (&Lightning, &Path, f32)> {
+        let tick = tiamat_core::tick::TICK_DURATION.as_secs_f32();
+        self.active
+            .iter()
+            .map(move |(bolt, path, age)| (bolt, path, *age / tick))
+    }
+
+    /// Whether anything is drawn.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.active.is_empty()
+    }
+}
+
+/// How many bolts a client will draw at once.
+///
+/// The lightning pass sizes its buffer from this, at the cap for forks: a
+/// few thousand segments, a hundred and fifty kilobytes.
+pub const MAX_BOLTS: usize = 16;
 
 /// A moment with the flashes added.
 ///
@@ -1137,6 +1195,37 @@ mod tests {
         assert_eq!(dim.intensity, 0.5);
         assert_eq!(dim.sky, [0.5, 0.5, 0.5]);
         assert_eq!(dim.grade.saturation, 0.5);
+    }
+
+    #[test]
+    fn a_bolt_is_drawn_for_its_ticks_and_then_forgotten() {
+        // Weather ask W26: built once when it strikes, drawn for its ticks
+        // on frame time, gone after; past the cap a bolt is not drawn at all.
+        let bolt = tiamat_core::lightning::Lightning {
+            from: [0.0, 300.0, 0.0],
+            to: [0.0, 0.0, 0.0],
+            seed: 3,
+            colour: tiamat_core::lightning::DEFAULT_COLOUR,
+            width: 0.4,
+            branches: 2,
+            ticks: 8,
+        };
+        let tick = tiamat_core::tick::TICK_DURATION.as_secs_f32();
+        let mut bolts = Bolts::default();
+        bolts.strike(bolt);
+        let (_, path, age) = bolts.live().next().expect("struck");
+        assert_eq!(*path, tiamat_core::lightning::build_path(&bolt));
+        assert!(age.abs() < f32::EPSILON);
+        bolts.advance(tick * 7.5);
+        let (_, _, age) = bolts.live().next().expect("still in the sky");
+        assert!((age - 7.5).abs() < 1e-3, "ages in ticks: {age}");
+        bolts.advance(tick);
+        assert!(bolts.is_empty(), "out after its eight ticks");
+
+        for _ in 0..MAX_BOLTS + 4 {
+            bolts.strike(bolt);
+        }
+        assert_eq!(bolts.live().count(), MAX_BOLTS);
     }
 
     #[test]
