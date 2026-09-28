@@ -2211,6 +2211,103 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_editor_with_an_atlas_draws_every_cell_from_its_materials_tile() {
+        // **UI ask 16, reported from the window**: the editor drew a black
+        // cube. Every earlier editor test ran with `Icons::default()` and took
+        // the flat-tint branch, so none of them had ever seen what the editor
+        // hands egui once the atlas is up. This is that half, on the CPU: which
+        // texture, which UVs, which colour. What the GPU then makes of it is
+        // `a_shape_editor_is_drawn_in_its_materials_colour` in the screenshot
+        // tests, which is where the black actually came from.
+        let tiles = crate::texture::Atlas::build(&[None, None, None, None]).tiles_only();
+        let atlas = egui::TextureId::User(9);
+        let material = 2;
+        let (u0, v0, u1, v1) = tiles.uv_of(material).expect("the atlas is up");
+
+        let ctx = egui::Context::default();
+        crate::app::install_fonts(&ctx);
+        let mut node = Node::new(Widget::ShapeEditor {
+            shape: tiamat_core::block::OCCUPANCY_FULL,
+            material,
+        });
+        node.name = "cut".to_owned();
+        // What the reporting mod sets: a clear background, which is a style
+        // with a colour in it, so `Paint::fill` is `Some` for this node.
+        node.style.background = Some([0, 0, 0, 0]);
+        let mut open = BTreeMap::new();
+        open.insert(
+            "mod:screen".to_owned(),
+            Screen::new(Tree { nodes: vec![node] }, false),
+        );
+        let mut dialogs = Dialogs::default();
+        let views = BTreeMap::new();
+        let mut output = None;
+        // **With the clock running.** A sheet fades in, and a frame drawn
+        // before the fade has finished carries every vertex colour at a
+        // fraction of its alpha — which would pass for "dark" here for a reason
+        // that has nothing to do with the editor.
+        for frame in 0..6 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 720.0),
+                )),
+                time: Some(f64::from(frame)),
+                ..Default::default()
+            };
+            output = Some(ctx.run_ui(raw, |root| {
+                let ctx = root.ctx().clone();
+                dialogs.draw(
+                    &ctx,
+                    &open,
+                    &views,
+                    Icons::new(Some(atlas), Some(&tiles)),
+                    &BTreeMap::new(),
+                    &crate::fonts::Fonts::new(),
+                    (1280.0, 720.0),
+                    0.0,
+                    crate::theme::Dressing::default(),
+                );
+            }));
+        }
+        let output = output.expect("six frames ran");
+
+        let faces: Vec<&egui::Mesh> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == atlas => Some(&**mesh),
+                _ => None,
+            })
+            .collect();
+        // Not a void: a whole block is twenty-seven cells, three faces each.
+        assert_eq!(
+            faces.len(),
+            27 * 3,
+            "a full block drew {} textured faces",
+            faces.len()
+        );
+        for face in &faces {
+            for vertex in &face.vertices {
+                let (u, v) = (vertex.uv.x, vertex.uv.y);
+                assert!(
+                    (u0..=u1).contains(&u) && (v0..=v1).contains(&v),
+                    "a cell samples ({u}, {v}), outside material {material}'s tile \
+                     ({u0}, {v0})..({u1}, {v1})"
+                );
+                // The shading's darkest face is 0.6 of white, and nothing else
+                // multiplies in: a colour below that is the tile being darkened
+                // before the GPU ever sees it.
+                let colour = vertex.color;
+                assert!(
+                    colour.a() == 255 && colour.r() >= 150 && colour.r() == colour.g(),
+                    "a cell's tint is {colour:?}, not a neutral shade of white"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_screen_stays_inside_the_sheet_however_much_is_in_it() {
         /// egui's window frame: `panel::size` is the room the CONTENTS get, and
         /// the window drawn around it is that plus its own margin and stroke.

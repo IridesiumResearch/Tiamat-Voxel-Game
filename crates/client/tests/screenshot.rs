@@ -9283,3 +9283,253 @@ fn a_gradient_in_the_weather_thins_the_clouds_out_and_does_not_cut_them() {
         );
     }
 }
+
+/// A server dialog drawn the way the window draws one, and read back.
+///
+/// Laid out and painted by `client::dialog`, tessellated by egui and rendered
+/// by `egui_wgpu` into a target of the window's own format — with the world's
+/// atlas registered as the interface's picture of every material through the
+/// accessor and the filter `register_atlas` in `main.rs` uses. So what this
+/// reads back is what a player's window shows, minus the world behind it.
+///
+/// Returns the frame and every mesh egui was handed that samples the atlas, in
+/// the order they were drawn, so a test can find a face and read what is under
+/// it.
+fn draw_dialog(
+    gpu: Gpu,
+    atlas: &Atlas,
+    tree: tiamat_core::ui::Tree,
+    views: &std::collections::BTreeMap<String, client::dialog::ViewContents>,
+) -> (Image, Vec<egui::Mesh>) {
+    let (width, height) = (640u32, 400u32);
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, width, height).expect("renderer");
+    renderer.set_atlas(atlas);
+    let tiles = atlas.tiles_only();
+    let gpu = renderer.gpu().clone();
+    let target = Offscreen::new(&gpu, width, height);
+    let mut painter = egui_wgpu::Renderer::new(
+        &gpu.device,
+        gpu.surface_format(),
+        egui_wgpu::RendererOptions {
+            msaa_samples: 1,
+            depth_stencil_format: None,
+            ..Default::default()
+        },
+    );
+    let atlas_id = painter.register_native_texture(
+        &gpu.device,
+        renderer.interface_atlas_view(),
+        wgpu::FilterMode::Nearest,
+    );
+
+    let ctx = egui::Context::default();
+    client::app::install_fonts(&ctx);
+    let mut dialogs = client::dialog::Dialogs::default();
+    let mut open = std::collections::BTreeMap::new();
+    open.insert(
+        "mod:screen".to_owned(),
+        client::dialog::Screen::new(tree, false),
+    );
+    let fonts = client::fonts::Fonts::new();
+    let area = (width as f32, height as f32);
+    // **With the clock running**, a second a frame: a sheet fades in, and a
+    // frame drawn before the fade has finished is dim all over for a reason
+    // that has nothing to do with what is being tested.
+    let mut output = None;
+    for frame in 0..6 {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(area.0, area.1),
+            )),
+            time: Some(f64::from(frame)),
+            ..Default::default()
+        };
+        let drawn = ctx.run_ui(raw, |root| {
+            let ctx = root.ctx().clone();
+            dialogs.draw(
+                &ctx,
+                &open,
+                views,
+                client::icons::Icons::new(Some(atlas_id), Some(&tiles)),
+                &std::collections::BTreeMap::new(),
+                &fonts,
+                area,
+                0.0,
+                client::theme::Dressing::default(),
+            );
+        });
+        // Every frame's, in order: the first carries the font atlas, and a
+        // later one may patch it.
+        for (id, delta) in &drawn.textures_delta.set {
+            painter.update_texture(&gpu.device, &gpu.queue, *id, delta);
+        }
+        output = Some(drawn);
+    }
+    let output = output.expect("six frames ran");
+
+    let faces: Vec<egui::Mesh> = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == atlas_id => {
+                Some((**mesh).clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let triangles = ctx.tessellate(output.shapes, 1.0);
+    let screen = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: [width, height],
+        pixels_per_point: 1.0,
+    };
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dialog"),
+        });
+    painter.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &triangles, &screen);
+    {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("dialog"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target.view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        painter.render(&mut pass.forget_lifetime(), &triangles, &screen);
+    }
+    gpu.queue.submit(Some(encoder.finish()));
+    let frame = target.read_back(&gpu).expect("read the dialog back");
+    (frame, faces)
+}
+
+#[test]
+fn a_shape_editor_is_drawn_in_its_materials_colour() {
+    // **UI ask 16, reported from the window**: with a material chosen, the
+    // Crafting tab's shape editor was "a solid black block, or a black void".
+    // Every earlier editor test took the no-atlas branch, and the unit test
+    // beside the editor shows its meshes are right — the atlas's texture, UVs
+    // inside the material's tile, a neutral tint. So this draws them on a GPU,
+    // the way the window does, and reads the colour back.
+    //
+    // **Why it was black.** egui samples every texture as gamma-encoded bytes
+    // and does its arithmetic on those; its own textures are `Rgba8Unorm`. The
+    // atlas is `Rgba8UnormSrgb`, because the world's shaders want the hardware
+    // to decode it, and the view egui was given decoded too — so every texel
+    // was shown as its own LINEAR value. Dirt's (98, 78, 58) came out as
+    // (31, 19, 11), and at the 0.6 the front faces are shaded to, as (19, 11,
+    // 7): a black cube on a dark sheet. Coal, basalt and mud went to nothing.
+    //
+    // Dirt-coloured on purpose: the colour a first dig gives a player, and one
+    // the old path took to black. An orange test tile came out a dark rust
+    // instead, which a "not black" check would have waved through — so this
+    // checks the colour itself.
+    //
+    // The slot is drawn beside it through the same `Icons`: the fault was
+    // never the editor's own, and a slot showing the same material in a
+    // different colour from the editor next to it would be its own bug.
+    use tiamat_core::ui::{Align, Build, Direction, Node, Widget};
+
+    const DIRT: [u8; 4] = [98, 78, 58, 255];
+    let Some(gpu) = gpu() else { return };
+    // The one device the fix cannot reach, and says so: see
+    // `Renderer::interface_atlas_view` for what such a device draws instead.
+    if !gpu.view_formats {
+        println!(
+            "SKIPPING: `{}` via {} cannot view one texture with and without its sRGB decode, \
+             so the interface draws from the world's view and is darker than the tile",
+            gpu.adapter, gpu.backend
+        );
+        return;
+    }
+    let atlas = Atlas::build(&[None, None, Some(Image::solid(16, 16, DIRT))]);
+
+    let mut slot = Node::new(Widget::ItemSlot {
+        view: "player:main".to_owned(),
+        index: 0,
+    });
+    slot.size = Some(96);
+    let mut editor = Node::new(Widget::ShapeEditor {
+        shape: tiamat_core::block::OCCUPANCY_FULL,
+        material: 2,
+    });
+    editor.name = "cut".to_owned();
+    editor.grow = 1;
+    // What the reporting mod gives its editor.
+    editor.style.background = Some([0, 0, 0, 0]);
+    let tree = Build::of(
+        Node::new(Widget::Container {
+            direction: Direction::Row,
+            gap: 8,
+            padding: 8,
+            align: Align::Stretch,
+        }),
+        vec![Build::of(slot, Vec::new()), Build::of(editor, Vec::new())],
+    )
+    .flatten();
+    let mut views = std::collections::BTreeMap::new();
+    views.insert(
+        "player:main".to_owned(),
+        client::dialog::ViewContents {
+            slots: vec![Some(tiamat_core::proto::StackDef {
+                material: 2,
+                units: 27,
+                shape: 0,
+                detail: None,
+            })],
+            held: None,
+        },
+    );
+
+    let (frame, faces) = draw_dialog(gpu, &atlas, tree, &views);
+    if let Some(dir) = std::env::var_os("TIAMAT_DIALOG_PICTURES") {
+        let dir = std::path::PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        write_png(&dir.join("shape-editor.png"), &frame);
+    }
+    // The slot's whole block is three faces; the editor's is twenty-seven
+    // cells of three. Painted in tree order, and each in its own draw order —
+    // so the slot's cube is the first three and the editor's nearest cell,
+    // which nothing is drawn over, is the last three.
+    assert_eq!(faces.len(), 3 + 27 * 3, "not one cube and one editor");
+    let nearest = &faces[faces.len() - 3..];
+    for (who, drawn) in [("slot", &faces[..3]), ("editor", nearest)] {
+        for face in drawn {
+            // The middle of the face, clear of the outline round its edge.
+            let middle = face
+                .vertices
+                .iter()
+                .fold(egui::Vec2::ZERO, |sum, vertex| sum + vertex.pos.to_vec2())
+                / face.vertices.len() as f32;
+            let (x, y) = (middle.x as u32, middle.y as u32);
+            let got = average(&frame, x - 1, y - 1, x + 2, y + 2).map(|c| c * 255.0);
+            // egui multiplies the tile by the face's shade in the bytes it
+            // sampled, so that is the colour a correct path shows.
+            let shade = f32::from(face.vertices[0].color.r()) / 255.0;
+            let want = [DIRT[0], DIRT[1], DIRT[2]].map(|c| f32::from(c) * shade);
+            let off = got
+                .iter()
+                .zip(want)
+                .map(|(got, want)| (got - want).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                off <= 8.0,
+                "the {who}'s face shaded {shade:.2} at ({x}, {y}) is {got:?} where the tile times \
+                 its shade is {want:?}: the atlas is not reaching the interface as the colour it \
+                 is (a texel shown as its own linear value is what a view with an sRGB decode \
+                 does to egui)"
+            );
+        }
+    }
+}

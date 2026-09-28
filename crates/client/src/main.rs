@@ -2423,7 +2423,10 @@ fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dr
 ///
 /// **Not a second copy.** The atlas is uploaded by the renderer and this
 /// registers a view of that same texture, so an inventory slot and the wall
-/// built from it cannot disagree about what a material looks like.
+/// built from it cannot disagree about what a material looks like — the view
+/// made for egui, without the sRGB decode the world's shaders want, or every
+/// material is drawn as its own linear value (UI ask 16's black shape editor;
+/// see `Renderer::interface_atlas_view`).
 ///
 /// Nearest filtering: a 16-pixel tile blown up to a 48-point slot should look
 /// like the blocks do, not like a smear.
@@ -2445,7 +2448,7 @@ fn register_atlas(surface: &mut Surface) {
     };
     surface.atlas_texture = Some(surface.egui_renderer.register_native_texture(
         &device,
-        app.renderer().atlas_view(),
+        app.renderer().interface_atlas_view(),
         wgpu::FilterMode::Nearest,
     ));
 }

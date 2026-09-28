@@ -15,6 +15,11 @@
 //! ([`egui_wgpu::Renderer::register_native_texture`]) and the layout to point
 //! into it with ([`TileMap`]); neither is a second copy of the image.
 //!
+//! The view is the texture's bytes WITHOUT the sRGB decode the world samples
+//! it with — see [`crate::render::Renderer::interface_atlas_view`]. egui does
+//! its arithmetic on the bytes, and a decoding view drew every material as its
+//! own linear value: a dirt block in the shape editor came out black.
+//!
 //! # Both halves can be missing, and separately
 //!
 //! The material table arrives from the server after the window exists, so on

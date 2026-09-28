@@ -751,6 +751,13 @@ pub struct Gpu {
     /// `None` for a headless device. Captured here because this is where the
     /// adapter is, and asking a surface what it supports needs one.
     pub surface_format: Option<wgpu::TextureFormat>,
+    /// Whether a texture can be viewed with and without its sRGB decode.
+    ///
+    /// What lets the interface sample the world's atlas as the bytes they are
+    /// — see [`Renderer::interface_atlas_view`]. Every Vulkan, Metal and DX12
+    /// device can; the GL backends cannot, and asking one to is a validation
+    /// error rather than a quiet no, so it is asked here where the adapter is.
+    pub view_formats: bool,
 }
 
 /// Chooses the format to configure a window's surface with.
@@ -809,6 +816,10 @@ impl Gpu {
         let wireframe = adapter
             .features()
             .contains(wgpu::Features::POLYGON_MODE_LINE);
+        let view_formats = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("tiamat-client"),
@@ -845,6 +856,7 @@ impl Gpu {
             backend: format!("{:?}", info.backend),
             polygon_mode_line: wireframe,
             surface_format,
+            view_formats,
         })
     }
 
@@ -920,14 +932,17 @@ pub struct Renderer {
     /// The atlas geometry the shader needs, mirroring what was uploaded.
     atlas_grid: u32,
     atlas_side: u32,
-    /// The atlas texture itself, kept so the interface can draw from it.
+    /// The atlas texture itself, seen the way the world samples it and the way
+    /// the interface does.
     ///
-    /// **Kept only because egui needs a view to register.** The world pass
-    /// reaches the atlas through `bind_group` and never touches this; a slot in
-    /// an inventory has to draw the same pixels, and the alternative — a second
-    /// upload of the same image for the UI — would double the atlas's memory
-    /// just to show a player what they are carrying.
-    atlas_view: wgpu::TextureView,
+    /// The world's view is kept so its bind group can be rebuilt around it when
+    /// the tints change; the pass itself reaches the atlas through
+    /// `bind_group`. The interface's is **a view, not a copy**: a slot in an
+    /// inventory has to draw the same pixels the world does, and a second
+    /// upload of the same image for the UI would double the atlas's memory just
+    /// to show a player what they are carrying. See
+    /// [`Renderer::interface_atlas_view`] for why there are two.
+    atlas: AtlasViews,
     /// What each material's colour does, and whether any of them does.
     ///
     /// Held so the bind group can be rebuilt when the atlas changes without
@@ -1160,14 +1175,14 @@ impl Renderer {
         // One tint entry, meaning nothing varies: no material does until a
         // table says one does, and the shader's first test is the scale.
         let (place_fog, particles, lightning, clouds) = build_atmosphere(&gpu);
-        let (view, grid, side, tints, bind_group) =
+        let (views, grid, side, tints, bind_group) =
             build_atlas_bindings(&gpu, &bind_layout, &globals, &sampler, &place_fog, &clouds);
 
         let instances = build_instance_buffer(&gpu, 64);
 
         // The engine's own rig, built in Rust and uploaded once. A mod-supplied
         // model goes through the same constructor — see `core::model`.
-        let hands = viewmodel::Viewmodel::new(&gpu, &view, &sampler, target);
+        let hands = viewmodel::Viewmodel::new(&gpu, &views.world, &sampler, target);
         let skinned = skinned::Skinned::new(&gpu, tiamat_core::model::humanoid());
         let skinned_pipeline = skinned::colour_pipeline(&gpu, &skinned, &bind_layout, mode, target);
 
@@ -1193,7 +1208,7 @@ impl Renderer {
             sampler,
             atlas_grid: grid,
             atlas_side: side,
-            atlas_view: view,
+            atlas: views,
             tints,
             fluid_opacity: Vec::new(),
             biome_tints: BTreeMap::new(),
@@ -1610,7 +1625,7 @@ impl Renderer {
             &self.bind_layout,
             &self.globals,
             &WorldTextures {
-                atlas: &self.atlas_view,
+                atlas: &self.atlas.world,
                 sampler: &self.sampler,
                 shade: self.clouds.shade(),
             },
@@ -1647,7 +1662,7 @@ impl Renderer {
             &self.bind_layout,
             &self.globals,
             &WorldTextures {
-                atlas: &self.atlas_view,
+                atlas: &self.atlas.world,
                 sampler: &self.sampler,
                 shade: self.clouds.shade(),
             },
@@ -1661,7 +1676,7 @@ impl Renderer {
     /// Called once, when the material table and its textures arrive. Rebuilds
     /// the bind group because the texture view it referenced is gone.
     pub fn set_atlas(&mut self, atlas: &Atlas) {
-        let (view, grid, side) = upload_atlas(&self.gpu, atlas);
+        let (views, grid, side) = upload_atlas(&self.gpu, atlas);
         self.atlas_grid = grid;
         self.atlas_side = side;
         self.bind_group = make_bind_group(
@@ -1669,15 +1684,15 @@ impl Renderer {
             &self.bind_layout,
             &self.globals,
             &WorldTextures {
-                atlas: &view,
+                atlas: &views.world,
                 sampler: &self.sampler,
                 shade: self.clouds.shade(),
             },
             &self.tints.buffer,
             self.place_fog.buffer(),
         );
-        self.hands.set_atlas(&self.gpu, &view, &self.sampler);
-        self.atlas_view = view;
+        self.hands.set_atlas(&self.gpu, &views.world, &self.sampler);
+        self.atlas = views;
     }
 
     /// What the hands are holding and how far through a swing they are.
@@ -1694,9 +1709,29 @@ impl Renderer {
     /// **The same texture the world is drawn from**, which is the point: a slot
     /// showing stone and a wall made of it cannot disagree about what stone
     /// looks like, because there is one image.
+    ///
+    /// # Seen without its sRGB decode, and that is the fix for UI ask 16
+    ///
+    /// **egui samples every texture as the bytes in it.** Its own textures are
+    /// `Rgba8Unorm`, its shader multiplies and blends in that gamma-encoded
+    /// space, and its render target does the one conversion there is. The
+    /// atlas is `Rgba8UnormSrgb` so the world's shaders get linear light, and
+    /// handing egui a view with that decode made it happen twice: every texel
+    /// came out as its own LINEAR value, dirt's (98, 78, 58) as (31, 19, 11).
+    /// Reported from the window as a shape editor that drew "a solid black
+    /// block" — dirt shaded to its front face is black on a dark sheet, and
+    /// coal is black outright. A slot drew the same way, measured to the pixel
+    /// beside the editor; small and on a lighter ground, it read as a dark
+    /// block rather than a missing one, which is why the editor was blamed.
+    ///
+    /// So this is the same texture viewed as `Rgba8Unorm`: the bytes an artist
+    /// wrote, which is what egui expects. On a device that cannot view one
+    /// texture two ways — the GL backends, see [`Gpu::view_formats`] — it is the
+    /// world's view after all: darker than it should be, but still the tile,
+    /// and not a second copy of the atlas kept just for the interface.
     #[must_use]
-    pub const fn atlas_view(&self) -> &wgpu::TextureView {
-        &self.atlas_view
+    pub const fn interface_atlas_view(&self) -> &wgpu::TextureView {
+        &self.atlas.interface
     }
 
     /// Records one chunk COLUMN's biome colour.
@@ -4865,9 +4900,9 @@ fn build_atlas_bindings(
     sampler: &wgpu::Sampler,
     place_fog: &place_fog::PlaceFog,
     clouds: &clouds::Pass,
-) -> (wgpu::TextureView, u32, u32, TintTable, wgpu::BindGroup) {
+) -> (AtlasViews, u32, u32, TintTable, wgpu::BindGroup) {
     let placeholder = Atlas::build(&[None]);
-    let (view, grid, side) = upload_atlas(gpu, &placeholder);
+    let (views, grid, side) = upload_atlas(gpu, &placeholder);
     // One entry saying nothing varies: no material does until a table says so.
     let tints = TintTable {
         buffer: upload_tints(gpu, &[MaterialTint::none()]),
@@ -4880,14 +4915,14 @@ fn build_atlas_bindings(
         layout,
         globals,
         &WorldTextures {
-            atlas: &view,
+            atlas: &views.world,
             sampler,
             shade: clouds.shade(),
         },
         &tints.buffer,
         place_fog.buffer(),
     );
-    (view, grid, side, tints, bind_group)
+    (views, grid, side, tints, bind_group)
 }
 
 /// The per-material tint table, and whether anything in it varies.
@@ -4933,8 +4968,25 @@ fn upload_tints(gpu: &Gpu, tints: &[MaterialTint]) -> wgpu::Buffer {
         })
 }
 
-fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (wgpu::TextureView, u32, u32) {
+/// One atlas texture, seen the two ways its two consumers need.
+struct AtlasViews {
+    /// With the sRGB decode, as every world shader expects.
+    world: wgpu::TextureView,
+    /// Without it, as egui expects — see [`Renderer::interface_atlas_view`].
+    interface: wgpu::TextureView,
+}
+
+/// The format egui samples its textures in: the bytes, undecoded.
+///
+/// [`COLOUR_FORMAT`] less its sRGB suffix, which is the only difference two
+/// views of one texture are allowed to have.
+const INTERFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
     let levels = atlas.mips();
+    // Declared up front or the second view is refused: a texture may only be
+    // viewed in the formats it was created to allow.
+    let interface_format = gpu.view_formats.then_some(INTERFACE_FORMAT);
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("atlas"),
         size: wgpu::Extent3d {
@@ -4947,7 +4999,7 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (wgpu::TextureView, u32, u32) {
         dimension: wgpu::TextureDimension::D2,
         format: COLOUR_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
+        view_formats: interface_format.as_slice(),
     });
 
     for (level, image) in levels.iter().enumerate() {
@@ -4972,11 +5024,15 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (wgpu::TextureView, u32, u32) {
         );
     }
 
-    (
-        texture.create_view(&wgpu::TextureViewDescriptor::default()),
-        atlas.grid,
-        atlas.side(),
-    )
+    let views = AtlasViews {
+        world: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        interface: texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("atlas-interface"),
+            format: interface_format,
+            ..Default::default()
+        }),
+    };
+    (views, atlas.grid, atlas.side())
 }
 
 /// The pictures the world's bind group samples: the atlas with its sampler,
