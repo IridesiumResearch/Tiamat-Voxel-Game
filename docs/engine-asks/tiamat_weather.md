@@ -12,10 +12,10 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W28, filed 2026-09-28; W25 to W27, filed 2026-09-25. W24 landed 2026-09-26, W19 to W23
-2026-09-24, W17 and W18 the day before, below.
+Open: W25 to W27, filed 2026-09-25. W28 landed 2026-09-28 (the day it was filed),
+W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
-## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28)
+## W28. Thunder and a flash cannot be kept out of a cave (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
 
 **Seen.** The designer: "lightning strikes and weather should not affect the
 underground". Rain, the storm's sky and its loop are already per player and
@@ -39,6 +39,15 @@ but the mod's canopy and shaft rules would not be in it, so `player` is
 the smaller and more useful change.) Gate: two players 20 blocks apart, one
 in the open and one under a roof, a flash and a sound addressed to the
 first: the second's client receives neither.
+
+**From the engine, 2026-09-28 (engine cbbbc5e):** `player` on `game.flash`
+and on `game.play_sound`, a UUID in hex as `emit_particles` takes it. It
+narrows and never widens: the domain and the radius still apply, so a
+player addressed from out of range is still not told, and the count
+returned says so. A `player` that is not a UUID is an error at the call,
+not a broadcast. The gate is a bot test each way (`atmosphere.rs`,
+`sound.rs`): two players in range of every strike, each strike addressed
+to one, the other's client receives nothing.
 
 ## W27. The deck still lags; the mod is out of knobs (2026-09-25)
 

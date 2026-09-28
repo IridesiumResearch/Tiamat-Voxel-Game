@@ -29,7 +29,26 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-No open asks. Landed so far, asserted by the native check except 11 and 12,
+## 14. A fixed size for `player:main` (2026-09-25)
+
+The inventory is 28 fillable slots: 1-9 quick access, 10-27 the pack, 28 the
+off-hand. Worn slots are views of their own and not counted. The screen now
+draws exactly those 28 and nothing past them.
+
+But `player:main` grows: `game.give` never refuses, and a pickup into a full
+28 lands in slot 29, which no screen shows and no key selects. The item is
+kept but cannot be reached. The mod cannot prevent it: `register_view` is
+fixed-size but cannot replace `player:main`, there is no hook on a pickup, and
+`game.inventory` reports consolidated stacks rather than slots, so a tick
+cannot even find what is in 29 to move it back out.
+
+Smallest change: a size for `player:main`, set once at registration (say
+`game.set_main_slots(28)`, or `slots` on a view that replaces it). At that size
+`give` answers what did not fit, as `container_give` already does, and a
+pickup that does not fit stays on the ground. Nothing else here changes: the
+first 28 keep the engine's meaning.
+
+Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
 
 - **13**, `conflicts` in `mod.toml` (engine 57e5d6f), and the engine's mods

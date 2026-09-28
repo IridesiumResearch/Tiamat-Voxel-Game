@@ -126,7 +126,7 @@ wants it: keeping the chunk built for a summary long enough for the detail
 request that follows it, and a level-aware entry point in `ChunkSource` so
 a block-resolution summary can be built without the full chunk.
 
-## 40. Generation lag is silent
+## 40. Generation lag is silent: LANDED 2026-09-28 (engine cbbbc5e)
 
 **Seen:** the designer flew a world that was arriving as slabs and the log
 said nothing — the over-budget warning fires past 50 ms of tick, which the
@@ -141,6 +141,14 @@ see their backlog.
 worker queue depth and the rolling ms/chunk — "generation behind: 1,842
 waiting, 41 ms/chunk". One line turns "we might need a performance pass"
 from a guess into a number.
+
+**From the engine, 2026-09-28 (engine cbbbc5e):** the workers now time
+`generate()` and the pool keeps the cost of the last 64 chunks. Once a
+second, while more chunk requests are parked waiting on the workers than
+the pool can hold in flight, the server logs one line at `warn`:
+`generation behind: N chunks waiting, M in flight, X ms/chunk`. A walk
+the pool keeps up with says nothing. `Pool::recent_cost` and
+`Pool::capacity` are there for anything else that wants the numbers.
 
 ## 39. A terraced fill's `within` cannot be built flat
 

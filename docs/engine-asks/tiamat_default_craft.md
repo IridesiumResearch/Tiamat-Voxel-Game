@@ -16,8 +16,70 @@ Newest first. Items are removed when they land.
 
 Started 2026-09-26, from the mod's first plan, relayed by the designer.
 Asks 2 to 7 copied from the mod's own sheet on 2026-09-28, where the
-history stays; all six landed the same day (engine c83fbc9). Nothing is
-open.
+history stays; all six landed the same day (engine c83fbc9). Asks 8 and 9
+added 2026-09-28 from the mod's sheet and landed the same day (engine
+cbbbc5e). Nothing is open.
+
+## 9. Reading one slot of a player's view (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
+
+**Seen.** The brief's anvil is worked in the world: the hammer in the main
+hand, the bloom or bar in the off-hand (slot 28 of `player:main`), a
+right-click a blow. `game.held` answers the main hand only and
+`game.inventory` answers a view consolidated, one entry per material, cut
+and detail, with no slot in it — so nothing says what is in the off-hand.
+Ask 4 (engine c83fbc9) gave `game.take` and `game.give` a `slot`, which is
+the other half: the anvil could take the bloom from slot 28 and give the
+bar back into it, if it could first see what is there. A HUD script is told
+`state.offhand`, so the engine has the answer; the server API does not ask.
+
+**Meanwhile.** The anvil is a station with a container: the work goes on it
+through its screen, where the player chooses what to forge, and each use
+with a hammer in hand is a blow. It works; it is a screen where the brief
+wanted a gesture.
+
+**Smallest change.** `game.slot(player, view, n)` answering `{ material,
+units, shape, detail }` or nil — or a `slot` on each entry of
+`game.inventory` when asked for unconsolidated.
+
+**From the engine, 2026-09-28 (engine cbbbc5e):** `game.slot(player, view, n)`,
+`n` from 1 as the screens number them, answering the table `game.held`
+answers or nil for an empty slot, a view that does not exist, a slot past
+its end, or a player not connected. With ask 4's `slot` on `take` and
+`give`, the anvil reads slot 28, takes the bloom from it and gives the bar
+back into it.
+
+## 8. A use at a block reaching that block's handler first (2026-09-28): LANDED 2026-09-28 (engine cbbbc5e)
+
+**Seen.** A player holding raw meat right-clicks a burning campfire and the
+meat should go over the fire — the gesture the brief designed cooking
+around. `register_on_use` callbacks are asked in mod load order and the
+first to handle a use stops the rest. Life loads before Craft (Craft names
+Life in `optional_depends` to read its exports) and registers
+`{ anywhere = true }` to eat food held at any block or at the sky, so meat
+held at a fire is eaten before Craft hears of the use. Neither order is
+wrong for its own mod, and no mod can reorder the chain: loading Craft
+first would cost it Life's exports, and Life cannot know every block some
+other mod cooks on.
+
+**Meanwhile.** A fire has a container: opened with an empty hand, food put
+on it through the screen, cooked while it burns. Nothing contends with
+Life's eating; the gesture is lost.
+
+**Smallest change.** A use handler registered for particular materials —
+`game.register_on_use(fn, { materials = { "tiamat_default_craft:campfire_lit", ... } })`
+— asked, in load order among themselves, before any handler without a
+material list: the block that was clicked answers first, and a held
+item's handler hears only what no block claimed. It is what a door, a
+lever and a cooking surface all want, and needs no mod to know another.
+
+**From the engine, 2026-09-28 (engine cbbbc5e):** the first form, as asked.
+`game.register_on_use(fn, { materials = { "campfire_lit", ... } })` is
+asked about a use at one of those blocks before any callback registered
+without a list, in load order among the listed, and is not asked about a
+use at any other block. Bare ids are the mod's own; a namespaced id may be
+any mod's block. A use at nothing has no block, so the list does not apply
+to it — `anywhere = true` beside it hears those too. A `materials` that is
+not a list of block id strings, or is empty, is refused at load.
 
 ## 7. A drop of another mod's material: LANDED 2026-09-28 (engine c83fbc9)
 
