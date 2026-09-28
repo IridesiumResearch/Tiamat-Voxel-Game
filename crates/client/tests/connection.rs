@@ -237,6 +237,7 @@ impl Seen {
             | Event::ShowOver(_)
             | Event::SkyModifier(_)
             | Event::Flash(_)
+            | Event::Lightning(_)
             | Event::Precipitation(_) => {}
             Event::HudReserve(reserve) => self.hud_reserve = Some(reserve),
             Event::Theme(theme) => self.theme = theme,

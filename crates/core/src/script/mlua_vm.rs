@@ -1725,6 +1725,106 @@ fn player_field(spec: &Table, call: &str) -> mlua::Result<Option<crate::identity
         .transpose()
 }
 
+/// A bolt from a mod's table — weather ask W26. `from` (with its domain) and
+/// `radius` say who sees it; the rest is the bolt. Wrong types are errors,
+/// wrong numbers are clamped, as `flash` has it.
+///
+/// The seed comes back as `None` when the mod named none: the closure picks
+/// one, because only it has the count that makes two unseeded bolts differ.
+fn lightning_request(
+    spec: &Table,
+) -> mlua::Result<(crate::lightning::LightningRequest, Option<u64>)> {
+    let end = |key: &str| -> mlua::Result<Table> {
+        spec.get::<Option<Table>>(key)?
+            .ok_or_else(|| mlua::Error::external(format!("lightning needs a `{key}` table")))
+    };
+    let (from, to) = (end("from")?, end("to")?);
+    // **One domain, named by the top.** A `to` that names another is a mod
+    // that has mixed up two worlds, and a bolt cannot cross between them.
+    let domain = domain_of(&from)?;
+    if let Some(other) = to
+        .get::<Option<String>>("domain")?
+        .filter(|other| !other.is_empty() && *other != domain)
+    {
+        return Err(mlua::Error::external(format!(
+            "lightning: `from` is in `{domain}` and `to` in `{other}`; a bolt is in one domain"
+        )));
+    }
+    let defaults = crate::lightning::DEFAULT_COLOUR;
+    let colour = match spec.get::<Option<Table>>("colour")? {
+        Some(table) => {
+            let channel = |name: &str, index: i64, fallback: f32| -> mlua::Result<f32> {
+                Ok(table
+                    .get::<Option<f32>>(name)?
+                    .or(table.get::<Option<f32>>(index)?)
+                    .unwrap_or(fallback))
+            };
+            [
+                channel("r", 1, defaults[0])?,
+                channel("g", 2, defaults[1])?,
+                channel("b", 3, defaults[2])?,
+            ]
+        }
+        None => defaults,
+    };
+    // Counts read wide and clamped here, because the wire's `u8` and `u16`
+    // would turn `branches = 300` into a conversion error rather than the
+    // clamp every other wrong number gets.
+    let count = |key: &str, default: i64, most: i64| -> mlua::Result<i64> {
+        Ok(spec
+            .get::<Option<i64>>(key)?
+            .unwrap_or(default)
+            .clamp(0, most))
+    };
+    let seed = match spec.get::<mlua::Value>("seed")? {
+        mlua::Value::Nil => None,
+        value => Some(seed_from_lua(&value)?),
+    };
+    let request = crate::lightning::LightningRequest {
+        lightning: crate::lightning::Lightning {
+            from: [from.get("x")?, from.get("y")?, from.get("z")?],
+            to: [to.get("x")?, to.get("y")?, to.get("z")?],
+            seed: seed.unwrap_or(0),
+            colour,
+            width: spec
+                .get::<Option<f32>>("width")?
+                .unwrap_or(crate::lightning::DEFAULT_WIDTH),
+            branches: u8::try_from(count(
+                "branches",
+                i64::from(crate::lightning::DEFAULT_BRANCHES),
+                i64::from(crate::lightning::MAX_LIGHTNING_BRANCHES),
+            )?)
+            .unwrap_or(crate::lightning::MAX_LIGHTNING_BRANCHES),
+            ticks: u16::try_from(count(
+                "ticks",
+                i64::from(crate::lightning::DEFAULT_TICKS),
+                i64::from(crate::lightning::MAX_LIGHTNING_TICKS),
+            )?)
+            .unwrap_or(crate::lightning::MAX_LIGHTNING_TICKS),
+        },
+        domain,
+        radius: spec.get::<Option<f32>>("radius")?.unwrap_or(256.0),
+        player: player_field(spec, "lightning")?,
+    };
+    Ok((request, seed))
+}
+
+/// A seed for a bolt a mod named none for.
+///
+/// **Not a fixed default, and not the same twice.** A constant would make
+/// every unseeded bolt between the same two points the same bolt, which a
+/// storm striking one peak over and over would show at once. The call's
+/// count and both ends' bits, mixed: different for each call, and still the
+/// same bolt for everyone watching, because the seed is decided here and
+/// travels.
+fn unseeded_bolt(count: u64, from: [f64; 3], to: [f64; 3]) -> u64 {
+    let mut seed = crate::detgen::rng::SplitMix64::new(count).next_u64();
+    for value in from.iter().chain(&to) {
+        seed = crate::detgen::rng::SplitMix64::new(seed ^ value.to_bits()).next_u64();
+    }
+    seed
+}
+
 /// A sky modifier from a mod's table. See `install_atmosphere`.
 /// Reads a `{ r, g, b }` or positional `{ r, g, b }` colour, with a fallback.
 ///
@@ -7585,6 +7685,35 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_clouds", set)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_lightning(game)
+    }
+
+    /// Puts `game.lightning` on the `game` table — weather ask W26.
+    ///
+    /// Beside `game.flash` and shaped like it: synchronous, answering how
+    /// many were told, and 0 with no server behind the VM. Its own function
+    /// because `install_atmosphere` is near clippy's line ceiling.
+    fn install_lightning(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.atmosphere);
+        let count = std::sync::atomic::AtomicU64::new(0);
+        let lightning = self
+            .lua
+            .create_function(move |_, spec: Table| {
+                let (mut request, seed) = lightning_request(&spec)?;
+                request.lightning.seed = seed.unwrap_or_else(|| {
+                    let call = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    unseeded_bolt(call, request.lightning.from, request.lightning.to)
+                });
+                let request = crate::lightning::sanitise_lightning(request);
+                let told = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.lightning(&request)));
+                Ok(told.unwrap_or(0))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("lightning", lightning)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -12495,6 +12624,7 @@ mod tests {
     struct Weather {
         set: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::SkyModifier>)>>,
         flashed: std::sync::Mutex<Vec<crate::atmosphere::FlashRequest>>,
+        struck: std::sync::Mutex<Vec<crate::lightning::LightningRequest>>,
         rained: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Precipitation>)>>,
         clouded: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Clouds>)>>,
     }
@@ -12514,6 +12644,14 @@ mod tests {
 
         fn flash(&self, request: &crate::atmosphere::FlashRequest) -> u32 {
             self.flashed
+                .lock()
+                .expect("weather lock")
+                .push(request.clone());
+            2
+        }
+
+        fn lightning(&self, request: &crate::lightning::LightningRequest) -> u32 {
+            self.struck
                 .lock()
                 .expect("weather lock")
                 .push(request.clone());
@@ -12778,6 +12916,193 @@ mod tests {
         assert!((plain.radius - 256.0).abs() < f32::EPSILON);
         assert_eq!(plain.flash.colour, [1.0; 3], "white by default");
         assert_eq!((plain.flash.attack_ticks, plain.flash.decay_ticks), (1, 6));
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_mod_draws_lightning_with_defaults_and_its_numbers_clamped() {
+        // **Weather ask W26.** The ask's own shape reaches the seam; the
+        // defaults are a violet-white bolt 0.4 across with three forks, seen
+        // for eight ticks from 256 blocks off; wild numbers are clamped.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        load(
+            &mut host,
+            "storm",
+            "told = game.lightning{ from = { x = 10, y = 380, z = -3, domain = 'storm:above' },\n\
+             \x20   to = { x = 40, y = 80, z = 5, domain = 'storm:above' }, seed = 7,\n\
+             \x20   colour = { 0.9, 0.92, 1.0 }, width = 99, branches = 40, ticks = 9000, radius = 9000 }\n\
+             game.lightning{ from = { x = 0, y = 300, z = 0 }, to = { x = 0, y = 0, z = 0 } }\n\
+             game.lightning{ from = { x = 0, y = 300, z = 0 }, to = { x = 0, y = 0, z = 0 },\n\
+             \x20   branches = -2, ticks = 0, colour = { g = 0.1 } }",
+        )
+        .expect("load");
+        let env = host.environment("storm").expect("env");
+        assert_eq!(env.get::<u32>("told").expect("told"), 2);
+        let struck = weather.struck.lock().expect("lock").clone();
+        assert_eq!(struck.len(), 3);
+
+        let wild = &struck[0];
+        assert_eq!(wild.domain, "storm:above");
+        assert_eq!(wild.lightning.from, [10.0, 380.0, -3.0]);
+        assert_eq!(wild.lightning.to, [40.0, 80.0, 5.0]);
+        assert_eq!(wild.lightning.seed, 7);
+        assert_eq!(wild.lightning.colour, [0.9, 0.92, 1.0]);
+        assert_eq!(wild.lightning.width, crate::lightning::MAX_LIGHTNING_WIDTH);
+        assert_eq!(
+            wild.lightning.branches,
+            crate::lightning::MAX_LIGHTNING_BRANCHES
+        );
+        assert_eq!(wild.lightning.ticks, crate::lightning::MAX_LIGHTNING_TICKS);
+        assert_eq!(wild.radius, crate::atmosphere::MAX_FLASH_RADIUS);
+        assert_eq!(wild.player, None);
+
+        let plain = &struck[1];
+        assert_eq!(plain.domain, crate::domain::OVERWORLD);
+        assert_eq!(plain.lightning.colour, crate::lightning::DEFAULT_COLOUR);
+        assert_eq!(plain.lightning.width, crate::lightning::DEFAULT_WIDTH);
+        assert_eq!(plain.lightning.branches, crate::lightning::DEFAULT_BRANCHES);
+        assert_eq!(plain.lightning.ticks, crate::lightning::DEFAULT_TICKS);
+        assert_eq!(plain.radius, 256.0);
+        assert!(plain.lightning.is_valid());
+
+        let low = &struck[2];
+        assert_eq!(low.lightning.branches, 0, "a negative count is none");
+        assert_eq!(low.lightning.ticks, 1, "a bolt is seen for a tick at least");
+        assert_eq!(
+            low.lightning.colour,
+            [
+                crate::lightning::DEFAULT_COLOUR[0],
+                0.1,
+                crate::lightning::DEFAULT_COLOUR[2]
+            ],
+            "a channel left out is the default's"
+        );
+    }
+
+    #[test]
+    fn a_bolt_a_mod_got_wrong_is_an_error() {
+        // Wrong types are errors, as a flash's are: a mod told is a mod that
+        // can fix it, and one whose bolt silently went nowhere cannot.
+        let bolt = "from = { x = 0, y = 300, z = 0 }, to = { x = 0, y = 0, z = 0 }";
+        for (script, why) in [
+            (
+                "game.lightning{ from = { x = 0, y = 300, z = 0 } }".to_owned(),
+                "no `to`",
+            ),
+            (
+                "game.lightning{ to = { x = 0, y = 0, z = 0 } }".to_owned(),
+                "no `from`",
+            ),
+            (
+                "game.lightning{ from = { x = 0, y = 300, z = 0, domain = 'a:b' },\n\
+                 \x20   to = { x = 0, y = 0, z = 0, domain = 'c:d' } }"
+                    .to_owned(),
+                "two domains",
+            ),
+            (
+                format!("game.lightning{{ {bolt}, width = 'wide' }}"),
+                "a word for a width",
+            ),
+            (
+                format!("game.lightning{{ {bolt}, seed = 0.5 }}"),
+                "a fraction for a seed",
+            ),
+            (
+                format!("game.lightning{{ {bolt}, seed = 'storm' }}"),
+                "a word for a seed",
+            ),
+            (
+                format!("game.lightning{{ {bolt}, player = 'Ada' }}"),
+                "a display name for a UUID",
+            ),
+        ] {
+            let mut host = vm();
+            host.set_atmosphere_access(std::sync::Arc::new(Weather::default()));
+            assert!(load(&mut host, "storm", &script).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_bolts_seed_past_the_top_bit_reaches_the_request_by_its_bits() {
+        // The 2026-09-25 bug's class, on a new field: a seed past 2^63 is a
+        // negative integer in Lua, and taken by its bits it is the seed the
+        // mod meant — through a float it would be a different bolt.
+        let seed = 16_099_289_709_293_836_018_u64;
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        load(
+            &mut host,
+            "storm",
+            &format!(
+                "game.lightning{{ from = {{ x = 0, y = 300, z = 0 }}, to = {{ x = 0, y = 0, z = 0 }},\n\
+                 \x20   seed = {} }}\n\
+                 game.lightning{{ from = {{ x = 0, y = 300, z = 0 }}, to = {{ x = 0, y = 0, z = 0 }},\n\
+                 \x20   seed = 0 }}",
+                seed_to_lua(seed)
+            ),
+        )
+        .expect("load");
+        let struck = weather.struck.lock().expect("lock").clone();
+        assert_eq!(struck[0].lightning.seed, seed);
+        assert_eq!(struck[1].lightning.seed, 0, "a seed of zero named is zero");
+    }
+
+    #[test]
+    fn an_unseeded_bolt_is_given_a_seed_and_the_next_another() {
+        // Two unseeded strikes on the same peak are two bolts, not one bolt
+        // twice; the seed is picked here, so everyone watching still sees
+        // the same one.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        load(
+            &mut host,
+            "storm",
+            "for _ = 1, 2 do\n\
+             \x20   game.lightning{ from = { x = 0, y = 300, z = 0 }, to = { x = 0, y = 0, z = 0 } }\n\
+             end",
+        )
+        .expect("load");
+        let struck = weather.struck.lock().expect("lock").clone();
+        assert_eq!(struck.len(), 2);
+        assert_ne!(struck[0].lightning.seed, 0);
+        assert_ne!(struck[1].lightning.seed, 0);
+        assert_ne!(
+            struck[0].lightning.seed, struck[1].lightning.seed,
+            "two unseeded bolts drew the same path"
+        );
+    }
+
+    #[test]
+    fn a_bolt_may_be_addressed_to_one_player() {
+        // As a flash may (W28): a strike drawn for the players under open
+        // sky and for nobody in a cave beside them. The UUID rides the
+        // request; who is skipped is the server's, tested there.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([0xCD; 32]);
+        load(
+            &mut host,
+            "storm",
+            &format!(
+                "game.lightning{{ from = {{ x = 0, y = 300, z = 0 }}, to = {{ x = 0, y = 0, z = 0 }},\n\
+                 \x20   player = '{}' }}\n\
+                 game.lightning{{ from = {{ x = 0, y = 300, z = 0 }}, to = {{ x = 0, y = 0, z = 0 }} }}",
+                uuid.to_hex()
+            ),
+        )
+        .expect("load");
+        let struck = weather.struck.lock().expect("lock").clone();
+        assert_eq!(struck.len(), 2);
+        assert_eq!(struck[0].player, Some(uuid));
+        assert_eq!(struck[1].player, None, "no `player` is everybody in range");
     }
 
     #[test]

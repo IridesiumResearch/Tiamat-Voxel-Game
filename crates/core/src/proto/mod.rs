@@ -88,9 +88,14 @@ pub const PROTOCOL_VERSION: u32 = 77;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
-// v77: tooltip on a dialog Node (UI ask 15) and ServerMessage::Lightning
-// appended (Weather W26) — a sibling branch lands the lightning half under the
-// same number, so this line covers both and the merge is trivial.
+// v77: two changes under one number, landed the same day. `Node` (a dialog
+// widget) gained `tooltip` (UI ask 15) — a field on an existing struct, the
+// unsafe kind of change. And `ServerMessage::Lightning` was appended (weather
+// W26): a bolt drawn from a storm's base to the ground, two ends, a seed and a
+// few numbers, from which every client builds the same forked path. Particles
+// could not draw it — lit by the world, boxed, and dropped first under load —
+// so a storm over the next valley was the sky blinking with nothing between
+// the cloud and the ground.
 // v76 (Life, right-click to eat): `ClientMessage::Use` carries an
 // `Option<SubNodePos>`. The place control pressed at NOTHING in reach — open
 // sky, or a block too far — is a use too, sent without a cell. The server hands
@@ -2295,6 +2300,16 @@ pub enum ServerMessage {
         /// Where it hangs and what it draws.
         badge: crate::particle::Badge,
     },
+    /// A lightning bolt this player can see — weather ask W26.
+    ///
+    /// **Appended at the end** (protocol v77). An event, sent to everyone
+    /// within the bolt's radius of its top in its domain, or to one of them.
+    /// The path does not travel: the client builds it from the seed, so every
+    /// client watching draws the same bolt. See [`crate::lightning`].
+    Lightning {
+        /// The bolt.
+        lightning: crate::lightning::Lightning,
+    },
 }
 
 /// [`phys::Abilities`](crate::phys::Abilities) as it travels.
@@ -2842,8 +2857,8 @@ fn check_mod_settings(settings: &[SettingDef]) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// The weather messages: a sky modifier's and a flash's numbers are the
-/// client's to trust only in range. One function for both, because
+/// The weather messages: a sky modifier's, a flash's and a bolt's numbers are the
+/// client's to trust only in range. One function for all of them, because
 /// `validate_server_message` is at clippy's line ceiling.
 fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
     let valid = match message {
@@ -2851,6 +2866,10 @@ fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
             .as_ref()
             .is_none_or(crate::atmosphere::SkyModifier::is_valid),
         ServerMessage::Flash { flash } => flash.is_valid(),
+        // **A fork count reaches the client's path builder**, and ends that
+        // are not numbers reach its arithmetic: checked before either is
+        // trusted, since a server's word for them is not a mod's.
+        ServerMessage::Lightning { lightning } => lightning.is_valid(),
         ServerMessage::Precipitation { precipitation } => precipitation
             .as_ref()
             .is_none_or(crate::atmosphere::Precipitation::is_valid),
@@ -3392,6 +3411,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::HudValues { mod_id, values } => check_hud_values(mod_id, values)?,
         ServerMessage::SkyModifier { .. }
         | ServerMessage::Flash { .. }
+        | ServerMessage::Lightning { .. }
         | ServerMessage::Precipitation { .. }
         | ServerMessage::CloudLayer { .. }
         | ServerMessage::CloudMap { .. }
@@ -4917,5 +4937,63 @@ mod tests {
             adopted.speed.to_bits(),
             crate::phys::Abilities::MAX_SPEED.to_bits()
         );
+    }
+
+    #[test]
+    fn a_bolt_round_trips_at_the_end_and_one_that_is_not_a_number_is_refused() {
+        // Weather ask W26, protocol v77. Appended last, which the ordinal pins:
+        // one place after `ShowOver`, the v72 tail.
+        let bolt = crate::lightning::Lightning {
+            from: [-120_000.5, 380.0, 64.25],
+            to: [-120_040.0, 80.0, 30.0],
+            seed: 16_099_289_709_293_836_018,
+            colour: crate::lightning::DEFAULT_COLOUR,
+            width: crate::lightning::MAX_LIGHTNING_WIDTH,
+            branches: crate::lightning::MAX_LIGHTNING_BRANCHES,
+            ticks: crate::lightning::MAX_LIGHTNING_TICKS,
+        };
+        let message = ServerMessage::Lightning { lightning: bolt };
+        assert!(validate_server_message(&message).is_ok());
+        let bytes = encode(&message).expect("encode");
+        let badge = encode(&ServerMessage::ShowOver {
+            badge: crate::particle::Badge {
+                entity: 1,
+                picture: [0; 32],
+                count: 1,
+                seconds: 1.0,
+                size: 1.0,
+                colour: [255; 4],
+            },
+        })
+        .expect("encode");
+        assert_eq!(
+            bytes[0],
+            badge[0] + 1,
+            "a bolt is the variant after the badge"
+        );
+        let decoded: ServerMessage = decode(&bytes).expect("decode");
+        assert_eq!(decoded, message);
+
+        // A top that is not a number, a fork count past the cap and a bolt
+        // longer than any storm: each is a server not to be trusted.
+        for poison in [
+            crate::lightning::Lightning {
+                from: [f64::NAN, 0.0, 0.0],
+                ..bolt
+            },
+            crate::lightning::Lightning {
+                branches: u8::MAX,
+                ..bolt
+            },
+            crate::lightning::Lightning {
+                to: [1.0e12, 0.0, 0.0],
+                ..bolt
+            },
+        ] {
+            assert!(
+                validate_server_message(&ServerMessage::Lightning { lightning: poison }).is_err(),
+                "{poison:?}"
+            );
+        }
     }
 }

@@ -502,6 +502,22 @@ fn server_messages() -> Vec<Vec<u8>> {
                 colour: [255, 0, 128, 40],
             },
         },
+        // Protocol v77: a bolt, at the edge of every range it may have.
+        ServerMessage::Lightning {
+            lightning: tiamat_core::lightning::Lightning {
+                from: [-120_000.0, 380.0, 7.5],
+                to: [
+                    -120_000.0 + tiamat_core::lightning::MAX_LIGHTNING_REACH,
+                    380.0,
+                    7.5,
+                ],
+                seed: u64::MAX,
+                colour: [tiamat_core::atmosphere::MAX_CHANNEL, 0.0, 1.0],
+                width: tiamat_core::lightning::MAX_LIGHTNING_WIDTH,
+                branches: tiamat_core::lightning::MAX_LIGHTNING_BRANCHES,
+                ticks: tiamat_core::lightning::MAX_LIGHTNING_TICKS,
+            },
+        },
         ServerMessage::BlockDelta {
             edit: Edit::Block {
                 pos: BlockPos::new(2, 3, 4),

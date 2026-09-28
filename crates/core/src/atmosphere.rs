@@ -578,7 +578,7 @@ pub fn sanitise_cloud_map(mut map: CloudMap) -> Option<CloudMap> {
     Some(map)
 }
 
-/// Where `game.set_sky_modifier` and `game.flash` reach.
+/// Where `game.set_sky_modifier`, `game.flash` and `game.lightning` reach.
 ///
 /// The same seam shape as [`crate::hud::Access`], and for the same reason:
 /// who is connected, and where, lives above core.
@@ -590,6 +590,14 @@ pub trait Access: Send + Sync {
 
     /// Shows a flash to everyone in reach, returning how many were told.
     fn flash(&self, request: &FlashRequest) -> u32;
+
+    /// Shows a lightning bolt to everyone in reach of its top, returning how
+    /// many were told — weather ask W26.
+    ///
+    /// Required rather than defaulted, as [`Self::flash`] is: a host that
+    /// relays flashes and silently drops the bolt beside each one would draw
+    /// the sky blinking with nothing in it, which is the ask's complaint.
+    fn lightning(&self, request: &crate::lightning::LightningRequest) -> u32;
 
     /// Replaces one player's precipitation, or clears it with `None`.
     ///

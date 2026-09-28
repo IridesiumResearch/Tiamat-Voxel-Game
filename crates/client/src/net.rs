@@ -525,6 +525,9 @@ pub enum Event {
     /// A flash of light: lightning, seen.
     Flash(tiamat_core::atmosphere::Flash),
 
+    /// A lightning bolt to draw — weather ask W26.
+    Lightning(tiamat_core::lightning::Lightning),
+
     /// The rain around this player, or none.
     Precipitation(Option<tiamat_core::atmosphere::Precipitation>),
 
@@ -1660,6 +1663,9 @@ async fn session(
             }
             ServerMessage::Flash { flash } => {
                 let _ = events.send(Event::Flash(flash));
+            }
+            ServerMessage::Lightning { lightning } => {
+                let _ = events.send(Event::Lightning(lightning));
             }
             ServerMessage::Precipitation { precipitation } => {
                 let _ = events.send(Event::Precipitation(precipitation));

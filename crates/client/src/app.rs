@@ -4793,6 +4793,7 @@ impl App {
 
             Event::SkyModifier(_)
             | Event::Flash(_)
+            | Event::Lightning(_)
             | Event::Precipitation(_)
             | Event::CloudLayer(_)
             | Event::CloudMap(_)
