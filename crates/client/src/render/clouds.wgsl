@@ -1365,8 +1365,21 @@ fn fragment_main(in: Varyings) -> Painted {
         // at its terminator. Cloud is not opaque and a hard terminator is the
         // main thing that makes it read as rock.
         let sunward = clamp((facing + 0.6) / 1.6, 0.0, 1.0);
-        let warm = clouds.colour.xyz * sun_lit;
-        let cool = clouds.shade.xyz * clouds.sky.xyz;
+        // **The sun's hue is the whole cloud's; its brightness is the
+        // sunward face's** (weather ask W25). This used to mix the side
+        // faces' `shade * sky` towards `colour * sun`, and at a low sun
+        // `sun` is saturated orange: the sunward face took the sun's hue at
+        // full strength while a face a few degrees round took none, so the
+        // hue changed on a face boundary and read as a painted face — and
+        // under a storm's darkness dark orange is brown. Now every face
+        // takes a share of the sun's hue, and what the sunward term adds is
+        // luminance: the sun's peak channel, over that shared tint. Under
+        // darkness the sunward face goes a warm grey.
+        let sun_peak = max(max(clouds.sun.x, clouds.sun.y), clouds.sun.z);
+        let sun_hue = clouds.sun.xyz / max(sun_peak, 0.001);
+        let tint = mix(vec3<f32>(1.0), sun_hue, 0.35 * horizon);
+        let cool = clouds.shade.xyz * clouds.sky.xyz * tint;
+        let warm = clouds.colour.xyz * tint * (sun_peak * horizon);
         lit = mix(cool, warm, sunward * sunward * horizon);
     }
 

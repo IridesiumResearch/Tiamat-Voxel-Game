@@ -2909,11 +2909,63 @@ mod summary_tests {
     }
 
     #[test]
+    fn a_summarys_fluid_cells_go_to_the_blended_pass_and_the_bed_shows_through() {
+        // World ask 42: a far sea was an opaque slab. A slab of rock with a
+        // layer of "water" (material 7, a fluid-family material) on top:
+        // the water's faces are fluid vertices, not quads; the rock's top,
+        // under the water, is still drawn; and two cells of one sea share
+        // no face.
+        let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level") as usize;
+        let mut cells = vec![MaterialId::AIR; n * n * n];
+        for z in 0..n {
+            for x in 0..n {
+                cells[(z * n) * n + x] = MaterialId(1);
+                cells[(z * n + 1) * n + x] = MaterialId(7);
+            }
+        }
+        let sea = tiamat_core::lod::Summary::from_parts(FINEST, cells).expect("build");
+        let mesh = mesh_summary(&sea, &[7]);
+        assert!(
+            mesh.quads.iter().all(|quad| quad.material == 1),
+            "a fluid-family material was emitted as an opaque quad"
+        );
+        assert!(
+            mesh.quads
+                .iter()
+                .any(|quad| quad.axis == 1 && quad.positive && quad.material == 1),
+            "the rock's top under the water was culled"
+        );
+        assert!(
+            !mesh.fluid_vertices.is_empty(),
+            "the water was not emitted at all"
+        );
+        assert!(
+            mesh.fluid_vertices
+                .iter()
+                .all(|vertex| vertex.material() == 7)
+        );
+        // One top face for the whole sheet (merged), its sides, and no
+        // underside against the rock: five faces, twenty vertices.
+        assert_eq!(
+            mesh.fluid_vertices.len(),
+            5 * 4,
+            "faces: {}",
+            mesh.fluid_vertices.len() / 4
+        );
+        assert_eq!(mesh.fluid_indices.len(), 5 * 6);
+        // And the same sea drawn without knowing the material is a slab,
+        // as it was.
+        let slab = mesh_summary(&sea, &[]);
+        assert!(slab.fluid_vertices.is_empty());
+        assert!(slab.quads.iter().any(|quad| quad.material == 7));
+    }
+
+    #[test]
     fn an_empty_summary_draws_nothing() {
         let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let empty = Summary::from_parts(FINEST, vec![MaterialId::AIR; (n * n * n) as usize])
             .expect("build");
-        assert!(mesh_summary(&empty).quads.is_empty());
+        assert!(mesh_summary(&empty, &[]).quads.is_empty());
     }
 
     #[test]
@@ -2925,7 +2977,7 @@ mod summary_tests {
             let n = tiamat_core::lod::cells_per_axis(level).expect("a level");
             let solid = Summary::from_parts(level, vec![MaterialId(1); (n * n * n) as usize])
                 .expect("build");
-            let mesh = mesh_summary(&solid);
+            let mesh = mesh_summary(&solid, &[]);
             assert_eq!(
                 mesh.quads.len(),
                 6,
@@ -2949,7 +3001,7 @@ mod summary_tests {
         let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let solid =
             Summary::from_parts(FINEST, vec![MaterialId(1); (n * n * n) as usize]).expect("build");
-        let mesh = mesh_summary(&solid);
+        let mesh = mesh_summary(&solid, &[]);
 
         let brightness = |axis: u8, positive: bool| {
             mesh.quads
@@ -2990,8 +3042,8 @@ mod summary_tests {
         // Done against the quads rather than a rendered frame deliberately: a
         // screenshot answers "was there a hole in this one frame from this one
         // angle", and the claim is about every angle.
-        let coarse = mesh_summary(&slab(3, 2, 1)); // cells 4 blocks tall: surface at 8
-        let fine = mesh_summary(&slab(FINEST, 5, 1)); // cells 1 block tall: surface at 5
+        let coarse = mesh_summary(&slab(3, 2, 1), &[]); // cells 4 blocks tall: surface at 8
+        let fine = mesh_summary(&slab(FINEST, 5, 1), &[]); // cells 1 block tall: surface at 5
 
         // The +x plane of the coarse chunk and the -x plane of the fine one.
         // **A quad's `w` is the last CELL it covers, not the plane** — see
@@ -3034,7 +3086,7 @@ mod summary_tests {
         // boundary plane, buried ones included. A mesher that culled the buried
         // ones against its own neighbours would leave the wall with a hole in
         // it exactly where the neighbouring chunk's surface happened to dip.
-        let mesh = mesh_summary(&slab(FINEST, 16, 1));
+        let mesh = mesh_summary(&slab(FINEST, 16, 1), &[]);
         let plane = u8::try_from(CHUNK_SUBNODES - 1).expect("fits");
         let wall: Vec<&Quad> = mesh
             .quads
@@ -4989,23 +5041,25 @@ fn summary_shade(axis: usize, positive: bool) -> crate::shade::Shade {
 /// term that stored sunlight would have carried, faked from the face direction:
 /// see [`summary_shade`].
 #[must_use]
-pub fn mesh_summary(summary: &tiamat_core::lod::Summary) -> Mesh {
+pub fn mesh_summary(summary: &tiamat_core::lod::Summary, fluid_materials: &[u16]) -> Mesh {
     let width = summary.width() as usize;
-    // How many sub-nodes one cell spans. The whole chunk is `CHUNK_SUBNODES`
-    // across at every level, so this is exact and never a remainder.
     let Some(step) = (CHUNK_SUBNODES as usize).checked_div(width) else {
         return Mesh::default();
     };
     let cells = summary.cells();
     let at = |x: usize, y: usize, z: usize| -> u16 { cells[(z * width + y) * width + x].0 };
     let air = tiamat_core::MaterialId::AIR.0;
+    // **A fluid-family cell is drawn in the blended pass** (World ask 42). A
+    // summary paints a terrain-free block holding fluid as the block that
+    // fluid is drawn as, and this used to emit it as an opaque quad — so a
+    // far sea, or standing rain, was a hard slab that disagreed with the
+    // blended, transparent water beside it the moment detail arrived. Its
+    // faces go out as fluid vertices now, and a solid face under it is
+    // exposed through it, as a riverbed is under a river.
+    let is_fluid = |material: u16| material != air && fluid_materials.contains(&material);
 
     let mut quads = Vec::new();
-    // One plane at a time, greedily merged within it — the same shape as the
-    // chunk mesher's binary pass, without the bitset: a summary plane is at
-    // most 16 x 16 cells, and a `Vec<u16>` of that is smaller than the masks
-    // would be. Merging matters even so: an unmerged solid chunk face is 256
-    // quads at level 1, and a horizon is thousands of chunks.
+    let mut fluid_quads = Vec::new();
     for (axis, positive) in [
         (0usize, false),
         (0, true),
@@ -5015,10 +5069,8 @@ pub fn mesh_summary(summary: &tiamat_core::lod::Summary) -> Mesh {
         (2, true),
     ] {
         for w in 0..width {
-            // The faces on this plane, by (u, v), or `air` for none. A face
-            // exists where the cell is solid and what is beyond it is not —
-            // and, on the chunk boundary, always: that is the skirt.
-            let mut plane = vec![air; width * width];
+            let mut solid = vec![air; width * width];
+            let mut wet = vec![air; width * width];
             for v in 0..width {
                 for u in 0..width {
                     let cell = match axis {
@@ -5032,74 +5084,114 @@ pub fn mesh_summary(summary: &tiamat_core::lod::Summary) -> Mesh {
                     }
                     let beyond = if positive { w + 1 } else { w.wrapping_sub(1) };
                     let at_boundary = if positive { beyond >= width } else { w == 0 };
-                    // Parenthesised deliberately: `if ... {} else {} || x` is
-                    // the kind of expression a reader has to look up.
-                    let exposed = at_boundary || {
+                    let neighbour = if at_boundary {
+                        air
+                    } else {
                         let n = match axis {
                             0 => (beyond, u, v),
                             1 => (u, beyond, v),
                             _ => (u, v, beyond),
                         };
-                        at(n.0, n.1, n.2) == air
+                        at(n.0, n.1, n.2)
                     };
-                    if exposed {
-                        plane[v * width + u] = material;
-                    }
-                }
-            }
-
-            // Greedy: run along u, then extend along v while whole rows match.
-            for v in 0..width {
-                let mut u = 0;
-                while u < width {
-                    let material = plane[v * width + u];
-                    if material == air {
-                        u += 1;
-                        continue;
-                    }
-                    let mut du = 1;
-                    while u + du < width && plane[v * width + u + du] == material {
-                        du += 1;
-                    }
-                    let mut dv = 1;
-                    while v + dv < width
-                        && (0..du).all(|offset| plane[(v + dv) * width + u + offset] == material)
-                    {
-                        dv += 1;
-                    }
-                    for cleared in 0..dv {
-                        for offset in 0..du {
-                            plane[(v + cleared) * width + u + offset] = air;
+                    if is_fluid(material) {
+                        // Against air alone: two cells of one sea share no
+                        // face, and a bank hides the water behind it.
+                        if neighbour == air {
+                            wet[v * width + u] = material;
                         }
+                    } else if neighbour == air || is_fluid(neighbour) {
+                        solid[v * width + u] = material;
                     }
-
-                    // **`Quad::w` is the CELL slice, not the plane.**
-                    // `quad_corners` adds one for a positive face to get from
-                    // one to the other, so a positive face names the LAST cell
-                    // it covers rather than the plane beyond it. Writing the
-                    // plane here put every positive face a third of a block
-                    // outside the chunk, and made the boundary walls — the
-                    // skirts themselves — not draw at all.
-                    let slice = w * step + if positive { step - 1 } else { 0 };
-                    quads.push(Quad {
-                        axis: u8::try_from(axis).unwrap_or(0),
-                        positive,
-                        w: u8::try_from(slice).unwrap_or(0),
-                        u: u8::try_from(u * step).unwrap_or(0),
-                        v: u8::try_from(v * step).unwrap_or(0),
-                        du: u8::try_from(du * step).unwrap_or(1),
-                        dv: u8::try_from(dv * step).unwrap_or(1),
-                        material,
-                        shade: summary_shade(axis, positive),
-                    });
-                    u += du;
                 }
             }
+            summary_plane_quads(&mut solid, width, step, axis, positive, w, &mut quads);
+            summary_plane_quads(&mut wet, width, step, axis, positive, w, &mut fluid_quads);
         }
+    }
+
+    let mut fluid_vertices = Vec::with_capacity(fluid_quads.len() * 4);
+    let mut fluid_indices = Vec::with_capacity(fluid_quads.len() * 6);
+    for quad in &fluid_quads {
+        let base = u32::try_from(fluid_vertices.len()).unwrap_or(0);
+        for (corner, (x, y, z)) in quad_corners(quad).into_iter().enumerate() {
+            // A summary knows no surface height and no current: a cell of
+            // fluid is full to its lattice, and still.
+            fluid_vertices.push(FluidVertex::new(
+                x,
+                y,
+                z,
+                quad.axis,
+                quad.positive,
+                quad.material,
+                quad.shade.corner(corner),
+                0,
+                (0, 0),
+            ));
+        }
+        push_quad_indices(&mut fluid_indices, base, quad);
     }
 
     Mesh {
         quads,
+        fluid_vertices,
+        fluid_indices,
         ..Mesh::default()
+    }
+}
+
+/// Greedily merges one plane of exposed summary faces into quads.
+///
+/// `plane` holds the material of each exposed cell face and `air` for the
+/// rest; it is consumed. The plane is `width` cells square, `step` sub-nodes
+/// to a cell, at slice `w` of the given axis and side.
+fn summary_plane_quads(
+    plane: &mut [u16],
+    width: usize,
+    step: usize,
+    axis: usize,
+    positive: bool,
+    w: usize,
+    quads: &mut Vec<Quad>,
+) {
+    let air = tiamat_core::MaterialId::AIR.0;
+    for v in 0..width {
+        let mut u = 0;
+        while u < width {
+            let material = plane[v * width + u];
+            if material == air {
+                u += 1;
+                continue;
+            }
+            let mut du = 1;
+            while u + du < width && plane[v * width + u + du] == material {
+                du += 1;
+            }
+            let mut dv = 1;
+            while v + dv < width
+                && (0..du).all(|offset| plane[(v + dv) * width + u + offset] == material)
+            {
+                dv += 1;
+            }
+            for cleared in 0..dv {
+                for offset in 0..du {
+                    plane[(v + cleared) * width + u + offset] = air;
+                }
+            }
+
+            let slice = w * step + if positive { step - 1 } else { 0 };
+            quads.push(Quad {
+                axis: u8::try_from(axis).unwrap_or(0),
+                positive,
+                w: u8::try_from(slice).unwrap_or(0),
+                u: u8::try_from(u * step).unwrap_or(0),
+                v: u8::try_from(v * step).unwrap_or(0),
+                du: u8::try_from(du * step).unwrap_or(1),
+                dv: u8::try_from(dv * step).unwrap_or(1),
+                material,
+                shade: summary_shade(axis, positive),
+            });
+            u += du;
+        }
     }
 }

@@ -5093,7 +5093,7 @@ impl App {
                 if summary.is_empty() || self.store.horizon_is_buried(*pos) {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
                 } else {
-                    let mesh = mesher::mesh_summary(summary);
+                    let mesh = mesher::mesh_summary(summary, &self.store.fluid_material_ids());
                     self.renderer.set_chunk(self.drawn_at(*pos), &mesh);
                 }
                 built += 1;

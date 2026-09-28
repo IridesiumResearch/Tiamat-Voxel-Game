@@ -313,6 +313,17 @@ impl ChunkStore {
         ChunkFluid { store: self, pos }
     }
 
+    /// The materials the registered fluids are drawn as, for the summary
+    /// mesher to draw in the blended pass (World ask 42).
+    #[must_use]
+    pub fn fluid_material_ids(&self) -> Vec<u16> {
+        self.fluid_materials
+            .iter()
+            .copied()
+            .filter(|material| *material != 0)
+            .collect()
+    }
+
     /// What one block of fluid is drawn as, and how deep it sits.
     ///
     /// `None` for an empty block, and for a fluid this client was never told

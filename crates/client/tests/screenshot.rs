@@ -4846,8 +4846,8 @@ fn no_sky_shows_through_the_seam_between_two_lod_levels() {
 
     // Fine on the left, coarse on the right, the seam at x = 16. Three chunks
     // deep so the frame has ground either side of it.
-    let fine = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 6));
-    let coarse = mesher::mesh_summary(&slab_summary(3, 1));
+    let fine = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 6), &[]);
+    let coarse = mesher::mesh_summary(&slab_summary(3, 1), &[]);
     for cz in 0..3 {
         renderer.set_chunk(ChunkPos::new(0, 0, cz), &fine);
         renderer.set_chunk(ChunkPos::new(1, 0, cz), &coarse);
