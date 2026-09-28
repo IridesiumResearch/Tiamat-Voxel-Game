@@ -8150,6 +8150,286 @@ fn how_long_weathers_deck_costs_by_knob() {
     }
 }
 
+/// Weather's deck as it ships — weather ask W27: cubes of 32, thickness
+/// 180, the floor 500 over the ground (which is 0 to 20 in the fixed
+/// scene), and the rest as W19's probe registers it.
+fn shipped_deck() -> tiamat_core::atmosphere::CloudLayer {
+    tiamat_core::atmosphere::CloudLayer {
+        base: 500.0,
+        thickness: 180.0,
+        cell: 32.0,
+        detail: 2,
+        frequency: 1.0 / 850.0,
+        octaves: 2,
+        towers: 0.2,
+        drift: [0.5, 0.0],
+        evolve: 1.0 / 2400.0,
+        colour: [1.0; 3],
+        shade: [0.42, 0.44, 0.58],
+    }
+}
+
+/// The six skies Weather sends most, as W19's probe names them: cumulus,
+/// stratocumulus, altocumulus and cumulonimbus shares.
+const WEATHER_SKIES: [(&str, f32, f32, f32, f32); 6] = [
+    ("clear", 0.15, 0.0, 0.25, 0.0),
+    ("clear-no-alto", 0.20, 0.0, 0.0, 0.0),
+    ("cloudy", 0.55, 0.40, 0.30, 0.0),
+    ("rain", 0.30, 0.85, 0.10, 0.0),
+    ("storm", 0.40, 0.70, 0.0, 0.60),
+    ("mega", 0.40, 0.70, 0.0, 1.0),
+];
+
+/// The three views W19's probe times from: height over the ground, and
+/// pitch. "above" is 200 over the shipped deck's floor.
+const WEATHER_VIEWS: [(&str, f64, f32); 3] = [
+    ("level", 40.0, 0.0),
+    ("45 up", 40.0, 0.78),
+    ("above", 700.0, -0.6),
+];
+
+/// A camera over the fixed scene at `height`, looking at `pitch`.
+fn weather_view(height: f64, pitch: f32) -> Camera {
+    let mut camera = Camera {
+        position: Position::from_world(24.0, height, 20.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, pitch);
+    camera
+}
+
+/// The middle of some numbers: the mean of the middle two when there is an
+/// even count of them.
+fn median_of(numbers: &[f64]) -> f64 {
+    let mut sorted = numbers.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let half = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[half - 1] + sorted[half]) / 2.0
+    } else {
+        sorted[half]
+    }
+}
+
+#[test]
+fn skipping_the_decks_clear_cells_changes_no_pixel() {
+    // **Weather ask W27's first step is an optimisation, not a new
+    // picture.** The march reads an occupancy before it asks the field, and
+    // crosses a cell called clear without asking; that is only right if the
+    // occupancy never calls clear a cell the field would have put cloud in
+    // for that ray. So the deck is drawn with the skip off and on, and the
+    // two frames must be the SAME BYTES — no tolerance, since there is no
+    // honest difference for one to allow: both frames ask the same field at
+    // the same points in every cell either of them asks.
+    //
+    // Weather's deck as it ships, its six skies from its three views, at
+    // `Low` — the default, and the gate W27 is measured on — and at
+    // `Medium`, where the rind and the self-shadow are on and the detail the
+    // occupancy leaves out is in the picture. Then a cover map, a wet square
+    // with a storm in it over a clear sky, since the map is where the weather
+    // changes cell by cell.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let target = Offscreen::new(renderer.gpu(), 320, 180);
+    let mut shots = 0usize;
+    let mut clouded = 0usize;
+    let mut compare = |renderer: &mut Renderer, label: &str, camera: &Camera, bare: &Image| {
+        renderer.set_cloud_skip(false);
+        let off = target.capture(renderer, camera).expect("capture");
+        renderer.set_cloud_skip(true);
+        let on = target.capture(renderer, camera).expect("capture");
+        let differ = off
+            .rgba
+            .chunks(4)
+            .zip(on.rgba.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        // Cloud, or its shade on the ground: well past the few levels the
+        // sky's own gradient moves by when the deck is drawn at a lower
+        // resolution than the bare frame's.
+        let cloud = off
+            .rgba
+            .chunks(4)
+            .zip(bare.rgba.chunks(4))
+            .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 24))
+            .count();
+        println!("{label}: {cloud} cloud pixels, {differ} differ with the skip on");
+        assert_eq!(
+            differ, 0,
+            "{label}: skipping the clear cells changed {differ} pixels, so the occupancy \
+             called clear a cell the field puts cloud in"
+        );
+        shots += 1;
+        if cloud > 0 {
+            clouded += 1;
+        }
+    };
+    let deck = |layer, clouds, quality| client::render::clouds::Deck {
+        layer,
+        clouds,
+        quality,
+        seed: 4242,
+    };
+    for quality in [
+        client::render::clouds::Quality::Low,
+        client::render::clouds::Quality::Medium,
+    ] {
+        for (view, height, pitch) in WEATHER_VIEWS {
+            let camera = weather_view(height, pitch);
+            renderer.set_clouds(deck(None, None, quality));
+            let bare = target.capture(&mut renderer, &camera).expect("capture");
+            for (sky, cover, strato, alto, cb) in WEATHER_SKIES {
+                renderer.set_clouds(deck(
+                    Some(shipped_deck()),
+                    Some(sky_of(cover, strato, alto, cb)),
+                    quality,
+                ));
+                compare(
+                    &mut renderer,
+                    &format!("{quality:?} {view} {sky}"),
+                    &camera,
+                    &bare,
+                );
+            }
+        }
+    }
+    // The map: a square of 512 blocks, heaps and a storm in it, clear sky
+    // round it, and the ramp between them a cell wide.
+    let quality = client::render::clouds::Quality::Low;
+    let clear = sky_of(0.05, 0.0, 0.0, 0.0);
+    renderer.set_cloud_map(Some(wet_square_map((200, 0), (255, 0), 128.0, 4)));
+    for (view, height, pitch) in WEATHER_VIEWS {
+        let camera = weather_view(height, pitch);
+        renderer.set_clouds(deck(None, Some(clear), quality));
+        let bare = target.capture(&mut renderer, &camera).expect("capture");
+        renderer.set_clouds(deck(Some(shipped_deck()), Some(clear), quality));
+        compare(
+            &mut renderer,
+            &format!("{quality:?} {view} wet square"),
+            &camera,
+            &bare,
+        );
+    }
+    renderer.set_cloud_map(None);
+    // Identical frames of an empty sky would prove nothing.
+    assert!(
+        clouded * 4 >= shots * 3,
+        "only {clouded} of {shots} frames had any cloud in them to compare"
+    );
+}
+
+#[test]
+#[ignore = "the measurement for weather ask W27; run with --ignored --nocapture"]
+fn how_long_the_shipped_deck_costs_on_low() {
+    // **Weather ask W27's gate**: `Low` at 1080p, the six skies and three
+    // views, at most half of today's median, with the storm seen from above
+    // no worse than today's level view. "Today" is the march with the skip
+    // off, which asks the field in every cell as it did before W27; the two
+    // are timed capture by capture, alternating, so whatever else the
+    // machine is doing lands on both. Two warm-up captures of each and the
+    // median of nine, as W19's probe times, and the deck's cost is what it
+    // adds over a bare sky — timed again for every shot, just before it,
+    // since one bare frame per view caught by a busy machine made a whole
+    // view's numbers negative. `TIAMAT_PROBE_SIZE=WxH` picks the frame,
+    // 1920x1080 when unset.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let (w, h) = std::env::var("TIAMAT_PROBE_SIZE")
+        .ok()
+        .and_then(|size| {
+            let (w, h) = size.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1920u32, 1080u32));
+    let target = Offscreen::new(renderer.gpu(), w, h);
+    let quality = client::render::clouds::Quality::Low;
+    let once = |renderer: &mut Renderer, camera: &Camera| {
+        let start = std::time::Instant::now();
+        let _ = target.capture(renderer, camera);
+        start.elapsed().as_secs_f64() * 1000.0
+    };
+    // Off and on in turn: the median of nine of each.
+    let both = |renderer: &mut Renderer, camera: &Camera| {
+        for skip in [false, true, false, true] {
+            renderer.set_cloud_skip(skip);
+            let _ = target.capture(renderer, camera);
+        }
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for _ in 0..9 {
+            renderer.set_cloud_skip(false);
+            off.push(once(renderer, camera));
+            renderer.set_cloud_skip(true);
+            on.push(once(renderer, camera));
+        }
+        (median_of(&off), median_of(&on))
+    };
+    println!(
+        "PROBE W27 {w}x{h}, {quality:?}, Beautiful, Weather's shipped deck, median of 9; \
+         off and on are what the deck adds over a bare sky"
+    );
+    let (mut all_off, mut all_on) = (Vec::new(), Vec::new());
+    let mut level_off = 0.0;
+    let mut storm_above_on = 0.0;
+    for (view, height, pitch) in WEATHER_VIEWS {
+        let camera = weather_view(height, pitch);
+        let (mut view_off, mut view_on) = (Vec::new(), Vec::new());
+        for (sky, cover, strato, alto, cb) in WEATHER_SKIES {
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer: None,
+                clouds: None,
+                quality,
+                seed: 4242,
+            });
+            let _ = target.capture(&mut renderer, &camera);
+            let _ = target.capture(&mut renderer, &camera);
+            let bare = median_of(
+                &(0..9)
+                    .map(|_| once(&mut renderer, &camera))
+                    .collect::<Vec<_>>(),
+            );
+            renderer.set_clouds(client::render::clouds::Deck {
+                layer: Some(shipped_deck()),
+                clouds: Some(sky_of(cover, strato, alto, cb)),
+                quality,
+                seed: 4242,
+            });
+            let (off, on) = both(&mut renderer, &camera);
+            let (off, on) = (off - bare, on - bare);
+            println!("PROBE W27 {view} {sky}: off {off:.2} ms, on {on:.2} ms (bare {bare:.2} ms)");
+            view_off.push(off);
+            view_on.push(on);
+            if view == "above" && sky == "storm" {
+                storm_above_on = on;
+            }
+        }
+        let (off, on) = (median_of(&view_off), median_of(&view_on));
+        println!(
+            "PROBE W27 view {view} median: off {off:.2} ms, on {on:.2} ms, on/off {:.2}",
+            on / off.max(1e-6)
+        );
+        if view == "level" {
+            level_off = off;
+        }
+        all_off.extend(view_off);
+        all_on.extend(view_on);
+    }
+    let (off, on) = (median_of(&all_off), median_of(&all_on));
+    println!(
+        "PROBE W27 all {} shots median: off {off:.2} ms, on {on:.2} ms, on/off {:.2} \
+         (gate: at most 0.50)",
+        all_off.len(),
+        on / off.max(1e-6)
+    );
+    println!(
+        "PROBE W27 storm from above: on {storm_above_on:.2} ms against today's level view, \
+         the median off, {level_off:.2} ms (gate: no worse)"
+    );
+}
+
 /// A map clear everywhere but a square of `wide` cells at its middle, the
 /// square centred on the camera, for the tests about what a gradient does
 /// to a cloud. `cell` is a cell's side in blocks, which is also the filtered
