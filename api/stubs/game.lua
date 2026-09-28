@@ -1715,6 +1715,7 @@ function game.register_on_chat(callback) end
 ---@class Tiamat.Widget
 ---@field type string Required. One of the types above.
 ---@field name string? What events from this widget carry, so you can tell two buttons apart.
+---@field tooltip string? What hovers over it, or nothing. Capped at 256 bytes — refused rather than truncated, the same rule `Stack.detail` follows. Drawn in the theme's `text_font`. On a `container`, a child's own tooltip wins: the container's only shows when the pointer is over it and over no descendant that has one.
 ---@field children Tiamat.Widget[]? Only for `container` and `scroll`.
 ---@field style Tiamat.WidgetStyle?
 ---@field grow integer? Share of the parent's leftover space. 0 takes only what it needs.
