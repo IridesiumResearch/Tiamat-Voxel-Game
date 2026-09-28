@@ -402,6 +402,23 @@ pub struct Shared {
     /// `None` when the loaded mods registered no default — and then nobody can
     /// dig at all, which is deliberate. See [`Shared::resolve_tool`].
     pub default_tool: Option<String>,
+    /// Each tool's speed on particular materials, resolved from the names it
+    /// registered to the ids this world uses (Craft ask 2). A material not
+    /// named digs at the tool's `speed_multiplier`.
+    pub tool_speeds: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<tiamat_core::MaterialId, f32>,
+    >,
+    /// What a full block of each material yields where its mod overrode the
+    /// ordinary rule (`register_block{ drops = ... }`), by world id, in
+    /// units. Absent means Contract §9: the block drops itself. **Never read
+    /// until Craft ask 3**: the field was accepted and sorted, and the dig
+    /// credited what the edit removed regardless.
+    pub drop_rules:
+        std::collections::BTreeMap<tiamat_core::MaterialId, Vec<(tiamat_core::MaterialId, u32)>>,
+    /// Every registered material by name, to the id this world uses — what a
+    /// dig hook's `drops` answer is resolved with, at the moment it is given.
+    pub material_ids: std::collections::BTreeMap<String, tiamat_core::MaterialId>,
 
     /// How each material resists a tool: its bare-handed seconds, and how
     /// strongly it imposes that on a block it is only part of.
@@ -510,6 +527,9 @@ pub struct PlayerSim {
     pub inputs: tiamat_core::phys::InputQueue,
     /// What this player is breaking, if anything.
     pub dig: Option<tiamat_core::dig::Dig>,
+    /// What that dig yields: the rule a hook chose for it, and the fractions
+    /// of a unit owed between bites. Reset with the dig.
+    pub dig_yield: tiamat_core::dig::Yield,
     /// The tool they say they are holding, or `None` for a bare hand.
     pub tool: Option<String>,
     /// Where they are looking, in turns, as the wire carries it.
@@ -615,6 +635,7 @@ impl PlayerSim {
             body: tiamat_core::phys::Body::at(local),
             inputs: tiamat_core::phys::InputQueue::new(tick),
             dig: None,
+            dig_yield: tiamat_core::dig::Yield::new(),
             tool: None,
             anim: tiamat_core::ent::AnimTag::IDLE,
             swung_on: 0,
@@ -1360,7 +1381,10 @@ impl Shared {
             return;
         };
         match target {
-            None => player.dig = None,
+            None => {
+                player.dig = None;
+                player.dig_yield = tiamat_core::dig::Yield::new();
+            }
             Some(target) => {
                 // No tool, no dig. A mod says what a player digs with, so a
                 // world with no tools mod is one nobody can dig in.
@@ -1369,16 +1393,79 @@ impl Shared {
                     .map(|tool| tool.brush)
                 else {
                     player.dig = None;
+                    player.dig_yield = tiamat_core::dig::Yield::new();
                     return;
                 };
-                match player.dig.as_mut() {
-                    Some(dig) => {
-                        dig.retarget(target, brush);
+                // A new target is a new dig: the rule a hook gave the last one
+                // and the fraction it was owed do not carry over to a block
+                // the hook has not been asked about.
+                let fresh = match player.dig.as_mut() {
+                    Some(dig) => dig.retarget(target, brush),
+                    None => {
+                        player.dig = Some(tiamat_core::dig::Dig::start(target, brush));
+                        true
                     }
-                    None => player.dig = Some(tiamat_core::dig::Dig::start(target, brush)),
+                };
+                if fresh {
+                    player.dig_yield = tiamat_core::dig::Yield::new();
                 }
             }
         }
+    }
+
+    /// Sets what a player's current dig yields, from a hook's answer (Craft
+    /// ask 3), resolving the names it gave to this world's ids.
+    ///
+    /// A name nobody registered is logged and left out: a mod's typo should
+    /// cost that one drop, not the dig. `None` leaves the block's own rule.
+    pub fn set_dig_drops(&self, uuid: &PlayerUuid, drops: Option<&[(String, u32)]>) {
+        let rule = drops.map(|drops| {
+            drops
+                .iter()
+                .filter_map(|(name, units)| match self.material_ids.get(name) {
+                    Some(id) => Some((*id, *units)),
+                    None => {
+                        tracing::warn!(
+                            block = %name,
+                            "a dig hook's `drops` names a block nobody registered; left out"
+                        );
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return;
+        };
+        if let Some(player) = bodies.get_mut(uuid) {
+            player.dig_yield.set_rule(rule);
+        }
+    }
+
+    /// What a player is credited for material their dig just removed: the
+    /// removed stacks, through the dig's rule or the block's, or as they are.
+    #[must_use]
+    pub fn yield_of(
+        &self,
+        uuid: &PlayerUuid,
+        removed: Vec<tiamat_core::inventory::Stack>,
+    ) -> Vec<tiamat_core::inventory::Stack> {
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return removed;
+        };
+        let Some(player) = bodies.get_mut(uuid) else {
+            return removed;
+        };
+        let mut paid = Vec::new();
+        for stack in removed {
+            let registered = self.drop_rules.get(&stack.material).map(Vec::as_slice);
+            paid.extend(
+                player
+                    .dig_yield
+                    .earn(stack.material, stack.units, registered),
+            );
+        }
+        tiamat_core::inventory::consolidate(paid)
     }
 
     /// Records which tool a player says they are holding.
@@ -1595,12 +1682,24 @@ impl Shared {
     /// `cells` is how many sub-nodes the target still has — only the caller can
     /// see the block. A `SubNode` brush passes 1 and behaves exactly as it
     /// always did: nothing until the timer, then the one cell.
-    pub fn advance_dig(&self, uuid: &PlayerUuid, hardness: f32, cells: u32) -> Option<Bite> {
+    pub fn advance_dig(
+        &self,
+        uuid: &PlayerUuid,
+        hardness: f32,
+        cells: u32,
+        material: tiamat_core::MaterialId,
+    ) -> Option<Bite> {
         let mut bodies = self.bodies.lock().ok()?;
         let player = bodies.get_mut(uuid)?;
-        let speed = self
-            .resolve_tool(player.tool.as_deref())
-            .map(|tool| tool.speed_multiplier)?;
+        // The tool's speed on THIS material where it named one (Craft ask
+        // 2), its general speed otherwise.
+        let speed = self.resolve_tool(player.tool.as_deref()).map(|tool| {
+            self.tool_speeds
+                .get(&tool.id)
+                .and_then(|speeds| speeds.get(&material))
+                .copied()
+                .unwrap_or(tool.speed_multiplier)
+        })?;
         let dig = player.dig.as_mut()?;
         let before = dig.chipped();
         let chips = dig.advance(hardness, speed, cells);
@@ -1991,6 +2090,7 @@ impl Shared {
         &self,
         uuid: &PlayerUuid,
         view: &str,
+        slot: Option<usize>,
         stack: tiamat_core::inventory::Stack,
     ) -> bool {
         // **Connected is the test, not "has dug something".** An inventory
@@ -2005,10 +2105,13 @@ impl Shared {
             return false;
         }
         let took = self.inventories.lock().is_ok_and(|mut inventories| {
-            inventories
+            let held = inventories
                 .entry(*uuid)
-                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views))
-                .insert(view, stack)
+                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views));
+            match slot {
+                Some(slot) => held.give_into(view, slot, stack),
+                None => held.insert(view, stack),
+            }
         });
         if took && let Ok(mut dirty) = self.inventory_dirty.lock() {
             dirty.insert(*uuid);
@@ -2036,10 +2139,15 @@ impl Shared {
     /// Takes up to `units` of one material and cut out of a view, for a mod.
     ///
     /// Returns how many it got, which may be fewer than asked.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the mod API's `take`, argument for argument; see `inventory::Access`"
+    )]
     pub fn take(
         &self,
         uuid: &PlayerUuid,
         view: &str,
+        slot: Option<usize>,
         material: tiamat_core::material::MaterialId,
         shape: Option<tiamat_core::inventory::Shape>,
         detail: Option<&str>,
@@ -2049,7 +2157,10 @@ impl Shared {
             .inventories
             .lock()
             .map(|mut inventories| match inventories.get_mut(uuid) {
-                Some(slots) => slots.take(view, material, shape, detail, units),
+                Some(slots) => match slot {
+                    Some(slot) => slots.take_from(view, slot, material, shape, detail, units),
+                    None => slots.take(view, material, shape, detail, units),
+                },
                 None => 0,
             })
             .unwrap_or(0);
@@ -3924,6 +4035,9 @@ mod tests {
             tools: std::collections::BTreeMap::new(),
             hardness: std::collections::BTreeMap::new(),
             default_tool: None,
+            tool_speeds: std::collections::BTreeMap::new(),
+            drop_rules: std::collections::BTreeMap::new(),
+            material_ids: std::collections::BTreeMap::new(),
         }
     }
 

@@ -290,7 +290,10 @@ pub struct BlockRules {
     ///
     /// `None` means the ordinary rule from the Sub-Node Contract §9: the block
     /// drops itself, 27 units for a full block and one per occupied cell
-    /// otherwise. `Some` replaces that outright, in units.
+    /// otherwise. `Some` replaces that outright, in units per full block,
+    /// paid as the block comes apart (see [`crate::dig::Yield`]). The ids
+    /// may be any mod's (Craft ask 7): a drop names a block rather than
+    /// registering one.
     pub drops: Option<Vec<(String, u32)>>,
     /// Light this block gives off, as `(r, g, b)` each 0..=15.
     ///
@@ -309,6 +312,9 @@ pub struct BlockRules {
     /// everything. The ids are strings and are resolved against the
     /// registries by whoever holds them — charter rule 8 again.
     pub absorbs: AbsorbsRule,
+    /// The tags a mod put on it, for other mods to match on — `"ore"`, say —
+    /// read back by `game.tags` (Craft ask 6). Empty when it said none.
+    pub tags: Vec<String>,
     /// Whether the block can be seen through: glass.
     ///
     /// **A flag, not an alpha value** — the texture already carries the alpha,
@@ -759,6 +765,11 @@ pub struct Tool {
     pub brush: Brush,
     /// How much faster than a bare hand it digs.
     pub speed_multiplier: f32,
+    /// Its speed on particular materials, by qualified block id, where it is
+    /// not [`Self::speed_multiplier`] (Craft ask 2): a bronze pick fast on
+    /// rock and slow on earth. Resolved to runtime ids by whoever holds the
+    /// registry.
+    pub speeds: Vec<(String, f32)>,
     /// Whether this is what a player digs with holding nothing.
     ///
     /// The engine has no bare hand of its own. It knows how to *count* a dig
@@ -1114,6 +1125,12 @@ pub struct HookOutcome {
     /// `None` here is the `false` case. Use [`HookOutcome::notice`] rather than
     /// reading it directly, so every caller spells the ladder the same way.
     pub reason: Option<String>,
+    /// What the dig yields, when an `on_dig_complete` hook answered
+    /// `{ drops = ... }` (Craft ask 3): block ids to units per full block,
+    /// sorted by id. `None` leaves the block's own rule in force. Only the
+    /// dig hooks read it; any hook may answer a table, and the field is
+    /// simply ignored where it means nothing.
+    pub drops: Option<Vec<(String, u32)>>,
     /// Mods that faulted during this round, now disabled.
     pub faults: Vec<(String, ScriptError)>,
 }
@@ -1132,6 +1149,7 @@ impl HookOutcome {
         Self {
             allowed: true,
             reason: None,
+            drops: None,
             faults: Vec::new(),
         }
     }

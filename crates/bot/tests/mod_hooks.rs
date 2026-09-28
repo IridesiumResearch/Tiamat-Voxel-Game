@@ -293,6 +293,110 @@ fn a_mod_that_throws_while_vetoing_does_not_stop_the_dig() {
     assert!(server.stop());
 }
 
+/// The world id the server gave a mod's block, from the table sent on join.
+fn material_named(bot: &Bot, name: &str) -> u16 {
+    bot.material_table()
+        .expect("the material table arrives on join")
+        .iter()
+        .find(|def| def.name == name)
+        .map(|def| def.id)
+        .unwrap_or_else(|| panic!("no material `{name}` in the table"))
+}
+
+fn units_of(stacks: &[tiamat_core::proto::StackDef], material: u16) -> u32 {
+    stacks
+        .iter()
+        .filter(|stack| stack.material == material)
+        .map(|stack| stack.units)
+        .sum()
+}
+
+#[test]
+fn a_mod_can_say_what_a_dig_yields() {
+    // Craft ask 3: rubble by hand, ore by pick. The hook's answer replaces
+    // the block's own rule for this dig, in units per full block, paid as the
+    // block comes apart — so a whole block at two a cell is exactly 54, and
+    // none of the stone that was actually there.
+    let server = start(
+        "dig-yields",
+        write_warden(
+            "dig-yields",
+            "game.register_block{ id = 'gem' }\n\
+             game.register_on_dig_complete(function(e)\n\
+             \x20   return { drops = { gem = 54 } }\n\
+             end)",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        // **World ids, from the table.** What a chunk holds and what an
+        // inventory carries are world ids, and `stone()` is the runtime id
+        // — the two number the same materials differently.
+        let stone = material_named(&bot, "test:stone");
+        let gem = material_named(&bot, "warden:gem");
+        let removed = dig_and_see(&mut bot, &server, BlockPos::new(2, -1, 0), stone).await;
+        assert!(removed, "an answer with drops was taken for a refusal");
+        let stacks = settled_inventory(&mut bot).await;
+        assert_eq!(
+            units_of(&stacks, gem),
+            54,
+            "the hook's drops were not paid: {stacks:?}"
+        );
+        assert_eq!(
+            units_of(&stacks, stone),
+            0,
+            "the block itself was paid as well: {stacks:?}"
+        );
+    });
+
+    assert!(server.stop());
+}
+
+#[test]
+fn a_blocks_registered_drops_apply_and_may_name_another_mods_block() {
+    // Two things at once. `register_block{ drops = ... }` was accepted and
+    // never consulted: a dig credited what the edit removed regardless. And
+    // a drop naming another mod's block was refused as if it registered one
+    // (Craft ask 7) — here the ore drops the `test:` namespace's stone,
+    // which is not the warden's, and three of its own gems a block.
+    let server = start(
+        "dig-drops",
+        write_warden(
+            "dig-drops",
+            "game.register_block{ id = 'ore', hardness = 0.5, drops = { ['test:stone'] = 27, gem = 3 } }\n\
+             game.register_block{ id = 'gem' }",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let stone = material_named(&bot, "test:stone");
+        let ore = material_named(&bot, "warden:ore");
+        let gem = material_named(&bot, "warden:gem");
+        let removed = dig_and_see(&mut bot, &server, BlockPos::new(2, -1, 0), ore).await;
+        assert!(removed, "the ore did not come apart");
+        let stacks = settled_inventory(&mut bot).await;
+        assert_eq!(
+            units_of(&stacks, stone),
+            27,
+            "the stone it drops was not paid: {stacks:?}"
+        );
+        assert_eq!(
+            units_of(&stacks, gem),
+            3,
+            "three gems a block, exactly: {stacks:?}"
+        );
+        assert_eq!(
+            units_of(&stacks, ore),
+            0,
+            "the ore itself was paid as well: {stacks:?}"
+        );
+    });
+
+    assert!(server.stop());
+}
+
 /// The inventory, once it has stopped changing.
 ///
 /// **Sampling after the first update is a bet on how fast the machine is.** A

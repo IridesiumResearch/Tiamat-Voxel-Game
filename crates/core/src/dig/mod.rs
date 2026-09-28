@@ -26,8 +26,10 @@
 //! it costs. The two are separate because the counting has no opinion about
 //! composition and the blend has none about time.
 
+pub mod drops;
 pub mod hardness;
 
+pub use drops::Yield;
 pub use hardness::{Resistance, SUBNODE_SHARE, block_hardness, subnode_hardness};
 
 use crate::block::SUBNODES_PER_BLOCK;

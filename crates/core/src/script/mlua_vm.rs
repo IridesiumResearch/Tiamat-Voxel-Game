@@ -3498,21 +3498,7 @@ impl ScriptVm for MluaVm {
                     .as_ref()
                     .and_then(|entry| entry.get::<Option<f32>>("dominance").ok().flatten())
                     .unwrap_or(crate::dig::Resistance::DEFAULT_DOMINANCE);
-                let drops = entry
-                    .as_ref()
-                    .and_then(|entry| entry.get::<Option<Table>>("drops").ok().flatten())
-                    .map(|drops| {
-                        drops
-                            .pairs::<String, u32>()
-                            .filter_map(Result::ok)
-                            .collect::<Vec<_>>()
-                    })
-                    .map(|mut drops| {
-                        // Contract §9: drop order is observable, so it must not
-                        // depend on Lua's table iteration.
-                        drops.sort();
-                        drops
-                    });
+                let drops = drops_of(entry.as_ref());
                 let light_emit = entry
                     .as_ref()
                     .and_then(|entry| entry.get::<Option<Table>>("light_emit").ok().flatten())
@@ -3557,6 +3543,7 @@ impl ScriptVm for MluaVm {
                         drops,
                         light_emit,
                         absorbs,
+                        tags: tags_of(entry.as_ref()),
                         // Read from the registry table the same way, and
                         // built into its packed form HERE rather than at
                         // registration: the table holds what the mod said, and
@@ -3668,6 +3655,17 @@ impl ScriptVm for MluaVm {
                 Some(Tool {
                     brush: Brush::parse(&entry.get::<String>("brush").ok()?)?,
                     speed_multiplier: entry.get("speed").ok()?,
+                    speeds: entry
+                        .get::<Option<Table>>("speeds")
+                        .ok()
+                        .flatten()
+                        .map(|speeds| {
+                            speeds
+                                .pairs::<String, f32>()
+                                .filter_map(Result::ok)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     default: entry.get("default").unwrap_or(false),
                     name: entry.get::<Option<String>>("name").ok().flatten(),
                     id,
@@ -4874,6 +4872,7 @@ impl MluaVm {
                 // that yields zero of something is a recipe with a condition
                 // in it, and the mod already knows what it asked for.
                 let detail = detail_of(&spec)?;
+                let into = container_slot_of(&spec)?;
                 let Some(stack) = crate::inventory::Stack::new(material, units).map(|stack| {
                     crate::inventory::Stack {
                         shape,
@@ -4885,7 +4884,7 @@ impl MluaVm {
                 };
                 let accepted = slot.lock().ok().and_then(|slot| {
                     slot.as_ref()
-                        .map(|access| access.give(player, &view, stack))
+                        .map(|access| access.give(player, &view, into, stack))
                 });
                 Ok(accepted.unwrap_or(false))
             })
@@ -4926,9 +4925,18 @@ impl MluaVm {
                 // what it took; one told only `false` would have to ask twice
                 // to find out how much that was.
                 let detail = detail_of(&spec)?;
+                let from = container_slot_of(&spec)?;
                 let took = slot.lock().ok().and_then(|slot| {
                     slot.as_ref().map(|access| {
-                        access.take(player, &view, material, shape, detail.as_deref(), units)
+                        access.take(
+                            player,
+                            &view,
+                            from,
+                            material,
+                            shape,
+                            detail.as_deref(),
+                            units,
+                        )
                     })
                 });
                 Ok(took.unwrap_or(0))
@@ -7071,6 +7079,33 @@ impl MluaVm {
     /// a place in the world and two mods may legitimately want at the same one
     /// — a hopper feeding a furnace is exactly that. The name is the mod's to
     /// choose and to keep unique, the way a block id is.
+    /// `game.containers(prefix)`: the names of the containers that exist,
+    /// starting with a prefix, in order (Craft ask 5).
+    ///
+    /// The engine already keys them by name; listing them here is what lets
+    /// a kiln mod's tick find every kiln without keeping an index of its own
+    /// in storage that drifts the first time the two disagree.
+    fn install_container_listing(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.containers);
+        let names = self
+            .lua
+            .create_function(move |lua, prefix: String| {
+                let found: Vec<String> = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.names(&prefix)))
+                    .unwrap_or_default();
+                let list = lua.create_table()?;
+                for name in found {
+                    list.push(name)?;
+                }
+                Ok(list)
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("containers", names)
+            .map_err(|err| self.vm_error(&err))
+    }
+
     fn install_container_api(&self, game: &Table) -> Result<(), ScriptError> {
         macro_rules! reach {
             ($slot:expr, $default:expr, $call:expr) => {
@@ -7175,6 +7210,8 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("container_holder", holder)
             .map_err(|err| self.vm_error(&err))?;
+
+        self.install_container_listing(game)?;
 
         let (give, take) = self.container_transfers()?;
         game.set("container_give", give)
@@ -7848,6 +7885,47 @@ impl MluaVm {
         game.set("block_of", block_of)
             .map_err(|err| self.vm_error(&err))?;
 
+        // What a block's registration said, read back by numeric material
+        // (Craft ask 6): registration was write-only, so the dig classes were
+        // a table naming the world's blocks one by one.
+        let hardness = self
+            .lua
+            .create_function(|lua, material: u16| {
+                let Some(name) = block_name_of(lua, material)? else {
+                    return Ok(None);
+                };
+                let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
+                let entry: Option<Table> = rules.get(name.as_str())?;
+                let value = entry
+                    .and_then(|entry| entry.get::<Option<f32>>("hardness").ok().flatten())
+                    .unwrap_or(crate::script::BlockRules::DEFAULT_HARDNESS);
+                Ok(Some(value))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("hardness", hardness)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let tags = self
+            .lua
+            .create_function(|lua, material: u16| {
+                let Some(name) = block_name_of(lua, material)? else {
+                    return Ok(None);
+                };
+                let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
+                let entry: Option<Table> = rules.get(name.as_str())?;
+                let list = lua.create_table()?;
+                if let Some(tags) =
+                    entry.and_then(|entry| entry.get::<Option<Table>>("tags").ok().flatten())
+                {
+                    for tag in tags.sequence_values::<String>() {
+                        list.push(tag?)?;
+                    }
+                }
+                Ok(Some(list))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("tags", tags).map_err(|err| self.vm_error(&err))?;
+
         Ok(())
     }
 
@@ -8403,6 +8481,25 @@ impl MluaVm {
                     outcome.reason = Some(reason);
                     return outcome;
                 }
+                // A table allows, and says something about the outcome — so
+                // far only what a dig yields (Craft ask 3). The walk goes on,
+                // and a later mod's answer replaces an earlier one's. An
+                // answer the engine cannot read is the mod's error, and is
+                // treated as one: disabled, the action proceeds.
+                Ok(mlua::Value::Table(answer)) => match hook_drops(&mod_id, &answer) {
+                    Ok(Some(drops)) => outcome.drops = Some(drops),
+                    Ok(None) => {}
+                    Err(err) => {
+                        let error = Self::classify(&err, &mod_id, hook);
+                        self.fault(&mod_id);
+                        tracing::error!(
+                            mod_id = %mod_id,
+                            error = %error,
+                            "disabling mod after a {hook} answer the engine could not read; the action is allowed to proceed"
+                        );
+                        outcome.faults.push((mod_id, error));
+                    }
+                },
                 Ok(_) => {}
             }
         }
@@ -8864,15 +8961,26 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
             entry.set("absorbs", block_absorbs(lua, owner, &id, &absorbs)?)?;
         }
         if let Some(drops) = drops {
+            // A drop NAMES a block, it does not register one, so another
+            // mod's is allowed here (Craft ask 7): fire-cracked rock yields
+            // the world's stone. Resolved on the server once every mod has
+            // registered, as `absorbs.becomes` is.
             let parsed = lua.create_table()?;
             for pair in drops.pairs::<String, u32>() {
                 let (dropped, units) = pair?;
-                parsed.set(
-                    qualify_id(owner, &dropped).map_err(mlua::Error::external)?,
-                    units,
-                )?;
+                parsed.set(named_block(owner, &dropped), units)?;
             }
             entry.set("drops", parsed)?;
+        }
+        // Kept, and read back by `game.tags` (Craft ask 6): until this the
+        // field was accepted and dropped on the floor, so a mod classing the
+        // world's blocks named them one by one.
+        if let Some(tags) = spec.get::<Option<Table>>("tags")? {
+            let list = lua.create_table()?;
+            for tag in tags.sequence_values::<String>() {
+                list.push(tag?)?;
+            }
+            entry.set("tags", list)?;
         }
         let rules: Table = lua.named_registry_value("tiamat.block_rules")?;
         rules.set(qualified.clone(), entry)?;
@@ -9314,9 +9422,32 @@ fn register_tool(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
         )));
     }
 
+    // A speed per material (Craft ask 2): a bronze pick fast on rock and slow
+    // on earth. A bare name is the mod's own; a namespaced one may be another
+    // mod's block, and one nobody registered is simply never asked about.
+    let speeds = lua.create_table()?;
+    if let Some(table) = spec.get::<Option<Table>>("speeds")? {
+        for pair in table.pairs::<String, f32>() {
+            let (block, factor) = pair?;
+            if !factor.is_finite() || factor <= 0.0 {
+                return Err(mlua::Error::external(format!(
+                    "register_tool(\"{qualified}\"): speeds[\"{block}\"] must be a positive \
+                     number, got {factor}"
+                )));
+            }
+            let block = if block.contains(':') {
+                block
+            } else {
+                qualify_id(owner, &block).map_err(mlua::Error::external)?
+            };
+            speeds.set(block, factor)?;
+        }
+    }
+
     let entry = lua.create_table()?;
     entry.set("brush", brush)?;
     entry.set("speed", speed)?;
+    entry.set("speeds", speeds)?;
     entry.set("default", default)?;
     // Accepted since tools existed and discarded until now, which meant a mod
     // could name its tool and the name went nowhere. The client shows it.
@@ -9602,7 +9733,14 @@ const CLOUD_FIELDS: [&str; 11] = [
 ];
 
 /// Fields `register_tool` accepts.
-const TOOL_FIELDS: [&str; 5] = ["id", "name", "brush", "speed_multiplier", "default"];
+const TOOL_FIELDS: [&str; 6] = [
+    "id",
+    "name",
+    "brush",
+    "speed_multiplier",
+    "default",
+    "speeds",
+];
 
 /// Fields `register_fluid` accepts. Anything else is a typo, and a typo that is
 /// silently ignored is a mod whose author cannot tell why nothing happened.
@@ -10265,6 +10403,84 @@ fn domain_of(position: &Table) -> mlua::Result<String> {
         .get::<Option<String>>("domain")?
         .filter(|domain| !domain.is_empty())
         .unwrap_or_else(|| crate::domain::OVERWORLD.to_owned()))
+}
+
+/// The block id a numeric material was registered under, or `None` for one
+/// this mod set never heard of — the `engine:unknown` placeholder of charter
+/// rule 8 arriving from a world written by another.
+fn block_name_of(lua: &Lua, material: u16) -> mlua::Result<Option<String>> {
+    let registry: Table = lua.named_registry_value("tiamat.blocks")?;
+    for pair in registry.pairs::<String, u16>() {
+        let (id, numeric) = pair?;
+        if numeric == material {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// A block's registered `drops`, from its rules entry.
+///
+/// Contract §9: drop order is observable, so it must not depend on Lua's
+/// table iteration — sorted by id.
+fn drops_of(entry: Option<&Table>) -> Option<Vec<(String, u32)>> {
+    let drops = entry.and_then(|entry| entry.get::<Option<Table>>("drops").ok().flatten())?;
+    let mut drops: Vec<(String, u32)> = drops
+        .pairs::<String, u32>()
+        .filter_map(Result::ok)
+        .collect();
+    drops.sort();
+    Some(drops)
+}
+
+/// A block's registered `tags`, in the order the mod listed them; empty for
+/// a block that has none.
+fn tags_of(entry: Option<&Table>) -> Vec<String> {
+    entry
+        .and_then(|entry| entry.get::<Option<Table>>("tags").ok().flatten())
+        .map(|tags| {
+            tags.sequence_values::<String>()
+                .filter_map(Result::ok)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A block id as a REFERENCE: bare is the mod's own, namespaced is kept as
+/// written, whoever's it is.
+///
+/// The counterpart of [`qualify_id`], which refuses another mod's namespace
+/// because REGISTERING into it would be a collision. Naming one is not — a
+/// drop, a `becomes` — and refusing it (Craft ask 7) made a mod give the
+/// digger the rock by hand rather than say the block drops it.
+fn named_block(mod_id: &str, id: &str) -> String {
+    if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("{mod_id}:{id}")
+    }
+}
+
+/// Reads `{ drops = { ["mod:id"] = units } }` out of a hook's answer.
+///
+/// `Ok(None)` when the table says nothing about drops, which is an ordinary
+/// allowance. Sorted by id so the payout order does not depend on Lua's table
+/// order (Contract §9); the units are per full block, as at registration.
+fn hook_drops(mod_id: &str, answer: &Table) -> mlua::Result<Option<Vec<(String, u32)>>> {
+    let Some(drops) = answer.get::<Option<Table>>("drops")? else {
+        return Ok(None);
+    };
+    let mut list = Vec::new();
+    for pair in drops.pairs::<String, u32>() {
+        let (dropped, units) = pair.map_err(|err| {
+            mlua::Error::external(format!(
+                "`drops` is a table of block id to units per block: {err}"
+            ))
+        })?;
+        list.push((named_block(mod_id, &dropped), units));
+    }
+    list.sort();
+    Ok(Some(list))
 }
 
 fn qualify_id(mod_id: &str, id: &str) -> Result<String, String> {
@@ -13192,6 +13408,121 @@ mod tests {
     }
 
     #[test]
+    fn a_dig_hook_may_say_what_the_dig_yields() {
+        // Craft ask 3: rubble by hand, ore by pick. A table answer allows,
+        // and carries the rule; a bare id is the mod's own and a namespaced
+        // one is anybody's; sorted, so the payout order is not Lua's.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "smithy",
+            "game.register_on_dig_complete(function(e)\n\
+             \x20   return { drops = { rubble = 27, ['world:ore'] = 3 } }\n\
+             end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        let outcome = vm.dig_complete(&a_dig());
+        assert!(
+            outcome.allowed,
+            "an answer with drops was taken for a refusal"
+        );
+        assert_eq!(
+            outcome.drops,
+            Some(vec![
+                ("smithy:rubble".to_owned(), 27),
+                ("world:ore".to_owned(), 3)
+            ])
+        );
+        assert!(outcome.faults.is_empty());
+
+        // A table that says nothing about drops is a plain allowance.
+        let mut quiet = self::vm();
+        load(
+            &mut quiet,
+            "quiet",
+            "game.register_on_dig_complete(function() return { note = 'seen' } end)",
+        )
+        .expect("load");
+        quiet.freeze().expect("freeze");
+        let outcome = quiet.dig_complete(&a_dig());
+        assert!(outcome.allowed);
+        assert_eq!(outcome.drops, None);
+    }
+
+    #[test]
+    fn a_later_mods_drops_answer_replaces_an_earlier_ones() {
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "first",
+            "game.register_on_dig_complete(function() return { drops = { a = 1 } } end)",
+        )
+        .expect("load first");
+        load(
+            &mut vm,
+            "second",
+            "game.register_on_dig_complete(function() return { drops = { b = 2 } } end)",
+        )
+        .expect("load second");
+        vm.freeze().expect("freeze");
+        let outcome = vm.dig_complete(&a_dig());
+        assert_eq!(outcome.drops, Some(vec![("second:b".to_owned(), 2)]));
+    }
+
+    #[test]
+    fn a_drops_answer_the_engine_cannot_read_is_the_mods_fault_and_the_dig_proceeds() {
+        // The same rule as a throw: the mod is disabled, nobody else is
+        // stopped from digging. A negative count is not a number of units.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "broken",
+            "game.register_on_dig_complete(function() return { drops = { gem = -1 } } end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        let outcome = vm.dig_complete(&a_dig());
+        assert!(outcome.allowed);
+        assert_eq!(outcome.drops, None);
+        assert_eq!(outcome.faults.len(), 1, "the fault was not reported");
+        assert_eq!(outcome.faults[0].0, "broken");
+        assert!(
+            vm.dig_complete(&a_dig()).faults.is_empty(),
+            "disabled, so it does not fault again"
+        );
+    }
+
+    #[test]
+    fn a_blocks_drops_may_name_another_mods_block() {
+        // Craft ask 7. Registering INTO another namespace is a collision and
+        // stays refused; naming a block in one is a reference.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "craft",
+            "game.register_block{ id = 'cracked', drops = { ['world:stone'] = 27, dust = 1 } }",
+        )
+        .expect("a drop naming another mod's block should load");
+        let rules = vm.registered_block_rules();
+        assert_eq!(
+            rules[0].drops.as_deref(),
+            Some(&[("craft:dust".to_owned(), 1), ("world:stone".to_owned(), 27)][..])
+        );
+        let mut other = self::vm();
+        assert!(
+            load(
+                &mut other,
+                "craft",
+                "game.register_block{ id = 'world:stone' }"
+            )
+            .is_err(),
+            "registering into another mod's namespace is still refused"
+        );
+    }
+
+    #[test]
     fn a_mod_that_throws_while_vetoing_is_disabled_and_the_action_proceeds() {
         // Charter rule 10's sharpest edge. If a crash counted as a refusal, one
         // broken mod would stop everybody on the server from digging — a much
@@ -15667,6 +15998,16 @@ mod entity_tests {
             self.holders.lock().expect("lock").get(name).copied()
         }
 
+        fn names(&self, prefix: &str) -> Vec<String> {
+            self.held
+                .lock()
+                .expect("lock")
+                .keys()
+                .filter(|name| name.starts_with(prefix))
+                .cloned()
+                .collect()
+        }
+
         fn ensure(&self, name: &str, slots: usize) -> bool {
             let mut held = self.held.lock().expect("lock");
             if held.contains_key(name) {
@@ -15969,6 +16310,108 @@ mod entity_tests {
              assert(game.fluid_id('sea') == nil, 'a fluid nobody registered')",
         )
         .expect("fluid ids");
+    }
+
+    #[test]
+    fn a_blocks_hardness_and_tags_are_read_back_by_material() {
+        // Craft ask 6: registration was write-only, so the dig classes named
+        // the world's blocks one by one. `tags` was accepted and dropped on
+        // the floor until this.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "spindle",
+            "game.register_block{ id = 'iron_ore', hardness = 4.5, tags = { 'ore', 'iron' } }\n\
+             game.register_block{ id = 'dirt' }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        let rules = vm.registered_block_rules();
+        let ore = rules
+            .iter()
+            .find(|r| r.block == "spindle:iron_ore")
+            .expect("ore");
+        assert_eq!(ore.tags, vec!["ore".to_owned(), "iron".to_owned()]);
+        vm.eval_in(
+            "spindle",
+            "local ore = game.get_block_id('spindle:iron_ore')\n\
+             local dirt = game.get_block_id('spindle:dirt')\n\
+             assert(game.hardness(ore) == 4.5, 'the hardness it was registered with')\n\
+             assert(game.hardness(dirt) == 0.75, 'the default for a block that said nothing')\n\
+             assert(game.hardness(60000) == nil, 'a material nobody registered')\n\
+             local tags = game.tags(ore)\n\
+             assert(#tags == 2 and tags[1] == 'ore' and tags[2] == 'iron', 'the tags, in order')\n\
+             assert(#game.tags(dirt) == 0, 'no tags is an empty list')\n\
+             assert(game.tags(60000) == nil, 'a material nobody registered')",
+        )
+        .expect("lookups");
+    }
+
+    #[test]
+    fn a_tool_may_name_its_speed_per_block() {
+        // Craft ask 2: a bronze pick fast on rock and slow on earth. A bare
+        // name is the mod's own; a namespaced one is kept as written.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "smithy",
+            "game.register_block{ id = 'rock' }\n\
+             game.register_tool{ id = 'pick', speed_multiplier = 3, speeds = { rock = 4.5, ['world:dirt'] = 0.5 } }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let tools = vm.registered_tools();
+        let pick = tools.iter().find(|t| t.id == "smithy:pick").expect("pick");
+        let mut speeds = pick.speeds.clone();
+        speeds.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            speeds,
+            vec![
+                ("smithy:rock".to_owned(), 4.5),
+                ("world:dirt".to_owned(), 0.5)
+            ]
+        );
+        // A speed that is not positive is a mistake to hear about at load.
+        let mut other = self::vm();
+        let err = load(
+            &mut other,
+            "smithy",
+            "game.register_tool{ id = 'pick', speeds = { rock = 0 } }",
+        )
+        .expect_err("a zero speed loaded");
+        let detail = match &err {
+            ScriptError::Vm { detail, .. }
+            | ScriptError::Load { detail, .. }
+            | ScriptError::Runtime { detail, .. } => detail.clone(),
+            other => other.to_string(),
+        };
+        assert!(detail.contains("must be a positive"), "{detail}");
+    }
+
+    #[test]
+    fn containers_are_listed_by_prefix() {
+        // Craft ask 5: the kiln index is the engine's, not a second one in
+        // storage that drifts.
+        let (mut vm, _boxes) = vm_with_containers();
+        load(
+            &mut vm,
+            "craft",
+            "game.register_block{ id = 'x' }\ngame.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        vm.eval_in(
+            "craft",
+            "game.make_container('craft:kiln:at:1,2,3', 4)\n\
+             game.make_container('craft:kiln:at:9,9,9', 4)\n\
+             game.make_container('craft:chest:at:0,0,0', 27)\n\
+             local kilns = game.containers('craft:kiln:')\n\
+             assert(#kilns == 2 and kilns[1] == 'craft:kiln:at:1,2,3' and kilns[2] == 'craft:kiln:at:9,9,9', 'the kilns, in order')\n\
+             assert(#game.containers('') == 3, 'everything')\n\
+             assert(#game.containers('nobody:') == 0, 'none of those')",
+        )
+        .expect("listing");
     }
 
     #[test]

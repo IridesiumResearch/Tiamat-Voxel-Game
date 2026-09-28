@@ -222,6 +222,16 @@ impl Containers {
         self.by_name.contains_key(name)
     }
 
+    /// The names that start with `prefix`, in name order.
+    #[must_use]
+    pub fn names(&self, prefix: &str) -> Vec<String> {
+        self.by_name
+            .range(prefix.to_owned()..)
+            .take_while(|(name, _)| name.starts_with(prefix))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Who has it open, if anybody.
     #[must_use]
     pub fn holder(&self, name: &str) -> Option<PlayerUuid> {
@@ -332,6 +342,13 @@ impl Shared {
 }
 
 impl tiamat_core::inventory::Containers for Shared {
+    fn names(&self, prefix: &str) -> Vec<String> {
+        self.store
+            .lock()
+            .map(|store| store.names(prefix))
+            .unwrap_or_default()
+    }
+
     fn holder(&self, name: &str) -> Option<[u8; 32]> {
         self.store
             .lock()

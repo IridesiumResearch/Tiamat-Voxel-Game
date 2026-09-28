@@ -590,6 +590,68 @@ impl Slots {
         moved
     }
 
+    /// Puts a stack into ONE slot of a view, whole or not at all (Craft ask 4).
+    ///
+    /// What rewriting a tool's `detail` needs: take the pick from the hand,
+    /// give it back with its wear changed, and have it land in the hand —
+    /// not wherever the pack has room. An empty slot takes the stack; one
+    /// holding the same thing with room for all of it merges; anything else
+    /// is refused whole, so nothing is half-given. `false` also for a slot
+    /// the view does not have.
+    pub fn give_into(&mut self, view: &str, slot: usize, stack: Stack) -> bool {
+        if stack.is_empty() || stack.units > stack.capacity() {
+            return false;
+        }
+        let Some(at) = self.locate(view, slot) else {
+            return false;
+        };
+        match &mut self.views[at].slots[slot] {
+            None => {
+                self.views[at].slots[slot] = Some(stack);
+                true
+            }
+            Some(held)
+                if held.material == stack.material
+                    && held.shape == stack.shape
+                    && held.detail == stack.detail
+                    && held.capacity().saturating_sub(held.units) >= stack.units =>
+            {
+                held.merge(&stack).is_ok()
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Takes up to `units` of one material out of ONE slot of a view, matched
+    /// exactly as [`Self::take`] matches. Returns how many it got.
+    pub fn take_from(
+        &mut self,
+        view: &str,
+        slot: usize,
+        material: MaterialId,
+        shape: Option<super::Shape>,
+        detail: Option<&str>,
+        units: u32,
+    ) -> u32 {
+        let Some(at) = self.locate(view, slot) else {
+            return 0;
+        };
+        let Some(stack) = &mut self.views[at].slots[slot] else {
+            return 0;
+        };
+        if stack.material != material || stack.shape != shape || stack.detail.as_deref() != detail {
+            return 0;
+        }
+        let taking = stack.units.min(units);
+        let Ok(part) = stack.split(taking) else {
+            return 0;
+        };
+        if stack.is_empty() {
+            self.views[at].slots[slot] = None;
+        }
+        part.units
+    }
+
     /// Puts a stack into a view, filling matching stacks then empty slots.
     ///
     /// **Never lossy.** If the view has no room, it GROWS — a player digging
@@ -894,6 +956,54 @@ mod tests {
             "it did not come back into the band"
         );
         assert_eq!(inv.total_units(), 50);
+    }
+
+    #[test]
+    fn a_give_into_one_slot_is_whole_or_not_at_all_and_a_take_from_one_slot_stays_there() {
+        // Craft ask 4: a tool's wear rewritten in place — take the pick from
+        // the hand, give it back changed, and it is in the hand.
+        let mut inv = Slots::for_player();
+        let pick = |wear: &str| Stack {
+            detail: Some(wear.to_owned()),
+            ..Stack::new(STONE, 1).expect("stack")
+        };
+        assert!(inv.give_into(PLAYER_MAIN, 2, pick("d=100")));
+        assert_eq!(
+            at(&inv, PLAYER_MAIN, 2).expect("held").detail.as_deref(),
+            Some("d=100")
+        );
+        // Another thing already there: refused whole, nothing given.
+        assert!(!inv.give_into(PLAYER_MAIN, 2, Stack::new(MaterialId(3), 5).expect("other")));
+        assert_eq!(inv.total_units(), 1);
+        // The rewrite: out of that slot alone, then back into it.
+        assert_eq!(
+            inv.take_from(PLAYER_MAIN, 2, STONE, None, Some("d=100"), 1),
+            1
+        );
+        assert!(at(&inv, PLAYER_MAIN, 2).is_none());
+        assert!(inv.give_into(PLAYER_MAIN, 2, pick("d=99")));
+        assert_eq!(
+            at(&inv, PLAYER_MAIN, 2).expect("held").detail.as_deref(),
+            Some("d=99")
+        );
+        // The wrong detail in that slot takes nothing; a slot that is not
+        // there takes nothing.
+        assert_eq!(
+            inv.take_from(PLAYER_MAIN, 2, STONE, None, Some("d=100"), 1),
+            0
+        );
+        assert_eq!(
+            inv.take_from(PLAYER_MAIN, 99, STONE, None, Some("d=99"), 1),
+            0
+        );
+        assert!(
+            !inv.give_into(PLAYER_MAIN, 99, pick("d=1")),
+            "a slot the view does not have"
+        );
+        // Merging into the same thing with room.
+        inv.views[0].slots[5] = Some(Stack::new(STONE, 20).expect("stack"));
+        assert!(inv.give_into(PLAYER_MAIN, 5, Stack::new(STONE, 7).expect("stack")));
+        assert_eq!(at(&inv, PLAYER_MAIN, 5).expect("merged").units, 27);
     }
 
     #[test]

@@ -770,7 +770,11 @@ pub trait Access: Send + Sync {
     /// Returns whether it took. `false` means the player is not connected or
     /// the view does not exist — never that it did not fit, because
     /// [`crate::inventory::Slots::insert`] grows rather than refusing.
-    fn give(&self, player: [u8; 32], view: &str, stack: Stack) -> bool;
+    ///
+    /// `slot` names one slot of the view, or `None` for wherever it fits. Into
+    /// a named slot the stack goes whole or not at all (Craft ask 4): what a
+    /// tool's wear rewrite needs, so the pick lands back in the hand.
+    fn give(&self, player: [u8; 32], view: &str, slot: Option<usize>, stack: Stack) -> bool;
 
     /// What a player is holding: the stack in the hotbar slot they selected.
     ///
@@ -789,10 +793,16 @@ pub trait Access: Send + Sync {
     /// has gets what there was and can decide whether to give it back; the
     /// alternative — all or nothing — hides the amount and makes the mod ask
     /// twice.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "who, where, and exactly which stack: the slot (Craft ask 4) is the \
+                  one that pushed it over, and a struct for it would be the one call's"
+    )]
     fn take(
         &self,
         player: [u8; 32],
         view: &str,
+        slot: Option<usize>,
         material: MaterialId,
         shape: Option<Shape>,
         detail: Option<&str>,
@@ -1670,4 +1680,13 @@ pub trait Containers: Send + Sync {
     /// refused to touch, and a chest has to tell those apart to refuse the
     /// dig out loud. `None` also for a container that does not exist.
     fn holder(&self, name: &str) -> Option<[u8; 32]>;
+
+    /// The names of the containers that exist, starting with `prefix`, in
+    /// name order (Craft ask 5).
+    ///
+    /// A kiln burns on the tick whether or not anybody is looking, so a mod
+    /// has to know where every kiln is; the engine keys them by name, and the
+    /// name says where — so this is the index, rather than a second one the
+    /// mod keeps in storage and that drifts the first time they disagree.
+    fn names(&self, prefix: &str) -> Vec<String>;
 }

@@ -443,7 +443,7 @@ function Stream:next_bool() end
 ---@field description string? One-line description.
 ---@field hardness number? Seconds to break with a bare hand. Default 0.75. Must not be negative. One SUB-NODE of it costs a thirteen-and-a-half-th of this, so chiselling a block out cell by cell takes twice as long as smashing it whole.
 ---@field dominance number? How strongly this material imposes its hardness on a block it is only part of. Default 1.0. Must be positive. See below.
----@field drops table<string, integer>? Overrides what breaking it yields: block id to UNITS (27 to a block). Omit for the ordinary rule — the block drops itself, 27 units whole or one per occupied sub-node. Bare ids are namespaced with your mod id.
+---@field drops table<string, integer>? Overrides what breaking it yields: block id to UNITS PER FULL BLOCK (27 to a block); a dig that takes part of a block pays that share, as the block comes apart. Omit for the ordinary rule — the block drops itself, 27 units whole or one per occupied sub-node. Bare ids are namespaced with your mod id; a namespaced id may be ANY mod's block (a drop names a block, it does not register one). A name nobody registered is logged and left out. `{}` drops nothing.
 ---@field tags string[]? Arbitrary tags for other mods to match on.
 ---@field textures Tiamat.BlockTextures? Which images clients draw this block with.
 ---@field sounds { step: string }? What this block sounds like underfoot. The client plays its own footsteps from its own movement, so this is the only way it can know. Unqualified ids mean your own mod's.
@@ -515,6 +515,7 @@ function Stream:next_bool() end
 ---@field name string? Display name.
 ---@field brush string? What shape it removes: `"block"` (default) or `"subnode"`.
 ---@field speed_multiplier number? How much faster than a bare hand. Default 1.0, must be positive.
+---@field speeds table<string, number>? Its speed on particular blocks, by id, where it is not `speed_multiplier`: `{ ["tiamat_default_world:stone"] = 4.5, dirt = 0.5 }` — a bare name is your own. Each must be positive. A block nobody registered is dropped, and digs at the general speed.
 ---@field default boolean? Whether this is what a player digs with holding nothing. The engine has no bare hand of its own, so a world whose mods register no default is one nobody can dig in. Lowest id wins if several mods mark one.
 
 ---Fields accepted by `game.register_sky`.
@@ -866,6 +867,15 @@ function game.break_container(name) end
 ---@param name string
 ---@return string|nil holder
 function game.container_holder(name) end
+
+---The names of the containers that exist, starting with `prefix`, in name
+---order. A kiln burns on the tick whether or not anybody is looking, so the
+---tick has to know where every kiln is: the engine keys containers by name and
+---the name says where, so this is that index — no need to keep a second one
+---in `game.storage` that drifts the first time they disagree.
+---@param prefix string `""` for every container there is.
+---@return string[] names
+function game.containers(prefix) end
 
 ---Registers an inventory view: a place stacks may sit, given to every player.
 ---Registration window only.
@@ -1513,7 +1523,11 @@ function game.inventory(player, view) end
 ---Returns false for a player who is not connected, or for a quantity of zero.
 ---An inventory never refuses for lack of room — it grows.
 ---@param player string A player UUID in hex.
----@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string? }
+---`slot` names ONE slot of the view, one-based, and then the stack goes in whole
+---or not at all — an empty slot takes it, one holding the same thing with room
+---merges, anything else is refused. What rewriting a tool's `detail` needs, so
+---the pick lands back in the hand rather than wherever the pack has room.
+---@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string?, slot: integer? }
 ---@return boolean gave
 function game.give(player, spec) end
 
@@ -1571,7 +1585,8 @@ function game.heading(dx, dz) end
 ---left in the same view. A mod that does want any of them reads `game.inventory`,
 ---which reports each stack's detail, and asks for the ones it wants by name.
 ---@param player string A player UUID in hex.
----@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string? }
+---`slot` names ONE slot of the view, one-based, to take from that slot alone.
+---@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string?, slot: integer? }
 ---@return integer units How many units were removed.
 function game.take(player, spec) end
 
@@ -3053,8 +3068,31 @@ function game.set_block(position, block, occupancy, options) end
 ---dug answers what it holds before anything is removed, so a hook can decide by
 ---the whole block rather than by the one material the event names. Writes from
 ---a veto are still refused.
----@param callback fun(event: Tiamat.DigEvent): boolean|string|nil
+---
+---**Or say what the dig yields.** Return a table with `drops` to replace the
+---block's own rule for this dig alone — rubble by hand, ore by pick:
+---
+---```lua
+---game.register_on_dig_complete(function(e)
+---    local held = game.held(e.player)
+---    if ore[e.material] and not (held and picks[held.material]) then
+---        return { drops = { rubble = 27 } }   -- a unit per cell, whatever it was
+---    end
+---end)
+---```
+---
+---The units are per full block, as in `register_block`, and are paid as the
+---block comes apart; a dig that takes nine cells pays a third. A table
+---without `drops` is a plain allowance. Where several mods answer, the last
+---answer wins. A `drops` the engine cannot read (a negative count, a
+---non-string key) counts as an error: your mod is disabled and the dig goes
+---ahead with the block's own rule.
+---@param callback fun(event: Tiamat.DigEvent): boolean|string|Tiamat.DigAnswer|nil
 function game.register_on_dig_complete(callback) end
+
+---What an `on_dig_complete` hook may answer instead of a plain allowance.
+---@class Tiamat.DigAnswer
+---@field drops table<string, integer>? What THIS dig yields: block id to units per full block, the shape `register_block`'s `drops` takes, replacing the block's own rule for this dig alone. Bare ids are your mod's; a namespaced id is any mod's block.
 
 ---Registers a veto on digs BEGINNING: the tick a dig is first seen, before
 ---any of the block has come off.
@@ -3382,6 +3420,21 @@ function game.get_block_id(id) end
 ---@param material integer
 ---@return string? id The qualified block id, e.g. "core_blocks:stone".
 function game.block_of(material) end
+
+---What a block's registration said its hardness was, by numeric material:
+---seconds to break with a bare hand, the default for a block that said nothing.
+---`nil` for a material nobody registered.
+---@param material integer
+---@return number|nil hardness
+function game.hardness(material) end
+
+---The tags a block was registered with, by numeric material — `{ "ore" }`,
+---say — so a mod can class the world's blocks by rule rather than name them
+---one by one. An empty list for a block with none; `nil` for a material nobody
+---registered.
+---@param material integer
+---@return string[]|nil tags
+function game.tags(material) end
 
 ---Generates a heightmap for a chunk from fractal noise.
 ---

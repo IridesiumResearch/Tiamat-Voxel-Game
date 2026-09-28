@@ -1972,6 +1972,46 @@ impl ServerHandle {
                 Some((tiamat_core::MaterialId(world_id), rules.resistance()))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        // Every material by the id this world uses: for the tables below, and
+        // for resolving a dig hook's `drops` answer while the dig runs.
+        let material_ids: std::collections::BTreeMap<String, tiamat_core::MaterialId> = registry
+            .iter()
+            .filter_map(|(runtime, name)| {
+                let world_id = world.materials().to_world(runtime).ok()?;
+                Some((name.to_owned(), tiamat_core::MaterialId(world_id)))
+            })
+            .collect();
+        // What a full block of each material yields where its mod said
+        // (`register_block{ drops = ... }`), keyed by world id like the
+        // hardness. A drop naming a material nobody registered is logged and
+        // left out: it may be any mod's block (Craft ask 7), so the name may
+        // be a typo or a mod that is not loaded, and neither should cost the
+        // block its other drops.
+        let drop_rules = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|rules| {
+                let tiamat_core::script::BlockRules { block, drops, .. } = rules;
+                let id = *material_ids.get(&block)?;
+                let resolved = drops?
+                    .into_iter()
+                    .filter_map(|(name, units)| match material_ids.get(&name) {
+                        Some(dropped) => Some((*dropped, units)),
+                        None => {
+                            warn!(
+                                block = %block,
+                                drop = %name,
+                                "a block's `drops` names a material nobody registered; left out"
+                            );
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Some((id, resolved))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         // Emissive blocks, keyed by world id for the same reason hardness is.
         // A world that has seen a different mod set numbers its materials
         // differently, and a table of this session's runtime ids would name
@@ -2348,6 +2388,21 @@ impl ServerHandle {
             .into_iter()
             .map(|tool| (tool.id.clone(), tool))
             .collect::<std::collections::BTreeMap<_, _>>();
+        // Each tool's per-material speeds, by the ids this world uses — the
+        // same resolution the hardness table gets, so the dig loop's material
+        // finds them (Craft ask 2). A name nobody registered is dropped: the
+        // tool digs that at its general speed, which is what the mod wrote.
+        let tool_speeds = tools
+            .values()
+            .map(|tool| {
+                let speeds = tool
+                    .speeds
+                    .iter()
+                    .filter_map(|(block, factor)| Some((*material_ids.get(block)?, *factor)))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                (tool.id.clone(), speeds)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         // The extra places a mod wants stacks to be able to sit. Read here for
         // the same reason the tools are: the registries are frozen (charter
         // rule 9), so this is settled once and cannot change under a player.
@@ -2528,6 +2583,9 @@ impl ServerHandle {
                 .collect(),
             tools,
             default_tool,
+            tool_speeds,
+            drop_rules,
+            material_ids,
         });
 
         // The runtime is built here rather than inside the network thread, and
@@ -3758,7 +3816,8 @@ impl ServerHandle {
                                     continue;
                                 }
                             }
-                            let Some(bite) = shared.advance_dig(&uuid, hardness, cells) else {
+                            let Some(bite) = shared.advance_dig(&uuid, hardness, cells, material)
+                            else {
                                 continue;
                             };
                             let chips = bite.chips;
@@ -3818,9 +3877,17 @@ impl ServerHandle {
                                 }
                                 continue;
                             }
+                            // What this dig yields, if a mod said (Craft ask
+                            // 3) — set on the bite the mods were asked on,
+                            // and only then, because the outcome on every
+                            // other bite is a plain allowance that would
+                            // clear it.
+                            if bite.first {
+                                shared.set_dig_drops(&uuid, verdict.drops.as_deref());
+                            }
 
                             // Contract §2 and §9: the brush decides what comes
-                            // out, and `break_block` decides what it yields.
+                            // out, and the dig's yield decides what it pays.
                             let edits = match brush {
                                 tiamat_core::dig::Brush::SubNode => {
                                     vec![tiamat_core::proto::Edit::SubNode {
@@ -3882,7 +3949,11 @@ impl ServerHandle {
                                             .expect("fluid lock")
                                             .of(&where_they_are)
                                             .touch(edited_block(&edit));
-                                        shared.credit(uuid, removed);
+                                        // Through the drop rules: the block's
+                                        // own, or the one the hook gave this
+                                        // dig, paid as the block comes apart.
+                                        let paid = shared.yield_of(&uuid, removed);
+                                        shared.credit(uuid, paid);
                                         shared.broadcast_in(
                                             &where_they_are,
                                             ServerMessage::BlockDelta {
@@ -5912,9 +5983,15 @@ impl tiamat_core::inventory::Access for Carried {
         self.shared.contents_of(&uuid, view)
     }
 
-    fn give(&self, player: [u8; 32], view: &str, stack: tiamat_core::inventory::Stack) -> bool {
+    fn give(
+        &self,
+        player: [u8; 32],
+        view: &str,
+        slot: Option<usize>,
+        stack: tiamat_core::inventory::Stack,
+    ) -> bool {
         let uuid = tiamat_core::identity::PlayerUuid::from_bytes(player);
-        self.shared.give(&uuid, view, stack)
+        self.shared.give(&uuid, view, slot, stack)
     }
 
     fn held(&self, player: [u8; 32]) -> Option<tiamat_core::inventory::Stack> {
@@ -5941,6 +6018,7 @@ impl tiamat_core::inventory::Access for Carried {
         &self,
         player: [u8; 32],
         view: &str,
+        slot: Option<usize>,
         material: tiamat_core::material::MaterialId,
         shape: Option<tiamat_core::inventory::Shape>,
         detail: Option<&str>,
@@ -5948,7 +6026,7 @@ impl tiamat_core::inventory::Access for Carried {
     ) -> u32 {
         let uuid = tiamat_core::identity::PlayerUuid::from_bytes(player);
         self.shared
-            .take(&uuid, view, material, shape, detail, units)
+            .take(&uuid, view, slot, material, shape, detail, units)
     }
 }
 
