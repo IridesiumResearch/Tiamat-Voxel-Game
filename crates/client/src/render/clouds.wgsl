@@ -93,11 +93,13 @@ struct Clouds {
     // How much of the star catalog shows, the day's turn as (cos, sin), and
     // whether `fragment_main` draws the stars (1) or `resolve_main` does (0).
     stars: vec4<f32>,
-    // The occupancy's corner x and z, counted in the march's base cells and
-    // a whole number of its coarsest; its side, in base cells; and whether
-    // the march reads it (1) or asks the field in every cell (0) — weather
-    // ask W27. The switch exists for the test that proves both draw the same
-    // picture. Last, so no field before it moved.
+    // The occupancy — weather ask W27: the base cell the camera stands in
+    // (x and z), which every level's square is centred on; the side that
+    // covers the deck's reach, in base cells, or 0 when the march asks the
+    // field in every cell; and the most cells a side any level but the
+    // coarsest needs, for how far out the march walks that level's grid.
+    // `occupancy_side` makes a level's side of the last two. Last, so no
+    // field before it moved.
     occupancy: vec4<f32>,
 }
 
@@ -131,13 +133,13 @@ const MAP_TEXELS: f32 = 16.0;
 // Where in each of the march's cells there is cloud at all — weather ask
 // W27: per cell, the heights the low cloud spans, and the heights the
 // altocumulus and an anvil span together, or nothing. One level per grid
-// the march can walk, side by side in one texture (see `occupancy_slot`):
-// level k's texel is one cell of the base cube times 2^k, which is the grid
-// `grid_level` puts a ray on — and one texel more, whether the camera stands
-// in cloud. Drawn every frame by `occupancy_main` and read by `march` and
-// `fragment_main` alone, so only the deck's own pipelines bind it; the pass
-// that draws it could not, since a texture cannot be drawn into and read in
-// one pass.
+// the march can walk, side by side in one row of one texture (see
+// `occupancy_level`): level k's texel is one cell of the base cube times
+// 2^k, which is the grid `grid_level` puts a ray on — and one texel before
+// them, at the corner, whether the camera stands in cloud. Drawn every frame
+// by `occupancy_main` and read by `march` and `fragment_main` alone, so only
+// the deck's own pipelines bind it; the pass that draws it could not, since
+// a texture cannot be drawn into and read in one pass.
 @group(0) @binding(8) var occupancy: texture_2d<f32>;
 
 // The occupancy's levels: the base cube and five doublings, since
@@ -146,11 +148,24 @@ const MAP_TEXELS: f32 = 16.0;
 const OCCUPANCY_LEVELS: f32 = 6.0;
 
 // How far past its column's own each span in the occupancy reaches, in
-// blocks: thousands of times the last bit of any height the deck has, so a
-// top the occupancy's pass and the march's work out a bit apart — two
-// shaders, and a compiler free to fuse a multiply and an add in one and not
-// the other — cannot put a hit outside the span the march reads.
-const OCCUPANCY_PAD: f32 = 0.0625;
+// blocks. The occupancy's pass and the march are two shaders, and a
+// compiler is free to fuse a multiply and an add in one and not the other,
+// so a height the two work out may differ in its last bits — and near a
+// heap's rim or a tower's, where the crown is a root of a small number, a
+// last bit of the field's coordinate at the world's edge moves a top by
+// most of a block. Two blocks holds that; and a ray only loses its skip
+// where it passes within them of a cloud, which is a sliver of any view.
+const OCCUPANCY_PAD: f32 = 2.0;
+
+// How near a keep-or-drop line of the field a column may fall before the
+// occupancy will not say what the march decides there, as a share of the
+// line's own scale — weather ask W27. The pad holds a height that moved;
+// it cannot hold a heap that was kept in one shader and dropped in the
+// other, or a column that chose the other of two heaps, so such a column
+// is written as cloud at every height and the march asks the field there
+// itself. A thousandth: hundreds of times what two compilations of one
+// expression differ by at the world's edge, and a thin ring on any line.
+const OCCUPANCY_SLACK: f32 = 0.0009765625;
 
 // The octahedral map's (u, v) in 0..1 for a direction: `clouds.rs::oct_encode`.
 fn oct_encode(d: vec3<f32>) -> vec2<f32> {
@@ -368,6 +383,10 @@ struct Column {
     // hand where it hits, and a storm three squares east must not colour the
     // fair cloud overhead.
     darkness: f32,
+    // Whether a keep-or-drop line of the field fell within the caller's
+    // slack of this column (weather ask W27). Only the occupancy asks with
+    // a slack, and only it reads this.
+    undecided: bool,
 };
 
 fn empty_column() -> Column {
@@ -377,7 +396,15 @@ fn empty_column() -> Column {
     column.mid = vec2<f32>(0.0, -1.0);
     column.density = 0.0;
     column.darkness = 0.0;
+    column.undecided = false;
     return column;
+}
+
+// Whether `value` falls within `slack` of the line `at` a keep-or-drop test
+// of the field draws — weather ask W27. With no slack only a tie is near,
+// and nothing but the occupancy reads the answer.
+fn near(value: f32, at: f32, slack: f32) -> bool {
+    return abs(value - at) <= slack;
 }
 
 // Worley cells: the nearest and second-nearest feature point to `p`, and a
@@ -526,7 +553,20 @@ fn field_to_world(point: vec2<f32>, frequency: f32, drift: vec2<f32>, evolve: f3
     return (point - vec2<f32>(evolve, -evolve)) / frequency + drift;
 }
 
-fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Column {
+// The field at one column, as `column_at` asks it, with `slack` for the
+// occupancy's asking of it — weather ask W27. Every line a column can be
+// kept or dropped by, or choose one heap over another by, sets `undecided`
+// where the column falls within `slack` of it (`near`); and the cheap
+// rejects in front of those lines are widened by it, so a candidate near a
+// line reaches the line. With no slack every test is the one the march has
+// always made, and nothing it computes changes.
+fn column_within(
+    cell_xz: vec2<f32>,
+    detail_mix: f32,
+    y_lo: f32,
+    y_hi: f32,
+    slack: f32,
+) -> Column {
     let base = clouds.sun_direction.w;
     let thickness = clouds.sun.w;
     // **The weather over THIS column**, not over the player — ask W10. Every
@@ -615,7 +655,9 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
             for (var i = -1; i <= 1; i = i + 1) {
                 let id = home + vec2<f32>(f32(i), f32(j));
                 let gap = abs(local - (id + 0.5)) - 0.5;
-                if (max(gap.x, gap.y) > reach) {
+                // Widened by the slack: at the reach a heap's rim meets the
+                // column exactly, so a candidate at it goes on to `d`.
+                if (max(gap.x, gap.y) > reach + slack) {
                     continue;
                 }
                 // **One hash for the roll, not a noise lookup.** A value noise
@@ -637,7 +679,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 let clump = hash2(floor(id * 0.4), seed + 7.0);
                 let raw = 0.62 * clump + 0.38 * roll.x;
                 let stem = clamp((raw - 0.5) * 2.4 + 0.5, 0.0, 1.0);
-                if (stem <= loosest) {
+                if (stem <= loosest - slack) {
                     continue;
                 }
                 let point = (id + 0.15 + 0.7 * roll.yz) * spacing;
@@ -648,6 +690,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 // the loosest cell would keep.
                 let own = weather_at(field_to_world(point, frequency, drift, evolve)).cover;
                 let threshold = mix(0.95, -0.10, clamp(own, 0.0, 1.0));
+                column.undecided = column.undecided || near(stem, threshold, slack);
                 if (stem <= threshold) {
                     continue;
                 }
@@ -664,7 +707,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 // heap could be, stretched? Most candidates are not, and the hash
                 // below would be spent on a miss.
                 let offset = at - point;
-                let widest = radius * (1.0 + HEAP_STRETCH);
+                let widest = radius * (1.0 + HEAP_STRETCH) * (1.0 + slack);
                 if (dot(offset, offset) > widest * widest) {
                     continue;
                 }
@@ -678,6 +721,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                     1.0 - 2.0 * HEAP_STRETCH * (shape.x - 0.5),
                 );
                 let d = length(offset / stretch) / radius;
+                column.undecided = column.undecided || near(d, 1.0, slack);
                 if (d < 1.0) {
                     // The crown, from flat bun to pointed heap. **Not `pow`**,
                     // which is a log and an exp for every candidate on every step
@@ -688,6 +732,9 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                     let root = sqrt(dome);
                     let quarter = sqrt(root);
                     let h = mix(quarter, root * quarter, CROWN_FLATTEST + CROWN_RANGE * shape.y);
+                    // Which heap the column takes its height and floor
+                    // from: two crowns near a tie can go either way.
+                    column.undecided = column.undecided || near(h, crown, slack);
                     if (h > crown) {
                         crown = h;
                         // Towers are a SHARE of heaps grown taller, not a second
@@ -715,6 +762,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
             // not a shorter cloud.
             var lobe = 0.0;
             var buds = 0.0;
+            column.undecided = column.undecided || near(crown, 0.08, slack);
             if (crown > 0.08) {
                 let florets = cells(at / (spacing * 0.3), seed + 41.0);
                 lobe = sqrt(clamp((florets.y - florets.x) * 2.2, 0.0, 1.0));
@@ -753,12 +801,20 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
         // **The share at the patch's own anchor** (ask W21): the lattice
         // point of the area noise, so a patch is one patch from every column.
         let anchor = round(at * 0.9) / 0.9;
+        // Halfway between two anchors the patch can be either's, which
+        // matters only where a map makes the two shares differ.
+        column.undecided = column.undecided
+            || (clouds.map.w > 0.0 && any(abs(fract(at * 0.9) - 0.5) <= vec2<f32>(slack)));
         let strato = weather_at(field_to_world(anchor, frequency, drift, evolve)).stratocumulus;
         let area = value2(at * 0.9, seed + 13.0);
+        column.undecided = column.undecided || near(area, strato * 1.15, slack);
         if (strato > 0.0 && area < strato * 1.15) {
             let v = cells(at / vec2<f32>(STRATO_CELL_X, STRATO_CELL_Z), seed + 17.0);
             let groove = mix(0.22, 0.06, strato);
             let edge = v.y - v.x;
+            column.undecided = column.undecided
+                || near(edge, groove, slack)
+                || near(v.z, 0.55 + 0.5 * strato, slack);
             if (edge > groove && v.z < 0.55 + 0.5 * strato) {
                 let t = smoothstep(groove, groove + 0.45, edge);
                 let fade = smoothstep(strato * 1.15, strato * 1.15 - 0.15, area);
@@ -794,7 +850,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                 for (var i = -1; i <= 1; i = i + 1) {
                     let id = home_b + vec2<f32>(f32(i), f32(j));
                     let r = hash4(id, seed + 31.0);
-                    if (r.x > 0.15 + 0.3 * cb_most) {
+                    if (r.x > 0.15 + 0.3 * cb_most + slack) {
                         continue;
                     }
                     let centre = (id + 0.3 + 0.4 * r.yz) * big;
@@ -803,6 +859,8 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                         continue;
                     }
                     let cb = weather_at(field_to_world(centre, frequency, drift, evolve)).cumulonimbus;
+                    column.undecided = column.undecided
+                        || (cb > 0.0 && near(r.x, 0.15 + 0.3 * cb, slack));
                     if (cb <= 0.0 || r.x > 0.15 + 0.3 * cb) {
                         continue;
                     }
@@ -817,6 +875,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                     let height = thickness * CB_HEIGHT * (0.8 + 0.2 * r.w) * scale;
                     let tower_r = big * 0.24 * scale;
                     let d_t = from_centre / tower_r;
+                    column.undecided = column.undecided || near(d_t, 1.0, slack);
                     if (d_t < 1.0) {
                         // A tower is a tall, flat-topped heap: the same two
                         // square roots as a cumulus crown, blended nearer the
@@ -838,6 +897,7 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                     // into the tower that holds it up.
                     let shear = vec2<f32>(big * 0.16, big * 0.04) * scale;
                     let d_a = length((at - centre - shear) * vec2<f32>(0.75, 1.1)) / (big * 0.5 * scale);
+                    column.undecided = column.undecided || near(d_a, 1.0, slack);
                     if (d_a < 1.0) {
                         let edge = sqrt(1.0 - d_a * d_a);
                         let ceiling = base + height * 0.9;
@@ -847,6 +907,9 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
                         let flare = height * 0.42 * (1.0 - from_tower) * (1.0 - from_tower);
                         let mammatus = thickness * 0.4 * cb * cb * lobe * edge * smoothstep(0.35, 0.8, d_a);
                         let bottom = ceiling - height * 0.08 * edge - flare - mammatus;
+                        // In blocks, so the slack is a share of the deck.
+                        column.undecided = column.undecided
+                            || near(top - bottom, cell * 0.5, slack * thickness);
                         if (top - bottom > cell * 0.5) {
                             if (column.upper.y <= column.upper.x) {
                                 column.upper = vec2<f32>(bottom, top);
@@ -874,16 +937,22 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
         if (y_hi >= level - deepest * 0.35 - small && y_lo <= level + deepest + small) {
             // The share at the patch's own anchor, as for the sheet (ask W21).
             let anchor = (round(at * 0.6 + vec2<f32>(5.0, 9.0)) - vec2<f32>(5.0, 9.0)) / 0.6;
+            column.undecided = column.undecided
+                || (clouds.map.w > 0.0
+                    && any(abs(fract(at * 0.6 + vec2<f32>(5.0, 9.0)) - 0.5) <= vec2<f32>(slack)));
             let alto = weather_at(field_to_world(anchor, frequency, drift, evolve)).altocumulus;
             let area = value2(at * 0.6 + vec2<f32>(5.0, 9.0), seed + 57.0);
+            column.undecided = column.undecided || near(area, alto * 1.1, slack);
             if (alto > 0.0 && area < alto * 1.1) {
                 // A sine across the field, bent by a little noise so the
                 // bands are waves rather than rulings.
                 let band = 0.5 + 0.5 * sin(dot(at, vec2<f32>(0.82, 0.57)) * 16.0
                     + value2(at * 2.0, seed + 3.0) * 4.0);
+                column.undecided = column.undecided || near(band, 0.55 - 0.3 * alto, slack);
                 if (band > 0.55 - 0.3 * alto) {
                     let v = cells(at / ALTO_CELL, seed + 61.0);
                     let edge = v.y - v.x;
+                    column.undecided = column.undecided || near(edge, 0.22, slack);
                     if (edge > 0.22) {
                         let t = smoothstep(0.22, 0.5, edge);
                         let fade = smoothstep(alto * 1.1, alto * 1.1 - 0.12, area);
@@ -902,6 +971,12 @@ fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Colum
     }
     column.density = density;
     return column;
+}
+
+// The field at one column, as the march, the shade map and the fog ask it:
+// every line exactly where it has always been (see `column_within`).
+fn column_at(cell_xz: vec2<f32>, detail_mix: f32, y_lo: f32, y_hi: f32) -> Column {
+    return column_within(cell_xz, detail_mix, y_lo, y_hi, 0.0);
 }
 
 // Whether a height is inside any of the three intervals.
@@ -1033,24 +1108,36 @@ fn cell_centre(cell_index: vec2<f32>, cell: f32) -> vec2<f32> {
     return cell_index * cell + cell * 0.5;
 }
 
-// Where level `level` of the occupancy stands in its texture, for a square
-// `side` base cells wide: the finest at the corner, each coarser one in a
-// column beside it, under the one before. `cloud_occupancy.rs::slot` is the
-// same arithmetic, and draws each level there.
-fn occupancy_slot(level: u32, side: i32) -> vec2<i32> {
-    if (level == 0u) {
-        return vec2<i32>(0);
+// How many of its own cells a side level `level` of the occupancy covers:
+// enough for the deck's reach at that level's cells, and for every level
+// but the coarsest no more than the march walks that level's grid — a ray
+// moves to a coarser grid once its cells shrink under the pixels it wants,
+// which is the same count of cells out from the camera at every level (see
+// `cloud_occupancy.rs`, which works the counts out). The coarsest is walked
+// to the end of the reach. `Placement::side` in `cloud_occupancy.rs` is the
+// same arithmetic, and draws each level that size.
+fn occupancy_side(level: u32) -> i32 {
+    let whole = i32(clouds.occupancy.z) >> level;
+    if (level + 1u >= u32(OCCUPANCY_LEVELS)) {
+        return whole;
     }
-    return vec2<i32>(side, side - (side >> (level - 1u)));
+    return min(whole, i32(clouds.occupancy.w));
 }
 
-// Where the occupancy keeps whether the camera stands in cloud: the foot of
-// the column the coarser levels stand in, which the coarsest leaves free.
-// `cloud_occupancy.rs::camera_texel` is the same.
-fn occupancy_camera() -> vec2<i32> {
-    let side = i32(clouds.occupancy.z);
-    return vec2<i32>(side, side - 1);
+// Where level `level` of the occupancy starts along the texture's top row:
+// the levels side by side, finest first, after the camera's texel in the
+// corner. `Placement::x` in `cloud_occupancy.rs` is the same arithmetic.
+fn occupancy_x(level: u32) -> i32 {
+    var x = 1;
+    for (var finer = 0u; finer < level; finer = finer + 1u) {
+        x = x + occupancy_side(finer);
+    }
+    return x;
 }
+
+// Where the occupancy keeps whether the camera stands in cloud: the corner,
+// before the levels. `cloud_occupancy.rs::CAMERA_TEXEL` is the same.
+const OCCUPANCY_CAMERA: vec2<i32> = vec2<i32>(0, 0);
 
 // Whether the camera stands inside solid cloud: the column over it, asked
 // at its own height with the rind on. The same answer for every pixel of a
@@ -1086,9 +1173,11 @@ fn span_met(span: vec2<f32>, origin_y: f32, dir_y: f32, t0: f32, t1: f32) -> boo
 // side of zero reads nothing — the occupancy switched off, or a grid it has
 // no level for.
 //
-// Integer arithmetic. The corner is a whole number of the coarsest cells,
-// so at every level it is a whole number of that level's cells and a shift
-// finds it: no division, and no cell that rounds onto its neighbour's texel.
+// Integer arithmetic, and the same in `occupancy_main`, which draws the
+// level: the square is centred on the cell the camera stands in at this
+// level, and a shift finds that cell from the camera's base cell — no
+// division, so no cell that the pass and the march round onto different
+// texels.
 struct OccupancyLevel {
     corner: vec2<i32>,
     side: i32,
@@ -1098,14 +1187,13 @@ struct OccupancyLevel {
 fn occupancy_level(level: f32) -> OccupancyLevel {
     var out: OccupancyLevel;
     out.side = 0;
-    if (clouds.occupancy.w < 0.5 || level >= OCCUPANCY_LEVELS) {
+    if (clouds.occupancy.z < 0.5 || level >= OCCUPANCY_LEVELS) {
         return out;
     }
     let shift = u32(level);
-    let whole = i32(clouds.occupancy.z);
-    out.corner = vec2<i32>(clouds.occupancy.xy) >> vec2<u32>(shift);
-    out.side = whole >> shift;
-    out.slot = occupancy_slot(shift, whole);
+    out.side = occupancy_side(shift);
+    out.corner = (vec2<i32>(clouds.occupancy.xy) >> vec2<u32>(shift)) - vec2<i32>(out.side >> 1u);
+    out.slot = vec2<i32>(occupancy_x(shift), 0);
     return out;
 }
 
@@ -1509,8 +1597,8 @@ fn fragment_main(in: Varyings) -> Painted {
     // asked it once this frame, rather than asked again for every pixel: a
     // whole column of the field wherever the camera is in the slab.
     var in_cloud = false;
-    if (clouds.occupancy.w > 0.5) {
-        in_cloud = textureLoad(occupancy, occupancy_camera(), 0).x > 0.5;
+    if (clouds.occupancy.z > 0.5) {
+        in_cloud = textureLoad(occupancy, OCCUPANCY_CAMERA, 0).x > 0.5;
     } else {
         in_cloud = camera_in_cloud();
     }
@@ -1719,7 +1807,7 @@ fn occupancy_vertex(
 // with its top at or under its bottom. Or, for the one instance past the
 // levels, whether the camera stands in cloud (x).
 //
-// **Exact, not a guess.** It asks `column_at` at the cell's centre, the
+// **Exact, not a guess.** It asks the field at the cell's centre, the
 // point the march asks it at, over the whole slab and with no detail. The
 // march asks the same column over a stretch of the slab and with some
 // detail near the camera, and neither can find cloud this does not:
@@ -1740,28 +1828,43 @@ fn occupancy_vertex(
 //   its body plus the rind; the body is a few blocks even at the rim, but
 //   so the argument does not rest on that, a column with density and no
 //   interval is written as cloud at every height.
+// - **Two shaders, not one.** Everything above holds if this pass and the
+//   march work the field out to the same bits, which the software renderer
+//   does and a driver need not: it may fuse a multiply and an add in one
+//   and not the other. A height that moves by a last bit is held by the
+//   pad. A keep-or-drop test that lands the other way is not — a heap kept
+//   here and dropped there, or the column's height taken from the other of
+//   two heaps — so the field is asked with `OCCUPANCY_SLACK`, and a column
+//   within it of any such line is written as cloud at every height, for the
+//   march to ask itself.
 //
 // So a cell `occupancy_clear` calls clear is one every march step would
 // have walked through, and skipping it changes no pixel — which
-// `screenshot.rs` asserts, byte for byte, with the skip on and off.
+// `screenshot.rs` asserts, byte for byte, with the skip on and off. On the
+// software renderer; a real card's compiler is the human gate the ask
+// records.
 //
-// **Its cost**: one column a texel, and the texels are four thirds of the
-// finest level, all drawn in one pass. At Low on Weather's deck that is 128
-// a side, about twenty-two thousand columns a frame — against the shade
-// map's sixty-five thousand, and the march's millions.
+// **Its cost**: one column a texel, and a level covers only as far as the
+// march walks its grid, so the finest levels are small: at Low on Weather's
+// deck at 1920 x 1080 about nine thousand columns a frame, fewer in a
+// smaller frame — against the shade map's sixty-five thousand, and the
+// march's millions.
 @fragment
 fn occupancy_main(in: Leveled) -> @location(0) vec4<f32> {
     // The instance past the last level is the camera's texel.
     if (in.level >= OCCUPANCY_LEVELS) {
         return vec4<f32>(select(0.0, 1.0, camera_in_cloud()), 0.0, 0.0, 0.0);
     }
+    let at = occupancy_level(in.level);
     let cell = level_cell(clouds.colour.w, in.level);
-    let shift = u32(in.level);
-    let corner = vec2<i32>(clouds.occupancy.xy) >> vec2<u32>(shift);
-    let texel = vec2<i32>(floor(in.clip.xy)) - occupancy_slot(shift, i32(clouds.occupancy.z));
-    let cell_index = vec2<f32>(texel + corner);
+    let texel = vec2<i32>(floor(in.clip.xy)) - at.slot;
+    let cell_index = vec2<f32>(texel + at.corner);
     let slab = deck_slab();
-    let column = column_at(cell_centre(cell_index, cell), 0.0, slab.x, slab.y);
+    let column = column_within(cell_centre(cell_index, cell), 0.0, slab.x, slab.y, OCCUPANCY_SLACK);
+    let everywhere = vec4<f32>(-1e30, 1e30, 0.0, -1.0);
+    if (column.undecided) {
+        return everywhere;
+    }
     let pad = vec2<f32>(-OCCUPANCY_PAD, OCCUPANCY_PAD);
     let none = vec2<f32>(0.0, -1.0);
     var low = none;
@@ -1777,7 +1880,7 @@ fn occupancy_main(in: Leveled) -> @location(0) vec4<f32> {
         high = select(vec2<f32>(min(high.x, mid.x), max(high.y, mid.y)), mid, high.y <= high.x);
     }
     if (low.y <= low.x && high.y <= high.x && column.density > 0.0) {
-        low = vec2<f32>(-1e30, 1e30);
+        return everywhere;
     }
     return vec4<f32>(low, high);
 }

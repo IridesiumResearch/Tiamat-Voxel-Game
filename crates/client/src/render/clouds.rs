@@ -233,9 +233,10 @@ struct Uniforms {
     /// and whether `fragment_main` draws the stars (1) or the resolve does
     /// (0), which is the case when the deck is at a lower resolution.
     stars: [f32; 4],
-    /// The occupancy's corner x and z and its side, in the march's base
-    /// cells, and whether the march reads it — weather ask W27. Last, as it
-    /// is in the shader, so nothing before it moved.
+    /// The occupancy — weather ask W27: the camera's base cell x and z, the
+    /// side over the reach in base cells (zero when the march reads none),
+    /// and the side the walk of a grid needs. Last, as it is in the shader,
+    /// so nothing before it moved.
     occupancy: [f32; 4],
 }
 
@@ -673,8 +674,12 @@ impl Pass {
             reason = "the seed only has to pick a field, not be read back"
         )]
         let seed = (self.deck.seed & 0xFFFF) as f32;
+        // How wide one of the march's pixels is: the frame's own, times the
+        // divisor of the target it marches into.
+        #[expect(clippy::cast_precision_loss, reason = "one, two or four")]
+        let march_pixel = frame.pixel_angle.max(1e-6) * divisor as f32;
         let shadow_origin = self.place_shade(camera, base, cell, frame.mode);
-        let occupancy = self.place_occupancy(gpu, camera, cell, quality.reach());
+        let occupancy = self.place_occupancy(gpu, camera, cell, quality.reach(), march_pixel);
         let (descriptor, most) = self.map_descriptor();
         let reach = |own: f32, index: usize| own.max(most[index]);
         let uniforms = Uniforms {
@@ -682,10 +687,7 @@ impl Pass {
             view_projection: frame.view_projection.to_cols_array_2d(),
             camera: [camera[0], camera[1], camera[2], self.seconds],
             view: [
-                #[expect(clippy::cast_precision_loss, reason = "one or two")]
-                {
-                    frame.pixel_angle.max(1e-6) * divisor as f32
-                },
+                march_pixel,
                 // The frame's own pixel, for the stars: drawn at full
                 // resolution whatever the deck is marched at, because a star
                 // is a point and a point two pixels square is a block.
@@ -838,10 +840,17 @@ impl Pass {
     }
 
     /// Places this frame's occupancy — weather ask W27 — and returns it as
-    /// the uniform carries it. Its texture grows when a larger square is
+    /// the uniform carries it. Its texture grows when larger squares are
     /// asked for, and the deck's bind group is made again with it.
-    fn place_occupancy(&mut self, gpu: &Gpu, camera: [f32; 3], cell: f32, reach: f32) -> [f32; 4] {
-        let (occupancy, grew) = self.occupancy.place(gpu, camera, cell, reach);
+    fn place_occupancy(
+        &mut self,
+        gpu: &Gpu,
+        camera: [f32; 3],
+        cell: f32,
+        reach: f32,
+        march_pixel: f32,
+    ) -> [f32; 4] {
+        let (occupancy, grew) = self.occupancy.place(gpu, camera, cell, reach, march_pixel);
         if grew {
             self.deck_bind = deck_bind_group(
                 gpu,
