@@ -134,6 +134,17 @@ async fn execute(bot: &mut Bot, command: &Command) -> Result<Reply, BotError> {
             Ok(Reply::Inventory(stacks))
         }
         Command::ChunkReport(view) => Ok(Reply::Text(bot.chunk_report(*view))),
+        Command::Use(pos) => {
+            // The block's centre sub-node cell — see `Command::Use`'s docs for
+            // why there is no face or hit point to choose here.
+            bot.use_block(pos.subnode(1, 1, 1)).await?;
+            Ok(Reply::Done)
+        }
+        Command::Press(form, name) => {
+            bot.press(form, name).await?;
+            Ok(Reply::Done)
+        }
+        Command::Heard => Ok(Reply::Lines(bot.heard())),
         Command::Disconnect => Ok(Reply::Done),
     }
 }

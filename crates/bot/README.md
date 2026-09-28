@@ -104,6 +104,9 @@ measures the replayer rather than the server.
 | `bot.inventory()` | `{[material] = units}` — see below |
 | `bot.expect_units(material, units, timeout_ms)` | Block until the inventory holds at least that many units |
 | `bot.sleep_ticks(n)` | Wait roughly n server ticks |
+| `bot.use(x, y, z)` | The place control on a block with nothing to place — reaches `register_on_use`, at the block's centre sub-node cell |
+| `bot.press(form, name)` | Press a named button in a dialog the bot currently holds open; errors if it holds no such form |
+| `bot.heard()` | The chat lines sent to the bot since the last call, oldest first, then empties the buffer (last 256 kept) |
 | `bot.assert(cond, message)` | Assert, and count it |
 | `bot.disconnect()` | Close cleanly |
 | `bot.UNITS_PER_BLOCK` | 27 |

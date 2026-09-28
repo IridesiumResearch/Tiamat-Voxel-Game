@@ -24,6 +24,15 @@ pub use tiamat_server::transport::{Impairment, Link};
 /// The ALPN the server requires. Must match `transport::endpoint`.
 const ALPN: &[u8] = b"tiamat/1";
 
+/// How many chat lines [`Bot::heard`] keeps for a script that never asks.
+///
+/// **Progress ask 4.** `bot.heard()` drains on every call, so this is only
+/// ever paid by a script that goes quiet while the server keeps talking —
+/// the same trade the server's own `MAX_QUEUED_NOTICES` makes for a client
+/// that reads slower than a mod writes. Older lines are dropped rather than
+/// kept: a script asking what it heard wants what is current, not a log.
+pub const MAX_HEARD_LINES: usize = 256;
+
 /// Something went wrong driving a connection.
 #[derive(Debug, thiserror::Error)]
 pub enum BotError {
@@ -81,6 +90,21 @@ pub enum BotError {
         expected: String,
         /// What the server presented.
         actual: String,
+    },
+
+    /// [`Bot::press`] named a form the bot has not been shown, or one already
+    /// closed.
+    ///
+    /// **Progress ask 4.** A script that pressed a button in a dialog it was
+    /// never shown must learn that at the call, the way a forged
+    /// [`ClientMessage::DialogEvent`](tiamat_core::proto::ClientMessage::DialogEvent)
+    /// for a form nobody owns is dropped on the server rather than accepted —
+    /// this is the honest client-side version of that: a script that made
+    /// the mistake, not one making it on purpose.
+    #[error("the bot holds no open dialog for form `{form}`")]
+    NoSuchForm {
+        /// The form a script tried to press.
+        form: String,
     },
 }
 
@@ -154,6 +178,15 @@ pub struct Bot {
     /// stays where they left it: a test that had to name the direction on each
     /// step would be a test whose bot faced north whenever somebody forgot.
     look: [f32; 2],
+    /// How many entries of `history` [`Bot::heard`] has already returned.
+    ///
+    /// `heard()` is a DRAINING read — Progress ask 4 wants `bot.heard()` to
+    /// answer only what arrived since the last call — while `history` itself
+    /// only ever grows, the way `received()` needs it to for `notices()`,
+    /// `dialogs()` and everything else that re-scans it. A cursor is the
+    /// difference: cheap to advance, and it costs `heard()` nothing when
+    /// nothing has arrived.
+    heard_cursor: usize,
 }
 
 impl Bot {
@@ -298,6 +331,7 @@ impl Bot {
             history,
             reader,
             cert_fingerprint,
+            heard_cursor: 0,
         })
     }
 
@@ -1966,6 +2000,34 @@ impl Bot {
             .collect()
     }
 
+    /// Which dialogs this bot currently holds open, by qualified form name,
+    /// with each one's last-known tree.
+    ///
+    /// A single pass over `received()` in arrival order — `ShowDialog` and
+    /// `UpdateDialog` open or replace a form, `CloseDialog` closes it — the
+    /// same "last word wins" reading [`Bot::views`] gives inventory state,
+    /// rather than [`Bot::dialogs`]'s full history of every open and replace.
+    ///
+    /// [`Bot::press`] uses this to answer whether the bot holds a form before
+    /// sending an event for one it does not.
+    #[must_use]
+    pub fn open_dialogs(&self) -> std::collections::BTreeMap<String, tiamat_core::ui::Tree> {
+        let mut open = std::collections::BTreeMap::new();
+        for message in self.received() {
+            match message {
+                ServerMessage::ShowDialog { form, tree, .. }
+                | ServerMessage::UpdateDialog { form, tree, .. } => {
+                    open.insert(form, tree);
+                }
+                ServerMessage::CloseDialog { form } => {
+                    open.remove(&form);
+                }
+                _ => {}
+            }
+        }
+        open
+    }
+
     /// Every dialog the server has closed.
     #[must_use]
     pub fn closed_dialogs(&self) -> Vec<String> {
@@ -2069,6 +2131,35 @@ impl Bot {
             form: form.to_owned(),
             event,
         })
+        .await
+    }
+
+    /// Presses a named button in a dialog this bot currently holds open.
+    ///
+    /// **Progress ask 4.** The message a client sends when a player clicks a
+    /// button in a dialog a mod showed them — [`Bot::dialog_event`] with
+    /// [`DialogEvent::Pressed`](tiamat_core::proto::DialogEvent::Pressed) —
+    /// gated on [`Bot::open_dialogs`] so a script learns it pressed nothing
+    /// rather than firing an event the server silently drops for owning no
+    /// such form (see `dialogs.rs`'s forged-event tests for that server-side
+    /// half).
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::NoSuchForm`] if the bot holds no open dialog under `form`.
+    /// [`BotError::Frame`] if the write fails.
+    pub async fn press(&mut self, form: &str, name: &str) -> Result<(), BotError> {
+        if !self.open_dialogs().contains_key(form) {
+            return Err(BotError::NoSuchForm {
+                form: form.to_owned(),
+            });
+        }
+        self.dialog_event(
+            form,
+            tiamat_core::proto::DialogEvent::Pressed {
+                name: name.to_owned(),
+            },
+        )
         .await
     }
 
@@ -2277,6 +2368,44 @@ impl Bot {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The chat lines sent to this bot since the last call, oldest first.
+    ///
+    /// **Progress ask 4.** Where [`Bot::notices`] re-reads the engine's own
+    /// `Chat { from: None, .. }` lines every time, this is a DRAINING read of
+    /// every `Chat` this bot has been sent — a player's line and a mod's or
+    /// the engine's own notice alike, because a script watching a dialog and
+    /// a script watching a player are asking the same question: what got
+    /// said to me since I last asked. Two calls in a row therefore never see
+    /// the same line twice.
+    ///
+    /// **Text only, no sender.** The real client renders every `Chat` the
+    /// same way regardless of who sent it —
+    /// `Event::Chat { text, .. } => self.say(text)` in
+    /// `crates/client/src/app.rs` — so there is no established "sender: text"
+    /// format for a script to match; this follows what the client actually
+    /// shows.
+    ///
+    /// **Bounded to the last [`MAX_HEARD_LINES`].** A script that never calls
+    /// this while a server is chatty must not turn a bot into an unbounded
+    /// log; anything older is dropped silently.
+    pub fn heard(&mut self) -> Vec<String> {
+        let history = self.received();
+        let start = self.heard_cursor.min(history.len());
+        self.heard_cursor = history.len();
+        let mut lines: Vec<String> = history[start..]
+            .iter()
+            .filter_map(|message| match message {
+                ServerMessage::Chat { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        if lines.len() > MAX_HEARD_LINES {
+            let cut = lines.len() - MAX_HEARD_LINES;
+            lines.drain(..cut);
+        }
+        lines
     }
 
     /// Whether a matching block delta has been seen.

@@ -86,6 +86,25 @@ pub enum Command {
     ChunkReport(i32),
     /// Wait until the inventory holds at least this many units of a material.
     ExpectUnits(u16, u32, u64),
+    /// The place control on a block with nothing to place — a real client's
+    /// right-click with an empty hand, which reaches a mod's
+    /// `register_on_use`.
+    ///
+    /// **Progress ask 4.** Aimed at the block's CENTRE sub-node cell
+    /// (`BlockPos::subnode(1, 1, 1)`), the same cell `mod_hooks.rs`'s
+    /// `centre_of` computes by hand: a script names a block, not a face or a
+    /// hit point, because there is no screen here to have chosen one.
+    Use(BlockPos),
+    /// Press a named button in a dialog this bot currently holds open, as
+    /// `(qualified form, widget name)`.
+    ///
+    /// Errors — a Lua error, so it stops the script — if the bot holds no
+    /// open dialog under that form, so a script learns it pressed nothing
+    /// rather than sending an event the server silently drops.
+    Press(String, String),
+    /// The chat lines sent to this bot since the last call, oldest first.
+    /// Draining: a second call in a row with nothing new answers empty.
+    Heard,
     /// Close the connection.
     Disconnect,
 }
@@ -99,6 +118,8 @@ pub enum Reply {
     Inventory(Vec<tiamat_core::proto::StackDef>),
     /// A line of text, for a report.
     Text(String),
+    /// Chat lines, oldest first — [`Command::Heard`]'s answer.
+    Lines(Vec<String>),
     /// The command failed; the script should stop.
     Failed(String),
 }
@@ -277,6 +298,17 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
     bind!("expect_units", (u16, u32, u64), |_lua, p| {
         Command::ExpectUnits(p.0, p.1, p.2)
     });
+    // The place control with nothing to place, at the named block's centre
+    // sub-node cell — see `Command::Use`.
+    bind!("use", (i32, i32, i32), |_lua, p| Command::Use(
+        BlockPos::new(p.0, p.1, p.2)
+    ));
+    // A button, by the qualified form a `ShowDialog`/`UpdateDialog` named and
+    // the widget's own name. Errors — see `Command::Press` — if the bot holds
+    // no such form.
+    bind!("press", (String, String), |_lua, p| Command::Press(
+        p.0, p.1
+    ));
 
     // `disconnect` takes no arguments, so it does not fit the macro's shape.
     {
@@ -339,6 +371,30 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
         table
             .set("inventory", function)
             .map_err(|err| format!("could not set bot.inventory: {err}"))?;
+    }
+
+    // `heard()` returns an array table of chat lines received since the last
+    // call, oldest first, and empties the buffer — Progress ask 4's third
+    // call, so a script can read what a mod said back without a screen.
+    {
+        let channel = Arc::clone(&channel);
+        let function = lua
+            .create_function(move |lua, ()| {
+                let reply = call(&channel, Command::Heard).map_err(mlua::Error::external)?;
+                let lines = match reply {
+                    Reply::Lines(lines) => lines,
+                    _ => Vec::new(),
+                };
+                let out = lua.create_table()?;
+                for (index, line) in lines.into_iter().enumerate() {
+                    out.set(index + 1, line)?;
+                }
+                Ok(out)
+            })
+            .map_err(|err| format!("could not bind bot.heard: {err}"))?;
+        table
+            .set("heard", function)
+            .map_err(|err| format!("could not set bot.heard: {err}"))?;
     }
 
     // `assert` counts as well as checks, so a script that silently asserted
@@ -611,5 +667,80 @@ mod tests {
             commands,
             vec![Command::ExpectBlock(BlockPos::new(1, 2, 3), 9, 5000)]
         );
+    }
+
+    #[test]
+    fn a_use_names_the_block_not_a_face_or_a_hit_point() {
+        // Progress ask 4: `bot.use(x, y, z)` takes a whole block, because a
+        // script has no screen to have picked a face or a hit point with.
+        // `Command::Use`'s centre-sub-node choice is `runner.rs`'s job to
+        // apply; here it is only the command that must carry the right block.
+        let (outcome, commands) = run_with_stub("bot.join('Alice')\nbot.use(2, -1, 0)");
+        assert!(outcome.passed, "{:?}", outcome.failure);
+        assert_eq!(
+            commands,
+            vec![
+                Command::Join("Alice".to_owned()),
+                Command::Use(BlockPos::new(2, -1, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_press_names_the_form_and_the_button() {
+        let (outcome, commands) = run_with_stub("bot.press('warden:panel', 'go')");
+        assert!(outcome.passed, "{:?}", outcome.failure);
+        assert_eq!(
+            commands,
+            vec![Command::Press("warden:panel".to_owned(), "go".to_owned())]
+        );
+    }
+
+    #[test]
+    fn pressing_a_form_the_bot_does_not_hold_fails_the_script() {
+        // The bot side of Progress ask 4's error requirement: whatever
+        // decided the bot holds no such form, the script must stop and say
+        // so rather than carrying on as if the button had been pressed.
+        let (outcome, _) =
+            run_with_replies("bot.press('warden:nope', 'go')", |command| match command {
+                Command::Press(form, _) => {
+                    Reply::Failed(format!("the bot holds no open dialog for form `{form}`"))
+                }
+                _ => Reply::Done,
+            });
+        assert!(!outcome.passed);
+        let failure = outcome.failure.expect("a failure message");
+        assert!(
+            failure.contains("warden:nope"),
+            "the form must be named: {failure}"
+        );
+    }
+
+    #[test]
+    fn heard_returns_the_lines_in_order_oldest_first() {
+        let (outcome, _) = run_with_replies(
+            "local lines = bot.heard()\n\
+             bot.assert(#lines == 2, 'expected 2 lines, got ' .. tostring(#lines))\n\
+             bot.assert(lines[1] == 'first', lines[1])\n\
+             bot.assert(lines[2] == 'second', lines[2])",
+            |command| match command {
+                Command::Heard => Reply::Lines(vec!["first".to_owned(), "second".to_owned()]),
+                _ => Reply::Done,
+            },
+        );
+        assert!(outcome.passed, "{:?}", outcome.failure);
+        assert_eq!(outcome.assertions, 3);
+    }
+
+    #[test]
+    fn heard_with_nothing_new_is_an_empty_table() {
+        let (outcome, _) = run_with_replies(
+            "bot.assert(#bot.heard() == 0, 'expected nothing heard')",
+            |command| match command {
+                Command::Heard => Reply::Lines(Vec::new()),
+                _ => Reply::Done,
+            },
+        );
+        assert!(outcome.passed, "{:?}", outcome.failure);
     }
 }
