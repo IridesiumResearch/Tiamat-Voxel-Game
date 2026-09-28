@@ -33,7 +33,7 @@ use tiamat_core::phys::ChunkLookup as _;
 use tiamat_core::proto::Edit;
 use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId, SubNodePos};
 
-use crate::mesher::{Absent, Neighbours};
+use crate::mesher::{Absent, Neighbours, OpenSky};
 
 /// The six neighbour directions, in the order [`Neighbours`] expects.
 ///
@@ -420,12 +420,68 @@ impl ChunkStore {
     ///
     /// Reads across chunk boundaries, which is what smooth lighting at a seam
     /// needs. A neighbour whose light has not arrived reads as dark rather than
-    /// as daylight — the honest answer, and the safe one: the faces against an
-    /// absent neighbour are not drawn at all (see [`Absent`]), so the dark only
-    /// ever applies where a real, loaded, genuinely dark chunk is.
+    /// as daylight, for [`Self::light_at`]'s reason: guessing daylight would
+    /// flash the end of a tunnel white while the chunk past it streamed in.
+    ///
+    /// **Those faces are drawn**, which they were not when this was first
+    /// written: [`ABSENT_POLICY`] is [`Absent::Air`], so the loaded region ends
+    /// in a wall of faces against whatever has not arrived, and that wall is
+    /// lit by this dark until the neighbour's light comes and the chunk is
+    /// meshed again. What it is not is FOGGED by it — weather ask W29 fogs by sky light, and a
+    /// frontier fogged as a cave would stand in a daylit haze in the cave's
+    /// colour. [`Self::open_sky`] tells the renderer which vertices those are.
     #[must_use]
     pub const fn light_for(&self, pos: ChunkPos) -> ChunkLight<'_> {
         ChunkLight { store: self, pos }
+    }
+
+    /// Which of a chunk's vertices its fog should take as under the open sky,
+    /// because the light they were meshed against is not here — weather ask
+    /// W29. Asked when the mesh is handed to the renderer, of the light held
+    /// then, which is the light it was meshed against.
+    ///
+    /// **All of them where the chunk's own light has not arrived**: every
+    /// sample it took read [`Light::DARK`]. Otherwise **the sides whose
+    /// neighbour's light has not**, whether the neighbour is still streaming,
+    /// held without its light yet, or a summary past the detail radius, which
+    /// carries none: a vertex on that boundary plane took part of its light
+    /// from across it, and a face on it pointing out took all of it. Either
+    /// way what the vertex carries is not how much sky reaches it, and the
+    /// fog's answer to that is the sky's colour, which is what every fog was
+    /// before W29. See [`OpenSky`].
+    ///
+    /// The light is left as it is: a frontier is dark for the frames it takes,
+    /// for [`Self::light_at`]'s reason. And a neighbour's light arriving marks
+    /// this chunk for remeshing ([`Self::set_light`]), which asks again.
+    #[must_use]
+    pub fn open_sky(&self, pos: ChunkPos) -> OpenSky {
+        if !self.has_light(pos) {
+            return OpenSky::ALL;
+        }
+        NEIGHBOUR_OFFSETS
+            .iter()
+            .enumerate()
+            .filter(|(_, (dx, dy, dz))| {
+                !self.has_light(ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
+            })
+            .fold(OpenSky::NONE, |open, (index, _)| {
+                open.with(OpenSky::side(index / 2, index % 2 == 1))
+            })
+    }
+
+    /// How much sky a fog takes at a block, `0.0..=1.0` — weather ask W29, for
+    /// what has no mesh to carry it, a particle above all.
+    ///
+    /// The stored sunlight where light is held, and the open sky where it is
+    /// not: [`Self::light_at`] reads that as dark, which is right for what the
+    /// block is LIT by and wrong for what it is fogged by — a spray in a chunk
+    /// whose light is still on its way is not in a cave. [`Self::open_sky`]
+    /// makes the same call for a mesh.
+    #[must_use]
+    pub fn fog_sky_at(&self, pos: BlockPos) -> f32 {
+        self.light.get(&pos.chunk()).map_or(1.0, |layer| {
+            f32::from(layer.get(pos.local()).sun()) / f32::from(tiamat_core::light::MAX_LEVEL)
+        })
     }
 
     /// Whether any light has arrived for a chunk.
@@ -1442,6 +1498,66 @@ mod tests {
             "the player walked away and the client kept the full chunk as well"
         );
         assert_eq!(store.summary_len(), 1);
+    }
+
+    #[test]
+    fn a_chunk_fogs_as_the_open_sky_wherever_the_light_it_was_meshed_against_is_missing() {
+        // Weather ask W29 fogs a vertex by its sky light, and a vertex sampled
+        // against light that has not arrived carries `Light::DARK` — the
+        // frontier's wall, drawn under `Absent::Air`, fogged as a cave in the
+        // middle of a daylit haze. The store says which vertices those are.
+        let mut store = ChunkStore::new();
+        let pos = ChunkPos::new(0, 0, 0);
+        store.insert(chunk_at(0, 0, 0));
+        assert_eq!(
+            store.open_sky(pos),
+            OpenSky::ALL,
+            "a chunk whose own light has not arrived took every sample from nothing"
+        );
+
+        store.set_light(pos, LightLayer::dark());
+        // Five of its six neighbours lit, and +x streaming in without its
+        // light yet: only that side is open.
+        for (index, (dx, dy, dz)) in NEIGHBOUR_OFFSETS.iter().enumerate() {
+            if index != 1 {
+                store.set_light(ChunkPos::new(*dx, *dy, *dz), LightLayer::dark());
+            }
+        }
+        store.insert(chunk_at(1, 0, 0));
+        assert_eq!(store.open_sky(pos), OpenSky::side(0, true));
+
+        // Its light arrives: nothing is open, and the chunk is queued to be
+        // meshed again, which is when this is asked again.
+        let _ = store.take_dirty(pos, 64);
+        store.set_light(ChunkPos::new(1, 0, 0), LightLayer::dark());
+        assert_eq!(store.open_sky(pos), OpenSky::NONE);
+        assert!(store.take_dirty(pos, 64).positions.contains(&pos));
+
+        // And a summary carries no light at all: the neighbour at -z, held
+        // and lit, walked away from and summarised.
+        let south = ChunkPos::new(0, 0, -1);
+        store.insert(chunk_at(0, 0, -1));
+        assert_eq!(store.open_sky(pos), OpenSky::NONE);
+        store.set_summary(south, summary(tiamat_core::lod::FINEST, 1));
+        assert_eq!(store.open_sky(pos), OpenSky::side(2, false));
+    }
+
+    #[test]
+    fn a_fog_takes_the_stored_sky_light_and_the_open_sky_where_none_has_arrived() {
+        // For a particle, which has no mesh to carry an `OpenSky`: lit where it
+        // is by the dark `light_at` gives an unlit chunk, and fogged there as
+        // the open sky rather than as a cave.
+        let mut store = ChunkStore::new();
+        let mut layer = LightLayer::dark();
+        layer.set(
+            tiamat_core::coords::LocalBlock::new(2, 3, 4),
+            Light::new(12, 0, 0, 0),
+        );
+        store.set_light(ChunkPos::new(0, 0, 0), layer);
+
+        assert!((store.fog_sky_at(BlockPos::new(2, 3, 4)) - 0.8).abs() < 1e-6);
+        assert!(store.fog_sky_at(BlockPos::new(5, 5, 5)).abs() < 1e-6);
+        assert!((store.fog_sky_at(BlockPos::new(40, 3, 4)) - 1.0).abs() < 1e-6);
     }
 
     #[test]

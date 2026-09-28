@@ -46,7 +46,7 @@ use tiamat_core::ChunkPos;
 
 use crate::camera::Camera;
 use crate::config::RenderMode;
-use crate::mesher::{Mesh, PackedVertex};
+use crate::mesher::{Mesh, OpenSky, PackedVertex};
 use crate::texture::Atlas;
 
 pub use frustum::Frustum;
@@ -420,6 +420,15 @@ impl MaterialTint {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
+    /// The chunk's camera-relative origin in `xyz`, and in `w` which of its
+    /// vertices the fog takes as under the open sky — [`OpenSky`]'s
+    /// bits, as a float the vertex stage turns back into them (weather ask
+    /// W29).
+    ///
+    /// **In the offset's `w` and not the origin's**, because the offset is
+    /// the one attribute every chunk pipeline reads: the fluid layout takes it
+    /// alone, and the sprites read their chunk's element of it. Exact as a
+    /// float — seven bits of integer.
     offset: [f32; 4],
     /// The same chunk's ABSOLUTE origin, in blocks. w unused.
     ///
@@ -487,6 +496,10 @@ struct ChunkMesh {
     sprites: Option<SpriteMesh>,
     /// Bytes actually written, as opposed to the pooled buffers' capacity.
     used_bytes: u64,
+    /// Which of its vertices the fog takes as under the open sky, from the
+    /// mesh — see [`OpenSky`]. Kept here rather than in the vertices,
+    /// and handed to the shader in the chunk's instance.
+    open_sky: OpenSky,
 }
 
 /// One chunk's sprites, as instances rather than geometry.
@@ -1312,9 +1325,12 @@ impl Renderer {
     /// the fog down a tunnel is the cave's and the daylit ground seen out of
     /// its mouth is the day's, in the same frame. The sky light is the stored
     /// sunlight channel the mesh already carries for lighting, so this costs
-    /// a mix per fragment and nothing per vertex. Whatever leans the sky's
-    /// colour — the clock, a storm's modifier, a flash — leans only the
-    /// sky-lit share, which is what keeps lightning out of caves.
+    /// a mix per fragment and nothing per vertex — except where the mesh says
+    /// that channel is not the sky's reach, a summary's or a chunk's whose
+    /// light has not arrived, and there the fog is the sky's (see
+    /// [`OpenSky`]). Whatever leans the sky's colour — the clock, a
+    /// storm's modifier, a flash — leans only the sky-lit share, which is what
+    /// keeps lightning out of caves.
     pub const fn set_cave_fog(&mut self, colour: [f32; 3]) {
         self.cave_fog = colour;
     }
@@ -2053,6 +2069,7 @@ impl Renderer {
                     + cutout_bytes
                     + sprite_bytes
                     + glass_bytes,
+                open_sky: mesh.open_sky,
             },
         );
     }
@@ -2494,7 +2511,7 @@ impl Renderer {
 
         let mut culled = Culled::default();
         let mut instances = Vec::with_capacity(self.chunks.len());
-        for pos in self.chunks.keys() {
+        for (pos, mesh) in &self.chunks {
             let offset = camera.position.chunk_offset(*pos);
             let seen = frustum.contains_chunk(offset);
             let casts = cascades
@@ -2535,7 +2552,12 @@ impl Renderer {
                 [colour[0], colour[1], colour[2], 0.0]
             };
             instances.push(Instance {
-                offset: [offset.x, offset.y, offset.z, 0.0],
+                offset: [
+                    offset.x,
+                    offset.y,
+                    offset.z,
+                    f32::from(mesh.open_sky.bits()),
+                ],
                 world: [
                     (pos.x * side) as f32,
                     (pos.y * side) as f32,
@@ -3898,7 +3920,21 @@ fn build_prop_pipeline(
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,
-                    write_mask: wgpu::ColorWrites::COLOR,
+                    // **The mark too, on mode 3's float target**, as the
+                    // world's opaque pipelines and the figures write it. The
+                    // composite fogs a pixel by the sky light in its alpha
+                    // (weather ask W29), and a prop that left alpha alone kept
+                    // the mark of the terrain behind it: a block held in
+                    // daylight in front of a tunnel wall was fogged in the
+                    // cave's colour while the arm holding it was fogged in the
+                    // sky's, and only in Beautiful. `fragment_main` returns
+                    // `SKY_MARK`, the sky's fog, which is what modes 1 and 2
+                    // give it. The window's alpha is not ours to write.
+                    write_mask: if format == graph::HDR_FORMAT {
+                        wgpu::ColorWrites::ALL
+                    } else {
+                        wgpu::ColorWrites::COLOR
+                    },
                 })],
             }),
             primitive: wgpu::PrimitiveState {

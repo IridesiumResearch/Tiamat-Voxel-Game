@@ -4927,7 +4927,7 @@ impl App {
             meshing += mesh_started.elapsed();
             match outcome {
                 Ok((at, mesh)) => {
-                    self.renderer.set_chunk(self.drawn_at(at), &mesh);
+                    self.upload_chunk(at, mesh);
                     rebuilt += 1;
                 }
                 // Still not done. Put back everything this frame was going to
@@ -5008,7 +5008,7 @@ impl App {
                     break;
                 }
             };
-            self.renderer.set_chunk(self.drawn_at(at), &mesh);
+            self.upload_chunk(at, mesh);
             rebuilt += 1;
 
             // A count is not a budget on a machine you have not measured.
@@ -5040,6 +5040,19 @@ impl App {
             rebuilt,
         );
         rebuilt
+    }
+
+    /// Hands a freshly meshed chunk to the renderer, with which of its
+    /// vertices were meshed against light that is not here.
+    ///
+    /// The mesher cannot know that — it is given a sampler, and a missing
+    /// layer and a dark one read alike through it — so the store is asked
+    /// here, when the mesh is handed over, of the light it was meshed against.
+    /// The fog takes those vertices as under the open sky (weather ask W29);
+    /// see [`crate::mesher::OpenSky`].
+    fn upload_chunk(&mut self, at: ChunkPos, mut mesh: mesher::Mesh) {
+        mesh.open_sky = self.store.open_sky(at);
+        self.renderer.set_chunk(self.drawn_at(at), &mesh);
     }
 
     /// The overlay's horizon line.
@@ -5720,11 +5733,12 @@ impl App {
     fn particle_light(&self, pos: [f64; 3]) -> ([f32; 3], f32) {
         let cell = particle_cell(pos);
         let light = self.store.light_at(cell.block());
+        let sun = f32::from(light.sun()) / 15.0 * self.renderer.sun_intensity();
         // The stored sky light, before the clock scales it: how much sky
         // reaches the place, which is what the fog is blended by (weather
-        // ask W29) — a cave is a cave at noon.
-        let sky = f32::from(light.sun()) / 15.0;
-        let sun = sky * self.renderer.sun_intensity();
+        // ask W29) — a cave is a cave at noon. The open sky where no light
+        // has arrived, which `light_at` reads as dark for the lighting.
+        let sky = self.store.fog_sky_at(cell.block());
         let channel = |level: u8| (f32::from(level) / 15.0).max(sun).max(PARTICLE_FLOOR);
         (
             [

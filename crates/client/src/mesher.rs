@@ -1244,6 +1244,75 @@ pub struct Mesh {
     pub fluid_vertices: Vec<FluidVertex>,
     /// Indices into [`Mesh::fluid_vertices`].
     pub fluid_indices: Vec<u32>,
+    /// Which of its vertices the fog takes as under the open sky, whatever
+    /// sunlight they carry — weather ask W29. [`OpenSky::NONE`] from the
+    /// mesher, [`OpenSky::ALL`] from [`mesh_summary`]; the client sets a
+    /// chunk's own from the light it was meshed against, which the mesher
+    /// cannot see — see `ChunkStore::open_sky`.
+    pub open_sky: OpenSky,
+}
+
+/// Which of a mesh's vertices its fog takes as under the open sky, whatever
+/// sunlight they carry — weather ask W29.
+///
+/// # Why a mesh has to say so
+///
+/// Fog is blended by the stored sunlight a vertex carries, from the sky's
+/// colour at full to the cave's at none. That is right only where the stored
+/// sunlight IS how much sky reaches the place, and two meshes carry something
+/// else in it:
+///
+/// - **A summary** carries a shading term by face direction ([`mesh_summary`]'s
+///   `summary_shade`): a far cliff's side is ten of fifteen and an overhang's
+///   underside five. Read as sky light, that fogged every far hillside a third
+///   of the way to a cave's colour, and a mod's vivid cave fog tinted the
+///   horizon.
+/// - **A chunk meshed before its light arrived** reads `Light::DARK` where none
+///   is held — for its own blocks, or across a side whose neighbour's light is
+///   still on its way. Under `Absent::Air` the faces on that side are drawn,
+///   the streaming frontier's wall, and fogged by that they stood in a daylit
+///   haze in a cave's colour until the neighbour came.
+///
+/// Neither is a cave, so neither's fog is the cave's: it is the sky's, which is
+/// what every fog was before W29. The LIGHTING is untouched — a frontier is
+/// still dark for the frames it takes, for `ChunkStore::light_at`'s reason.
+///
+/// # Per chunk, not per vertex
+///
+/// A [`PackedVertex`] has no bit left, and neither case needs one: a summary is
+/// the whole mesh, and a side is the vertices lying on that side's boundary
+/// plane, which the shader can tell from the position it already unpacks. So
+/// the renderer carries this in the chunk's instance, in the `w` its offset
+/// never used, and the vertex stage reads it (`fog_open` in `world.wgsl`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSky(u8);
+
+impl OpenSky {
+    /// Every vertex's fog follows its own sunlight: an ordinary lit chunk.
+    pub const NONE: Self = Self(0);
+    /// Every vertex's fog is the sky's: a summary, or a chunk whose own light
+    /// has not arrived. Must match `OPEN_ALL` in `world.wgsl`.
+    pub const ALL: Self = Self(1 << 6);
+
+    /// The vertices on one side's boundary plane, the side a face on it would
+    /// point to — `axis * 2 + positive`, the mesher's order for neighbours.
+    #[must_use]
+    pub fn side(axis: usize, positive: bool) -> Self {
+        Self(1 << (axis.min(2) * 2 + usize::from(positive)))
+    }
+
+    /// Both sets together.
+    #[must_use]
+    pub const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// The bits the shader reads: a side at `1 << (axis * 2 + positive)`,
+    /// everything at [`Self::ALL`]'s.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
 }
 
 impl Mesh {
@@ -3030,6 +3099,60 @@ mod summary_tests {
             "opposite walls were shaded differently, so a sun direction has been baked in"
         );
         assert_eq!(brightness(0, true), brightness(2, true));
+    }
+
+    #[test]
+    fn a_summarys_fog_is_the_skys_on_every_face_and_a_chunks_is_its_own() {
+        // Weather ask W29 fogs by the sunlight a vertex carries, and a
+        // summary's is the face-direction term above, not the sky's reach: a
+        // far cliff's side read as two thirds sky and fogged a third of the
+        // way to a cave. The mesh says so instead — the whole of it, since the
+        // horizon has no caves the fog should know about. A chunk says nothing
+        // of its own: which of its sides are unlit is the store's to know.
+        let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
+        let solid =
+            Summary::from_parts(FINEST, vec![MaterialId(1); (n * n * n) as usize]).expect("build");
+        assert_eq!(mesh_summary(&solid, &[]).open_sky, OpenSky::ALL);
+        assert_eq!(
+            mesh_summary(&slab(FINEST, 4, 1), &[7]).open_sky,
+            OpenSky::ALL
+        );
+
+        let mut chunk = Chunk::new(tiamat_core::ChunkPos::new(0, 0, 0), MaterialId::AIR);
+        chunk
+            .set_block(
+                tiamat_core::BlockPos::new(3, 3, 3),
+                tiamat_core::BlockValue::Uniform(MaterialId(2)),
+            )
+            .expect("in chunk");
+        let mesh = mesh_chunk(
+            &chunk,
+            &Neighbours::open(),
+            Absent::Air,
+            &crate::shade::Uniform(tiamat_core::light::Light::DAYLIGHT),
+            &NoFluid,
+            &NoGlass,
+        );
+        assert!(!mesh.is_empty());
+        assert_eq!(mesh.open_sky, OpenSky::NONE);
+    }
+
+    #[test]
+    fn a_side_of_open_sky_is_one_bit_in_the_order_the_shader_reads() {
+        // `fog_open` in `world.wgsl` reads bit `axis * 2 + positive` for the
+        // side and bit 6 for the whole mesh; a transposed side would open the
+        // fog on the face across the chunk from the one whose light is late.
+        let bits: Vec<u8> = (0..3)
+            .flat_map(|axis| [false, true].map(|positive| OpenSky::side(axis, positive).bits()))
+            .collect();
+        assert_eq!(bits, [1, 2, 4, 8, 16, 32]);
+        assert_eq!(OpenSky::ALL.bits(), 64);
+        assert_eq!(OpenSky::NONE.bits(), 0);
+        assert_eq!(
+            OpenSky::side(0, true).with(OpenSky::side(2, false)).bits(),
+            2 | 16
+        );
+        assert_eq!(OpenSky::default(), OpenSky::NONE);
     }
 
     #[test]
@@ -4994,6 +5117,15 @@ mod tests {
 /// `dot(normal, sunward)` to these quads, exactly as it does to real geometry,
 /// so a fixed directional tint would be counting the sun twice and would drift
 /// out of agreement as the sun moved.
+///
+/// # A term for the light, and not for the fog
+///
+/// It stands in the sunlight channel, but it is not how much sky reaches the
+/// face — for an exposed face of the horizon that is all of it, as it is for
+/// open ground in the detail radius. Weather ask W29 fogs by that channel,
+/// from the sky's colour at full to a cave's at none, and read there this
+/// fogged every far cliff a third of the way to a cave. So a summary's mesh is
+/// [`OpenSky::ALL`] and the fog never reads this.
 fn summary_shade(axis: usize, positive: bool) -> crate::shade::Shade {
     use tiamat_core::light::{Light, MAX_LEVEL};
 
@@ -5136,6 +5268,12 @@ pub fn mesh_summary(summary: &tiamat_core::lod::Summary, fluid_materials: &[u16]
         quads,
         fluid_vertices,
         fluid_indices,
+        // **Its sunlight is a shading term, not the sky's reach**
+        // (`summary_shade`), so the fog may not read it as one. The sky's on
+        // every face: the horizon is ground seen under the sky, and what of a
+        // cave a downsample keeps lies past the detail radius, where the fog
+        // was always the sky's.
+        open_sky: OpenSky::ALL,
         ..Mesh::default()
     }
 }

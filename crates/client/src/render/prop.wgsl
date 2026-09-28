@@ -187,6 +187,8 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     );
+    // Alpha 1 is `SKY_MARK` in mode 3's scene (`world.wgsl`): a prop carries
+    // no sky light of its own and is fogged as the sky, in every mode.
     return vec4<f32>(mix(camera_fog(lit, input.distance), globals.sky_colour.rgb, haze), 1.0);
 }
 

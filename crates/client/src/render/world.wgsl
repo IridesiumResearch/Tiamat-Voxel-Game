@@ -335,7 +335,9 @@ struct VertexIn {
     @location(0) packed: u32,
     // material:16 | light:16, the light half a packed `core::light::Light`
     @location(1) material: u32,
-    // Per-instance: this chunk's camera-relative offset, in blocks.
+    // Per-instance: this chunk's camera-relative offset, in blocks, and in w
+    // which of its vertices fog as under the open sky — `mesher::OpenSky`'s
+    // bits. See `fog_open`.
     @location(2) chunk_offset: vec4<f32>,
     // Per-instance: the same chunk's ABSOLUTE origin, in blocks.
     //
@@ -384,6 +386,13 @@ struct VertexOut {
     // face by the rasteriser — which is what makes it continuous rather than a
     // grid of 16-block squares.
     @location(10) biome: vec3<f32>,
+    // How much sky reaches this fragment, 0 to 1, for its FOG — weather ask
+    // W29. `sun` wherever the stored sunlight is the sky's reach, and 1 where
+    // the mesh says it is not (`fog_open`). Beside `sun` rather than in place
+    // of it, because the light and the fog part company exactly there: a
+    // summary's face is shaded by its direction and fogged as the sky, and a
+    // frontier wall is dark for a frame and still fogged as the sky.
+    @location(11) sky: f32,
 };
 
 // The outward normal of a face, from the two bits that describe it.
@@ -416,6 +425,38 @@ fn face_shade(axis: u32, positive: bool) -> f32 {
     }
     if (axis == 2u) { return 0.85; }    // z sides
     return 0.75;                        // x sides
+}
+
+// `mesher::OpenSky`'s bit for the whole mesh. Must match `OpenSky::ALL`.
+const OPEN_ALL: u32 = 64u;
+
+// Where a chunk's far boundary plane sits, in the packed position's cells.
+const CHUNK_CELLS: u32 = 48u;
+
+// Whether a vertex's fog is the open sky's whatever sunlight it carries —
+// weather ask W29, and `mesher::OpenSky` for why a mesh would say so.
+//
+// `flags` is the instance's: `OPEN_ALL` for every vertex (a summary, or a
+// chunk meshed before its light arrived), or a side at bit `axis * 2 +
+// positive` for the vertices lying on that side's boundary plane, whose light
+// was sampled partly across it from a neighbour whose light has not come. A
+// vertex's own cell coordinates say which plane it lies on, so a side costs
+// nothing in the vertex.
+fn fog_open(flags: u32, cell: vec3<u32>) -> bool {
+    if (flags == 0u) {
+        return false;
+    }
+    if ((flags & OPEN_ALL) != 0u) {
+        return true;
+    }
+    for (var axis = 0u; axis < 3u; axis = axis + 1u) {
+        let low = (flags & (1u << (axis * 2u))) != 0u && cell[axis] == 0u;
+        let high = (flags & (2u << (axis * 2u))) != 0u && cell[axis] == CHUNK_CELLS;
+        if (low || high) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The shared vertex stage, as a plain function.
@@ -533,6 +574,14 @@ fn unpack_vertex(input: VertexIn) -> VertexOut {
     out.occlusion = AO_FLOOR + (1.0 - AO_FLOOR) * level;
     out.sun = levels.x;
     out.block_light = levels.yzw;
+    // The unswayed cell, which is the lattice the mesher placed it on: a
+    // plant's top moving in the wind has not left its chunk's boundary.
+    let cell = vec3<u32>(
+        input.packed & 0x3Fu,
+        (input.packed >> 6u) & 0x3Fu,
+        (input.packed >> 12u) & 0x3Fu,
+    );
+    out.sky = select(levels.x, 1.0, fog_open(u32(input.chunk_offset.w), cell));
     return out;
 }
 
@@ -595,8 +644,9 @@ const CAVE_FOG_EDGE: f32 = 0.85;
 // black at midnight, and leaned with a storm and a flash. Blended by the sky
 // light at the fragment — the stored sunlight channel the mesh already
 // carries, in quarter levels, so a tunnel's fog shades from the day's at the
-// mouth to the cave's a few blocks in — from `sky_colour` at full sky light
-// to `cave_fog`, the sky owner's colour for every hour, at none. Whatever
+// mouth to the cave's a few blocks in, or full where that channel is not the
+// sky's reach (`VertexOut::sky`) — from `sky_colour` at full sky light to
+// `cave_fog`, the sky owner's colour for every hour, at none. Whatever
 // leans the sky's colour leans only the sky-lit share, which is what keeps
 // lightning out of a cave without anyone having to be told.
 //
@@ -1169,7 +1219,7 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     // front of that.
     let misted = place_fog(lit, input.world, input.distance);
     let haze = fog_amount(input.world);
-    let fog = fog_colour(input.sun, fog_reach(input.world));
+    let fog = fog_colour(input.sky, fog_reach(input.world));
     return vec4<f32>(mix(misted, fog, haze), texel.a);
 }
 
@@ -1277,6 +1327,8 @@ struct FluidOut {
     @location(8) @interpolate(flat) normal: vec3<f32>,
     // Which way this surface runs, in blocks per second, flat across the quad.
     @location(9) @interpolate(flat) flow: vec2<f32>,
+    // What the fog takes as the sky light: see `VertexOut::sky`.
+    @location(10) sky: f32,
 };
 
 // A signed byte out of a word. WGSL has no i8, so the sign is put back by hand.
@@ -1300,6 +1352,7 @@ fn fluid_vertex(input: FluidIn) -> FluidOut {
     out.slot = lit.slot;
     out.shade = lit.shade;
     out.sun = lit.sun;
+    out.sky = lit.sky;
     out.block_light = lit.block_light;
     out.occlusion = lit.occlusion;
     out.normal = lit.normal;
@@ -1335,6 +1388,7 @@ fn fluid_fragment(input: FluidOut) -> @location(0) vec4<f32> {
     lit.slot = input.slot;
     lit.shade = input.shade;
     lit.sun = input.sun;
+    lit.sky = input.sky;
     lit.block_light = input.block_light;
     lit.distance = input.distance;
     lit.occlusion = input.occlusion;
@@ -1471,6 +1525,10 @@ fn sprite_vertex(@builtin(vertex_index) index: u32, sprite: SpriteIn) -> VertexO
         f32((light >> 4u) & 0xFu) / 15.0,
         f32(light & 0xFu) / 15.0,
     );
+    // Only the whole chunk's flag can apply: a sprite is lit at its own
+    // cell, which is inside its chunk, so a neighbour's late light never
+    // reached it.
+    out.sky = select(out.sun, 1.0, (u32(sprite.chunk_offset.w) & OPEN_ALL) != 0u);
     return out;
 }
 
@@ -1478,13 +1536,13 @@ fn sprite_vertex(@builtin(vertex_index) index: u32, sprite: SpriteIn) -> VertexO
 // Mode 3 with its shadows off, too, which is why this marks.
 @fragment
 fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
-    return marked(unshadowed(input), input.sun);
+    return marked(unshadowed(input), input.sky);
 }
 
 // Mode 3: the same surface, with the cascades consulted.
 @fragment
 fn fragment_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
-    return marked(shadowed(input), input.sun);
+    return marked(shadowed(input), input.sky);
 }
 
 // Glass: `fragment_main` and `fragment_shadowed` without the mark, because a
@@ -1575,5 +1633,5 @@ fn cut_out(input: VertexOut, shadow: f32) -> vec4<f32> {
     if (colour.a < 0.5) {
         discard;
     }
-    return marked(vec4<f32>(colour.rgb, 1.0), input.sun);
+    return marked(vec4<f32>(colour.rgb, 1.0), input.sky);
 }

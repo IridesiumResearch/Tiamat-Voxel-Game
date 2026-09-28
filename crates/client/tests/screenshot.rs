@@ -1449,6 +1449,285 @@ fn a_particle_scattered_where_no_sky_reaches_fogs_to_the_caves_colour() {
     }
 }
 
+/// Two cave fogs no sky in these scenes is: a frame that changes between them
+/// has let the cave's colour into its fog, and one that does not has kept it
+/// out. Brighter than the tunnel's rust, because what is under test is that
+/// the colour does not arrive at all, and the brighter it is the less of it
+/// hides under the rounding.
+const RUST_CAVE: [f32; 3] = [0.7, 0.2, 0.05];
+const MOSS_CAVE: [f32; 3] = [0.05, 0.7, 0.2];
+
+/// The largest per-channel difference between two colours.
+fn furthest_apart(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3)
+        .map(|channel| (a[channel] - b[channel]).abs())
+        .fold(0.0_f32, f32::max)
+}
+
+/// A square of `half` pixels either side of a point off the frame's centre.
+fn patch(frame: &Image, dx: i32, dy: i32, half: u32) -> [f32; 3] {
+    let x = (WIDTH / 2).saturating_add_signed(dx);
+    let y = (HEIGHT / 2).saturating_add_signed(dy);
+    average(frame, x - half, y - half, x + half, y + half)
+}
+
+#[test]
+fn a_far_hillside_drawn_from_its_summary_fogs_in_the_skys_colour_whatever_the_caves() {
+    // **Weather ask W29, from its review.** A summary carries no light; its
+    // sunlight channel holds a shading term by which way the face points
+    // (`summary_shade`): ten of fifteen on a wall, five underneath. The fog
+    // read that as sky light, so every far hillside was fogged a third of the
+    // way to the cave's colour — darker than the haze it stood in, with a
+    // seam where a daylit detail cliff met its summary, and tinted by
+    // whatever cave fog a mod set. A summary's fog is the sky's on every face
+    // now, so the cave's colour cannot reach it: the same frame under two
+    // vivid cave fogs is the same frame.
+    let Some(gpu) = gpu() else { return };
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    renderer.set_atlas(&Atlas::build(&[
+        None,
+        None,
+        Some(Image::white_with_border()),
+    ]));
+    // A cliff of solid summaries three chunks wide and two high, its face at
+    // z = 32 turned to the camera — a wall face, the summary's ten.
+    let cliff = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 16), &[]);
+    for cx in -1..2 {
+        for cy in 0..2 {
+            renderer.set_chunk(ChunkPos::new(cx, cy, 2), &cliff);
+        }
+    }
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    // Level with the middle of the face and 24 blocks off it: with the fog
+    // total at 30 the face sits at 0.8 of the reach — well fogged, and short
+    // of `CAVE_FOG_EDGE`, where the sky's colour takes over whatever the sky
+    // light and would hide the fault.
+    let camera = Camera {
+        position: Position::from_world(8.0, 16.0, 8.0),
+        ..Camera::default()
+    };
+    const SKY: [f32; 3] = [0.53, 0.81, 0.92];
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        renderer.set_sky(SKY, 100_000.0);
+        let clear = target.capture(&mut renderer, &camera).expect("capture");
+        renderer.set_sky(SKY, 30.0);
+        renderer.set_cave_fog(RUST_CAVE);
+        let rust = target.capture(&mut renderer, &camera).expect("capture");
+        renderer.set_cave_fog(MOSS_CAVE);
+        let moss = target.capture(&mut renderer, &camera).expect("capture");
+
+        let face = |frame: &Image| patch(frame, 0, 0, 20);
+        let apart = furthest_apart(face(&rust), face(&moss));
+        assert!(
+            apart < 0.005,
+            "{mode:?}: the summary cliff reads {:?} under a rust cave fog and {:?} under a \
+             moss one ({apart} apart) — its face-direction shading is being read as sky light, \
+             and the horizon is fogged towards the caves",
+            face(&rust),
+            face(&moss)
+        );
+        // And not because the fog never reached it: the face moved most of
+        // the way to the sky's colour.
+        assert!(
+            furthest_apart(face(&rust), face(&clear)) > 0.1,
+            "{mode:?}: the cliff reads {:?} fogged and {:?} clear — it is not fogged enough \
+             for this to prove anything",
+            face(&rust),
+            face(&clear)
+        );
+    }
+}
+
+#[test]
+fn a_wall_where_the_streamed_world_stops_fogs_as_the_sky_until_its_neighbours_light_comes() {
+    // **Weather ask W29, from its review.** Under `Absent::Air` the loaded
+    // region ends in a wall of faces against whatever has not arrived, and
+    // those faces sample their light from across the boundary — from a layer
+    // that is not there, which reads as dark. The fog read that as a cave, and
+    // the frontier stood in a daylit haze fogged in the cave's colour until
+    // its neighbour streamed in. The client marks the sides whose neighbour's
+    // light is missing (`ChunkStore::open_sky`), and the vertices on that
+    // boundary plane fog as the sky.
+    //
+    // One chunk of stone meshed against nothing and lit by the dark a missing
+    // layer reads as, seen face on from either side along z. Marked on the
+    // side in view, the wall's fog is the sky's and two cave fogs give one
+    // frame; marked on the far side only, the same wall is fogged towards
+    // the cave's colour — which proves the scene can tell, and that the mark
+    // is the side's and not the chunk's.
+    let Some(gpu) = gpu() else { return };
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    renderer.set_atlas(&Atlas::build(&[
+        None,
+        None,
+        Some(Image::white_with_border()),
+    ]));
+    let pos = ChunkPos::new(0, 0, 2);
+    let frontier = mesher::mesh_chunk(
+        &Chunk::new(pos, STONE),
+        &Neighbours::open(),
+        Absent::Air,
+        &client::shade::Uniform(tiamat_core::light::Light::DARK),
+        &mesher::NoFluid,
+        &mesher::Sight::default(),
+    );
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
+    renderer.set_sky([0.53, 0.81, 0.92], 30.0);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+
+    // 24 blocks off the -z face (z = 32, its chunk's plane at 0) looking
+    // along +z, and 24 off the +z face (z = 48, the plane at 48) looking back.
+    let near_side = Camera {
+        position: Position::from_world(8.0, 8.0, 8.0),
+        ..Camera::default()
+    };
+    let mut far_side = Camera {
+        position: Position::from_world(8.0, 8.0, 72.0),
+        ..Camera::default()
+    };
+    far_side.look(std::f32::consts::PI, 0.0);
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        for (camera, facing, behind) in [(&near_side, false, true), (&far_side, true, false)] {
+            let mut under = |open: mesher::OpenSky| {
+                let mut mesh = frontier.clone();
+                mesh.open_sky = open;
+                renderer.set_chunk(pos, &mesh);
+                renderer.set_cave_fog(RUST_CAVE);
+                let rust = patch(
+                    &target.capture(&mut renderer, camera).expect("capture"),
+                    0,
+                    0,
+                    10,
+                );
+                renderer.set_cave_fog(MOSS_CAVE);
+                let moss = patch(
+                    &target.capture(&mut renderer, camera).expect("capture"),
+                    0,
+                    0,
+                    10,
+                );
+                (rust, moss)
+            };
+            let (rust, moss) = under(mesher::OpenSky::side(2, facing));
+            let apart = furthest_apart(rust, moss);
+            assert!(
+                apart < 0.005,
+                "{mode:?}: the frontier wall facing {} z reads {rust:?} under a rust cave fog \
+                 and {moss:?} under a moss one ({apart} apart) — a face lit by light that has \
+                 not arrived is being fogged as a cave",
+                if facing { "+" } else { "-" }
+            );
+            let (rust, moss) = under(mesher::OpenSky::side(2, behind));
+            let apart = furthest_apart(rust, moss);
+            assert!(
+                apart > 0.02,
+                "{mode:?}: the frontier wall facing {} z, marked open on its far side only, \
+                 reads {rust:?} and {moss:?} under two cave fogs ({apart} apart) — the scene \
+                 cannot tell a cave's fog from the sky's, or a side's mark reached the plane \
+                 across the chunk",
+                if facing { "+" } else { "-" }
+            );
+        }
+    }
+}
+
+#[test]
+fn a_held_block_is_fogged_as_the_sky_in_every_mode_whatever_stands_behind_it() {
+    // **Weather ask W29, from its review.** Mode 3 fogs in the composite, by
+    // the sky light the world pass leaves in the scene's alpha, and the prop
+    // pass wrote colour only: a held block kept the mark of the terrain behind
+    // it, so in front of a tunnel wall it was fogged in the cave's colour
+    // while the arm holding it — a figure, which writes the sky's mark — was
+    // fogged in the sky's. Modes 1 and 2 fog a prop as the sky in its own
+    // shader. The prop writes its mark now, so in every mode a box in front
+    // of an unlit wall is fogged alike under two cave fogs, while the wall
+    // round it is not.
+    let Some(gpu) = gpu() else { return };
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    renderer.set_atlas(&Atlas::build(&[
+        None,
+        None,
+        Some(Image::white_with_border()),
+    ]));
+    // A wall of stone at a sky light of zero, face on at z = 32, and every
+    // side of it lit for real: a cave's wall, fogged as a cave.
+    let pos = ChunkPos::new(0, 0, 2);
+    let wall = mesher::mesh_chunk(
+        &Chunk::new(pos, STONE),
+        &Neighbours::open(),
+        Absent::Air,
+        &client::shade::Uniform(tiamat_core::light::Light::DARK),
+        &mesher::NoFluid,
+        &mesher::Sight::default(),
+    );
+    renderer.set_chunk(pos, &wall);
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.05, -0.99, 0.1]);
+    renderer.set_sky([0.53, 0.81, 0.92], 30.0);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let camera = Camera {
+        position: Position::from_world(8.0, 8.0, 8.0),
+        ..Camera::default()
+    };
+    // A four-block box eighteen blocks out on the line of sight, in front of
+    // the wall 24 out: well fogged, and nothing but wall behind it.
+    renderer.set_props(&[client::render::Prop {
+        model: glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(2.0),
+            glam::Quat::IDENTITY,
+            glam::vec3(0.0, 0.0, 18.0),
+        )
+        .to_cols_array(),
+        uv: [0.0, 0.0, 0.25, 0.25],
+        ..Default::default()
+    }]);
+
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        renderer.set_cave_fog(RUST_CAVE);
+        let rust = target.capture(&mut renderer, &camera).expect("capture");
+        renderer.set_cave_fog(MOSS_CAVE);
+        let moss = target.capture(&mut renderer, &camera).expect("capture");
+
+        // The box covers about twenty pixels either side of the centre; the
+        // wall shows from thirty to fifty out.
+        let held = |frame: &Image| patch(frame, 0, 0, 8);
+        let beside = |frame: &Image| patch(frame, 40, 0, 6);
+        let wall_apart = furthest_apart(beside(&rust), beside(&moss));
+        assert!(
+            wall_apart > 0.02,
+            "{mode:?}: the unlit wall reads {:?} and {:?} under two cave fogs — it is not \
+             fogged as a cave, so the box in front of it proves nothing",
+            beside(&rust),
+            beside(&moss)
+        );
+        let apart = furthest_apart(held(&rust), held(&moss));
+        assert!(
+            apart < 0.005,
+            "{mode:?}: the held box reads {:?} under a rust cave fog and {:?} under a moss one \
+             ({apart} apart) — it is fogged by the sky light of the wall behind it",
+            held(&rust),
+            held(&moss)
+        );
+    }
+}
+
 #[test]
 fn a_frame_of_the_fixed_scene_has_sky_above_and_world_below() {
     // The structural assertion that catches almost every real regression: a
