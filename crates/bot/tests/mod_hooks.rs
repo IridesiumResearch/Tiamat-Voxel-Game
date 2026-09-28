@@ -360,6 +360,97 @@ fn a_mod_hears_a_player_cross_into_another_block() {
     assert!(server.stop());
 }
 
+#[test]
+fn a_fixed_main_view_refuses_what_does_not_fit_and_says_how_much() {
+    // UI ask 14. The warden fixes the main view at one slot, which holds
+    // ninety blocks (2430 units), and gives 2436 on join: the slot fills,
+    // `give` answers false and six,
+    // and the view has not grown. It marks the world only when all of that
+    // held.
+    let server = start(
+        "main-fixed",
+        write_warden(
+            "main-fixed",
+            "game.set_main_slots(1)\n\
+             game.register_block{ id = 'mark' }\n\
+             game.register_on_player_join(function(e)\n\
+             \x20   local gave, left = game.give(e.player, { material = 'warden:ground', units = 2436 })\n\
+             \x20   local slots = 0\n\
+             \x20   for n = 1, 4 do if game.slot(e.player, 'player:main', n) then slots = slots + 1 end end\n\
+             \x20   if gave == false and left == 6 and slots == 1 and game.slot(e.player, 'player:main', 2) == nil then\n\
+             \x20       game.set_block({ x = 9, y = 10, z = 1 }, 'warden:mark')\n\
+             \x20   end\n\
+             end)",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let mark = material_named(&bot, "warden:mark");
+        bot.expect_block(BlockPos::new(9, 10, 1), mark, Duration::from_secs(10))
+            .await
+            .expect("the give was refused past the second slot, and said so");
+        let stacks = settled_inventory(&mut bot).await;
+        let ground = material_named(&bot, "warden:ground");
+        assert_eq!(
+            units_of(&stacks, ground),
+            2430,
+            "one slot, full: {stacks:?}"
+        );
+    });
+
+    assert!(server.stop());
+}
+
+#[test]
+fn a_full_fixed_inventory_stops_a_dig_before_the_block_comes_apart() {
+    // UI ask 14's other half: with nowhere to put the yield, the bite is
+    // not taken. The block stays whole, nothing is credited past what fit,
+    // and the player is told.
+    let server = start(
+        "hands-full",
+        write_warden(
+            "hands-full",
+            "game.set_main_slots(1)\n\
+             game.register_on_player_join(function(e)\n\
+             \x20   game.give(e.player, { material = 'warden:ground', units = 2430 })\n\
+             end)",
+        ),
+    );
+    let stone = stone();
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        bot.sleep_ticks(4).await;
+        let removed = dig_and_see(&mut bot, &server, BlockPos::new(2, -1, 0), stone).await;
+        assert!(
+            !removed,
+            "a dig with nowhere to put the yield took the block apart"
+        );
+        assert!(
+            bot.notices()
+                .iter()
+                .any(|text| text.starts_with("you cannot carry any more")),
+            "the player was not told; notices {:?}",
+            bot.notices()
+        );
+        let stacks = settled_inventory(&mut bot).await;
+        let ground = material_named(&bot, "warden:ground");
+        assert_eq!(
+            units_of(&stacks, ground),
+            2430,
+            "the one slot, as given: {stacks:?}"
+        );
+        assert_eq!(
+            stacks.iter().map(|stack| stack.units).sum::<u32>(),
+            2430,
+            "something was credited past the one slot: {stacks:?}"
+        );
+    });
+
+    assert!(server.stop());
+}
+
 /// The world id the server gave a mod's block, from the table sent on join.
 fn material_named(bot: &Bot, name: &str) -> u16 {
     bot.material_table()

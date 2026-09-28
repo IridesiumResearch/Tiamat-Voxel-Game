@@ -355,6 +355,43 @@ fn group_by_domain<'a, T>(
 
 /// Writes each dirty chunk of entities into the domain it belongs to.
 ///
+/// What a bite's edits would take out of a block, as stacks: one unit per
+/// cell, by the material the cell holds now.
+///
+/// The preview `world.apply` will report once the edits land, computed
+/// first so a dig can be refused before anything is removed (UI ask 14).
+fn would_remove(
+    cells: &[tiamat_core::MaterialId],
+    edits: &[tiamat_core::proto::Edit],
+) -> Vec<tiamat_core::inventory::Stack> {
+    let mut stacks: Vec<tiamat_core::inventory::Stack> = Vec::new();
+    for edit in edits {
+        let tiamat_core::proto::Edit::SubNode { pos, .. } = edit else {
+            continue;
+        };
+        let (dx, dy, dz) = (
+            pos.x.rem_euclid(3) as usize,
+            pos.y.rem_euclid(3) as usize,
+            pos.z.rem_euclid(3) as usize,
+        );
+        let Some(material) = cells.get(dx + 3 * dy + 9 * dz).copied() else {
+            continue;
+        };
+        if material.is_air() {
+            continue;
+        }
+        match stacks.binary_search_by_key(&material, |stack| stack.material) {
+            Ok(found) => stacks[found].units += 1,
+            Err(at) => {
+                if let Some(stack) = tiamat_core::inventory::Stack::new(material, 1) {
+                    stacks.insert(at, stack);
+                }
+            }
+        }
+    }
+    stacks
+}
+
 /// Unloads up to [`MAX_UNLOADS_PER_TICK`] chunks from the front of the queue.
 ///
 /// For each: the world drops it (or refuses it as dirty, and it waits for the
@@ -2517,6 +2554,14 @@ impl ServerHandle {
             .map(|loaded| loaded.vm().registered_views())
             .unwrap_or_default();
         info!(views = views.len(), "inventory views registered");
+        // The size a mod fixed the main view at (UI ask 14), or none: read
+        // here with the views, and for the same reason.
+        let main_slots = host
+            .as_ref()
+            .and_then(|loaded| loaded.vm().registered_main_slots());
+        if let Some(main_slots) = main_slots {
+            info!(main_slots, "the main inventory view is a fixed size");
+        }
         // Lowest id among those marked default, so the answer does not depend
         // on which mod loaded first — among mods that are not reference mods,
         // the rule the sky uses: the engine's own fixture hand loses to any
@@ -2692,6 +2737,7 @@ impl ServerHandle {
             tool_speeds,
             drop_rules,
             material_ids,
+            main_slots,
         });
 
         // The runtime is built here rather than inside the network thread, and
@@ -4063,6 +4109,26 @@ impl ServerHandle {
                                     )
                                 }
                             };
+                            // **A full inventory stops the dig** (UI ask 14).
+                            // With `player:main` fixed, a bite whose yield
+                            // would not fit is not taken: the block stays
+                            // whole and the player is told, rather than the
+                            // material being paid short or landing in a slot
+                            // no screen shows. Checked against what the bite
+                            // would remove and what the yield rules would pay
+                            // for it, before anything is removed.
+                            if shared.main_slots.is_some() {
+                                let cells = world
+                                    .block_cells(&digging_in, target.block(), &mut source)
+                                    .unwrap_or(tiamat_core::block::EMPTY_CELLS);
+                                let removed = would_remove(&cells, &edits);
+                                let paid = shared.would_yield(&uuid, &removed);
+                                if !shared.can_carry(&uuid, &paid) {
+                                    shared.set_dig(&uuid, None);
+                                    shared.tell(&uuid, "you cannot carry any more".to_owned());
+                                    continue;
+                                }
+                            }
                             // **The actor's domain, not the world's.** An edit
                             // happens in the space the player making it is
                             // standing in, and the positions mean different
@@ -6225,7 +6291,7 @@ impl tiamat_core::inventory::Access for Carried {
         view: &str,
         slot: Option<usize>,
         stack: tiamat_core::inventory::Stack,
-    ) -> bool {
+    ) -> u32 {
         let uuid = tiamat_core::identity::PlayerUuid::from_bytes(player);
         self.shared.give(&uuid, view, slot, stack)
     }

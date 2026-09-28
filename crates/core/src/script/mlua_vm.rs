@@ -3762,6 +3762,13 @@ impl ScriptVm for MluaVm {
         items
     }
 
+    fn registered_main_slots(&self) -> Option<usize> {
+        self.lua
+            .named_registry_value::<Option<usize>>("tiamat.main_slots")
+            .ok()
+            .flatten()
+    }
+
     fn registered_views(&self) -> Vec<crate::inventory::ViewDef> {
         let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.views") else {
             return Vec::new();
@@ -4989,28 +4996,9 @@ impl MluaVm {
         Ok(())
     }
 
-    fn install_inventory(&self, game: &Table) -> Result<(), ScriptError> {
-        let slot = std::sync::Arc::clone(&self.inventories);
-        let read = self
-            .lua
-            .create_function(move |lua, (uuid, view): (String, Option<String>)| {
-                let player = player_of(&uuid, "inventory")?;
-                let view = view.unwrap_or_else(|| DEFAULT_VIEW.to_owned());
-                let stacks = slot
-                    .lock()
-                    .ok()
-                    .and_then(|slot| slot.as_ref().map(|access| access.contents(player, &view)))
-                    .unwrap_or_default();
-                let list = lua.create_table()?;
-                for stack in stacks {
-                    list.push(stack_table(lua, &stack)?)?;
-                }
-                Ok(list)
-            })
-            .map_err(|err| self.vm_error(&err))?;
-        game.set("inventory", read)
-            .map_err(|err| self.vm_error(&err))?;
-
+    /// `game.give(player, spec)`: material into a player's view, answering
+    /// whether all of it went in and how much did not (UI ask 14).
+    fn install_give(&self, game: &Table) -> Result<(), ScriptError> {
         let slot = std::sync::Arc::clone(&self.inventories);
         let give = self
             .lua
@@ -5034,16 +5022,50 @@ impl MluaVm {
                         ..stack
                     }
                 }) else {
-                    return Ok(false);
+                    return Ok((false, 0));
                 };
-                let accepted = slot.lock().ok().and_then(|slot| {
-                    slot.as_ref()
-                        .map(|access| access.give(player, &view, into, stack))
-                });
-                Ok(accepted.unwrap_or(false))
+                let asked = stack.units;
+                let left = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .map(|access| access.give(player, &view, into, stack))
+                    })
+                    .unwrap_or(asked);
+                // `true` only when all of it went in, so a mod that never
+                // read the second answer keeps its meaning; the second is
+                // what did not fit, for the mod that leaves it where it was.
+                Ok((left == 0, left))
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("give", give).map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
+    fn install_inventory(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.inventories);
+        let read = self
+            .lua
+            .create_function(move |lua, (uuid, view): (String, Option<String>)| {
+                let player = player_of(&uuid, "inventory")?;
+                let view = view.unwrap_or_else(|| DEFAULT_VIEW.to_owned());
+                let stacks = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.contents(player, &view)))
+                    .unwrap_or_default();
+                let list = lua.create_table()?;
+                for stack in stacks {
+                    list.push(stack_table(lua, &stack)?)?;
+                }
+                Ok(list)
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("inventory", read)
+            .map_err(|err| self.vm_error(&err))?;
+
+        self.install_give(game)?;
 
         let slot = std::sync::Arc::clone(&self.inventories);
         let held = self
@@ -5754,6 +5776,26 @@ impl MluaVm {
     }
 
     /// The `register_*` family, live only during the registration window.
+    /// `game.register_view` and `game.set_main_slots`: the places a player's
+    /// stacks may sit, and the size of the one the engine credits into.
+    fn install_views(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        let owner = mod_id.to_owned();
+        let register_view = self
+            .lua
+            .create_function(move |lua, spec: Table| register_view(lua, &owner, &spec))
+            .map_err(|err| self.vm_error(&err))?;
+        let owner = mod_id.to_owned();
+        let set_main_slots = self
+            .lua
+            .create_function(move |lua, slots: usize| set_main_slots(lua, &owner, slots))
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_main_slots", set_main_slots)
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_view", register_view)
+            .map_err(|err| self.vm_error(&err))?;
+        Ok(())
+    }
+
     fn install_registration(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
         // -- registration -------------------------------------------------
         // Registration mutates engine state from inside a Lua callback, so the
@@ -5805,13 +5847,7 @@ impl MluaVm {
         game.set("register_item", register_item)
             .map_err(|err| self.vm_error(&err))?;
 
-        let owner = mod_id.to_owned();
-        let register_view = self
-            .lua
-            .create_function(move |lua, spec: Table| register_view(lua, &owner, &spec))
-            .map_err(|err| self.vm_error(&err))?;
-        game.set("register_view", register_view)
-            .map_err(|err| self.vm_error(&err))?;
+        self.install_views(mod_id, game)?;
 
         let owner = mod_id.to_owned();
         let register_fluid = self
@@ -9608,6 +9644,48 @@ fn register_fluid(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
 /// What the slots MEAN — an armour rack, a tool belt, a bandolier — is the
 /// mod's; the engine gives them a name and a size and moves stacks between
 /// them. See [`crate::inventory::Slots::for_player_with`].
+/// `game.set_main_slots(n)`: the size `player:main` is fixed at (UI ask 14).
+///
+/// Registration window only, and one size for the server: two mods
+/// disagreeing about how big a player's inventory is would be two screens
+/// drawing different things over one view.
+fn set_main_slots(lua: &Lua, owner: &str, slots: usize) -> mlua::Result<()> {
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
+    if frozen {
+        return Err(mlua::Error::external(format!(
+            "mod `{owner}`: registration is closed"
+        )));
+    }
+    if slots == 0 || slots > crate::inventory::MAX_VIEW_SLOTS {
+        return Err(mlua::Error::external(format!(
+            "set_main_slots({slots}): outside 1..={}",
+            crate::inventory::MAX_VIEW_SLOTS
+        )));
+    }
+    // One size for the server: two mods disagreeing about how big
+    // a player's inventory is would be two screens drawing
+    // different things over one view.
+    if let Some(was) = lua
+        .named_registry_value::<Option<usize>>("tiamat.main_slots")
+        .ok()
+        .flatten()
+        && was != slots
+    {
+        let by = lua
+            .named_registry_value::<Option<String>>("tiamat.main_slots_by")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        return Err(mlua::Error::external(format!(
+            "set_main_slots({slots}): mod `{by}` already fixed the main view at \
+                 {was} slots"
+        )));
+    }
+    lua.set_named_registry_value("tiamat.main_slots", slots)?;
+    lua.set_named_registry_value("tiamat.main_slots_by", owner.to_owned())?;
+    Ok(())
+}
+
 fn register_view(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
@@ -13770,6 +13848,28 @@ mod tests {
         });
         assert_eq!(outcome.faults.len(), 1, "the mod should have been faulted");
         assert_eq!(outcome.faults[0].0, "broken");
+    }
+
+    #[test]
+    fn the_main_view_is_fixed_once_and_by_one_size() {
+        // UI ask 14. Read back after the freeze like the views; a second
+        // mod naming a different size is an error, the same size is not,
+        // and nothing at all is the view that grows.
+        let mut vm = vm();
+        assert_eq!(vm.registered_main_slots(), None);
+        load(&mut vm, "screen", "game.set_main_slots(28)").expect("screen");
+        load(&mut vm, "agree", "game.set_main_slots(28)").expect("the same size again");
+        let err = load(&mut vm, "other", "game.set_main_slots(36)").expect_err("a second size");
+        assert!(format!("{err:?}").contains("already fixed"), "{err:?}");
+        vm.freeze().expect("freeze");
+        assert_eq!(vm.registered_main_slots(), Some(28));
+        for bad in ["0", "257"] {
+            let mut fresh = self::vm();
+            assert!(
+                load(&mut fresh, "screen", &format!("game.set_main_slots({bad})")).is_err(),
+                "{bad} slots loaded"
+            );
+        }
     }
 
     #[test]

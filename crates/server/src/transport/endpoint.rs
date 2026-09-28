@@ -419,6 +419,11 @@ pub struct Shared {
     /// Every registered material by name, to the id this world uses — what a
     /// dig hook's `drops` answer is resolved with, at the moment it is given.
     pub material_ids: std::collections::BTreeMap<String, tiamat_core::MaterialId>,
+    /// The size a mod fixed `player:main` at, if one did (UI ask 14).
+    ///
+    /// `None` is the view that grows, as it always has. Settled at start
+    /// like the views beside it, because the registries are frozen.
+    pub main_slots: Option<usize>,
 
     /// How each material resists a tool: its bare-handed seconds, and how
     /// strongly it imposes that on a block it is only part of.
@@ -2079,6 +2084,52 @@ impl Shared {
         }
     }
 
+    /// A new player's inventory: the mods' views, and the main view at the
+    /// size a mod fixed it to, if one did (UI ask 14).
+    #[must_use]
+    pub fn fresh_slots(&self) -> tiamat_core::inventory::Slots {
+        tiamat_core::inventory::Slots::for_player_sized(self.main_slots, &self.views)
+    }
+
+    /// Whether a player could be credited these stacks in full.
+    ///
+    /// True for everybody whose main view grows; the check a dig makes
+    /// before it takes a bite out of a block when the view is fixed.
+    #[must_use]
+    pub fn can_carry(&self, uuid: &PlayerUuid, stacks: &[tiamat_core::inventory::Stack]) -> bool {
+        if self.main_slots.is_none() {
+            return true;
+        }
+        self.inventories.lock().is_ok_and(|inventories| {
+            inventories
+                .get(uuid)
+                .is_none_or(|held| held.fits(PLAYER_MAIN, stacks))
+        })
+    }
+
+    /// What a player's dig would pay for these removed stacks, without
+    /// paying it: the yield rules over a copy of the dig's carry.
+    #[must_use]
+    pub fn would_yield(
+        &self,
+        uuid: &PlayerUuid,
+        removed: &[tiamat_core::inventory::Stack],
+    ) -> Vec<tiamat_core::inventory::Stack> {
+        let Ok(bodies) = self.bodies.lock() else {
+            return removed.to_vec();
+        };
+        let Some(player) = bodies.get(uuid) else {
+            return removed.to_vec();
+        };
+        let mut trial = player.dig_yield.clone();
+        let mut paid = Vec::new();
+        for stack in removed {
+            let registered = self.drop_rules.get(&stack.material).map(Vec::as_slice);
+            paid.extend(trial.earn(stack.material, stack.units, registered));
+        }
+        tiamat_core::inventory::consolidate(paid)
+    }
+
     /// Credits stacks to a player and marks them for an update.
     pub fn credit(&self, uuid: PlayerUuid, stacks: Vec<tiamat_core::inventory::Stack>) {
         if stacks.is_empty() {
@@ -2087,7 +2138,7 @@ impl Shared {
         if let Ok(mut inventories) = self.inventories.lock() {
             let held = inventories
                 .entry(uuid)
-                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views));
+                .or_insert_with(|| self.fresh_slots());
             for stack in stacks {
                 held.insert(PLAYER_MAIN, stack);
             }
@@ -2125,7 +2176,7 @@ impl Shared {
         view: &str,
         slot: Option<usize>,
         stack: tiamat_core::inventory::Stack,
-    ) -> bool {
+    ) -> u32 {
         // **Connected is the test, not "has dug something".** An inventory
         // record is created the first time a player is credited, so somebody
         // who has just joined has none — and a mod handing them a starting kit
@@ -2135,21 +2186,30 @@ impl Shared {
             .lock()
             .is_ok_and(|bodies| bodies.contains_key(uuid));
         if !connected {
-            return false;
+            return stack.units;
         }
-        let took = self.inventories.lock().is_ok_and(|mut inventories| {
+        let asked = stack.units;
+        let left = self.inventories.lock().map_or(asked, |mut inventories| {
             let held = inventories
                 .entry(*uuid)
-                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views));
+                .or_insert_with(|| self.fresh_slots());
             match slot {
-                Some(slot) => held.give_into(view, slot, stack),
-                None => held.insert(view, stack),
+                // Whole or not at all into a named slot (Craft ask 4).
+                Some(slot) => {
+                    if held.give_into(view, slot, stack) {
+                        0
+                    } else {
+                        asked
+                    }
+                }
+                None => held.insert_within(view, stack).map_or(0, |left| left.units),
             }
         });
+        let took = left < asked;
         if took && let Ok(mut dirty) = self.inventory_dirty.lock() {
             dirty.insert(*uuid);
         }
-        took
+        left
     }
 
     /// Swaps a hotbar slot with the off-hand, for a player who pressed the key.
@@ -2328,7 +2388,7 @@ impl Shared {
         if let Ok(mut inventories) = self.inventories.lock() {
             inventories
                 .entry(uuid)
-                .or_insert_with(|| tiamat_core::inventory::Slots::for_player_with(&self.views));
+                .or_insert_with(|| self.fresh_slots());
         }
     }
 
@@ -2338,7 +2398,7 @@ impl Shared {
     /// sizes this session's mods registered.
     #[must_use]
     pub fn fresh_inventory(&self) -> tiamat_core::inventory::Slots {
-        tiamat_core::inventory::Slots::for_player_with(&self.views)
+        self.fresh_slots()
     }
 
     /// Replaces a player's whole inventory, and tells their client.
@@ -4071,6 +4131,7 @@ mod tests {
             tool_speeds: std::collections::BTreeMap::new(),
             drop_rules: std::collections::BTreeMap::new(),
             material_ids: std::collections::BTreeMap::new(),
+            main_slots: None,
         }
     }
 

@@ -1200,6 +1200,10 @@ pub trait ScriptVm: Sized {
     /// Which backend this is.
     fn backend() -> Backend;
 
+    /// The size a mod fixed `player:main` at with `game.set_main_slots`, if
+    /// one did (UI ask 14). Read after the freeze, like the views.
+    fn registered_main_slots(&self) -> Option<usize>;
+
     /// Creates a VM with the given limits, with the registration window **open**.
     ///
     /// # Errors

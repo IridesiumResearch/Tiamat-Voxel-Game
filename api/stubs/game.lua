@@ -1563,9 +1563,37 @@ function game.inventory(player, view) end
 ---or not at all — an empty slot takes it, one holding the same thing with room
 ---merges, anything else is refused. What rewriting a tool's `detail` needs, so
 ---the pick lands back in the hand rather than wherever the pack has room.
+---**Two answers.** `gave` is true only when ALL of it went in. `left` is
+---how many units did not: zero on success; everything for a player who is
+---not connected or a view that does not exist; and, once a mod has fixed the
+---size of `player:main` with `game.set_main_slots`, whatever was left when
+---the view filled — the view no longer grows past its size. A pickup that
+---leaves something is a pickup to leave on the ground: give back `left`
+---units to the entity rather than despawning it.
 ---@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string?, slot: integer? }
 ---@return boolean gave
+---@return integer left
 function game.give(player, spec) end
+
+---Fixes the size of `player:main` for this server.
+---
+---**Registration window only.** One size for the server: a second mod
+---naming a different one is an error at load.
+---
+---Without this the main view GROWS: `game.give` never refuses, a dig always
+---credits, and a pickup into a full twenty-eight lands in a twenty-ninth slot
+---no screen shows and no key selects. A mod that draws a fixed number of
+---slots says so here, and then: the view never grows past it, `game.give`
+---answers with what did not fit (its second return), and a dig whose yield
+---would not fit is refused before the block comes apart, with the player
+---told "you cannot carry any more". The first 28 keep the engine's meaning
+---(1–9 the hotbar, 28 the off-hand).
+---
+---```lua
+---game.set_main_slots(28)
+---```
+---@param slots integer 1 to 256.
+function game.set_main_slots(slots) end
 
 ---What a player is holding: the stack in the hotbar slot they have selected.
 ---

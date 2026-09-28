@@ -231,6 +231,14 @@ pub struct Slots {
     pub views: Vec<View>,
     /// What is on the cursor.
     pub grab: Grab,
+    /// Whether `player:main` is a fixed size (UI ask 14).
+    ///
+    /// Unset, the main view GROWS on insert, as it always has — see
+    /// [`Slots::insert`]. Set by a mod that draws a fixed number of slots
+    /// and wants nothing to land past them: then an insert that does not
+    /// fit answers with what did not, and the engine's own credits check
+    /// first.
+    pub main_fixed: bool,
 }
 
 /// The engine's own view names.
@@ -300,11 +308,24 @@ impl Slots {
     /// opinion about which ones are boots.
     #[must_use]
     pub fn for_player_with(extra: &[ViewDef]) -> Self {
-        let mut views = vec![View::empty(PLAYER_MAIN, PLAYER_MAIN_SLOTS)];
+        Self::for_player_sized(None, extra)
+    }
+
+    /// The same, with `player:main` fixed at `main` slots when a mod said so.
+    ///
+    /// UI ask 14: the screen draws twenty-eight and a pickup into a full
+    /// twenty-eight landed in a twenty-ninth no screen shows and no key
+    /// selects. With a size, the view does not grow: `insert` answers with
+    /// what did not fit and a dig that would not fit is refused before the
+    /// block comes apart.
+    #[must_use]
+    pub fn for_player_sized(main: Option<usize>, extra: &[ViewDef]) -> Self {
+        let mut views = vec![View::empty(PLAYER_MAIN, main.unwrap_or(PLAYER_MAIN_SLOTS))];
         for def in extra {
             // A mod that names `player:main` gets ignored rather than obeyed:
             // resizing the view the engine itself credits digging into is not
-            // something a mod may do by picking a string.
+            // something a mod may do by picking a string — `set_main_slots`
+            // is how, and it is a size rather than a view.
             if def.id == PLAYER_MAIN {
                 continue;
             }
@@ -313,7 +334,24 @@ impl Slots {
         Self {
             views,
             grab: Grab::default(),
+            main_fixed: main.is_some(),
         }
+    }
+
+    /// Whether these stacks would all go into a view, without changing it.
+    ///
+    /// Always true for a view that grows. For a fixed `player:main` it is
+    /// the check the engine makes before crediting a dig: a bite whose yield
+    /// would not fit is refused rather than paid short.
+    #[must_use]
+    pub fn fits(&self, view: &str, stacks: &[Stack]) -> bool {
+        if !(self.main_fixed && view == PLAYER_MAIN) {
+            return true;
+        }
+        let mut trial = self.clone();
+        stacks
+            .iter()
+            .all(|stack| trial.insert_within(view, stack.clone()).is_none())
     }
 
     /// Finds a view by name.
@@ -660,13 +698,29 @@ impl Slots {
     /// about its `item_grid`, not about what the player owns.
     ///
     /// Returns whether anything was added, which is what marks the view dirty.
-    pub fn insert(&mut self, view: &str, mut stack: Stack) -> bool {
+    ///
+    /// **Unless `player:main` is fixed** (UI ask 14): then what does not fit
+    /// is not added, and [`Slots::insert_within`] says how much that was.
+    pub fn insert(&mut self, view: &str, stack: Stack) -> bool {
+        let asked = stack.units;
+        let left = self.insert_within(view, stack).map_or(0, |left| left.units);
+        left < asked
+    }
+
+    /// Puts a stack into a view and answers with what did not fit.
+    ///
+    /// `None` when all of it went in, which is every case for a view that
+    /// grows. For a fixed `player:main` the remainder comes back as a stack
+    /// of the same material, cut and detail, so a mod can leave it where it
+    /// was — on the ground, in the chest it came from.
+    pub fn insert_within(&mut self, view: &str, mut stack: Stack) -> Option<Stack> {
         if stack.is_empty() {
-            return false;
+            return None;
         }
         let Some(at) = self.index_of(view) else {
-            return false;
+            return Some(stack);
         };
+        let fixed = self.main_fixed && view == PLAYER_MAIN;
         for slot in self.views[at].slots.iter_mut().flatten() {
             // **The shape is half of what makes two stacks the same stack.**
             // Material alone was the test until shaped stacks existed, and the
@@ -689,25 +743,33 @@ impl Slots {
                 let _ = stack.merge(&part);
             }
             if stack.is_empty() {
-                return true;
+                return None;
             }
         }
         // A stack bigger than one slot holds is laid out over as many as it
         // needs, rather than being refused or quietly truncated.
         let cap = stack.capacity();
         while !stack.is_empty() {
-            // Never fails: the amount asked for is the smaller of what is left
-            // and one slot's worth.
+            let Some(empty) = self.views[at].slots.iter().position(Option::is_none) else {
+                if fixed {
+                    // No room, and the view may not grow: the rest is the
+                    // caller's to keep.
+                    return Some(stack);
+                }
+                // Never fails: the amount asked for is the smaller of what is
+                // left and one slot's worth.
+                let Ok(part) = stack.split(stack.units.min(cap)) else {
+                    break;
+                };
+                self.views[at].slots.push(Some(part));
+                continue;
+            };
             let Ok(part) = stack.split(stack.units.min(cap)) else {
                 break;
             };
-            if let Some(empty) = self.views[at].slots.iter_mut().find(|slot| slot.is_none()) {
-                *empty = Some(part);
-            } else {
-                self.views[at].slots.push(Some(part));
-            }
+            self.views[at].slots[empty] = Some(part);
         }
-        true
+        None
     }
 
     /// Takes up to `units` of a material out of a view, returning how many.
@@ -959,6 +1021,50 @@ mod tests {
     }
 
     #[test]
+    fn a_fixed_main_view_does_not_grow_and_says_what_did_not_fit() {
+        // UI ask 14. Twenty-eight slots that stay twenty-eight: what does
+        // not fit comes back as a stack, and `fits` says so beforehand.
+        let mut inv = Slots::for_player_sized(Some(2), &[]);
+        assert!(inv.main_fixed);
+        assert_eq!(inv.view(PLAYER_MAIN).expect("main").slots.len(), 2);
+        // Two slots, each of one stack's capacity: two full slots and six
+        // left over.
+        let slot = super::super::stack_capacity(None);
+        let left = inv
+            .insert_within(PLAYER_MAIN, Stack::new(STONE, 2 * slot + 6).expect("stack"))
+            .expect("six did not fit");
+        assert_eq!(left.units, 6);
+        assert_eq!(left.material, STONE);
+        assert_eq!(
+            inv.view(PLAYER_MAIN).expect("main").slots.len(),
+            2,
+            "it did not grow"
+        );
+        assert_eq!(inv.total_units(), u64::from(2 * slot));
+        // `insert` still says whether anything went in.
+        assert!(!inv.insert(PLAYER_MAIN, Stack::new(STONE, 1).expect("stack")));
+        assert!(!inv.fits(PLAYER_MAIN, &[Stack::new(STONE, 1).expect("stack")]));
+        // Room in a matching stack still counts.
+        inv.views[0].slots[1] = Some(Stack::new(STONE, slot - 7).expect("stack"));
+        assert!(inv.fits(PLAYER_MAIN, &[Stack::new(STONE, 7).expect("stack")]));
+        assert!(!inv.fits(PLAYER_MAIN, &[Stack::new(STONE, 8).expect("stack")]));
+        assert!(
+            inv.insert_within(PLAYER_MAIN, Stack::new(STONE, 7).expect("stack"))
+                .is_none()
+        );
+        // A view that was never fixed grows as it always did.
+        let mut grows = Slots::for_player();
+        assert!(!grows.main_fixed);
+        assert!(
+            grows
+                .insert_within(PLAYER_MAIN, Stack::new(STONE, slot * 30).expect("stack"))
+                .is_none()
+        );
+        assert!(grows.view(PLAYER_MAIN).expect("main").slots.len() > PLAYER_MAIN_SLOTS);
+        assert!(grows.fits(PLAYER_MAIN, &[Stack::new(STONE, u32::MAX).expect("stack")]));
+    }
+
+    #[test]
     fn a_give_into_one_slot_is_whole_or_not_at_all_and_a_take_from_one_slot_stays_there() {
         // Craft ask 4: a tool's wear rewritten in place — take the pick from
         // the hand, give it back changed, and it is in the hand.
@@ -1093,6 +1199,7 @@ mod tests {
             grab: Grab {
                 held: Some(Stack::shaped(STONE, shape, 3).expect("cut")),
             },
+            main_fixed: false,
         };
 
         assert!(inv.left_click(PLAYER_MAIN, 0));
@@ -1126,6 +1233,7 @@ mod tests {
             grab: Grab {
                 held: Some(Stack::shaped(STONE, shape, 3).expect("cut")),
             },
+            main_fixed: false,
         };
         let before = inv.total_units();
 
@@ -1151,6 +1259,7 @@ mod tests {
                 ],
             }],
             grab: Grab::default(),
+            main_fixed: false,
         };
 
         // Taking the cut takes it from the cut slot only.
@@ -1211,6 +1320,7 @@ mod tests {
                 View::empty("player:hotbar", 9),
             ],
             grab: Grab::default(),
+            main_fixed: false,
         }
     }
 
@@ -1263,6 +1373,7 @@ mod tests {
                         },
                     ],
                     grab: Grab { held },
+                    main_fixed: false,
                 })
         }
 
@@ -1408,6 +1519,7 @@ mod tests {
         let mut inv = Slots {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
+            main_fixed: false,
         };
         let whole = crate::inventory::ITEMS_PER_STACK * UNITS_PER_BLOCK;
         assert!(inv.insert(
@@ -1441,6 +1553,7 @@ mod tests {
         let mut inv = Slots {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
+            main_fixed: false,
         };
         assert!(
             inv.insert(
@@ -1473,6 +1586,7 @@ mod tests {
         let mut inv = Slots {
             views: vec![View::empty("player:main", 2)],
             grab: Grab::default(),
+            main_fixed: false,
         };
         for material in 2..8u16 {
             assert!(inv.insert(
@@ -1500,6 +1614,7 @@ mod tests {
                 slots: vec![stack(STONE, 5), None],
             }],
             grab: Grab::default(),
+            main_fixed: false,
         };
         inv.insert("player:main", Stack::new(STONE, 7).expect("stack"));
         assert_eq!(at(&inv, "player:main", 0).expect("topped up").units, 12);
@@ -1517,6 +1632,7 @@ mod tests {
                 slots: vec![stack(STONE, 5), stack(DIRT, 9), stack(STONE, 4)],
             }],
             grab: Grab::default(),
+            main_fixed: false,
         };
         // Spanning two slots, first one emptied.
         assert_eq!(inv.take("player:main", STONE, None, None, 7), 7);
@@ -1549,6 +1665,7 @@ mod tests {
                 slots: vec![stack(STONE, 5), stack(DIRT, 9), None, stack(STONE, 4)],
             }],
             grab: Grab::default(),
+            main_fixed: false,
         };
         let held = inv.consolidated("player:main");
         assert_eq!(held.len(), 2, "{held:?}");
@@ -1672,6 +1789,7 @@ mod tests {
                 },
             ],
             grab: Grab::default(),
+            main_fixed: false,
         };
         assert!(inv.shift_click("player:main", 0, "player:hotbar"));
         assert_eq!(
@@ -1706,6 +1824,7 @@ mod tests {
                 },
             ],
             grab: Grab::default(),
+            main_fixed: false,
         };
         inv.shift_click("player:main", 0, "player:hotbar");
         assert_eq!(
@@ -1834,6 +1953,7 @@ mod tests {
                 View::empty("player:hotbar", 2),
             ],
             grab: Grab::default(),
+            main_fixed: false,
         };
         inv.shift_click("player:main", 0, "player:hotbar");
         assert!(at(&inv, "player:main", 0).is_none(), "shift click");

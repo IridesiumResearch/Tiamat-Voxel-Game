@@ -767,14 +767,17 @@ pub trait Access: Send + Sync {
 
     /// Puts a stack into a player's view.
     ///
-    /// Returns whether it took. `false` means the player is not connected or
-    /// the view does not exist — never that it did not fit, because
-    /// [`crate::inventory::Slots::insert`] grows rather than refusing.
+    /// Returns how many units did NOT go in: zero when all of it did.
+    ///
+    /// All of it, for a player who is connected and a view that exists and
+    /// grows. The whole stack comes back for a player who is not connected
+    /// or a view that does not exist; and for a `player:main` a mod fixed
+    /// the size of (UI ask 14), whatever was left when it filled.
     ///
     /// `slot` names one slot of the view, or `None` for wherever it fits. Into
     /// a named slot the stack goes whole or not at all (Craft ask 4): what a
     /// tool's wear rewrite needs, so the pick lands back in the hand.
-    fn give(&self, player: [u8; 32], view: &str, slot: Option<usize>, stack: Stack) -> bool;
+    fn give(&self, player: [u8; 32], view: &str, slot: Option<usize>, stack: Stack) -> u32;
 
     /// What a player is holding: the stack in the hotbar slot they selected.
     ///

@@ -252,9 +252,19 @@ pub fn decode(
             .find(|view| view.name == stored_view.name)
         {
             Some(view) => {
-                // **The session's size wins.** A mod that shrank its container
-                // must not get a longer row than it registered, and one that
-                // grew it gets the empty slots it asked for.
+                // **The session's size wins** for a mod's view: one that
+                // shrank its container must not get a longer row than it
+                // registered, and one that grew it gets the empty slots it
+                // asked for. **Not for `player:main`**: it grows in a session
+                // and what it grew to was saved, so a row longer than the
+                // template is kept whole — a size a mod has since fixed
+                // (`set_main_slots`) stops it growing further, not what a
+                // player already carried.
+                if stored_view.name == crate::inventory::PLAYER_MAIN
+                    && restored.len() > view.slots.len()
+                {
+                    view.slots.resize(restored.len(), None);
+                }
                 did_not_fit += stored_view.slots.len().saturating_sub(view.slots.len());
                 for (slot, stack) in view.slots.iter_mut().zip(restored) {
                     *slot = stack;
@@ -300,7 +310,39 @@ mod tests {
                 slots: vec![None; 4],
             }],
             grab: Grab::default(),
+            main_fixed: false,
         }
+    }
+
+    #[test]
+    fn a_main_view_saved_longer_than_the_template_comes_back_whole() {
+        // The main view grows in a session; a save of the grown row loaded
+        // into a fresh four-slot template used to drop the fifth stack with
+        // a warning. Kept, fixed size or not: what a player carried is not
+        // the template's to shorten.
+        let mut slots = template();
+        slots.views[0].slots = vec![
+            Some(Stack::new(MaterialId(1), 27).expect("stack")),
+            None,
+            None,
+            None,
+            Some(Stack::new(MaterialId(2), 5).expect("stack")),
+        ];
+        let (bytes, _) = encode(&slots, &shifted());
+        let mut fixed = template();
+        fixed.main_fixed = true;
+        let (back, lost) =
+            decode(PLAYER_FORMAT_VERSION, &bytes, &fixed, &shifted()).expect("decode");
+        assert_eq!(lost, 0, "the fifth stack was dropped");
+        assert_eq!(back.views[0].slots.len(), 5);
+        assert_eq!(
+            back.views[0].slots[4].as_ref().map(material_of),
+            Some(MaterialId(2))
+        );
+        assert!(
+            back.main_fixed,
+            "the template's rule still applies from here"
+        );
     }
 
     #[test]
@@ -476,18 +518,23 @@ mod tests {
 
     #[test]
     fn a_view_that_shrank_keeps_what_still_fits() {
+        // A MOD's view: the session's size wins there. `player:main` is the
+        // exception, tested above — it grows in a session and what it grew
+        // to is kept.
         let mut wide = template();
-        wide.views[0].slots = vec![None; 8];
-        wide.views[0].slots[7] = Stack::new(MaterialId(1), 27);
-        wide.views[0].slots[1] = Stack::new(MaterialId(2), 9);
+        wide.views.push(View::empty("rack:worn", 8));
+        wide.views[1].slots[7] = Stack::new(MaterialId(1), 27);
+        wide.views[1].slots[1] = Stack::new(MaterialId(2), 9);
         let (bytes, _) = encode(&wide, &shifted());
 
         // This session registers four slots, not eight.
-        let (back, lost) = decode(PLAYER_FORMAT_VERSION, &bytes, &template(), &shifted())
-            .expect("it should decode");
-        assert_eq!(back.views[0].slots.len(), 4, "the session's size wins");
+        let mut narrow = template();
+        narrow.views.push(View::empty("rack:worn", 4));
+        let (back, lost) =
+            decode(PLAYER_FORMAT_VERSION, &bytes, &narrow, &shifted()).expect("it should decode");
+        assert_eq!(back.views[1].slots.len(), 4, "the session's size wins");
         assert_eq!(
-            back.views[0].slots[1].as_ref().map(material_of),
+            back.views[1].slots[1].as_ref().map(material_of),
             Some(MaterialId(2))
         );
         assert!(lost > 0, "the caller has to hear that a slot did not fit");
