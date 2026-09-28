@@ -892,6 +892,130 @@ fn a_use_at_nothing_reaches_a_mod_that_asked_for_one_and_is_answered_like_any_ot
     assert!(server.stop());
 }
 
+/// A `life`-like mod that eats whatever is held, anywhere, and a `craft`-like
+/// mod with both of `on_use`'s slots filled: a listed handler for its own
+/// fire, and an unlisted one for every station it cannot name (Craft ask 10).
+///
+/// `craft` names `life` in `optional_depends`, exactly as the real mods do
+/// (ask 8's landing note), so `life` loads first without leaning on the
+/// alphabetical tiebreak — the scenario the two slots exist for.
+fn write_use_slots_fixture(name: &str) -> PathBuf {
+    let root = scratch(name);
+
+    let life = root.join("life");
+    std::fs::create_dir_all(&life).expect("life dir");
+    std::fs::write(
+        life.join("mod.toml"),
+        "id = \"life\"\nname = \"Life\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\n",
+    )
+    .expect("life manifest");
+    std::fs::write(
+        life.join("init.lua"),
+        // Eats whatever is held, at any block or at nothing. The bot in
+        // this test never holds anything, so this never actually answers —
+        // it is here to be the earlier-loaded mod Craft's listed slot must
+        // still be asked ahead of, and whose unlisted slot must still be
+        // asked ahead of Craft's own unlisted one off the listed block.
+        "game.register_on_use(function(e)\n\
+         \x20   if e.held then return 'ate' end\n\
+         end, { anywhere = true })\n",
+    )
+    .expect("life script");
+
+    let craft = root.join("craft");
+    std::fs::create_dir_all(&craft).expect("craft dir");
+    std::fs::write(
+        craft.join("mod.toml"),
+        "id = \"craft\"\nname = \"Craft\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\noptional_depends = [\"life\"]\n",
+    )
+    .expect("craft manifest");
+    std::fs::write(
+        craft.join("init.lua"),
+        "local ground = game.register_block{ id = \"ground\" }\n\
+         game.register_on_generate(function(buf, pos)\n\
+         \x20   buf:fill_below_heightmap(game.flat_heightmap(0), ground)\n\
+         end)\n\
+         game.register_tool{\n\
+         \x20   id = \"hand\",\n\
+         \x20   brush = \"block\",\n\
+         \x20   speed_multiplier = 1.0,\n\
+         \x20   default = true,\n\
+         }\n\
+         game.register_block{ id = \"campfire\" }\n\
+         game.register_block{ id = \"anvil\" }\n\
+         -- Listed: Craft's own fire, asked before anything unlisted.\n\
+         game.register_on_use(function(e) return \"cooked\" end, \
+           { materials = { \"campfire\" } })\n\
+         -- Unlisted: heard at every OTHER block, in Craft's ordinary\n\
+         -- load-order place — standing in for a station some other mod\n\
+         -- adds after Craft loads, which Craft cannot name.\n\
+         game.register_on_use(function(e) return \"stationed\" end)\n",
+    )
+    .expect("craft script");
+
+    root
+}
+
+#[test]
+fn a_use_reaches_a_mods_listed_handler_first_and_its_unlisted_one_elsewhere() {
+    // Craft ask 10, end to end: `on_use`'s two slots, reached over a real
+    // connection through the real dispatch path — not just the in-process
+    // one the `mlua_vm` unit tests exercise.
+    let server = start("use-slots", write_use_slots_fixture("use-slots"));
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let campfire = material_named(&bot, "craft:campfire");
+        let anvil = material_named(&bot, "craft:anvil");
+
+        let fire_pos = BlockPos::new(2, -1, 0);
+        let anvil_pos = BlockPos::new(-2, -1, 0);
+        assert!(server.seed_block(fire_pos, campfire), "seed queue full");
+        bot.expect_block(fire_pos, campfire, Duration::from_secs(10))
+            .await
+            .expect("the campfire should land");
+        assert!(server.seed_block(anvil_pos, anvil), "seed queue full");
+        bot.expect_block(anvil_pos, anvil, Duration::from_secs(10))
+            .await
+            .expect("the anvil should land");
+
+        let told = |bot: &Bot, word: &str| bot.notices().iter().any(|text| text.starts_with(word));
+        async fn wait_for(bot: &mut Bot, word: &str) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline
+                && !bot.notices().iter().any(|text| text.starts_with(word))
+            {
+                let _ = tokio::time::timeout(Duration::from_millis(200), bot.recv()).await;
+            }
+        }
+
+        // The listed block: Craft's listed handler answers, ahead of
+        // Life — loaded first — and of Craft's own unlisted handler.
+        bot.use_block(centre_of(fire_pos)).await.expect("send");
+        wait_for(&mut bot, "cooked").await;
+        assert!(
+            told(&bot, "cooked"),
+            "the listed handler did not answer for its own block; notices {:?}",
+            bot.notices()
+        );
+
+        // Off the listed block: Life declines (an empty hand), and Craft's
+        // unlisted handler — heard in its ordinary load-order place —
+        // answers instead.
+        bot.use_block(centre_of(anvil_pos)).await.expect("send");
+        wait_for(&mut bot, "stationed").await;
+        assert!(
+            told(&bot, "stationed"),
+            "the unlisted handler did not answer off the listed block; notices {:?}",
+            bot.notices()
+        );
+    });
+
+    assert!(server.stop());
+}
+
 /// Where the reference mods live, for the test below.
 fn reference_mods() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

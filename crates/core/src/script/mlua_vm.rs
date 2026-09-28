@@ -76,6 +76,12 @@ const USERS_ANYWHERE: &str = "tiamat.users_anywhere";
 /// Mods whose `on_use` was registered for particular materials, in load
 /// order — asked before the rest for a use at one of their blocks, and not
 /// asked at all for a use at any other (Craft ask 8).
+///
+/// A mod on this list may ALSO be on [`USERS`]: `on_use` alone may be
+/// registered twice, once with `materials` and once without, and the two
+/// are independent slots (Craft ask 10). A use at one of this mod's listed
+/// blocks reaches only its listed callback; a use at any other block reaches
+/// only its unlisted one, if it registered one.
 const USERS_SCOPED: &str = "tiamat.users_scoped";
 
 /// Hook name used in registry keys and in fault messages.
@@ -4318,6 +4324,16 @@ impl MluaVm {
     /// to beside `list` — `on_use`'s `anywhere`. A hook without one refuses an
     /// options table outright, and an unknown key is an error rather than a
     /// silent no, so a misspelt option cannot pass for a working one.
+    ///
+    /// **`on_use` alone has two slots.** Every other hook stores its one
+    /// callback at [`Self::hook_key`] and a second `register_*` call is
+    /// always a collision with itself. `on_use` also stores a listed
+    /// callback (one registered with `materials`) at [`Self::hook_key_scoped`]
+    /// — a different slot, so a mod may hold one callback in each: a listed
+    /// one asked first at its blocks, and an unlisted one heard in its
+    /// ordinary load-order place at every other block (Craft ask 10). Which
+    /// slot a call targets is decided by whether it carries `materials`, so
+    /// that is read before the duplicate check runs.
     fn hook_registrar_with(
         &self,
         mod_id: &str,
@@ -4328,122 +4344,127 @@ impl MluaVm {
         let owner = mod_id.to_owned();
         let hook = hook.to_owned();
         let key = Self::hook_key(&hook, mod_id);
+        let scoped_key = Self::hook_key_scoped(&hook, mod_id);
         self.lua
-            .create_function(move |lua, (callback, options): (mlua::Function, Option<Table>)| {
-                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
-                if frozen {
-                    return Err(mlua::Error::external(format!(
-                        "mod `{owner}`: registration is closed"
-                    )));
-                }
-                // **A second registration is an error, not a replacement.**
-                //
-                // It used to overwrite the callback and push the mod's id onto
-                // the list again — so a mod that registered `on_player_join`
-                // twice lost its first handler entirely and had its second one
-                // called twice. Silently. Found while writing the cue tests, by
-                // writing exactly the mod an author would write: two unrelated
-                // things to do on join, one `register_` call each.
-                //
-                // Accumulating both would be the friendlier answer and is a
-                // bigger change than it looks — `run_hook` walks one callback
-                // per mod, and a veto hook would need a rule for what happens
-                // when one of a mod's handlers refuses and another does not.
-                // Refusing is the honest interim: it cannot lose anybody's code.
-                if lua
-                    .named_registry_value::<Value>(&key)
-                    .is_ok_and(|held| !held.is_nil())
-                {
-                    return Err(mlua::Error::external(format!(
-                        "mod `{owner}` already registered `{hook}`. One callback per hook per \
-                         mod — combine them into one function."
-                    )));
-                }
-                // The options, checked before anything is written.
-                let mut also = None;
-                let mut materials: Option<Table> = None;
-                if let Some(options) = options {
-                    let Some((flag, list_for_flag)) = option else {
+            .create_function(
+                move |lua, (callback, options): (mlua::Function, Option<Table>)| {
+                    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
+                    if frozen {
                         return Err(mlua::Error::external(format!(
-                            "mod `{owner}`: `register_{hook}` takes no options"
+                            "mod `{owner}`: registration is closed"
                         )));
-                    };
-                    for pair in options.pairs::<Value, Value>() {
-                        let (name, value) = pair?;
-                        let named = match &name {
-                            Value::String(name) => name.to_string_lossy(),
-                            other => {
-                                return Err(mlua::Error::external(format!(
-                                    "mod `{owner}`: `register_{hook}` has no option of type {}",
-                                    other.type_name()
-                                )));
-                            }
+                    }
+                    // The options, checked before anything is written — and
+                    // before the duplicate-registration check below, which for
+                    // `on_use` needs to know whether this call carries
+                    // `materials` before it can know which slot to look at.
+                    let mut also = None;
+                    let mut materials: Option<Table> = None;
+                    if let Some(options) = options {
+                        let Some((flag, list_for_flag)) = option else {
+                            return Err(mlua::Error::external(format!(
+                                "mod `{owner}`: `register_{hook}` takes no options"
+                            )));
                         };
-                        if named == flag {
-                            match value {
-                                Value::Boolean(true) => also = Some(list_for_flag),
-                                Value::Boolean(false) => {}
+                        for pair in options.pairs::<Value, Value>() {
+                            let (name, value) = pair?;
+                            let named = match &name {
+                                Value::String(name) => name.to_string_lossy(),
                                 other => {
                                     return Err(mlua::Error::external(format!(
-                                        "mod `{owner}`: `{flag}` is true or false, not {}",
+                                        "mod `{owner}`: `register_{hook}` has no option of type {}",
                                         other.type_name()
                                     )));
                                 }
-                            }
-                        } else if hook == HOOK_USE && named == "materials" {
-                            // Craft ask 8: a handler for particular blocks,
-                            // asked before any handler without a list when
-                            // one of them is used, and for nothing else. The
-                            // ids are references, so another mod's block may
-                            // be named (as a drop may), bare ones are the
-                            // registrant's own.
-                            let Value::Table(list) = value else {
-                                return Err(mlua::Error::external(format!(
-                                    "mod `{owner}`: `materials` is a list of block ids, not {}",
-                                    value.type_name()
-                                )));
                             };
-                            let scoped = lua.create_table()?;
-                            for id in list.sequence_values::<Value>() {
-                                let Value::String(id) = id? else {
-                                    return Err(mlua::Error::external(format!(
-                                        "mod `{owner}`: every entry of `materials` is a block id \
-                                         string"
-                                    )));
-                                };
-                                scoped.push(named_block(&owner, &id.to_string_lossy()))?;
-                            }
-                            if scoped.raw_len() == 0 {
+                            if named == flag {
+                                match value {
+                                    Value::Boolean(true) => also = Some(list_for_flag),
+                                    Value::Boolean(false) => {}
+                                    other => {
+                                        return Err(mlua::Error::external(format!(
+                                            "mod `{owner}`: `{flag}` is true or false, not {}",
+                                            other.type_name()
+                                        )));
+                                    }
+                                }
+                            } else if hook == HOOK_USE && named == "materials" {
+                                // Craft ask 8: a handler for particular blocks,
+                                // asked before any handler without a list when
+                                // one of them is used, and for nothing else.
+                                materials = Some(use_materials_option(lua, &owner, value)?);
+                            } else {
                                 return Err(mlua::Error::external(format!(
-                                    "mod `{owner}`: `materials` names no blocks; leave it out to \
-                                     hear every use"
+                                    "mod `{owner}`: `register_{hook}` has no option `{named}`"
                                 )));
                             }
-                            materials = Some(scoped);
-                        } else {
-                            return Err(mlua::Error::external(format!(
-                                "mod `{owner}`: `register_{hook}` has no option `{named}`"
-                            )));
                         }
                     }
-                }
-                lua.set_named_registry_value(&key, callback)?;
-                // Load order, which the resolver already made deterministic —
-                // so which mod gets to veto first is a property of the mod set
-                // rather than of anything at runtime.
-                let registered: Table = lua.named_registry_value(list)?;
-                registered.push(owner.clone())?;
-                if let Some(also) = also {
-                    let listed: Table = lua.named_registry_value(also)?;
-                    listed.push(owner.clone())?;
-                }
-                if let Some(materials) = materials {
-                    lua.set_named_registry_value(&Self::use_materials_key(&owner), materials)?;
-                    let listed: Table = lua.named_registry_value(USERS_SCOPED)?;
-                    listed.push(owner.clone())?;
-                }
-                Ok(())
-            })
+                    // Craft ask 10: `on_use`'s two slots are independent, but
+                    // `anywhere` is a use-at-nothing subscription and a use at
+                    // nothing has no block to be "listed" for — so it belongs to
+                    // the slot with no `materials`, and combining the two on one
+                    // call is refused rather than silently taking one or the
+                    // other.
+                    if materials.is_some() && also.is_some() {
+                        return Err(mlua::Error::external(format!(
+                            "mod `{owner}`: `anywhere` is for the handler with no `materials` — a \
+                         listed `on_use` is asked only at its blocks, never at nothing"
+                        )));
+                    }
+                    // **A second registration into the same slot is an error, not
+                    // a replacement.** `on_use` is the only hook with two slots
+                    // (see the doc comment above); every other hook has one, so
+                    // any second call of its registrar collides with the first.
+                    //
+                    // It used to overwrite the callback and push the mod's id onto
+                    // the list again — so a mod that registered `on_player_join`
+                    // twice lost its first handler entirely and had its second one
+                    // called twice. Silently. Found while writing the cue tests, by
+                    // writing exactly the mod an author would write: two unrelated
+                    // things to do on join, one `register_` call each.
+                    //
+                    // Accumulating both would be the friendlier answer and is a
+                    // bigger change than it looks — `run_hook` walks one callback
+                    // per mod, and a veto hook would need a rule for what happens
+                    // when one of a mod's handlers refuses and another does not.
+                    // Refusing is the honest interim: it cannot lose anybody's code.
+                    let slot_key = if materials.is_some() {
+                        &scoped_key
+                    } else {
+                        &key
+                    };
+                    if lua
+                        .named_registry_value::<Value>(slot_key)
+                        .is_ok_and(|held| !held.is_nil())
+                    {
+                        let reason =
+                            hook_already_registered_reason(&owner, &hook, materials.is_some());
+                        return Err(mlua::Error::external(reason));
+                    }
+                    lua.set_named_registry_value(slot_key, callback)?;
+                    // Load order, which the resolver already made deterministic —
+                    // so which mod gets to veto first is a property of the mod set
+                    // rather than of anything at runtime. A listed registration
+                    // goes only onto `USERS_SCOPED`: `USERS` is the unlisted
+                    // slot's list, and pushing a listed callback onto it too would
+                    // make `use_order` ask this mod twice for its own listed
+                    // blocks (Craft ask 10).
+                    if let Some(materials) = materials {
+                        lua.set_named_registry_value(&Self::use_materials_key(&owner), materials)?;
+                        let listed: Table = lua.named_registry_value(USERS_SCOPED)?;
+                        listed.push(owner.clone())?;
+                    } else {
+                        let registered: Table = lua.named_registry_value(list)?;
+                        registered.push(owner.clone())?;
+                        if let Some(also) = also {
+                            let listed: Table = lua.named_registry_value(also)?;
+                            listed.push(owner.clone())?;
+                        }
+                    }
+                    Ok(())
+                },
+            )
             .map_err(|err| self.vm_error(&err))
     }
 
@@ -8564,6 +8585,14 @@ impl MluaVm {
         format!("tiamat.{hook}.{mod_id}")
     }
 
+    /// Where one mod's LISTED `on_use` callback is stashed — the one
+    /// registered with `materials`. `on_use` is the only hook with a second
+    /// slot (Craft ask 10); every other hook's callback lives at
+    /// [`Self::hook_key`] alone.
+    fn hook_key_scoped(hook: &str, mod_id: &str) -> String {
+        format!("tiamat.{hook}.scoped.{mod_id}")
+    }
+
     /// Runs one cancellable hook across every mod that registered it.
     ///
     /// The shared body of [`ScriptVm::dig_complete`] and [`ScriptVm::place`],
@@ -8619,9 +8648,13 @@ impl MluaVm {
             // ordinary case on a server with no mods that care.
             return HookOutcome::allow();
         };
-        let mods: Vec<String> = registered
+        // `false`: every list but `on_use`'s listed one holds mods with a
+        // single, unscoped slot, and `run_hook` is never called with
+        // `USERS_SCOPED` (that walk is `use_order`'s, below).
+        let mods: Vec<(String, bool)> = registered
             .sequence_values::<String>()
             .filter_map(Result::ok)
+            .map(|mod_id| (mod_id, false))
             .collect();
         self.run_hook_over(hook, mods, event, Walk::UntilRefused)
     }
@@ -8635,23 +8668,32 @@ impl MluaVm {
         let Ok(registered) = self.lua.named_registry_value::<Table>(list) else {
             return HookOutcome::allow();
         };
-        let mods: Vec<String> = registered
+        let mods: Vec<(String, bool)> = registered
             .sequence_values::<String>()
             .filter_map(Result::ok)
+            .map(|mod_id| (mod_id, false))
             .collect();
         self.run_hook_over(hook, mods, event, Walk::Everyone)
     }
 
     /// The mods to ask about a use at a block of `material`, in order: those
-    /// registered for it, then those registered for no material.
-    fn use_order(&self, material: u16) -> mlua::Result<Vec<String>> {
+    /// registered for it, then those registered for no material. The `bool`
+    /// says which of a mod's two `on_use` slots to call (Craft ask 10): `true`
+    /// for the listed one, at [`Self::hook_key_scoped`], `false` for the
+    /// unlisted one, at [`Self::hook_key`] — the only place that decides,
+    /// since a mod may hold both and `run_hook_over` cannot tell them apart
+    /// from the id alone.
+    fn use_order(&self, material: u16) -> mlua::Result<Vec<(String, bool)>> {
         let name = block_name_of(&self.lua, material)?;
         let scoped: Table = self.lua.named_registry_value(USERS_SCOPED)?;
         let mut first = Vec::new();
-        let mut listed = std::collections::BTreeSet::new();
+        // Mods asked through their listed slot for this block. A mod on this
+        // set is not ALSO asked through its unlisted slot below, even if it
+        // registered one: that slot's place is "every other block", and this
+        // is one of its own.
+        let mut matched = std::collections::BTreeSet::new();
         for mod_id in scoped.sequence_values::<String>() {
             let mod_id = mod_id?;
-            listed.insert(mod_id.clone());
             let Some(name) = name.as_deref() else {
                 continue;
             };
@@ -8663,14 +8705,15 @@ impl MluaVm {
                 .filter_map(Result::ok)
                 .any(|id| id == name)
             {
-                first.push(mod_id);
+                matched.insert(mod_id.clone());
+                first.push((mod_id, true));
             }
         }
         let everyone: Table = self.lua.named_registry_value(USERS)?;
         for mod_id in everyone.sequence_values::<String>() {
             let mod_id = mod_id?;
-            if !listed.contains(&mod_id) {
-                first.push(mod_id);
+            if !matched.contains(&mod_id) {
+                first.push((mod_id, false));
             }
         }
         Ok(first)
@@ -8716,22 +8759,30 @@ impl MluaVm {
     /// The walk behind [`Self::run_hook`], for a caller that has already
     /// decided the order — `on_use`, which asks the clicked block's handlers
     /// before the rest — or decided that nobody may stop it.
+    ///
+    /// Each entry's `bool` says which slot to call: `true` for a mod's
+    /// LISTED `on_use` (at [`Self::hook_key_scoped`]), `false` for its
+    /// ordinary one (at [`Self::hook_key`]). Every caller but `use_order`
+    /// passes `false` throughout, since every hook other than `on_use` has
+    /// only the one slot.
     fn run_hook_over(
         &mut self,
         hook: &str,
-        mods: Vec<String>,
+        mods: Vec<(String, bool)>,
         event: &Table,
         walk: Walk,
     ) -> HookOutcome {
         let mut outcome = HookOutcome::allow();
-        for mod_id in mods {
+        for (mod_id, scoped) in mods {
             if self.is_faulted(&mod_id) {
                 continue;
             }
-            let Ok(callback) = self
-                .lua
-                .named_registry_value::<mlua::Function>(&Self::hook_key(hook, &mod_id))
-            else {
+            let key = if scoped {
+                Self::hook_key_scoped(hook, &mod_id)
+            } else {
+                Self::hook_key(hook, &mod_id)
+            };
+            let Ok(callback) = self.lua.named_registry_value::<mlua::Function>(&key) else {
                 continue;
             };
 
@@ -10817,6 +10868,59 @@ fn named_block(mod_id: &str, id: &str) -> String {
         id.to_owned()
     } else {
         format!("{mod_id}:{id}")
+    }
+}
+
+/// Parses `on_use`'s `materials` option into the table it is stored as:
+/// qualified block ids, `owner`'s own namespace for a bare one (Craft ask 8).
+///
+/// Pulled out of [`MluaVm::hook_registrar_with`] to keep that function
+/// readable; `materials` is the only option with a shape of its own to
+/// validate.
+fn use_materials_option(lua: &mlua::Lua, owner: &str, value: Value) -> mlua::Result<Table> {
+    let Value::Table(list) = value else {
+        return Err(mlua::Error::external(format!(
+            "mod `{owner}`: `materials` is a list of block ids, not {}",
+            value.type_name()
+        )));
+    };
+    let scoped = lua.create_table()?;
+    for id in list.sequence_values::<Value>() {
+        let Value::String(id) = id? else {
+            return Err(mlua::Error::external(format!(
+                "mod `{owner}`: every entry of `materials` is a block id string"
+            )));
+        };
+        scoped.push(named_block(owner, &id.to_string_lossy()))?;
+    }
+    if scoped.raw_len() == 0 {
+        return Err(mlua::Error::external(format!(
+            "mod `{owner}`: `materials` names no blocks; leave it out to hear every use"
+        )));
+    }
+    Ok(scoped)
+}
+
+/// The message for a second `register_{hook}` call that collides with the
+/// first — into the same slot, for `on_use`, since it is the only hook with
+/// two (Craft ask 10); the one slot, for everything else.
+fn hook_already_registered_reason(owner: &str, hook: &str, listed: bool) -> String {
+    if hook == HOOK_USE {
+        let (article, slot, other) = if listed {
+            ("a", "listed", "with")
+        } else {
+            ("an", "unlisted", "with no")
+        };
+        format!(
+            "mod `{owner}` already registered {article} {slot} `on_use` (one {other} \
+             `materials`). `on_use` may be registered twice — once with `materials`, once \
+             without — and no more; combine your {slot} handlers into the one call."
+        )
+    } else {
+        format!(
+            "mod `{owner}` already registered `{hook}`. One callback per hook per mod — combine \
+             them into one function."
+        )
     }
 }
 
@@ -14215,6 +14319,239 @@ mod tests {
                 )
                 .is_err(),
                 "{bad} loaded"
+            );
+        }
+    }
+
+    #[test]
+    fn on_use_may_be_registered_once_listed_and_once_unlisted() {
+        // Craft ask 10. A station Craft names (its own fire) is listed; a
+        // station it cannot name (another mod's, added after Craft loads) is
+        // heard through the unlisted slot, in Craft's ordinary load-order
+        // place, exactly as any other mod's plain `register_on_use` would be.
+        //
+        // Life loads first and eats held food anywhere, but only food (`held
+        // == 3`) — everything else passes through it, which is what lets the
+        // test tell "Life declined" apart from "Life was never asked".
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "life",
+            "game.register_on_use(function(e)\n\
+             \x20   if e.held and e.held.material == 3 then return 'ate' end\n\
+             end, { anywhere = true })",
+        )
+        .expect("life");
+        load(
+            &mut vm,
+            "craft",
+            "game.register_block{ id = 'campfire' }\n\
+             game.register_block{ id = 'anvil' }\n\
+             game.register_on_use(function(e)\n\
+             \x20   if e.held and e.held.material == 3 then return 'cooked' end\n\
+             end, { materials = { 'campfire' } })\n\
+             game.register_on_use(function(e) return 'stationed' end)",
+        )
+        .expect("craft");
+        vm.freeze().expect("freeze");
+        let id_of = |name: &str| {
+            vm.registered_blocks()
+                .into_iter()
+                .find(|(block, _)| block == name)
+                .map(|(_, id)| id)
+                .expect("registered")
+        };
+        let fire = id_of("craft:campfire");
+        let anvil = id_of("craft:anvil");
+        let at =
+            |material: MaterialId, held: Option<crate::inventory::Stack>| crate::script::UseEvent {
+                player: [0xEF; 32],
+                domain: crate::domain::OVERWORLD.to_owned(),
+                aim: Some(crate::script::UseAim {
+                    cell: crate::coords::SubNodePos::new(3, 3, 3),
+                    material,
+                }),
+                held,
+            };
+        let food = crate::inventory::Stack::new(MaterialId(3), 27);
+        let junk = crate::inventory::Stack::new(MaterialId(9), 27);
+
+        // At the listed block, holding food: the listed handler answers,
+        // ahead of Life — loaded first, and would have eaten it if asked.
+        assert_eq!(
+            vm.use_block(&at(fire, food.clone())).reason.as_deref(),
+            Some("cooked"),
+            "the listed handler was not asked first"
+        );
+
+        // At the listed block, holding junk: the listed handler declines,
+        // and Life — asked next — declines too. Craft's UNLISTED handler is
+        // never reached: campfire is one of Craft's own listed blocks, not
+        // "every other block", so it is not this handler's to answer.
+        assert!(
+            vm.use_block(&at(fire, junk.clone())).allowed,
+            "the unlisted handler answered for craft's own listed block"
+        );
+
+        // At craft's other block, holding junk: Life declines (not food),
+        // and craft's UNLISTED handler — heard in its ordinary load-order
+        // place — answers.
+        assert_eq!(
+            vm.use_block(&at(anvil, junk)).reason.as_deref(),
+            Some("stationed"),
+            "a use off the listed blocks did not reach the unlisted handler"
+        );
+
+        // At craft's other block, holding food: Life, asked before craft's
+        // unlisted handler because it loaded first, answers.
+        assert_eq!(
+            vm.use_block(&at(anvil, food)).reason.as_deref(),
+            Some("ate"),
+            "the unlisted handler ran ahead of an earlier-loaded mod"
+        );
+    }
+
+    #[test]
+    fn on_use_refuses_a_third_registration_or_two_of_the_same_slot() {
+        // Craft ask 10's refusal: `on_use` has exactly two slots — one with
+        // `materials`, one without — and a mod may fill each once. A second
+        // fill of either slot, in any combination, is refused with a message
+        // that says why, not just that it failed.
+        fn detail(err: &ScriptError) -> String {
+            match err {
+                ScriptError::Vm { detail, .. }
+                | ScriptError::Load { detail, .. }
+                | ScriptError::Runtime { detail, .. } => detail.clone(),
+                other => other.to_string(),
+            }
+        }
+
+        let mut two_listed = vm();
+        let err = load(
+            &mut two_listed,
+            "craft",
+            "game.register_block{ id = 'campfire' }\n\
+             game.register_block{ id = 'kiln' }\n\
+             game.register_on_use(function() end, { materials = { 'campfire' } })\n\
+             game.register_on_use(function() end, { materials = { 'kiln' } })",
+        )
+        .expect_err("a second listed on_use loaded");
+        let message = detail(&err);
+        assert!(
+            message.contains("already registered a listed `on_use`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("registered twice"),
+            "the error did not say the rule: {message}"
+        );
+
+        let mut two_unlisted = vm();
+        let err = load(
+            &mut two_unlisted,
+            "craft",
+            "game.register_on_use(function() end)\n\
+             game.register_on_use(function() end)",
+        )
+        .expect_err("a second unlisted on_use loaded");
+        let message = detail(&err);
+        assert!(
+            message.contains("already registered an unlisted `on_use`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("registered twice"),
+            "the error did not say the rule: {message}"
+        );
+
+        let mut third = vm();
+        let err = load(
+            &mut third,
+            "craft",
+            "game.register_block{ id = 'campfire' }\n\
+             game.register_on_use(function() end, { materials = { 'campfire' } })\n\
+             game.register_on_use(function() end)\n\
+             game.register_on_use(function() end)",
+        )
+        .expect_err("a third on_use registration loaded");
+        assert!(
+            detail(&err).contains("already registered an unlisted `on_use`"),
+            "{}",
+            detail(&err)
+        );
+
+        // `anywhere` is the unlisted slot's: a listed handler asking for it
+        // too is refused rather than silently taking one or the other.
+        let mut both_options = vm();
+        let err = load(
+            &mut both_options,
+            "craft",
+            "game.register_block{ id = 'campfire' }\n\
+             game.register_on_use(function() end, \
+             { materials = { 'campfire' }, anywhere = true })",
+        )
+        .expect_err("materials and anywhere together loaded");
+        assert!(
+            detail(&err).contains("`anywhere` is for the handler with no `materials`"),
+            "{}",
+            detail(&err)
+        );
+    }
+
+    #[test]
+    fn on_use_slots_do_not_care_which_is_registered_first() {
+        // The two `register_on_use` calls are independent, so a mod that
+        // writes the unlisted one first must behave exactly like one that
+        // writes the listed one first.
+        fn build(materials_first: bool) -> MluaVm {
+            let mut vm = self::vm();
+            let listed = "game.register_on_use(function() return 'cooked' end, \
+                           { materials = { 'campfire' } })\n";
+            let unlisted = "game.register_on_use(function() return 'stationed' end)\n";
+            let script = format!(
+                "game.register_block{{ id = 'campfire' }}\n\
+                 game.register_block{{ id = 'anvil' }}\n\
+                 {}",
+                if materials_first {
+                    format!("{listed}{unlisted}")
+                } else {
+                    format!("{unlisted}{listed}")
+                }
+            );
+            load(&mut vm, "craft", &script).expect("craft");
+            vm.freeze().expect("freeze");
+            vm
+        }
+
+        for materials_first in [true, false] {
+            let mut vm = build(materials_first);
+            let id_of = |vm: &MluaVm, name: &str| {
+                vm.registered_blocks()
+                    .into_iter()
+                    .find(|(block, _)| block == name)
+                    .map(|(_, id)| id)
+                    .expect("registered")
+            };
+            let fire = id_of(&vm, "craft:campfire");
+            let anvil = id_of(&vm, "craft:anvil");
+            let at = |material: MaterialId| crate::script::UseEvent {
+                player: [0xEF; 32],
+                domain: crate::domain::OVERWORLD.to_owned(),
+                aim: Some(crate::script::UseAim {
+                    cell: crate::coords::SubNodePos::new(3, 3, 3),
+                    material,
+                }),
+                held: None,
+            };
+            assert_eq!(
+                vm.use_block(&at(fire)).reason.as_deref(),
+                Some("cooked"),
+                "materials_first = {materials_first}"
+            );
+            assert_eq!(
+                vm.use_block(&at(anvil)).reason.as_deref(),
+                Some("stationed"),
+                "materials_first = {materials_first}"
             );
         }
     }

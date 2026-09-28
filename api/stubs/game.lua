@@ -3300,8 +3300,34 @@ function game.register_on_place(callback) end
 ---    if e.held and raw[e.held.material] then cook(e) return "" end
 ---end, { materials = { "campfire_lit", "kiln_lit" } })
 ---```
+---
+---**`register_on_use` may be called twice, and no more:** once with
+---`materials`, once without. Each is checked as its own slot, so nothing
+---about the ladder above changes — the listed callback still answers first,
+---and only, at its blocks; the unlisted one still answers in its ordinary
+---load-order place at every OTHER block, exactly as a mod with no listed
+---callback at all would. This is for a mod that both names its own blocks
+---(its own fires) and must still be heard at blocks it cannot name (a
+---station another mod registers after it loads):
+---
+---```lua
+---game.register_on_use(function(e)
+---    if e.held and raw[e.held.material] then cook(e) return "" end
+---end, { materials = { "campfire_lit" } })      -- Craft's own fire: listed
+---
+---game.register_on_use(function(e)
+---    if is_a_station(e) then open_station(e) return "" end
+---end)                                          -- everybody else's: unlisted
+---```
+---
+---A third call, or a second with the same one of `materials`/no-`materials`,
+---is refused at load — "one callback per hook per mod" still holds, it is
+---only `on_use` that has two hooks' worth of slot. `anywhere` is the
+---unlisted callback's: it hears a use with no block, and a listed callback
+---asking for one is refused, since it can never be asked about a block that
+---is not on its own list.
 ---@param callback fun(event: Tiamat.UseEvent): boolean|string|nil
----@param options { anywhere?: boolean, materials?: string[] }? `anywhere = true` to hear a use at nothing as well; `materials` to be asked first, and only, about uses at those blocks. Any other key is an error at load.
+---@param options { anywhere?: boolean, materials?: string[] }? `anywhere = true` to hear a use at nothing as well; `materials` to be asked first, and only, about uses at those blocks. Any other key is an error at load. `anywhere` and `materials` may not both be set.
 function game.register_on_use(callback, options) end
 
 ---Somebody hitting something.
