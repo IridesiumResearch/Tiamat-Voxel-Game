@@ -1744,8 +1744,7 @@ impl App {
         // may have slowed this player or taken their flight away, and a replay
         // that ignored it would part company with the server exactly where the
         // correction is meant to bring the two back together.
-        let intent = self.abilities.allow(self.previous_intent);
-        let tuning = self.abilities.tuning(&Tuning::DEFAULT);
+        let (intent, tuning) = self.stepping(self.previous_intent);
         for _ in 0..gap {
             self.tick += 1;
             if let Some(predictor) = self.predictor.as_mut() {
@@ -1908,7 +1907,13 @@ impl App {
         if self.displacement != [0, 0, 0] {
             return;
         }
-        let tuning = self.abilities.tuning(&Tuning::DEFAULT);
+        // The tuning of the body the state describes, which is the one the
+        // replay steps: a mount's pace while riding, the player's own on foot
+        // (Life ask 18).
+        let tuning = state.mount.map_or_else(
+            || self.abilities.tuning(&Tuning::DEFAULT),
+            |mount| mount.tuning(),
+        );
         let Some(predictor) = self.predictor.as_mut() else {
             return;
         };
@@ -2162,6 +2167,19 @@ impl App {
     #[must_use]
     pub const fn predicting(&self) -> bool {
         self.predictor.is_some()
+    }
+
+    /// The entity this player is riding, and so predicting, if any (Life ask
+    /// 18).
+    ///
+    /// The server's word, as the last state said it: a ride starts and ends
+    /// when the server says, and the body predicted changes with it.
+    #[must_use]
+    pub fn riding(&self) -> Option<u64> {
+        self.predictor
+            .as_ref()
+            .and_then(crate::predict::Predictor::mount)
+            .map(|mount| mount.entity)
     }
 
     /// Points the camera down by `radians` from the horizon.
@@ -5362,8 +5380,19 @@ impl App {
             // its own step: the client predicts what the server WILL do, not
             // what the keys said. `phys::Abilities` says why this is on the
             // wire at all.
-            let intent = self.abilities.allow(intent);
-            let tuning = self.abilities.tuning(&Tuning::DEFAULT);
+            //
+            // **Riding, the keys drive the mount instead** (Life ask 18), at
+            // its pace, and they go to the server as they were pressed: the
+            // rider's abilities are theirs, so a hungry rider's sprint still
+            // reaches the horse, and the server's own filter is the mount's.
+            let keys = intent;
+            let (intent, tuning) = self.stepping(keys);
+            let riding = self
+                .predictor
+                .as_ref()
+                .and_then(crate::predict::Predictor::mount)
+                .is_some();
+            let reported = if riding { keys } else { intent };
             if let Some(predictor) = self.predictor.as_mut() {
                 let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
                     .passing(&self.passable)
@@ -5384,10 +5413,10 @@ impl App {
             }
             self.report_input(
                 Input {
-                    jump: intent.jump,
+                    jump: reported.jump,
                     ..input
                 },
-                intent,
+                reported,
             );
         }
         if spent == MAX_CATCH_UP {
@@ -5421,6 +5450,26 @@ impl App {
     /// Turns this frame's keys into a world-space intent.
     fn intent_from(&self, input: Input) -> Intent {
         intent_at_yaw(self.camera.yaw, input)
+    }
+
+    /// The intent and tuning the predicted body steps with, from the keys.
+    ///
+    /// **The server's two rules, mirrored**: on foot, what a mod granted this
+    /// player (`phys::Abilities`); riding, the mount's own pace and the
+    /// rider's keys less their flight (`ent::mount`, Life ask 18) — so the
+    /// client predicts what the server will step, whichever body that is.
+    fn stepping(&self, keys: Intent) -> (Intent, Tuning) {
+        match self
+            .predictor
+            .as_ref()
+            .and_then(crate::predict::Predictor::mount)
+        {
+            Some(mount) => (tiamat_core::ent::mount::drive(keys), mount.tuning()),
+            None => (
+                self.abilities.allow(keys),
+                self.abilities.tuning(&Tuning::DEFAULT),
+            ),
+        }
     }
 
     /// Puts the camera at the predicted body's eyes.

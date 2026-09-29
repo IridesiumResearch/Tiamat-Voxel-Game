@@ -337,6 +337,23 @@ fn a_rider_drives_the_mount_at_its_pace_and_sits_on_it_until_they_get_off() {
             [under[0], under[1] + SEAT, under[2]],
             0.05,
         );
+        // **And the player's state says so** (protocol v80): the mount's own
+        // body, which is the one a client predicts, under the seat it reports.
+        let ride = bot.riding().expect("a rider's state carries the mount");
+        assert_eq!(ride.entity, mount);
+        let feet = blocks(&PlayerPosition {
+            chunk: ride.chunk,
+            local: ride.local,
+        });
+        assert_near("the state's mount is the scarecrow", feet, under, 0.001);
+        assert_near(
+            "the state's rider is on the state's mount",
+            sat,
+            [feet[0], feet[1] + SEAT, feet[2]],
+            0.001,
+        );
+        assert_eq!(ride.size, [2.4, 6.0], "the mount's own box");
+        assert!((f64::from(ride.speed) - PACE).abs() < 1e-6, "its own pace");
 
         // The keys drive the scarecrow now, at its own pace.
         let before = under;
@@ -374,6 +391,7 @@ fn a_rider_drives_the_mount_at_its_pace_and_sits_on_it_until_they_get_off() {
             "off the scarecrow the rider stands at {off:?}, the scarecrow at {stood:?}"
         );
         assert_eq!(ask(&mut bot, "which", "riding ").await, "nil");
+        assert_eq!(bot.riding(), None, "a state on foot still carried a mount");
         // And the keys are the player's own again: the player walks away and
         // the scarecrow does not come too. It may lean the other way — they
         // were standing inside it, and the crowd pass eases the two apart.

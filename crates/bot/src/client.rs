@@ -1492,6 +1492,21 @@ impl Bot {
         }
     }
 
+    /// The mount the server last said this bot is riding, and its body.
+    ///
+    /// **Life ask 18.** Read from the newest `PlayerState` — the one message
+    /// that says it, every tick — so `None` means the server's latest word is
+    /// "on foot". A bot does not predict, so this is only the server's answer;
+    /// the client steps this body itself.
+    #[must_use]
+    pub fn riding(&self) -> Option<tiamat_core::proto::Riding> {
+        let history = self.history.lock().ok()?;
+        history.iter().rev().find_map(|message| match message {
+            ServerMessage::PlayerState { riding, .. } => Some(*riding),
+            _ => None,
+        })?
+    }
+
     /// Asks the server to start breaking a cell.
     ///
     /// The server counts the ticks; this only says where to point. Sending it

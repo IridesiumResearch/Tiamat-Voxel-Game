@@ -49,7 +49,7 @@
 use std::collections::VecDeque;
 
 use tiamat_core::ChunkPos;
-use tiamat_core::phys::{self, Aabb, Body, Intent, Solid, Tuning, voxels::renormalise};
+use tiamat_core::phys::{self, Aabb, Body, Intent, Shape, Solid, Tuning, voxels::renormalise};
 
 /// How long a correction takes to blend away, in ticks.
 ///
@@ -65,7 +65,38 @@ pub const SMOOTH_TICKS: f32 = 2.0;
 /// disagreed about. Blending that would walk the player visibly through a wall.
 pub const SNAP_DISTANCE: f32 = 6.0;
 
-/// The server's word on where a player is.
+/// The mount a riding player's client predicts (Life ask 18).
+///
+/// **Everything the step needs that the body itself does not carry**: its box
+/// and its pace, which the server steps the mount with, and the seat the camera
+/// sits on. Carried in every `PlayerState` while the ride lasts, so a seat moved
+/// or a pace changed mid-ride is picked up by the next state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mount {
+    /// The entity being ridden, as the entity messages name it.
+    pub entity: u64,
+    /// Its box.
+    pub shape: Shape,
+    /// Its pace, as a multiple of the ordinary one.
+    pub speed: f32,
+    /// Where the rider's feet go, in cells from the mount's feet, measured as
+    /// if the mount faced yaw zero.
+    pub seat: [f32; 3],
+}
+
+impl Mount {
+    /// The tuning the mount is stepped with — the server's own function.
+    #[must_use]
+    pub fn tuning(&self) -> Tuning {
+        tiamat_core::ent::mount::tuning(self.speed)
+    }
+}
+
+/// The server's word on where the body a player drives is.
+///
+/// **Their own body on foot, and the MOUNT's while riding** (Life ask 18): the
+/// server steps whichever their inputs drive, and `last_processed_input`
+/// speaks for that one. See [`Authoritative::from_wire`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Authoritative {
     /// The last input tick the server had applied.
@@ -83,6 +114,54 @@ pub struct Authoritative {
     /// is — a replayed press against a cooldown the client had reset would
     /// launch here and not there.
     pub jump_cooldown: u8,
+    /// The mount this body is, while the player rides one; `None` on foot.
+    pub mount: Option<Mount>,
+}
+
+impl Authoritative {
+    /// The body a `PlayerState` says the player drives.
+    ///
+    /// On foot, the player's own. Riding, the mount's — the body the server
+    /// stepped from this player's inputs — with the rider's own fields, which
+    /// are only where the seat put them, left behind.
+    #[must_use]
+    pub fn from_wire(
+        last_processed_input: u64,
+        own: (ChunkPos, [f32; 3], [f32; 3]),
+        on_ground: bool,
+        jump_cooldown: u8,
+        riding: Option<tiamat_core::proto::Riding>,
+    ) -> Self {
+        let (chunk, local, velocity) = own;
+        match riding {
+            None => Self {
+                last_processed_input,
+                chunk,
+                local,
+                velocity,
+                on_ground,
+                jump_cooldown,
+                mount: None,
+            },
+            Some(ride) => Self {
+                last_processed_input,
+                chunk: ride.chunk,
+                local: ride.local,
+                velocity: ride.velocity,
+                on_ground: ride.on_ground,
+                jump_cooldown: ride.jump_cooldown,
+                mount: Some(Mount {
+                    entity: ride.entity,
+                    shape: Shape {
+                        width: ride.size[0],
+                        height: ride.size[1],
+                    },
+                    speed: ride.speed,
+                    seat: ride.seat,
+                }),
+            },
+        }
+    }
 }
 
 /// What the client believed at the end of one tick.
@@ -217,6 +296,12 @@ pub struct Predictor {
     remembered: VecDeque<Remembered>,
     /// The last disagreement found, for the HUD and the trace.
     divergence: Option<Divergence>,
+    /// The mount this body is, while the player rides one (Life ask 18).
+    ///
+    /// **Which body is predicted is the server's word**, taken on reconcile:
+    /// the server decides when a ride starts and ends, and the client learns
+    /// it from the state that says so.
+    mount: Option<Mount>,
 }
 
 /// Whether a tick should record the camera's step ease.
@@ -271,6 +356,7 @@ impl Predictor {
             step_rate: 0.0,
             remembered: VecDeque::new(),
             divergence: None,
+            mount: None,
             tick,
         }
     }
@@ -285,6 +371,19 @@ impl Predictor {
     #[must_use]
     pub const fn origin(&self) -> ChunkPos {
         self.origin
+    }
+
+    /// The mount this body is, while the player rides one (Life ask 18).
+    #[must_use]
+    pub const fn mount(&self) -> Option<Mount> {
+        self.mount
+    }
+
+    /// The box being predicted: the mount's while riding, the player's own
+    /// on foot.
+    #[must_use]
+    pub fn shape(&self) -> Shape {
+        self.mount.map_or(Shape::HUMANOID, |mount| mount.shape)
     }
 
     /// Forgets the world this body was standing in.
@@ -426,13 +525,14 @@ impl Predictor {
             (state.chunk.y - self.origin.y) as f32 * span + state.local[1],
             (state.chunk.z - self.origin.z) as f32 * span + state.local[2],
         ];
-        let box_here = Aabb::player_at(feet);
+        let shape = self.shape();
+        let box_here = shape.aabb(feet);
         let (min_x, _) = box_here.cell_span(0);
         let (min_y, _) = box_here.cell_span(1);
         let (min_z, _) = box_here.cell_span(2);
         // One block deep, ending a skin short of the feet so a body standing
         // flush on a surface is looking below it rather than at itself.
-        let half = phys::PLAYER_WIDTH / 2.0;
+        let half = shape.width / 2.0;
         let support = Aabb {
             min: [
                 feet[0] - half,
@@ -505,6 +605,19 @@ impl Predictor {
 
     /// Takes the server's answer and replays what it has not seen.
     pub fn reconcile(&mut self, solid: &impl Solid, state: &Authoritative, tuning: &Tuning) {
+        // **Getting on or off is a different body, not a wrong one** (Life ask
+        // 18). The server has started or stopped driving another body with
+        // this player's inputs, so what was predicted and what the server says
+        // are two things, and the gap between them is not a correction to
+        // blend: it is a seat. Taken as the server says, with no comparison and
+        // no ease.
+        let switched =
+            state.mount.map(|mount| mount.entity) != self.mount.map(|mount| mount.entity);
+        self.mount = state.mount;
+        if switched {
+            self.remembered.clear();
+            self.divergence = None;
+        }
         // Before the body is replaced, while the memory of that tick still means
         // something.
         self.compare(solid, state);
@@ -562,13 +675,19 @@ impl Predictor {
             let [x, y, z] = offset;
             ((x * x + y * y + z * z) as f32).sqrt()
         };
-        self.error = if distance > SNAP_DISTANCE {
+        self.error = if distance > SNAP_DISTANCE || switched {
             // Not slightly wrong — somewhere else. Blending would drag the
             // player visibly through whatever the two disagreed about.
             [0.0; 3]
         } else {
             [offset[0] as f32, offset[1] as f32, offset[2] as f32]
         };
+        if switched {
+            // Nor is it a step to ease: the camera is at the new body at once.
+            self.last_step = [0.0; 3];
+            self.step_lag = 0.0;
+            self.step_rate = 0.0;
+        }
     }
 
     /// Blends the visual correction away. Call once per rendered frame.
@@ -712,7 +831,11 @@ impl Predictor {
         solid.rebase(self.origin);
         let before = self.body.position;
         let was_on_ground = self.body.on_ground;
-        self.body = phys::step(solid, self.body, intent, tuning);
+        // **The body's own box**: a player's on foot, the mount's while riding
+        // (Life ask 18) — the same `step_shaped` the server's entity step
+        // takes, so a horse is predicted as the horse the server steps. On foot
+        // this is exactly `phys::step`, which is `step_shaped` with a humanoid.
+        self.body = phys::step_shaped(solid, self.body, intent, tuning, self.shape());
         self.last_step = [
             self.body.position[0] - before[0],
             self.body.position[1] - before[1],
@@ -986,6 +1109,7 @@ mod tests {
             velocity: [0.0; 3],
             on_ground: true,
             jump_cooldown: 0,
+            mount: None,
         };
         let view = store_view(&predictor);
         predictor.reconcile(&view, &state, &Tuning::DEFAULT);
@@ -1133,6 +1257,7 @@ mod tests {
             velocity: client.body().velocity,
             on_ground: client.body().on_ground,
             jump_cooldown: 0,
+            mount: None,
         };
 
         // Then step up. These ticks are unconfirmed, so every reconcile until
@@ -1355,6 +1480,254 @@ mod tests {
         assert_eq!(predictor.pending(), 10, "every input awaits confirmation");
     }
 
+    /// A horse-shaped mount at half pace, as a riding state names it.
+    fn a_horse() -> Mount {
+        Mount {
+            entity: 0x0000_0001_0000_0004,
+            shape: Shape {
+                width: 3.0,
+                height: 4.5,
+            },
+            speed: 0.5,
+            seat: [0.0, 4.8, 0.0],
+        }
+    }
+
+    /// The server's side of a ride: the mount stepped as `Population::drive`
+    /// steps it — the keys less their flight, the mount's pace, its box.
+    fn server_ride(ground: &Ground, body: Body, keys: Intent, mount: Mount) -> Body {
+        phys::step_shaped(
+            ground,
+            body,
+            tiamat_core::ent::mount::drive(keys),
+            &mount.tuning(),
+            mount.shape,
+        )
+    }
+
+    fn riding_state(tick: u64, body: &Body, mount: Mount) -> Authoritative {
+        Authoritative {
+            last_processed_input: tick,
+            chunk: ChunkPos::new(0, 0, 0),
+            local: body.position,
+            velocity: body.velocity,
+            on_ground: body.on_ground,
+            jump_cooldown: body.jump_cooldown,
+            mount: Some(mount),
+        }
+    }
+
+    #[test]
+    fn a_riding_client_predicts_the_mount_the_server_steps_and_agreement_corrects_nothing() {
+        // Life ask 18. While riding, the body predicted is the MOUNT's: the
+        // server steps it from this player's keys, with its own box and pace,
+        // and the client runs the same function over the same numbers — so a
+        // state that agrees corrects nothing, bit for bit, however many of the
+        // client's inputs are still in flight. The keys carry flight, which
+        // both ends take out the same way.
+        let ground = Ground::flat();
+        let horse = a_horse();
+        let keys = Intent {
+            fly: true,
+            gait: Gait::Sprint,
+            ..walking()
+        };
+
+        // Getting on: the first state that names the mount.
+        let mut mount = Body {
+            on_ground: true,
+            ..Body::at([20.0, 0.0, 24.0])
+        };
+        let mut client = predictor();
+        client.reconcile(&ground, &riding_state(0, &mount, horse), &horse.tuning());
+        assert_eq!(client.mount(), Some(horse));
+        assert_eq!(client.shape(), horse.shape);
+
+        let mut server_at = Vec::new();
+        for tick in 1..=10 {
+            client.predict(
+                &ground,
+                tick,
+                tiamat_core::ent::mount::drive(keys),
+                &horse.tuning(),
+            );
+            mount = server_ride(&ground, mount, keys, horse);
+            server_at.push(mount);
+        }
+        let predicted = *client.body();
+        assert_eq!(
+            predicted.position.map(f32::to_bits),
+            mount.position.map(f32::to_bits),
+            "the client and the server parted over the same ten ticks"
+        );
+
+        // The server has applied six of them.
+        client.reconcile(
+            &ground,
+            &riding_state(6, &server_at[5], horse),
+            &horse.tuning(),
+        );
+        assert_eq!(
+            client.error().to_bits(),
+            0.0f32.to_bits(),
+            "an agreeing server produced a correction of {}",
+            client.error()
+        );
+        assert_eq!(
+            client.body().position.map(f32::to_bits),
+            predicted.position.map(f32::to_bits),
+            "replaying the four unconfirmed inputs did not land where the client was"
+        );
+        assert_eq!(client.pending(), 4);
+        let divergence = client.divergence().expect("tick 6 was remembered");
+        assert!(divergence.distance == 0.0, "{divergence:?}");
+
+        // And it went at the horse's pace, not the player's.
+        let mut afoot = predictor();
+        for tick in 1..=10 {
+            afoot.predict(&ground, tick, walking(), &Tuning::DEFAULT);
+        }
+        let walked = afoot.body().position[0] - 24.0;
+        let rode = client.body().position[0] - 20.0;
+        assert!(
+            rode > 0.0 && rode < walked,
+            "a half-pace horse at a sprint rode {rode} cells against a walk's {walked}"
+        );
+    }
+
+    #[test]
+    fn the_mount_is_predicted_with_its_own_box() {
+        // A lintel four cells up, from x = 30 east: a humanoid is stopped by
+        // it and a low mount passes under — so what the client predicts is the
+        // mount's box and not the rider's.
+        let mut ground = Ground::flat();
+        for x in 30..40 {
+            for y in 4..8 {
+                for z in -64..64 {
+                    ground.0.insert((x, y, z));
+                }
+            }
+        }
+        let low = Mount {
+            shape: Shape {
+                width: 1.8,
+                height: 3.0,
+            },
+            speed: 1.0,
+            ..a_horse()
+        };
+        let start = Body {
+            on_ground: true,
+            ..Body::at([24.0, 0.0, 24.0])
+        };
+        let mut riding = predictor();
+        riding.reconcile(&ground, &riding_state(0, &start, low), &low.tuning());
+        let mut walking_player = predictor();
+        for tick in 1..=40 {
+            riding.predict(&ground, tick, walking(), &low.tuning());
+            walking_player.predict(&ground, tick, walking(), &Tuning::DEFAULT);
+        }
+        assert!(
+            walking_player.body().position[0] < 30.0,
+            "the lintel did not stop a humanoid: {:?}",
+            walking_player.body().position
+        );
+        // In world cells: forty ticks under the lintel carries it past the
+        // chunk plane at 48, and the body is renormalised as it crosses.
+        let rode = riding.world_position()[0];
+        assert!(
+            rode > 40.0,
+            "a mount three cells tall was stopped by a lintel four up, at x = {rode}"
+        );
+    }
+
+    #[test]
+    fn getting_on_or_off_is_a_seat_and_not_a_correction() {
+        // The server started driving another body with this player's keys. The
+        // gap between the two is where the mount stands, not a prediction gone
+        // wrong, so it is taken at once — never blended, never eased — and
+        // the box goes with it.
+        let ground = Ground::flat();
+        let horse = a_horse();
+        let mut client = predictor();
+        for tick in 1..=3 {
+            client.predict(&ground, tick, walking(), &Tuning::DEFAULT);
+        }
+        // Four cells away: well inside the distance a correction would blend.
+        let mount = Body {
+            on_ground: true,
+            ..Body::at([client.body().position[0] + 4.0, 0.0, 24.0])
+        };
+        const { assert!(4.0 < SNAP_DISTANCE) };
+        client.reconcile(&ground, &riding_state(3, &mount, horse), &horse.tuning());
+        assert_eq!(client.error().to_bits(), 0.0f32.to_bits());
+        assert!(
+            client.divergence().is_none(),
+            "a seat was measured as a divergence"
+        );
+        assert_eq!(client.shape(), horse.shape);
+        assert_eq!(
+            client.body().position.map(f32::to_bits),
+            mount.position.map(f32::to_bits)
+        );
+
+        // And off again, back to the rider's own box where the server put them.
+        let landed = Body {
+            on_ground: true,
+            ..Body::at([mount.position[0] - 2.0, 0.0, 24.0])
+        };
+        client.reconcile(
+            &ground,
+            &Authoritative {
+                last_processed_input: 3,
+                chunk: ChunkPos::new(0, 0, 0),
+                local: landed.position,
+                velocity: landed.velocity,
+                on_ground: true,
+                jump_cooldown: 0,
+                mount: None,
+            },
+            &Tuning::DEFAULT,
+        );
+        assert_eq!(client.error().to_bits(), 0.0f32.to_bits());
+        assert_eq!(client.mount(), None);
+        assert_eq!(client.shape(), Shape::HUMANOID);
+        assert_eq!(
+            client.body().position.map(f32::to_bits),
+            landed.position.map(f32::to_bits)
+        );
+    }
+
+    #[test]
+    fn a_state_names_the_mounts_body_while_riding_and_the_players_on_foot() {
+        let ride = tiamat_core::proto::Riding {
+            entity: 9,
+            chunk: ChunkPos::new(1, 0, -1),
+            local: [3.0, 4.0, 5.0],
+            velocity: [0.1, 0.0, 0.0],
+            on_ground: true,
+            jump_cooldown: 4,
+            size: [3.0, 4.5],
+            speed: 0.5,
+            seat: [0.0, 4.8, 0.0],
+        };
+        let own = (ChunkPos::new(1, 0, -1), [3.0, 8.8, 5.0], [0.1, 0.0, 0.0]);
+        let riding = Authoritative::from_wire(12, own, true, 0, Some(ride));
+        assert_eq!(
+            riding.local.map(f32::to_bits),
+            ride.local.map(f32::to_bits),
+            "the rider's seat was predicted"
+        );
+        assert_eq!(
+            riding.jump_cooldown, 4,
+            "the mount's cooldown is the ride's"
+        );
+        assert_eq!(riding.mount.map(|mount| mount.entity), Some(9));
+        let afoot = Authoritative::from_wire(12, own, true, 0, None);
+        assert_eq!(afoot.local.map(f32::to_bits), own.1.map(f32::to_bits));
+        assert_eq!(afoot.mount, None);
+    }
+
     #[test]
     fn a_server_state_that_agrees_corrects_nothing() {
         // The normal case, and the one that must be silent. Determinism is what
@@ -1378,6 +1751,7 @@ mod tests {
                 velocity: server.body().velocity,
                 on_ground: server.body().on_ground,
                 jump_cooldown: 0,
+                mount: None,
             },
             &Tuning::DEFAULT,
         );
@@ -1419,6 +1793,7 @@ mod tests {
                 velocity: server.body().velocity,
                 on_ground: server.body().on_ground,
                 jump_cooldown: 0,
+                mount: None,
             },
             &Tuning::DEFAULT,
         );
@@ -1451,6 +1826,7 @@ mod tests {
                 velocity: [0.0; 3],
                 on_ground: true,
                 jump_cooldown: 0,
+                mount: None,
             },
             &Tuning::DEFAULT,
         );
@@ -1495,6 +1871,7 @@ mod tests {
                 velocity: [0.0; 3],
                 on_ground: true,
                 jump_cooldown: 0,
+                mount: None,
             },
             &Tuning::DEFAULT,
         );
@@ -1541,6 +1918,7 @@ mod tests {
                 velocity: server.body().velocity,
                 on_ground: server.body().on_ground,
                 jump_cooldown: 0,
+                mount: None,
             },
             &Tuning::DEFAULT,
         );

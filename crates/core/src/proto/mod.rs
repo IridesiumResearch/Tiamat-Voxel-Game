@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 79;
+pub const PROTOCOL_VERSION: u32 = 80;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,15 @@ pub const PROTOCOL_VERSION: u32 = 79;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v80 (Life 18, riding): `PlayerState` carries `riding`, the mount's body when
+// the player is seated on an entity, appended after `jump_cooldown`. While it
+// is `Some` the player's keys drive the ENTITY on the server, so the client
+// predicts that body — with its box, its pace and its jump cooldown, all
+// carried here — and puts the camera at the seat on top of it. Its own
+// `Riding` struct rather than more fields beside the player's, so the two
+// bodies cannot be mistaken for each other. **A field on an existing message**,
+// the unsafe kind of change, so the version check is what keeps a v79 peer
+// from reading past the cooldown.
 // v79 (UI ask 17): `DialogEvent::Pressed` carries `click`, which press it was:
 // left, right, or the second half of a double-click. A button reported that it
 // was pressed and nothing else, so a row that crafts ten on a click, one on a
@@ -1472,6 +1481,43 @@ pub enum Press {
     Double,
 }
 
+/// The mount a riding player drives, as their own state carries it
+/// (protocol v80, Life ask 18).
+///
+/// **Everything the client needs to step it exactly as the server will**,
+/// through the same `phys::step_shaped`: where it is and how fast, its footing
+/// and the rider's jump cooldown, its box and its pace. And the seat, so the
+/// camera can sit on it. The entity's id is here so the client draws the mount
+/// it is predicting where it predicted it, rather than a round trip behind on
+/// the entity stream.
+///
+/// **Hostile input** (charter rule 14): the client steps with these numbers,
+/// so [`validate_server_message`] refuses a non-finite one, a box no body could
+/// be stepped as, a pace past `Abilities::MAX_SPEED` and a seat further than a
+/// chunk from the feet, before any of them reach the client's physics.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Riding {
+    /// The mount, as the entity messages name it.
+    pub entity: u64,
+    /// Chunk half of the mount's position.
+    pub chunk: ChunkPos,
+    /// Cell offset of the mount's feet within that chunk.
+    pub local: [f32; 3],
+    /// The mount's velocity, cells per tick.
+    pub velocity: [f32; 3],
+    /// Whether the mount is standing on something.
+    pub on_ground: bool,
+    /// Ticks until the rider's jump may launch the mount again.
+    pub jump_cooldown: u8,
+    /// The mount's box, `[width, height]` in cells.
+    pub size: [f32; 2],
+    /// The mount's pace, as a multiple of the ordinary one.
+    pub speed: f32,
+    /// Where the rider's feet go, in cells from the mount's feet, measured as
+    /// if the mount faced yaw zero; it turns with the mount.
+    pub seat: [f32; 3],
+}
+
 /// Messages a server sends.
 ///
 /// **APPEND ONLY.** See the module docs.
@@ -1687,6 +1733,14 @@ pub enum ServerMessage {
         /// client that reset it would launch a replayed press the server had
         /// refused, and the two would part in mid-air.
         jump_cooldown: u8,
+        /// The mount this player is riding, and its body — `None` on foot
+        /// (protocol v80, Life ask 18).
+        ///
+        /// **While it is set, the body above is the rider's, carried at the
+        /// seat, and this is the body the client predicts**: the server steps
+        /// the mount from the player's inputs, so `last_processed_input`
+        /// speaks for this body and not for the one above. See [`Riding`].
+        riding: Option<Riding>,
     },
 
     /// How far along the player's current dig is.
@@ -3140,10 +3194,18 @@ fn check_player_floats(message: &ServerMessage) -> Result<(), ProtocolError> {
     };
     match message {
         ServerMessage::PlayerState {
-            local, velocity, ..
+            local,
+            velocity,
+            riding,
+            ..
         } => {
             if local.iter().chain(velocity.iter()).any(|v| !v.is_finite()) {
                 return bad("player_state");
+            }
+            // **The mount is stepped by the client's own physics too**, so its
+            // numbers are held to what the server itself would ride.
+            if riding.as_ref().is_some_and(|ride| !riding_is_valid(ride)) {
+                return bad("riding");
             }
             Ok(())
         }
@@ -3155,6 +3217,27 @@ fn check_player_floats(message: &ServerMessage) -> Result<(), ProtocolError> {
         }
         _ => Ok(()),
     }
+}
+
+/// Whether a riding state is one a client can step: every number finite, a
+/// box the server would let anybody ride, a pace in range, and a seat on the
+/// mount (protocol v80, Life ask 18).
+#[must_use]
+pub fn riding_is_valid(ride: &Riding) -> bool {
+    let finite = ride
+        .local
+        .iter()
+        .chain(ride.velocity.iter())
+        .all(|v| v.is_finite());
+    let shape = crate::phys::Shape {
+        width: ride.size[0],
+        height: ride.size[1],
+    };
+    finite
+        && crate::ent::mount::fits(shape)
+        && ride.speed.is_finite()
+        && (0.0..=crate::phys::Abilities::MAX_SPEED).contains(&ride.speed)
+        && crate::ent::mount::seat_is_valid(ride.seat)
 }
 
 /// Bounds the three protocol v23 messages.
@@ -3886,6 +3969,7 @@ mod tests {
                     velocity: [0.0; 3],
                     on_ground: true,
                     jump_cooldown: 0,
+                    riding: None,
                 },
                 ServerMessage::PlayerState {
                     last_processed_input: 1,
@@ -3894,6 +3978,7 @@ mod tests {
                     velocity: [0.0, bad, 0.0],
                     on_ground: true,
                     jump_cooldown: 0,
+                    riding: None,
                 },
             ] {
                 assert!(
@@ -3910,8 +3995,115 @@ mod tests {
             velocity: [0.1, -0.2, 0.0],
             on_ground: true,
             jump_cooldown: 0,
+            riding: None,
         };
         assert!(validate_server_message(&good).is_ok());
+    }
+
+    fn a_ride() -> Riding {
+        Riding {
+            entity: 0x0000_0003_0000_0011,
+            chunk: ChunkPos::new(-1, 2, 3),
+            local: [24.5, 3.0, 47.25],
+            velocity: [0.2, -0.24, 0.0],
+            on_ground: false,
+            jump_cooldown: 11,
+            size: [3.0, 4.5],
+            speed: 1.5,
+            seat: [0.0, 4.8, -0.9],
+        }
+    }
+
+    #[test]
+    fn a_player_state_carries_the_mount_it_rides_and_round_trips() {
+        // Life ask 18, protocol v80: appended after the cooldown, so the
+        // bytes before it are a v78 state's, and the version check is what
+        // stops a v78 peer reading one field past its end.
+        let state = |riding| ServerMessage::PlayerState {
+            last_processed_input: 99,
+            chunk: ChunkPos::new(-1, 2, 3),
+            local: [24.5, 7.8, 47.25],
+            velocity: [0.2, -0.24, 0.0],
+            on_ground: false,
+            jump_cooldown: 0,
+            riding,
+        };
+        for message in [state(None), state(Some(a_ride()))] {
+            assert!(validate_server_message(&message).is_ok(), "{message:?}");
+            let bytes = encode(&message).expect("encode");
+            let decoded: ServerMessage = decode(&bytes).expect("decode");
+            assert_eq!(decoded, message);
+        }
+        // On foot costs one byte more than it did, and not a byte more.
+        let on_foot = encode(&state(None)).expect("encode");
+        let riding = encode(&state(Some(a_ride()))).expect("encode");
+        assert_eq!(on_foot.last(), Some(&0), "`None` is the last byte on foot");
+        assert!(riding.len() > on_foot.len());
+    }
+
+    #[test]
+    fn a_ride_a_client_could_not_step_is_refused_before_it_steps_it() {
+        // Charter rule 14: the client steps its mount with these numbers, so a
+        // NaN, a box the server would never let anybody ride, a pace past the
+        // cap or a seat a chunk away is a server not to be believed.
+        let state = |riding| ServerMessage::PlayerState {
+            last_processed_input: 1,
+            chunk: ChunkPos::new(0, 0, 0),
+            local: [1.0; 3],
+            velocity: [0.0; 3],
+            on_ground: true,
+            jump_cooldown: 0,
+            riding: Some(riding),
+        };
+        let poisons = [
+            Riding {
+                local: [f32::NAN, 0.0, 0.0],
+                ..a_ride()
+            },
+            Riding {
+                velocity: [0.0, f32::INFINITY, 0.0],
+                ..a_ride()
+            },
+            Riding {
+                size: [0.0, 4.5],
+                ..a_ride()
+            },
+            Riding {
+                size: [3.0, crate::ent::mount::MAX_MOUNT_CELLS * 4.0],
+                ..a_ride()
+            },
+            Riding {
+                size: [f32::NAN, 4.5],
+                ..a_ride()
+            },
+            Riding {
+                speed: f32::NAN,
+                ..a_ride()
+            },
+            Riding {
+                speed: crate::phys::Abilities::MAX_SPEED * 2.0,
+                ..a_ride()
+            },
+            Riding {
+                speed: -1.0,
+                ..a_ride()
+            },
+            Riding {
+                seat: [0.0, crate::ent::mount::MAX_SEAT_CELLS * 2.0, 0.0],
+                ..a_ride()
+            },
+            Riding {
+                seat: [f32::NAN, 0.0, 0.0],
+                ..a_ride()
+            },
+        ];
+        for poison in poisons {
+            assert!(
+                validate_server_message(&state(poison)).is_err(),
+                "{poison:?} would reach the client's physics"
+            );
+        }
+        assert!(validate_server_message(&state(a_ride())).is_ok());
     }
 
     #[test]
@@ -4352,6 +4544,7 @@ mod tests {
             velocity: [0.0; 3],
             on_ground: false,
             jump_cooldown: 0,
+            riding: None,
         })
         .expect("encode");
         assert_eq!(state[0], 13);

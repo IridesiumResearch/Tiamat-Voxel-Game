@@ -106,6 +106,25 @@ pub struct Riding {
     pub speed: f32,
 }
 
+impl Riding {
+    /// The ride as the rider's `PlayerState` carries it: the body their
+    /// client predicts, with everything it needs to step it as the tick does.
+    #[must_use]
+    pub const fn to_wire(&self) -> tiamat_core::proto::Riding {
+        tiamat_core::proto::Riding {
+            entity: self.entity.0,
+            chunk: self.origin,
+            local: self.body.position,
+            velocity: self.body.velocity,
+            on_ground: self.body.on_ground,
+            jump_cooldown: self.body.jump_cooldown,
+            size: [self.shape.width, self.shape.height],
+            speed: self.speed,
+            seat: self.seat,
+        }
+    }
+}
+
 /// Where a rider coming off is put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Landing {

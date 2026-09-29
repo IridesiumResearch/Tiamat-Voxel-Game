@@ -1876,6 +1876,11 @@ impl Shared {
             velocity: player.body.velocity,
             on_ground: player.body.on_ground,
             jump_cooldown: player.body.jump_cooldown,
+            // **Read under the same lock as the input tick above** (Life ask
+            // 18): the mount's body is the one that tick drove, and a state
+            // pairing one tick's input with another tick's mount would be a
+            // correction the client could never agree with.
+            riding: player.riding.as_ref().map(crate::mount::Riding::to_wire),
         })
     }
 

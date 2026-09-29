@@ -23,8 +23,8 @@ use std::path::PathBuf;
 
 use tiamat_core::proto::{
     ActionDef, ChunkFog, Click, ClientMessage, DialogEvent, DisconnectReason, Edit, EntityDef,
-    EntityDelta, FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION, ServerMessage,
-    SkyFrame, SkyGrade, SoundDef, WireSignature, encode,
+    EntityDelta, FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION, Riding,
+    ServerMessage, SkyFrame, SkyGrade, SoundDef, WireSignature, encode,
 };
 use tiamat_core::{BlockPos, ChunkPos, SubNodePos};
 
@@ -685,6 +685,7 @@ fn server_messages() -> Vec<Vec<u8>> {
             velocity: [0.1, -0.2, 0.3],
             on_ground: true,
             jump_cooldown: 7,
+            riding: None,
         },
         ServerMessage::PlayerState {
             last_processed_input: u64::MAX,
@@ -693,6 +694,48 @@ fn server_messages() -> Vec<Vec<u8>> {
             velocity: [f32::MAX, f32::MIN, 0.0],
             on_ground: false,
             jump_cooldown: 7,
+            riding: None,
+        },
+        // Protocol v80 (Life 18): a rider's state, carrying the mount the
+        // client predicts — an ordinary ride, and one whose every number is
+        // one `validate_server_message` refuses.
+        ServerMessage::PlayerState {
+            last_processed_input: 4321,
+            chunk: ChunkPos::new(-1, 2, 3),
+            local: [24.5, 7.8, 47.25],
+            velocity: [0.2, -0.24, 0.0],
+            on_ground: false,
+            jump_cooldown: 0,
+            riding: Some(Riding {
+                entity: 0x0000_0003_0000_0011,
+                chunk: ChunkPos::new(-1, 2, 3),
+                local: [24.5, 3.0, 47.25],
+                velocity: [0.2, -0.24, 0.0],
+                on_ground: true,
+                jump_cooldown: 11,
+                size: [3.0, 4.5],
+                speed: 1.5,
+                seat: [0.0, 4.8, -0.9],
+            }),
+        },
+        ServerMessage::PlayerState {
+            last_processed_input: 0,
+            chunk: ChunkPos::new(0, 0, 0),
+            local: [0.0; 3],
+            velocity: [0.0; 3],
+            on_ground: true,
+            jump_cooldown: 0,
+            riding: Some(Riding {
+                entity: u64::MAX,
+                chunk: ChunkPos::new(i32::MAX, i32::MIN, 0),
+                local: [f32::NAN, 0.0, f32::INFINITY],
+                velocity: [f32::MAX, 0.0, 0.0],
+                on_ground: false,
+                jump_cooldown: u8::MAX,
+                size: [-1.0, f32::MAX],
+                speed: f32::NAN,
+                seat: [f32::NEG_INFINITY, 1e9, 0.0],
+            }),
         },
         ServerMessage::DigProgress {
             target: SubNodePos::new(9, 9, 9),

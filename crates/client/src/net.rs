@@ -1573,15 +1573,20 @@ async fn session(
                 velocity,
                 on_ground,
                 jump_cooldown,
+                riding,
             } => {
-                let _ = events.send(Event::PlayerState(crate::predict::Authoritative {
-                    last_processed_input,
-                    chunk,
-                    local,
-                    velocity,
-                    on_ground,
-                    jump_cooldown,
-                }));
+                // **The body this player drives**: their own, or while riding
+                // the mount's (Life ask 18) — which is the one the server
+                // stepped from their inputs, and so the one to predict.
+                let _ = events.send(Event::PlayerState(
+                    crate::predict::Authoritative::from_wire(
+                        last_processed_input,
+                        (chunk, local, velocity),
+                        on_ground,
+                        jump_cooldown,
+                        riding,
+                    ),
+                ));
             }
 
             ServerMessage::DigProgress { target, progress } => {
