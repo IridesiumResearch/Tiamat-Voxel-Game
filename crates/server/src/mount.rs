@@ -972,4 +972,97 @@ mod tests {
         );
         assert!(access.take_dismounts().is_empty(), "heard twice");
     }
+
+    #[test]
+    #[ignore = "a measurement, run by hand: cargo test -p server --release --lib -- --ignored --nocapture a_ride_costs"]
+    fn a_ride_costs_no_more_than_a_player_and_an_entity_walking_beside_it() {
+        // Charter rule 18: fifty players' worth, as a share of the 50 ms tick.
+        // On foot, each player is one step and each creature another; riding,
+        // the rider's step IS the creature's and the entity pass skips it. The
+        // bodies turn every twenty ticks so they stay on the floored chunk.
+        const BODIES: usize = 50;
+        const TICKS: usize = 2_000;
+        let world = floored();
+        let dry = crate::fluid::Fluidics::default();
+        let spot = |index: usize| {
+            [
+                4.0 + (index % 10) as f32 * 4.0,
+                3.0,
+                4.0 + (index / 10) as f32 * 8.0,
+            ]
+        };
+        let keys = |tick: usize| Intent {
+            walk: if (tick / 20).is_multiple_of(2) {
+                [0.0, 1.0]
+            } else {
+                [0.0, -1.0]
+            },
+            ..north(Gait::Walk, false)
+        };
+
+        // On foot: fifty players stepped as the tick steps them, and fifty
+        // creatures stepped by the entity pass.
+        let mut walkers = Population::new();
+        let mut players: Vec<PlayerSim> = (0..BODIES).map(|_| rider().1).collect();
+        for (index, player) in players.iter_mut().enumerate() {
+            player.origin = ChunkPos::new(0, 0, 0);
+            player.body = Body::at(spot(index));
+            walkers.spawn(horse(spot(index), 1.0));
+        }
+        let terrain = world.solid(OVERWORLD);
+        let started = std::time::Instant::now();
+        for tick in 0..TICKS {
+            let intent = keys(tick);
+            for id in walkers.iter().map(|(id, _)| id).collect::<Vec<_>>() {
+                if let Some(entity) = walkers.get_mut(id) {
+                    entity.drive = intent;
+                }
+            }
+            for player in &mut players {
+                let voxels = tiamat_core::phys::Voxels::with_fluid(&terrain, &dry, player.origin);
+                player.body = tiamat_core::phys::step(
+                    &voxels,
+                    player.body,
+                    intent,
+                    &tiamat_core::phys::Tuning::DEFAULT,
+                );
+            }
+            walkers.tick(OVERWORLD, &world, &dry, &[], &[]);
+        }
+        let apart = started.elapsed();
+
+        // Riding: fifty riders on fifty mounts.
+        let mut mounts = Population::new();
+        let mut riders: Vec<(PlayerUuid, PlayerSim)> = Vec::new();
+        for index in 0..BODIES {
+            let id = mounts.spawn(horse(spot(index), 1.0));
+            let (uuid, mut player) = rider();
+            seat_on(&mounts, &uuid, &mut player, id, SEAT);
+            riders.push((uuid, player));
+        }
+        let started = std::time::Instant::now();
+        for tick in 0..TICKS {
+            let intent = keys(tick);
+            mounts.begin_rides();
+            for (uuid, player) in &mut riders {
+                let ridden = ride(&mut mounts, uuid, player, intent, &world, &dry, &[], &[]);
+                assert_eq!(ridden, Ride::Rode);
+            }
+            mounts.tick(OVERWORLD, &world, &dry, &[], &[]);
+        }
+        let riding = started.elapsed();
+
+        let per_tick = |took: std::time::Duration| took.as_secs_f64() * 1000.0 / TICKS as f64;
+        let (apart, riding) = (per_tick(apart), per_tick(riding));
+        println!(
+            "{BODIES} players and {BODIES} creatures walking apart: {apart:.4} ms a tick \
+             ({:.3}% of 50 ms); {BODIES} riders on them: {riding:.4} ms ({:.3}%)",
+            apart / 50.0 * 100.0,
+            riding / 50.0 * 100.0
+        );
+        assert!(
+            riding <= apart * 1.25,
+            "riding cost {riding:.4} ms a tick against {apart:.4} walking apart"
+        );
+    }
 }
