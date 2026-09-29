@@ -36,8 +36,9 @@
 //!
 //! It runs for about seven minutes, and it needs the default mods, which are
 //! separate repositories: symlink `tiamat_default_world`, `_life`, `_ui`,
-//! `_craft`, `_progress` and `tiamat_weather` into `game/` first. Without the
-//! world mod it says so and passes, because there is no fen to fly over.
+//! `_craft`, `_progress` and `tiamat_weather` into `game/` first. With any
+//! enabled mod missing it names them and passes: the server would refuse to
+//! start, and without the world mod there is no fen to fly over.
 //!
 //! ```console
 //! FEN_OUT=/tmp/fen cargo test --release -p bot --test fen_soak -- --ignored --nocapture
@@ -247,14 +248,41 @@ fn sql_mean(ledger: &PhaseLedger) -> Duration {
 #[test]
 #[ignore = "a seven-minute soak over the default mods, run by hand"]
 fn fly_over_the_fen() {
-    let mods = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../game");
-    if !mods.join("tiamat_default_world").is_dir() {
+    let mods = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../game")
+        .canonicalize()
+        .expect("game dir");
+    let enabled: Vec<String> = std::env::var("FEN_MODS")
+        .unwrap_or_else(|_| {
+            "core,core_sky,tiamat_default_world,tiamat_default_life,tiamat_weather,\
+             tiamat_default_ui,tiamat_default_craft,tiamat_default_progress"
+                .to_owned()
+        })
+        .split(',')
+        .map(|name| name.trim().to_owned())
+        .collect();
+    // **Every enabled mod, by the id its manifest gives**, not only the world
+    // mod and not by directory name: a server refuses to start with an
+    // enabled mod missing, and that would fail here as a panic in `start`
+    // rather than as the skip the module promises. A symlink to a checkout
+    // that is not there reads as missing, too.
+    let found: std::collections::BTreeSet<String> = tiamat_core::modload::scan_directory(&mods)
+        .expect("game/ has a mod whose manifest does not parse")
+        .into_iter()
+        .map(|found| found.manifest.id)
+        .collect();
+    let missing: Vec<&str> = enabled
+        .iter()
+        .filter(|id| !found.contains(id.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
         eprintln!(
-            "fen_soak: no tiamat_default_world in game/ — symlink the default mods in to run it"
+            "fen_soak: not in game/: {} — symlink the default mods in to run it",
+            missing.join(", ")
         );
         return;
     }
-    let mods = mods.canonicalize().expect("game dir");
 
     let out = out_dir();
     let log = std::fs::File::create(out.join("server.log")).expect("log file");
@@ -277,15 +305,6 @@ fn fly_over_the_fen() {
 
     let identity = Identity::generate().expect("identity");
     let operator = identity.uuid_as_root().to_hex();
-    let enabled: Vec<String> = std::env::var("FEN_MODS")
-        .unwrap_or_else(|_| {
-            "core,core_sky,tiamat_default_world,tiamat_default_life,tiamat_weather,\
-             tiamat_default_ui,tiamat_default_craft,tiamat_default_progress"
-                .to_owned()
-        })
-        .split(',')
-        .map(|name| name.trim().to_owned())
-        .collect();
     tracing::warn!(target: "fen_soak", "PHASE start mods={enabled:?}");
 
     let server = ServerHandle::start(&Settings {
