@@ -1413,6 +1413,24 @@ rubber-bands. Do not try this with `game.set_entity` on a player's body: the
 body is stepped from the player's own inputs and your write is overwritten the
 next tick.
 
+**A player can ride an entity: `game.mount(uuid, entity, { seat, sneak_dismounts })`.**
+From the next tick their walk, jump and sprint drive the ENTITY — at its own
+`speed`, with its own `collider` — and their client predicts it, so nobody
+rubber-bands; their body and camera sit at the `seat` (blocks above the
+mount's feet, turned with it; no seat is on top of its box), and the mount
+faces where they look. Sneak gets them off unless `sneak_dismounts = false`,
+and so do `game.dismount(uuid)`, the mount being despawned (which is how you
+kill one), either of them changing domain, and the player leaving; every one
+of them is heard by `register_on_dismount` with a `reason` and where the engine
+put them — the mount's feet — so `game.move_player` from there lands them
+anywhere else. `game.mounted(uuid)` says what they are on. Refusals are
+`nil, reason`, never an error, because a race can cause each: one rider to a
+mount (`"ridden"`), one mount to a rider (`"already riding"`), and no players,
+markers, boxes past 16 blocks or other domains. The rider's own abilities stay
+theirs, a push on a rider pushes the mount, a `move_player` on one ends the
+ride, and nothing about a ride is saved. Do not build this with `move_player`
+every tick: that is the rubber-banding version.
+
 **Your sea is drawn at the horizon.** A chunk past the detail radius arrives as
 a summary — one material a cell — and until 2026-09-19 a summary held no fluid,
 so a generated ocean read as its floor with a hole over it until you walked into

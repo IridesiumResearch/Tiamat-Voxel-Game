@@ -4281,6 +4281,11 @@ function game.set_entity(id, spec) end
 ---`false` means the player is not connected, or the position is outside the
 ---world.
 ---
+---**Moving a rider gets them off** where the move put them — their body is
+---otherwise put back at the seat every tick — and `on_dismount` hears it with
+---the reason `"dismount"`. Inside `on_dismount` they are already off, which is
+---how a mod lands a rider somewhere other than the mount's feet.
+---
 ---```lua
 ----- A respawn point, remembered per player and keyed on the UUID.
 ---local home = game.storage.get("home:" .. event.player)
@@ -4334,6 +4339,9 @@ function game.select_slot(player, slot) end
 ---
 ---An upward push also takes them off the ground, or the next step's friction
 ---eats a shove meant to move somebody standing still.
+---
+---**A rider's push lands on their mount**, which carries them: their own body
+---is put at the seat every tick. They stay on.
 ---
 ---```lua
 ---game.push_player(event.player, { x = 0, y = 0.9, z = 0 })   -- a jump pad
