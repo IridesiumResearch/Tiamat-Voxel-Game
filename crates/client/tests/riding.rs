@@ -223,6 +223,18 @@ fn a_rider_predicts_the_mount_and_an_agreeing_server_corrects_nothing() {
     // (it is not a correction, and is not counted as one — but a divergence
     // window opened before it would still be open).
     run_frames(&mut app, Input::default(), 2.5, |_| false);
+    // **The camera is at the seat plus a player's eye height** above the
+    // mount's feet, which on this flat world stand on the ground at y = 0 —
+    // not at the mount's own feet plus an eye, which is where the predicted
+    // body's eyes would be. (What that looks like from the saddle is a human
+    // gate; where it is, is this.)
+    let eye = f64::from(tiamat_core::phys::EYE_HEIGHT) / f64::from(tiamat_core::SUBNODES_PER_AXIS);
+    let seated = app.camera().position.to_world().1;
+    assert!(
+        (seated - (SEAT + eye)).abs() < 0.05,
+        "a rider's camera is at y = {seated:.3}, not the seat plus an eye, {:.3}",
+        SEAT + eye
+    );
     // Sprinting, so the gait reaches the mount as well as the direction; and
     // a moment for the first reconcile after starting to move.
     let forward = Input {

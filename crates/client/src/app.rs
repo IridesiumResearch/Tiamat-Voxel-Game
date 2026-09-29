@@ -2205,7 +2205,7 @@ impl App {
     pub fn looking_at(&self) -> Option<phys::Hit> {
         let predictor = self.predictor.as_ref()?;
         let voxels = phys::Voxels::new(&self.store, predictor.origin());
-        let eye = predictor.body().eye();
+        let eye = self.eye_of(predictor);
         let forward = self.camera.forward();
         phys::ray::cast(&voxels, eye, [forward.x, forward.y, forward.z], phys::REACH)
     }
@@ -2324,7 +2324,7 @@ impl App {
     pub fn punch_target(&self) -> Option<u64> {
         let predictor = self.predictor.as_ref()?;
         let origin = predictor.origin();
-        let eye = predictor.body().eye();
+        let eye = self.eye_of(predictor);
         let forward = self.camera.forward();
         let direction = [forward.x, forward.y, forward.z];
         let now = self.since_start.elapsed();
@@ -2470,7 +2470,7 @@ impl App {
         let predictor = self.predictor.as_ref()?;
         let origin = predictor.origin();
         let span = tiamat_core::CHUNK_SUBNODES as i32;
-        let eye = predictor.body().eye();
+        let eye = self.eye_of(predictor);
         let block = cell.block();
         // The block's middle, in the predictor's own chunk frame — the same
         // space `looking_at` casts its ray in.
@@ -4640,7 +4640,7 @@ impl App {
         let predictor = self.predictor.as_ref()?;
         let voxels = phys::Voxels::with_fluid(&self.store, &self.store, predictor.origin())
             .passing(&self.passable);
-        let fluid = phys::swim::fluid_at(&voxels, predictor.body().eye());
+        let fluid = phys::swim::fluid_at(&voxels, self.eye_of(predictor));
         (!fluid.is_none()).then_some(fluid)
     }
 
@@ -5452,6 +5452,34 @@ impl App {
         intent_at_yaw(self.camera.yaw, input)
     }
 
+    /// Where a rider's feet are above their mount's, turned with it — the
+    /// origin on foot (Life ask 18).
+    ///
+    /// **The server's own turn**: a mount faces where its rider looks, and
+    /// the seat is turned through `ent::mount::seat_offset` from the same
+    /// look this client reports. Presentation here — it places a camera — but
+    /// it is the one function, so the camera and the server's rider agree.
+    fn seat_offset(&self, predictor: &crate::predict::Predictor) -> [f32; 3] {
+        predictor.mount().map_or([0.0; 3], |mount| {
+            tiamat_core::ent::mount::seat_offset(
+                mount.seat,
+                tiamat_core::ent::figure_yaw(self.camera.yaw),
+            )
+        })
+    }
+
+    /// Where the eyes are, in the predicted body's own chunk frame.
+    ///
+    /// **On foot, the body's; riding, the rider's on the seat** (Life ask
+    /// 18): the predicted body is then the mount, and the eyes are the seat
+    /// plus a player's eye height above its feet — where the camera is, and
+    /// where the server casts a rider's reach from.
+    fn eye_of(&self, predictor: &crate::predict::Predictor) -> [f32; 3] {
+        let [x, y, z] = predictor.body().eye();
+        let [sx, sy, sz] = self.seat_offset(predictor);
+        [x + sx, y + sy, z + sz]
+    }
+
     /// The intent and tuning the predicted body steps with, from the keys.
     ///
     /// **The server's two rules, mirrored**: on foot, what a mod granted this
@@ -5485,7 +5513,14 @@ impl App {
         let Some(predictor) = self.predictor.as_ref() else {
             return;
         };
-        let local = predictor.render_local_at(alpha);
+        // The drawn body: the player's own, or while riding the MOUNT's feet
+        // (Life ask 18), which the rider sits above at the seat — so the
+        // camera, the figure and the shadow ride with the prediction, and the
+        // mount is drawn where it is predicted rather than a round trip behind
+        // on the entity stream. Presentation, and exempt from charter rule 4.
+        let drawn = predictor.render_local_at(alpha);
+        let seat = self.seat_offset(predictor);
+        let local = [drawn[0] + seat[0], drawn[1] + seat[1], drawn[2] + seat[2]];
         let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         // Displaced by the debug teleport, or this drags the camera straight
         // back to the body's real position while the world stays 50,000 blocks
@@ -5494,6 +5529,16 @@ impl App {
         // the two are drawn in different coordinate systems. Free-fly never hit
         // this because nothing was writing the camera position every frame.
         let corner = tiamat_core::BlockPos::from_chunk_corner(self.drawn_at(predictor.origin()));
+        let ridden = predictor.mount().map(|mount| {
+            (
+                mount.entity,
+                [
+                    f64::from(corner.x) + f64::from(drawn[0]) / cells,
+                    f64::from(corner.y) + f64::from(drawn[1]) / cells,
+                    f64::from(corner.z) + f64::from(drawn[2]) / cells,
+                ],
+            )
+        });
 
         // Cells to blocks, and the eye offset on top. Presentation arithmetic:
         // the division by three is exact enough for a camera and never feeds
@@ -5546,7 +5591,7 @@ impl App {
         self.renderer.set_body_visible(self.third_person);
 
         // After the camera has settled, because every offset is relative to it.
-        self.place_entities();
+        self.place_entities(ridden);
         // And after the entities, because the player's figure goes on the end
         // of theirs — see `Renderer::set_player`.
         let figure = crate::render::skinned::Figure {
@@ -6173,6 +6218,11 @@ impl App {
         let Some(predictor) = self.predictor.as_ref() else {
             return AnimTag::IDLE.0;
         };
+        // A rider sits: the predicted body is the mount, and its gait is not
+        // theirs — the server draws them the same way (Life ask 18).
+        if predictor.mount().is_some() {
+            return AnimTag::IDLE.0;
+        }
         let velocity = predictor.body().velocity;
         // Horizontal only, and squared: falling is not walking, a player
         // stepping off a ledge should not break into a run on the way down, and
@@ -6188,7 +6238,9 @@ impl App {
         }
     }
 
-    fn place_entities(&mut self) {
+    /// `ridden` is the mount this player is on and where its feet are drawn,
+    /// in world blocks: the predicted place, which is ahead of the stream's.
+    fn place_entities(&mut self, ridden: Option<(u64, [f64; 3])>) {
         let now = self.since_start.elapsed();
         let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
 
@@ -6217,14 +6269,22 @@ impl App {
             let corner = tiamat_core::BlockPos::from_chunk_corner(pose.chunk);
             // The figure stands ON its feet, not centred in a box: the rig's
             // origin is between them, which is where the server's position is.
-            let feet = [
+            let streamed = [
                 f64::from(corner.x) + f64::from(pose.local[0]) / cells,
                 f64::from(corner.y) + f64::from(pose.local[1]) / cells,
                 f64::from(corner.z) + f64::from(pose.local[2]) / cells,
             ];
+            // **The mount under this player is drawn where it is predicted**
+            // (Life ask 18), facing where they look as the server turns it —
+            // the stream's copy is a round trip behind, and the rider on top
+            // of it is not.
+            let (feet, yaw) = match ridden {
+                Some((mount, at)) if mount == id => (at, figure_yaw(self.camera.yaw)),
+                _ => (streamed, pose.yaw),
+            };
             let figure = crate::render::skinned::Figure {
                 offset: self.camera.position.offset_to(feet),
-                yaw: pose.yaw,
+                yaw,
                 anim: pose.anim,
                 // **Each figure keeps its own clock**, offset by its id. Two
                 // hundred mobs sharing one march in step, which reads as a
