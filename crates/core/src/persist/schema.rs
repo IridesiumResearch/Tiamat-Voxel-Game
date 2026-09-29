@@ -19,6 +19,9 @@ use rusqlite::Connection;
 /// which is the true answer that it has no fluid saved. Nothing existing reads
 /// or writes it, so an older build opening a newer world simply ignores it.
 ///
+/// An index is the same case: `CREATE INDEX IF NOT EXISTS` builds it on an
+/// older world's next open, and an older build ignores one it did not make.
+///
 /// Bump this only for a change that would make old rows misread: a column
 /// added to an existing table, a type changed, a key redefined.
 ///
@@ -237,6 +240,22 @@ CREATE TABLE IF NOT EXISTS containers (
 CREATE INDEX IF NOT EXISTS entities_by_chunk
     ON entities (domain, chunk_x, chunk_y, chunk_z);
 
+-- Every write of a chunk or its fluid forgets that chunk's summaries, every
+-- level at once: `DELETE FROM chunk_summaries WHERE domain, x, y, z`, with no
+-- level, from four places in `persist`. The primary key leads with `level`, so
+-- it could narrow those deletes to the domain and no further, and each one
+-- scanned every summary the world had ever stored. A cache that only grows —
+-- the horizon adds rows while a player stands still and nothing sweeps them —
+-- so a world got slower with AGE, not with the session: one 32-chunk save
+-- batch measured 8 ms at 5k rows and 57–69 ms at 47k, more than a tick, paid
+-- on the tick thread every tick a save backlog lasted.
+--
+-- An index rather than a reordered primary key, which would have been a table
+-- rebuild on a player's save file. Additive, like the tables above: an older
+-- world builds it once on its next open and nothing else about it changes.
+CREATE INDEX IF NOT EXISTS chunk_summaries_by_pos
+    ON chunk_summaries (domain, x, y, z);
+
 CREATE INDEX IF NOT EXISTS player_keys_by_uuid
     ON player_keys (uuid);
 ";
@@ -258,9 +277,17 @@ CREATE INDEX IF NOT EXISTS player_keys_by_uuid
 ///
 /// # WAL checkpoint policy
 ///
-/// A **passive** checkpoint runs on every explicit flush. Passive never blocks
-/// readers and gives up rather than waiting, which is correct for a periodic
-/// flush — if it cannot checkpoint now it will succeed on the next one.
+/// An explicit flush, [`WorldDb::flush`], runs a **passive** checkpoint.
+/// Passive never blocks readers and gives up rather than waiting, which is
+/// correct for a periodic flush — if it cannot checkpoint now it will succeed
+/// on the next one.
+///
+/// **Nothing flushes during play, though.** `flush` is reached only from
+/// [`WorldDb::close`], so mid-session the WAL is folded back by `SQLite`'s own
+/// automatic checkpoint: `wal_autocheckpoint` is not set here, so its default
+/// of 1,000 pages, run inside whichever commit crosses that line and on the
+/// thread that made the commit — for a world, the tick. The passive checkpoint
+/// at close is the only one the engine asks for.
 ///
 /// Task 16's `save-freeze` depends on this: it needs a moment where the WAL is
 /// known to be folded into the main database so the file can be copied. It gets
@@ -271,6 +298,9 @@ CREATE INDEX IF NOT EXISTS player_keys_by_uuid
 /// # Errors
 ///
 /// Any pragma failure.
+///
+/// [`WorldDb::flush`]: crate::persist::WorldDb::flush
+/// [`WorldDb::close`]: crate::persist::WorldDb::close
 pub fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     // journal_mode returns a row, so it needs query_row rather than execute.
     conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;

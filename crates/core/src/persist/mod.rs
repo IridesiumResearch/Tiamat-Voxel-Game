@@ -64,6 +64,18 @@ const MAX_PLAN_BYTES: usize = (crate::plan::MAX_CELLS * 16) + (64 * 1024);
 /// compresses well, and this is written once per world rather than per save.
 const MAP_ZSTD_LEVEL: i32 = codec::ZSTD_LEVEL;
 
+/// Forgets every level of one chunk's summary: the statement each chunk and
+/// fluid write runs beside its own.
+///
+/// **One text for all four places it runs**, because what makes it cheap is
+/// not in this string: it names no level, so the primary key cannot find the
+/// rows, and only `chunk_summaries_by_pos` in [`schema::SCHEMA`] can. Without
+/// that index each run scanned every summary in the domain. One constant is
+/// one statement the query-plan test checks, rather than four copies of which
+/// the test sees one.
+const FORGET_SUMMARIES: &str =
+    "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4";
+
 use crate::chunk::Chunk;
 use crate::coords::ChunkPos;
 use crate::fluid::FluidLayer;
@@ -555,10 +567,7 @@ impl WorldDb {
                 blob
             ],
         )?;
-        transaction.execute(
-            "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-            params![domain, pos.x, pos.y, pos.z],
-        )?;
+        transaction.execute(FORGET_SUMMARIES, params![domain, pos.x, pos.y, pos.z])?;
         transaction.commit()?;
         Ok(())
     }
@@ -619,9 +628,7 @@ impl WorldDb {
             }
             // The summaries of everything written, for the reason given on
             // `save_chunk_in`: a stored summary describes a stored chunk.
-            let mut forget = transaction.prepare_cached(
-                "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-            )?;
+            let mut forget = transaction.prepare_cached(FORGET_SUMMARIES)?;
             for (pos, _) in &encoded {
                 forget.execute(params![domain, pos.x, pos.y, pos.z])?;
             }
@@ -888,9 +895,7 @@ impl WorldDb {
             // In the same transaction as the layers, for the reason the batch
             // exists: a commit that wrote the ponds and not the summary
             // removals would leave a horizon showing a sea that has drained.
-            let mut forget = transaction.prepare_cached(
-                "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-            )?;
+            let mut forget = transaction.prepare_cached(FORGET_SUMMARIES)?;
             for (pos, blob) in &encoded {
                 forget.execute(params![domain, pos.x, pos.y, pos.z])?;
                 match blob {
@@ -2157,10 +2162,9 @@ impl WorldDb {
     ///
     /// Any SQL failure.
     pub fn forget_summaries(&self, domain: &str, pos: ChunkPos) -> Result<usize, WorldError> {
-        Ok(self.conn.execute(
-            "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-            params![domain, pos.x, pos.y, pos.z],
-        )?)
+        Ok(self
+            .conn
+            .execute(FORGET_SUMMARIES, params![domain, pos.x, pos.y, pos.z])?)
     }
 
     /// How many summary rows one domain holds, for the tests and the zero-cost
@@ -2454,6 +2458,87 @@ mod tests {
             "a world with no fluid rows reported fluid"
         );
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// What `SQLite` would do with [`FORGET_SUMMARIES`], one line per step.
+    fn forget_plan(db: &WorldDb) -> Vec<String> {
+        let mut statement = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {FORGET_SUMMARIES}"))
+            .expect("explain");
+        statement
+            .query_map(params![DEFAULT_DOMAIN, 1, 2, 3], |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("plan")
+            .collect::<Result<_, _>>()
+            .expect("plan rows")
+    }
+
+    #[test]
+    fn forgetting_a_chunks_summaries_finds_them_by_position() {
+        // Every chunk save, fluid save and fluid adopt runs this, and it names
+        // no level. Before `chunk_summaries_by_pos` the plan was `USING INDEX
+        // sqlite_autoindex_chunk_summaries_1 (domain=?)` — every summary the
+        // world had ever stored, walked once per chunk written — and that
+        // table only grows, so a world got slower with age. The plan has to
+        // use all four columns, or the scan is only narrower.
+        let mut registry = Registry::new();
+        let db = WorldDb::open_in_memory(&mut registry).expect("open");
+        let plan = forget_plan(&db);
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("chunk_summaries_by_pos")
+                    && step.contains("domain=? AND x=? AND y=? AND z=?")),
+            "the summary forget does not use the position index: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn a_world_saved_before_the_position_index_gets_it_on_open() {
+        // **The fix has to reach the worlds that need it**, and those are the
+        // old ones: a world gets slower the more summaries it has stored. The
+        // index is created with the schema, on every open, so a file written
+        // before it existed builds it the next time it is opened.
+        let dir = std::env::temp_dir().join("tiamat-pre-summary-index-world");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(format!("{}.tiamat", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let pos = ChunkPos::new(-3, 1, 4);
+        {
+            let mut registry = Registry::default();
+            let db = WorldDb::open(&path, &mut registry).expect("create");
+            db.save_summaries(DEFAULT_DOMAIN, pos, &[(1, vec![1, 2, 3])])
+                .expect("summaries");
+            // Leaves the file shaped exactly like one an older build wrote.
+            db.conn
+                .execute("DROP INDEX chunk_summaries_by_pos", [])
+                .expect("drop the index");
+            assert!(
+                !forget_plan(&db)
+                    .iter()
+                    .any(|step| step.contains("chunk_summaries_by_pos")),
+                "the index is still there, so this test proves nothing"
+            );
+        }
+
+        let mut registry = Registry::default();
+        let db = WorldDb::open(&path, &mut registry).expect("an older world must still open");
+        assert!(
+            forget_plan(&db)
+                .iter()
+                .any(|step| step.contains("chunk_summaries_by_pos")),
+            "reopening an older world did not build the position index"
+        );
+        assert_eq!(
+            db.forget_summaries(DEFAULT_DOMAIN, pos).expect("forget"),
+            1,
+            "the summary written before the index is found through it"
+        );
+
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 }

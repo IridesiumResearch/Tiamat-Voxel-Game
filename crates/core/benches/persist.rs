@@ -13,6 +13,9 @@
 //! - **Batch save** is paid on shutdown and on periodic autosave, where the
 //!   question is whether saving a large loaded region is a stall a player
 //!   notices.
+//! - **The tick's save batch over a stored horizon** is paid every tick a
+//!   save backlog lasts, and its cost is set by the world's age rather than by
+//!   the batch — see `bench_batch_save_over_summaries`.
 //!
 //! As in the voxel benches, CI runs these in smoke mode only. Shared runners
 //! have too much variance for a regression gate, and a flaky perf gate teaches
@@ -189,6 +192,62 @@ fn bench_batch_save(c: &mut Criterion) {
     group.finish();
 }
 
+/// Chunks per save batch on the tick: the server's `CHUNKS_PER_SAVE_BATCH`.
+const TICK_BATCH: usize = 32;
+
+/// Summary levels a horizon position stores, so a row count is a position
+/// count times this.
+const SUMMARY_LEVELS: u8 = 5;
+
+/// The tick's save batch, over a world that has a horizon behind it.
+///
+/// **Why `batch_save` could not see this.** Every chunk written forgets its
+/// summaries in the same transaction, and `batch_save` starts from an empty
+/// world, where that is free whatever the query plan. The cost that made a
+/// world slower with age lived entirely in how many summary rows the forget
+/// had to get past: with no index on position it scanned every one in the
+/// domain, per chunk — a 32-chunk batch measured 8 ms at 5k rows and 57–69 ms
+/// at 47k on a real world file, more than a whole tick. So this fills the
+/// table first, at the sizes a played world reaches, and times the batch the
+/// tick actually writes. Flat across the row counts is the pass.
+///
+/// The same positions are written every iteration: their summaries go on the
+/// first and the forget finds nothing after, which is the right thing to time —
+/// finding nothing is what the scan was slow at.
+fn bench_batch_save_over_summaries(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_save_over_summaries");
+    group.sample_size(20);
+
+    for rows in [0usize, 10_000, 50_000] {
+        let (mut db, registry) = session();
+        let positions = rows / usize::from(SUMMARY_LEVELS);
+        let side = 128;
+        let blob = vec![0x5A_u8; 64];
+        for index in 0..positions {
+            let pos = ChunkPos::new((index % side) as i32, 0, (index / side) as i32);
+            let chain: Vec<(u8, Vec<u8>)> = (1..=SUMMARY_LEVELS)
+                .map(|level| (level, blob.clone()))
+                .collect();
+            db.save_summaries(tiamat_core::persist::DEFAULT_DOMAIN, pos, &chain)
+                .expect("summaries");
+        }
+        let template = scene("flat", &registry);
+        let chunks: Vec<(ChunkPos, Chunk)> = (0..TICK_BATCH)
+            .map(|i| (ChunkPos::new(i as i32, 0, 0), template.clone()))
+            .collect();
+
+        group.bench_with_input(BenchmarkId::from_parameter(rows), &rows, |b, _| {
+            b.iter(|| {
+                black_box(
+                    db.save_chunks_batch(chunks.iter().map(|(pos, chunk)| (*pos, chunk)))
+                        .expect("batch save"),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Reconciliation runs once per world open, and its cost scales with how many
 /// materials the world has ever seen — including those from removed mods.
 fn bench_open(c: &mut Criterion) {
@@ -218,6 +277,7 @@ criterion_group!(
     bench_codec,
     report_sizes,
     bench_batch_save,
+    bench_batch_save_over_summaries,
     bench_open
 );
 criterion_main!(benches);
