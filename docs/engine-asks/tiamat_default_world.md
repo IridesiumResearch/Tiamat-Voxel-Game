@@ -160,6 +160,22 @@ the pool can hold in flight, the server logs one line at `warn`:
 the pool keeps up with says nothing. `Pool::recent_cost` and
 `Pool::capacity` are there for anything else that wants the numbers.
 
+**From the engine, 2026-09-28, again (engine c55ad43):** the rule above
+fired on every walk. One player may have more requests out than a
+four-worker pool holds, so "more waiting than the pool can hold" was the
+ordinary shape of a stream the pool was keeping up with, and it was
+logged at 0.6 ms a chunk as readily as at 45. Counting requests
+cannot tell the two apart; where the workers' time goes can. The line now
+speaks once the workers have spent at least 90% of their time generating,
+with requests waiting, for three looks (seconds) running. The tick refills
+the pool once a pass, two jobs a worker, so in practice that is chunks
+dearer than about 23 ms asked for without a break; a pool the tick is
+pacing, full at every look but idle for most of every tick, says nothing.
+Still once a second while it holds, now ending in the workers' share and
+how long: `generation behind: N chunks waiting, M in flight, X ms/chunk —
+W workers generating P% of the time for S s`. `Pool::busy` is the
+workers' generating time, for anything else that wants it.
+
 ## 39. A terraced fill's `within` cannot be built flat: LANDED 2026-09-28 (engine 4885f54)
 
 **Seen:** a fully-dressed river bed, bone dry, one day after the world mod
