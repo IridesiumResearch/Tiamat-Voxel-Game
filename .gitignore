@@ -64,6 +64,12 @@ __pycache__/
 /fuzz/corpus/beacon_decode/*
 !/fuzz/corpus/beacon_decode/seed-*.bin
 !/fuzz/corpus/beacon_decode/regression-*.bin
+# The release manifest's corpus, same rule and same reason: a manifest is a
+# few hundred bytes of JSON, two seeds are the two releases that shipped, and
+# three minutes of fuzzing left fourteen hundred files beside them.
+/fuzz/corpus/manifest_decode/*
+!/fuzz/corpus/manifest_decode/seed-*.json
+!/fuzz/corpus/manifest_decode/regression-*.json
 
 /fuzz/coverage/
 /fuzz/Cargo.lock
