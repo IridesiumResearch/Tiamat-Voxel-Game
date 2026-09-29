@@ -91,11 +91,51 @@ impl Clock for MonotonicClock {
 /// runs over. It costs one `Instant::now()` per phase — about a dozen a tick,
 /// some tens of nanoseconds — and the `String` is built only for a tick that
 /// has already lost its budget.
+///
+/// # And what is inside a phase
+///
+/// A phase that does several jobs is still one number, and "fluid 45 ms" was
+/// the line that could not be acted on next: a solver whose visits are
+/// capped, a broadcast per touched chunk, terrain edits, mod hooks and the
+/// tick's relight all sit inside it. So a phase can carry named pieces
+/// ([`Phases::part`]), the sizes that explain it ([`Phases::count`]), and the
+/// time it spent in the world database ([`Phases::attribute_sql`]), each
+/// printed in parentheses after the phase it belongs to.
 #[derive(Debug)]
 pub struct Phases {
     started: Instant,
     at: Instant,
     spans: Vec<(&'static str, Duration)>,
+    /// What a phase was made of, where one phase does several jobs.
+    parts: Vec<Part>,
+    /// Sizes that say why a phase cost what it did: `(phase, what, how many)`.
+    counts: Vec<(&'static str, &'static str, u64)>,
+    /// Time in the world database, per phase: `(phase, time, calls)`.
+    sql: Vec<(&'static str, Duration, u32)>,
+    /// Database calls over [`crate::sqlclock::SLOW_CALL`]: `(phase, what, time)`.
+    slow_sql: Vec<(&'static str, &'static str, Duration)>,
+    /// The WAL's size in bytes, once a slow call has made it worth reading.
+    wal_bytes: Option<u64>,
+}
+
+/// One named piece of a phase.
+#[derive(Debug, Clone, Copy)]
+struct Part {
+    phase: &'static str,
+    name: &'static str,
+    took: Duration,
+    /// Whether the over-budget line prints it. A piece the phase's own detail
+    /// line already prints is kept for the means and nothing else.
+    shown: bool,
+}
+
+/// Pieces and database time shorter than this are left out of a line: at one
+/// decimal place they would read as `0.0ms`.
+const SHOWN_PIECE: Duration = Duration::from_micros(50);
+
+/// A duration as the lines here print one.
+fn millis(took: Duration) -> String {
+    format!("{:.1}ms", took.as_secs_f64() * 1000.0)
 }
 
 impl Default for Phases {
@@ -113,6 +153,11 @@ impl Phases {
             started: now,
             at: now,
             spans: Vec::with_capacity(16),
+            parts: Vec::with_capacity(16),
+            counts: Vec::with_capacity(16),
+            sql: Vec::with_capacity(8),
+            slow_sql: Vec::new(),
+            wal_bytes: None,
         }
     }
 
@@ -122,6 +167,11 @@ impl Phases {
         self.started = now;
         self.at = now;
         self.spans.clear();
+        self.parts.clear();
+        self.counts.clear();
+        self.sql.clear();
+        self.slow_sql.clear();
+        self.wal_bytes = None;
     }
 
     /// Closes the phase that ends here and names it.
@@ -136,6 +186,101 @@ impl Phases {
         self.at = now;
     }
 
+    /// Records a piece of a phase, printed in parentheses after it.
+    ///
+    /// Pieces need not add up to their phase — what is not named is the rest
+    /// of it — and a piece recorded twice in one tick, once per domain, adds.
+    pub fn part(&mut self, phase: &'static str, name: &'static str, took: Duration) {
+        self.add_part(phase, name, took, true);
+    }
+
+    /// Records a piece of a phase for the means only.
+    ///
+    /// For a phase whose own detail line already prints it — serving has the
+    /// serve line — so the over-budget line does not say it twice, and the
+    /// once-a-minute means still carry it.
+    pub fn quiet_part(&mut self, phase: &'static str, name: &'static str, took: Duration) {
+        self.add_part(phase, name, took, false);
+    }
+
+    fn add_part(&mut self, phase: &'static str, name: &'static str, took: Duration, shown: bool) {
+        if let Some(part) = self
+            .parts
+            .iter_mut()
+            .find(|part| part.phase == phase && part.name == name)
+        {
+            part.took += took;
+            return;
+        }
+        self.parts.push(Part {
+            phase,
+            name,
+            took,
+            shown,
+        });
+    }
+
+    /// Records a size that explains a phase: how much it had to do.
+    ///
+    /// Printed after the phase's pieces. Recorded twice in one tick, it adds.
+    pub fn count(&mut self, phase: &'static str, name: &'static str, value: u64) {
+        if let Some(count) = self
+            .counts
+            .iter_mut()
+            .find(|(of, what, _)| *of == phase && *what == name)
+        {
+            count.2 += value;
+            return;
+        }
+        self.counts.push((phase, name, value));
+    }
+
+    /// Files each database call under the phase it started in.
+    ///
+    /// **By when it started, after the fact**, because the calls are made
+    /// deep inside the world and the world does not know which phase it is
+    /// in. Called once the last phase is marked: a call that started before
+    /// the first mark belongs to the first phase and one after the last to
+    /// the last, so none is dropped.
+    pub fn attribute_sql(&mut self, calls: &[crate::sqlclock::Call]) {
+        for call in calls {
+            let offset = call.at.saturating_duration_since(self.started);
+            let mut end = Duration::ZERO;
+            let mut phase = self.spans.last().map_or("unmarked", |(name, _)| *name);
+            for (name, took) in &self.spans {
+                end += *took;
+                if offset < end {
+                    phase = name;
+                    break;
+                }
+            }
+            match self.sql.iter_mut().find(|(of, ..)| *of == phase) {
+                Some(entry) => {
+                    entry.1 += call.took;
+                    entry.2 += 1;
+                }
+                None => self.sql.push((phase, call.took, 1)),
+            }
+            if call.took >= crate::sqlclock::SLOW_CALL {
+                self.slow_sql.push((phase, call.what, call.took));
+            }
+        }
+    }
+
+    /// Whether any database call this tick was slow enough to name.
+    #[must_use]
+    pub fn has_slow_sql(&self) -> bool {
+        !self.slow_sql.is_empty()
+    }
+
+    /// Records the WAL's size, printed beside the slow calls.
+    ///
+    /// Asked for by the caller only when there are slow calls to print it
+    /// beside, because it is a filesystem call.
+    pub fn note_wal(&mut self, bytes: Option<u64>) {
+        self.wal_bytes = bytes;
+    }
+
     /// How long the tick has taken so far.
     #[must_use]
     pub fn total(&self) -> Duration {
@@ -145,7 +290,8 @@ impl Phases {
     /// The phases that cost anything, largest first, as one line.
     ///
     /// Everything under 1% of the budget is dropped: a breakdown of twelve
-    /// phases where nine are noise is a line nobody reads to the end.
+    /// phases where nine are noise is a line nobody reads to the end. A phase
+    /// that is shown carries what it was made of in parentheses.
     #[must_use]
     pub fn report(&self) -> String {
         let mut spans: Vec<(&'static str, Duration)> = self
@@ -157,13 +303,271 @@ impl Phases {
         spans.sort_by_key(|(_, took)| std::cmp::Reverse(*took));
         let named: Vec<String> = spans
             .iter()
-            .map(|(phase, took)| format!("{phase} {:.1}ms", took.as_secs_f64() * 1000.0))
+            .map(|(phase, took)| {
+                let detail = self.detail(phase);
+                if detail.is_empty() {
+                    format!("{phase} {}", millis(*took))
+                } else {
+                    format!("{phase} {} ({detail})", millis(*took))
+                }
+            })
             .collect();
         format!(
             "{:.1}ms total: {}",
             self.total().as_secs_f64() * 1000.0,
             if named.is_empty() {
                 "nothing over 0.5ms".to_owned()
+            } else {
+                named.join(", ")
+            }
+        )
+    }
+
+    /// What one phase was made of: its pieces, its sizes, and its time in the
+    /// database, each group separated by a semicolon.
+    fn detail(&self, phase: &str) -> String {
+        let mut groups = Vec::new();
+        let parts: Vec<String> = self
+            .parts
+            .iter()
+            .filter(|part| part.shown && part.phase == phase && part.took >= SHOWN_PIECE)
+            .map(|part| format!("{} {}", part.name, millis(part.took)))
+            .collect();
+        if !parts.is_empty() {
+            groups.push(parts.join(", "));
+        }
+        let counts: Vec<String> = self
+            .counts
+            .iter()
+            .filter(|(of, ..)| *of == phase)
+            .map(|(_, name, value)| format!("{value} {name}"))
+            .collect();
+        if !counts.is_empty() {
+            groups.push(counts.join(", "));
+        }
+        if let Some((_, took, calls)) = self.sql.iter().find(|(of, ..)| *of == phase)
+            && *took >= SHOWN_PIECE
+        {
+            let plural = if *calls == 1 { "" } else { "s" };
+            let mut sql = format!("sqlite {} in {calls} call{plural}", millis(*took));
+            let slow: Vec<String> = self
+                .slow_sql
+                .iter()
+                .filter(|(of, ..)| *of == phase)
+                .map(|(_, what, took)| format!("{what} {}", millis(*took)))
+                .collect();
+            if !slow.is_empty() {
+                sql.push_str(": ");
+                sql.push_str(&slow.join(", "));
+                if let Some(bytes) = self.wal_bytes {
+                    let mib = bytes as f64 / (1024.0 * 1024.0);
+                    sql.push_str(&format!(", WAL {mib:.1} MiB"));
+                }
+            }
+            groups.push(sql);
+        }
+        groups.join("; ")
+    }
+}
+
+/// Every phase's time summed over many ticks, the quiet ones too.
+///
+/// # Why a mean over every tick
+///
+/// [`Phases::report`] explains a tick that lost its budget and says nothing
+/// about the nineteen in twenty that did not — and it drops anything under
+/// half a millisecond, which is most of a healthy tick. A world that is slowly
+/// getting slower shows there first: a phase that creeps from 3 ms to 9 ms puts
+/// no tick over until the rest of the tick meets it, and by then the first line
+/// about it is the problem already. The soak that found the summary scan had to
+/// infer what the under-budget ticks were made of; this is that number, kept.
+///
+/// **Sums, not means, so two ledgers subtract.** The server keeps one running
+/// total ([`Control::phase_ledger`]) and [`PhaseLedger::since`] turns it into
+/// whatever window a reader wants — a minute for the log, thirty seconds for a
+/// soak.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PhaseLedger {
+    ticks: u64,
+    /// Every phase and piece as `(phase, piece)`, with `""` for the phase
+    /// itself and `"sqlite"` for its database time: the time, and how many
+    /// ticks it appeared in.
+    time: std::collections::BTreeMap<(&'static str, &'static str), (Duration, u64)>,
+    /// Every size a phase noted: the sum, and how many ticks noted it.
+    counts: std::collections::BTreeMap<(&'static str, &'static str), (u64, u64)>,
+}
+
+impl PhaseLedger {
+    /// Adds one tick.
+    pub fn add(&mut self, phases: &Phases) {
+        self.ticks += 1;
+        for (phase, took) in &phases.spans {
+            self.add_time(phase, "", *took);
+        }
+        for part in &phases.parts {
+            self.add_time(part.phase, part.name, part.took);
+        }
+        for (phase, took, _) in &phases.sql {
+            self.add_time(phase, "sqlite", *took);
+        }
+        for (phase, name, value) in &phases.counts {
+            let entry = self.counts.entry((phase, name)).or_default();
+            entry.0 += value;
+            entry.1 += 1;
+        }
+    }
+
+    fn add_time(&mut self, phase: &'static str, piece: &'static str, took: Duration) {
+        let entry = self.time.entry((phase, piece)).or_default();
+        entry.0 += took;
+        entry.1 += 1;
+    }
+
+    /// How many ticks this covers.
+    #[must_use]
+    pub const fn ticks(&self) -> u64 {
+        self.ticks
+    }
+
+    /// A phase's mean over every tick, including those it did not run in —
+    /// its share of the budget.
+    #[must_use]
+    pub fn mean(&self, phase: &'static str) -> Duration {
+        self.part_mean(phase, "")
+    }
+
+    /// A piece's mean over every tick: `"sqlite"` for the phase's database
+    /// time.
+    #[must_use]
+    pub fn part_mean(&self, phase: &'static str, piece: &'static str) -> Duration {
+        self.time
+            .get(&(phase, piece))
+            .map_or(Duration::ZERO, |(took, _)| self.per_tick(*took))
+    }
+
+    /// How many ticks a phase ran in: a save runs in one of forty.
+    #[must_use]
+    pub fn appearances(&self, phase: &'static str) -> u64 {
+        self.time.get(&(phase, "")).map_or(0, |(_, seen)| *seen)
+    }
+
+    /// A size's mean over the ticks that noted it.
+    #[must_use]
+    pub fn count_mean(&self, phase: &'static str, name: &'static str) -> Option<u64> {
+        self.counts
+            .get(&(phase, name))
+            .filter(|(_, samples)| *samples > 0)
+            .map(|(sum, samples)| sum / samples)
+    }
+
+    /// The whole tick's mean.
+    #[must_use]
+    pub fn tick_mean(&self) -> Duration {
+        let total = self
+            .time
+            .iter()
+            .filter(|((_, piece), _)| piece.is_empty())
+            .map(|(_, (took, _))| *took)
+            .sum();
+        self.per_tick(total)
+    }
+
+    fn per_tick(&self, took: Duration) -> Duration {
+        if self.ticks == 0 {
+            return Duration::ZERO;
+        }
+        let nanos = took.as_nanos() / u128::from(self.ticks);
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
+
+    /// What this ledger holds that `earlier` did not: the ticks between them.
+    #[must_use]
+    pub fn since(&self, earlier: &Self) -> Self {
+        let mut time = std::collections::BTreeMap::new();
+        for (key, (took, seen)) in &self.time {
+            let (was, was_seen) = earlier.time.get(key).copied().unwrap_or_default();
+            let seen = seen.saturating_sub(was_seen);
+            if seen > 0 {
+                time.insert(*key, (took.saturating_sub(was), seen));
+            }
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        for (key, (sum, samples)) in &self.counts {
+            let (was, was_samples) = earlier.counts.get(key).copied().unwrap_or_default();
+            let samples = samples.saturating_sub(was_samples);
+            if samples > 0 {
+                counts.insert(*key, (sum.saturating_sub(was), samples));
+            }
+        }
+        Self {
+            ticks: self.ticks.saturating_sub(earlier.ticks),
+            time,
+            counts,
+        }
+    }
+
+    /// Every phase's mean, largest first, with its pieces and sizes in
+    /// parentheses — the over-budget line's shape, over every tick.
+    ///
+    /// Two decimal places and nothing dropped above a hundredth of a
+    /// millisecond, because the small phases are the point: this is the line
+    /// that says what the ticks that did NOT run over were made of.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let shown = Duration::from_micros(5);
+        let two = |took: Duration| format!("{:.2}ms", took.as_secs_f64() * 1000.0);
+        let mut phases: Vec<(&'static str, Duration)> = self
+            .time
+            .iter()
+            .filter(|((_, piece), _)| piece.is_empty())
+            .map(|((phase, _), (took, _))| (*phase, self.per_tick(*took)))
+            .filter(|(_, mean)| *mean >= shown)
+            .collect();
+        phases.sort_by_key(|(_, mean)| std::cmp::Reverse(*mean));
+        let named: Vec<String> = phases
+            .iter()
+            .map(|(phase, mean)| {
+                let mut groups = Vec::new();
+                let pieces: Vec<String> = self
+                    .time
+                    .iter()
+                    .filter(|((of, piece), _)| {
+                        of == phase && !piece.is_empty() && *piece != "sqlite"
+                    })
+                    .map(|((_, piece), (took, _))| (piece, self.per_tick(*took)))
+                    .filter(|(_, mean)| *mean >= shown)
+                    .map(|(piece, mean)| format!("{piece} {}", two(mean)))
+                    .collect();
+                if !pieces.is_empty() {
+                    groups.push(pieces.join(", "));
+                }
+                let counts: Vec<String> = self
+                    .counts
+                    .iter()
+                    .filter(|((of, _), _)| of == phase)
+                    .filter(|(_, (_, samples))| *samples > 0)
+                    .map(|((_, name), (sum, samples))| format!("{} {name}", sum / samples))
+                    .collect();
+                if !counts.is_empty() {
+                    groups.push(counts.join(", "));
+                }
+                let sql = self.part_mean(phase, "sqlite");
+                if sql >= shown {
+                    groups.push(format!("sqlite {}", two(sql)));
+                }
+                if groups.is_empty() {
+                    format!("{phase} {}", two(*mean))
+                } else {
+                    format!("{phase} {} ({})", two(*mean), groups.join("; "))
+                }
+            })
+            .collect();
+        format!(
+            "{} a tick over {} ticks: {}",
+            two(self.tick_mean()),
+            self.ticks,
+            if named.is_empty() {
+                "nothing".to_owned()
             } else {
                 named.join(", ")
             }
@@ -216,6 +620,13 @@ struct ControlInner {
     slowest_phases: std::sync::Mutex<Option<String>>,
     /// How long the tick behind `slowest_phases` took, in microseconds.
     slowest_phase_micros: AtomicU64,
+    /// Every tick's phases, summed since start. See [`PhaseLedger`].
+    ledger: std::sync::Mutex<PhaseLedger>,
+    /// Summary rows the world file holds, and chunks waiting to be written,
+    /// as of the last tick: the two numbers that say how far behind the
+    /// disk is and how old the world is.
+    summary_rows: AtomicU64,
+    dirty_chunks: AtomicU64,
     /// Per-tick durations in microseconds, for the macro benchmark.
     ///
     /// A bounded buffer: a server running for a week must not accumulate a
@@ -435,6 +846,48 @@ impl Control {
             .lock()
             .ok()
             .and_then(|held| held.clone())
+    }
+
+    /// Adds one tick's phases to the running ledger.
+    pub fn note_phases(&self, phases: &Phases) {
+        if let Ok(mut ledger) = self.inner.ledger.lock() {
+            ledger.add(phases);
+        }
+    }
+
+    /// Every phase's time since start.
+    ///
+    /// A running total: subtract an earlier copy with [`PhaseLedger::since`]
+    /// for the ticks in between.
+    #[must_use]
+    pub fn phase_ledger(&self) -> PhaseLedger {
+        self.inner
+            .ledger
+            .lock()
+            .map(|ledger| ledger.clone())
+            .unwrap_or_default()
+    }
+
+    /// Records the world's save backlog and how many summaries it holds.
+    pub fn note_world_rows(&self, summary_rows: u64, dirty_chunks: usize) {
+        self.inner
+            .summary_rows
+            .store(summary_rows, Ordering::Relaxed);
+        self.inner
+            .dirty_chunks
+            .store(dirty_chunks as u64, Ordering::Relaxed);
+    }
+
+    /// Summary rows the world file held at the end of the last tick.
+    #[must_use]
+    pub fn summary_rows(&self) -> u64 {
+        self.inner.summary_rows.load(Ordering::Relaxed)
+    }
+
+    /// Chunks waiting to be written at the end of the last tick.
+    #[must_use]
+    pub fn dirty_chunks(&self) -> u64 {
+        self.inner.dirty_chunks.load(Ordering::Relaxed)
     }
 
     /// How many ticks ran over the 50 ms budget.
@@ -741,5 +1194,170 @@ mod tests {
 
         assert_eq!(observer.tick(), 5);
         assert!(observer.stopping());
+    }
+
+    /// A tick's phases with made-up lengths, since `mark` reads the clock.
+    fn phases_of(spans: &[(&'static str, u64)]) -> Phases {
+        let mut phases = Phases::start();
+        for (phase, micros) in spans {
+            phases.spans.push((phase, Duration::from_micros(*micros)));
+        }
+        phases
+    }
+
+    /// A database call `offset_micros` into the tick.
+    fn call(
+        phases: &Phases,
+        what: &'static str,
+        offset_micros: u64,
+        micros: u64,
+    ) -> crate::sqlclock::Call {
+        crate::sqlclock::Call {
+            what,
+            at: phases.started + Duration::from_micros(offset_micros),
+            took: Duration::from_micros(micros),
+        }
+    }
+
+    #[test]
+    fn a_phase_carries_its_pieces_sizes_and_database_time_in_parentheses() {
+        let mut phases = phases_of(&[("fluid", 23_000), ("serving", 10_000), ("mods", 200)]);
+        phases.part("fluid", "solver", Duration::from_millis(2));
+        phases.part("fluid", "broadcast", Duration::from_millis(1));
+        // Twice in one tick, as the per-domain loop records it: it adds.
+        phases.part("fluid", "broadcast", Duration::from_millis(1));
+        phases.part("fluid", "hooks", Duration::from_micros(10));
+        phases.count("fluid", "active", 1200);
+        phases.count("fluid", "carried", 30);
+        phases.quiet_part("serving", "gen", Duration::from_millis(3));
+        let calls = [
+            call(&phases, "save fluid", 1_000, 6_000),
+            call(&phases, "load fluid", 2_000, 200),
+        ];
+        phases.attribute_sql(&calls);
+        assert!(phases.has_slow_sql());
+        phases.note_wal(Some(2 * 1024 * 1024));
+        let report = phases.report();
+        assert!(
+            report.contains(
+                "fluid 23.0ms (solver 2.0ms, broadcast 2.0ms; 1200 active, 30 carried; \
+                 sqlite 6.2ms in 2 calls: save fluid 6.0ms, WAL 2.0 MiB)"
+            ),
+            "{report}"
+        );
+        // A quiet piece is for the means: the serve line already says it.
+        assert!(report.contains("serving 10.0ms"), "{report}");
+        assert!(!report.contains("gen"), "{report}");
+        // Too short to read as anything but 0.0ms.
+        assert!(!report.contains("hooks"), "{report}");
+        // Still dropped below half a millisecond, pieces or not.
+        assert!(!report.contains("mods"), "{report}");
+    }
+
+    #[test]
+    fn a_database_call_is_filed_under_the_phase_it_started_in() {
+        let mut phases = phases_of(&[("serving", 10_000), ("save chunks", 10_000)]);
+        let before = crate::sqlclock::Call {
+            what: "load chunk",
+            at: phases
+                .started
+                .checked_sub(Duration::from_millis(1))
+                .unwrap_or(phases.started),
+            took: Duration::from_micros(100),
+        };
+        let calls = [
+            before,
+            call(&phases, "load chunk", 5_000, 100),
+            call(&phases, "save chunk batch", 15_000, 300),
+            // Past the last mark: the last phase's, not dropped.
+            call(&phases, "save fluid", 25_000, 50),
+        ];
+        phases.attribute_sql(&calls);
+        assert_eq!(
+            phases.sql,
+            vec![
+                ("serving", Duration::from_micros(200), 2),
+                ("save chunks", Duration::from_micros(350), 2),
+            ]
+        );
+        assert!(
+            !phases.has_slow_sql(),
+            "nothing here is over five milliseconds"
+        );
+    }
+
+    #[test]
+    fn the_ledger_means_count_every_tick_including_the_quiet_ones() {
+        // A save runs in one tick of four here: its mean over every tick is a
+        // quarter of what it cost when it ran, which is its share of the
+        // budget — the number that says whether it is growing.
+        let mut ledger = PhaseLedger::default();
+        for tick in 0..4 {
+            let mut phases = if tick == 0 {
+                phases_of(&[("fluid", 4_000), ("save chunks", 8_000)])
+            } else {
+                phases_of(&[("fluid", 4_000)])
+            };
+            phases.part("fluid", "solver", Duration::from_millis(1));
+            phases.count("fluid", "active", 100 * (tick + 1));
+            let calls = [call(&phases, "load fluid", 0, 400)];
+            phases.attribute_sql(&calls);
+            ledger.add(&phases);
+        }
+        assert_eq!(ledger.ticks(), 4);
+        assert_eq!(ledger.mean("fluid"), Duration::from_millis(4));
+        assert_eq!(ledger.mean("save chunks"), Duration::from_millis(2));
+        assert_eq!(ledger.appearances("save chunks"), 1);
+        assert_eq!(
+            ledger.part_mean("fluid", "solver"),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            ledger.part_mean("fluid", "sqlite"),
+            Duration::from_micros(400)
+        );
+        assert_eq!(ledger.count_mean("fluid", "active"), Some(250));
+        assert_eq!(ledger.tick_mean(), Duration::from_millis(6));
+
+        // And a window is a subtraction.
+        let earlier = ledger.clone();
+        let mut phases = phases_of(&[("fluid", 10_000)]);
+        phases.count("fluid", "active", 7);
+        ledger.add(&phases);
+        let window = ledger.since(&earlier);
+        assert_eq!(window.ticks(), 1);
+        assert_eq!(window.mean("fluid"), Duration::from_millis(10));
+        assert_eq!(window.mean("save chunks"), Duration::ZERO);
+        assert_eq!(window.count_mean("fluid", "active"), Some(7));
+    }
+
+    #[test]
+    fn the_ledger_line_keeps_what_the_over_budget_line_drops() {
+        // The small phases are the point of it: the report drops anything
+        // under half a millisecond, and this is what a tick that did NOT run
+        // over was made of.
+        let mut ledger = PhaseLedger::default();
+        let mut phases = phases_of(&[("serving", 12_000), ("unload", 100)]);
+        phases.quiet_part("serving", "relight", Duration::from_millis(9));
+        ledger.add(&phases);
+        let line = ledger.line();
+        assert_eq!(
+            line,
+            "12.10ms a tick over 1 ticks: serving 12.00ms (relight 9.00ms), unload 0.10ms"
+        );
+    }
+
+    #[test]
+    fn the_control_handle_keeps_a_running_ledger() {
+        let control = Control::new();
+        let phases = phases_of(&[("fluid", 1_000)]);
+        control.note_phases(&phases);
+        control.note_phases(&phases);
+        assert_eq!(control.phase_ledger().ticks(), 2);
+        control.note_world_rows(47_000, 180);
+        assert_eq!(
+            (control.summary_rows(), control.dirty_chunks()),
+            (47_000, 180)
+        );
     }
 }

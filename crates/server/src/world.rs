@@ -654,6 +654,12 @@ pub struct World {
     /// registries freeze. Empty until then, and an empty table means every
     /// summary is exactly what it was.
     fluids: tiamat_core::fluid::Fluids,
+    /// Every call into the database since the tick last asked, timed.
+    ///
+    /// See [`crate::sqlclock`]. A `RefCell` because the reads are `&self`
+    /// methods and the world is only ever on one thread at a time — it moves
+    /// between the tick and a mod's lease, and is never shared.
+    sql: std::cell::RefCell<crate::sqlclock::Log>,
 }
 
 impl World {
@@ -681,6 +687,7 @@ impl World {
             computed: 0,
             served: 0,
             fluids: tiamat_core::fluid::Fluids::new(),
+            sql: std::cell::RefCell::new(crate::sqlclock::Log::default()),
         })
     }
 
@@ -721,6 +728,31 @@ impl World {
     #[must_use]
     pub const fn db(&self) -> &WorldDb {
         &self.db
+    }
+
+    /// Runs `call` against the database and times it, for a caller that has
+    /// to reach it directly — the tick's own writes of the hour, the
+    /// identities and the domain list.
+    pub fn timed<T>(&self, what: &'static str, call: impl FnOnce(&WorldDb) -> T) -> T {
+        crate::sqlclock::Log::time(&self.sql, what, || call(&self.db))
+    }
+
+    /// Every database call since the last take, for the tick to file under
+    /// its phases. See [`crate::sqlclock`].
+    pub fn take_sql_calls(&self) -> Vec<crate::sqlclock::Call> {
+        self.sql
+            .try_borrow_mut()
+            .map(|mut log| log.take())
+            .unwrap_or_default()
+    }
+
+    /// Summary rows the world file holds, every domain.
+    ///
+    /// The world's age as the horizon sees it: the table only grows while
+    /// anybody plays. See [`WorldDb::summary_rows_held`].
+    #[must_use]
+    pub fn summary_rows(&self) -> u64 {
+        self.db.summary_rows_held()
     }
 
     /// How many chunks are cached, across every domain.
@@ -800,7 +832,7 @@ impl World {
         uuid: &tiamat_core::PlayerUuid,
         template: &inventory::Slots,
     ) -> Result<Option<(inventory::Slots, usize)>, WorldError> {
-        let Some(blob) = self.db.load_player(&uuid.to_hex())? else {
+        let Some(blob) = self.timed("load player", |db| db.load_player(&uuid.to_hex()))? else {
             return Ok(None);
         };
         // The version is the first byte, written by `save_player_slots`. A
@@ -844,11 +876,13 @@ impl World {
         let mut row = Vec::with_capacity(bytes.len() + 1);
         row.push(tiamat_core::persist::playerdata::PLAYER_FORMAT_VERSION);
         row.extend_from_slice(&bytes);
-        self.db.save_player(
-            &uuid.to_hex(),
-            tiamat_core::persist::playerdata::PLAYER_FORMAT_VERSION,
-            &row,
-        )
+        self.timed("save player", |db| {
+            db.save_player(
+                &uuid.to_hex(),
+                tiamat_core::persist::playerdata::PLAYER_FORMAT_VERSION,
+                &row,
+            )
+        })
     }
 
     /// Every container the world holds, decoded into views.
@@ -871,7 +905,7 @@ impl World {
     ) -> Result<(Vec<(String, inventory::View)>, usize), WorldError> {
         let mut out = Vec::new();
         let mut dropped = 0;
-        for (name, blob) in self.db.load_containers()? {
+        for (name, blob) in self.timed("load containers", WorldDb::load_containers)? {
             let Some((&version, rest)) = blob.split_first() else {
                 tracing::warn!(container = %name, "a container row is empty and was skipped");
                 continue;
@@ -917,11 +951,13 @@ impl World {
         let mut row = Vec::with_capacity(bytes.len() + 1);
         row.push(tiamat_core::persist::containers::CONTAINER_FORMAT_VERSION);
         row.extend_from_slice(&bytes);
-        self.db.save_container(
-            name,
-            tiamat_core::persist::containers::CONTAINER_FORMAT_VERSION,
-            &row,
-        )
+        self.timed("save container", |db| {
+            db.save_container(
+                name,
+                tiamat_core::persist::containers::CONTAINER_FORMAT_VERSION,
+                &row,
+            )
+        })
     }
 
     /// Forgets a container whose block has been broken.
@@ -930,7 +966,7 @@ impl World {
     ///
     /// [`WorldError`] if the row cannot be deleted.
     pub fn delete_container(&self, name: &str) -> Result<(), WorldError> {
-        self.db.delete_container(name)
+        self.timed("delete container", |db| db.delete_container(name))
     }
 
     /// Every resident chunk's position, in a fixed order.
@@ -1019,14 +1055,18 @@ impl World {
             });
         }
         let Self {
-            db, seed, domains, ..
+            db,
+            seed,
+            domains,
+            sql,
+            ..
         } = self;
         let seed = *seed;
         let space = Self::space_of(domains, domain);
         if space.cache.contains_key(&pos) {
             return Ok(space.cache.get_mut(&pos).expect("checked just above"));
         }
-        match db.load_chunk_in(domain, pos)? {
+        match crate::sqlclock::Log::time(sql, "load chunk", || db.load_chunk_in(domain, pos))? {
             Some(chunk) => {
                 space.cache.insert(pos, chunk);
                 space.arrived.push(pos);
@@ -1036,7 +1076,7 @@ impl World {
                 // streamer has the workers do this and hands the result to
                 // `adopt_generated`, which is the same thing from here.
                 let (generated, fluid) = source.generate_with_fluid(domain, pos, seed);
-                Self::adopt_into(db, space, domain, pos, generated, &fluid);
+                Self::adopt_into(db, sql, space, domain, pos, generated, &fluid);
             }
         }
         Ok(space
@@ -1071,18 +1111,21 @@ impl World {
                 domain: domain.to_owned(),
             });
         }
-        let Self { db, domains, .. } = self;
+        let Self {
+            db, domains, sql, ..
+        } = self;
         let space = Self::space_of(domains, domain);
         if space.cache.contains_key(&pos) {
             return Ok(());
         }
-        Self::adopt_into(db, space, domain, pos, chunk, fluid);
+        Self::adopt_into(db, sql, space, domain, pos, chunk, fluid);
         Ok(())
     }
 
     /// The one place a freshly generated chunk enters the world.
     fn adopt_into(
         db: &WorldDb,
+        sql: &std::cell::RefCell<crate::sqlclock::Log>,
         space: &mut Space,
         domain: &str,
         pos: ChunkPos,
@@ -1104,7 +1147,9 @@ impl World {
         // Empty layers are skipped: almost every chunk has one, and a row
         // saying "no fluid" is a row to read back for nothing.
         if !fluid.is_empty()
-            && let Err(err) = db.save_chunk_fluid_in(domain, pos, fluid)
+            && let Err(err) = crate::sqlclock::Log::time(sql, "store generated fluid", || {
+                db.save_chunk_fluid_in(domain, pos, fluid)
+            })
         {
             tracing::error!(?pos, "could not store generated fluid: {err}");
         }
@@ -1129,12 +1174,14 @@ impl World {
                 domain: domain.to_owned(),
             });
         }
-        let Self { db, domains, .. } = self;
+        let Self {
+            db, domains, sql, ..
+        } = self;
         let space = Self::space_of(domains, domain);
         if space.cache.contains_key(&pos) {
             return Ok(true);
         }
-        match db.load_chunk_in(domain, pos)? {
+        match crate::sqlclock::Log::time(sql, "load chunk", || db.load_chunk_in(domain, pos))? {
             Some(chunk) => {
                 space.cache.insert(pos, chunk);
                 space.arrived.push(pos);
@@ -1241,7 +1288,8 @@ impl World {
         // filled in. Recomputed, and deliberately not stored: the row it would
         // write is one the imminent save deletes.
         if !self.is_dirty(domain, pos)
-            && let Some(cached) = self.db.load_summary(domain, level, pos)?
+            && let Some(cached) =
+                self.timed("load summary", |db| db.load_summary(domain, level, pos))?
         {
             self.served += 1;
             return Ok(Some(cached));
@@ -1255,15 +1303,14 @@ impl World {
         // pond the solver is actively moving is inside the detail radius and is
         // drawn from the real chunk, not from this.
         let wet = self
-            .db
-            .load_chunk_fluid_in(domain, pos)?
+            .timed("load fluid", |db| db.load_chunk_fluid_in(domain, pos))?
             .unwrap_or_else(tiamat_core::fluid::FluidLayer::empty);
         let chain = match self.domains.get(domain).and_then(|s| s.cache.get(&pos)) {
             Some(chunk) => lod::Summary::chain_wet(chunk, &wet, &self.fluids)
                 .iter()
                 .map(|summary| (summary.level(), lod::codec::encode(summary)))
                 .collect(),
-            None => match self.db.load_chunk_in(domain, pos)? {
+            None => match self.timed("load chunk", |db| db.load_chunk_in(domain, pos))? {
                 Some(chunk) => Self::encode_chain(&chunk, &wet, &self.fluids),
                 None => return Ok(None),
             },
@@ -1296,7 +1343,7 @@ impl World {
             .map(|(_, bytes)| bytes.clone())
             .ok_or(WorldError::NoSuchLevel { level })?;
         if !self.is_dirty(domain, pos) {
-            self.db.save_summaries(domain, pos, chain)?;
+            self.timed("save summaries", |db| db.save_summaries(domain, pos, chain))?;
         }
         Ok(wanted)
     }
@@ -1551,7 +1598,9 @@ impl World {
     /// next save retries rather than dropping the edit.
     pub fn save_dirty_within(&mut self, budget: Duration) -> Result<(usize, usize), WorldError> {
         let started = std::time::Instant::now();
-        let Self { db, domains, .. } = self;
+        let Self {
+            db, domains, sql, ..
+        } = self;
         let mut written = 0;
         let mut remaining = 0;
         for (domain, space) in domains.iter_mut() {
@@ -1600,7 +1649,9 @@ impl World {
             // runs on the tick thread: on the two-hundred-mob load test the
             // per-chunk version put 87 ms inside a 50 ms tick, which is a
             // debounce protecting the disk by spending the simulation's budget.
-            match db.save_chunks_batch_in(domain, batch) {
+            match crate::sqlclock::Log::time(sql, "save chunk batch", || {
+                db.save_chunks_batch_in(domain, batch)
+            }) {
                 Ok(count) => written += count,
                 Err(err) => {
                     // The batch rolled back, so every chunk in it is still
@@ -1634,7 +1685,7 @@ impl World {
         domain: &str,
         pos: ChunkPos,
     ) -> Result<Option<FluidLayer>, WorldError> {
-        self.db.load_chunk_fluid_in(domain, pos)
+        self.timed("load fluid", |db| db.load_chunk_fluid_in(domain, pos))
     }
 
     /// Writes fluid layers for chunks whose milk has changed.
@@ -1652,7 +1703,10 @@ impl World {
         domain: &str,
         layers: impl IntoIterator<Item = (ChunkPos, &'a FluidLayer)>,
     ) -> Result<usize, WorldError> {
-        self.db.save_chunk_fluid_batch_in(domain, layers)
+        let Self { db, sql, .. } = self;
+        crate::sqlclock::Log::time(sql, "save fluid", || {
+            db.save_chunk_fluid_batch_in(domain, layers)
+        })
     }
 
     /// Reads the entities anchored to a chunk.
@@ -1665,7 +1719,7 @@ impl World {
         domain: &str,
         pos: ChunkPos,
     ) -> Result<Vec<tiamat_core::ent::Entity>, WorldError> {
-        self.db.load_chunk_entities_in(domain, pos)
+        self.timed("load entities", |db| db.load_chunk_entities_in(domain, pos))
     }
 
     /// Replaces the entities anchored to each chunk given.
@@ -1687,7 +1741,10 @@ impl World {
         // put 87 ms inside a 50 ms tick on the nightly's load test.
         let chunks: Vec<(ChunkPos, &[tiamat_core::ent::Entity])> = chunks.into_iter().collect();
         let written: usize = chunks.iter().map(|(_, entities)| entities.len()).sum();
-        self.db.save_chunk_entities_batch_in(domain, chunks)?;
+        let Self { db, sql, .. } = self;
+        crate::sqlclock::Log::time(sql, "save entities", || {
+            db.save_chunk_entities_batch_in(domain, chunks)
+        })?;
         Ok(written)
     }
 
@@ -1697,7 +1754,7 @@ impl World {
     ///
     /// [`WorldError`] on a SQL failure or an undecodable value.
     pub fn load_mod_storage(&self, mod_id: &str) -> Result<tiamat_core::storage::Bag, WorldError> {
-        self.db.load_mod_storage(mod_id)
+        self.timed("load mod storage", |db| db.load_mod_storage(mod_id))
     }
 
     /// Replaces everything one mod has stored.
@@ -1710,7 +1767,7 @@ impl World {
         mod_id: &str,
         bag: &tiamat_core::storage::Bag,
     ) -> Result<(), WorldError> {
-        self.db.save_mod_storage(mod_id, bag)
+        self.timed("save mod storage", |db| db.save_mod_storage(mod_id, bag))
     }
 
     /// Writes one mod's changed keys, and deletes the ones it removed.
@@ -1723,7 +1780,9 @@ impl World {
         mod_id: &str,
         changes: &[(String, Option<tiamat_core::storage::Value>)],
     ) -> Result<(), WorldError> {
-        self.db.save_mod_storage_changes(mod_id, changes)
+        self.timed("save mod storage", |db| {
+            db.save_mod_storage_changes(mod_id, changes)
+        })
     }
 
     /// A plan a mod saved, or `None` if it never saved one by that name.
@@ -1737,7 +1796,7 @@ impl World {
         mod_id: &str,
         name: &str,
     ) -> Result<Option<tiamat_core::plan::Plan>, WorldError> {
-        self.db.load_plan(mod_id, name)
+        self.timed("load plan", |db| db.load_plan(mod_id, name))
     }
 
     /// Writes a plan under a mod's own name, replacing any it had.
@@ -1751,7 +1810,7 @@ impl World {
         name: &str,
         plan: &tiamat_core::plan::Plan,
     ) -> Result<(), WorldError> {
-        self.db.save_plan(mod_id, name, plan)
+        self.timed("save plan", |db| db.save_plan(mod_id, name, plan))
     }
 
     /// Every plan name a mod has saved, sorted.
@@ -1760,7 +1819,7 @@ impl World {
     ///
     /// [`WorldError`] on a SQL failure.
     pub fn plan_names(&self, mod_id: &str) -> Result<Vec<String>, WorldError> {
-        self.db.plan_names(mod_id)
+        self.timed("plan names", |db| db.plan_names(mod_id))
     }
 
     /// Removes a plan a mod saved. Returns whether there was one.
@@ -1769,7 +1828,7 @@ impl World {
     ///
     /// [`WorldError`] on a SQL failure.
     pub fn delete_plan(&self, mod_id: &str, name: &str) -> Result<bool, WorldError> {
-        self.db.delete_plan(mod_id, name)
+        self.timed("delete plan", |db| db.delete_plan(mod_id, name))
     }
 
     /// The terrain of one domain, for the physics to collide against.
@@ -1839,7 +1898,7 @@ impl World {
     /// keeping it would mean a destroyed ship still had terrain.
     pub fn forget_domain(&mut self, domain: &str) -> Result<(), WorldError> {
         self.domains.remove(domain);
-        self.db.remove_domain(domain)
+        self.timed("remove domain", |db| db.remove_domain(domain))
     }
 
     /// Flushes and closes the database.
@@ -2034,6 +2093,60 @@ mod tests {
             world.save_dirty().expect("save"),
             0,
             "something was still dirty after the backlog drained"
+        );
+    }
+
+    #[test]
+    fn every_database_call_the_world_makes_is_timed_and_handed_over_once() {
+        // The tick files these under its phases and names the slow ones, so a
+        // call the world makes without timing is time the tick cannot place —
+        // which is how a summary scan hid inside `save chunks` and `gen`.
+        let (mut world, ids) = world("sql-clock");
+        let mut flat = Flat::new(ids[0]);
+        let overworld = tiamat_core::domain::OVERWORLD;
+        let pos = ChunkPos::new(0, -1, 0);
+        drop(world.take_sql_calls());
+
+        world.chunk(overworld, pos, &mut flat).expect("generate");
+        world
+            .summary(overworld, 1, pos, &mut flat)
+            .expect("summary");
+        world.save_dirty().expect("save");
+        let names: Vec<&str> = world
+            .take_sql_calls()
+            .iter()
+            .map(|call| call.what)
+            .collect();
+        for expected in ["load chunk", "save chunk batch"] {
+            assert!(
+                names.contains(&expected),
+                "`{expected}` was not timed: {names:?}"
+            );
+        }
+        assert!(
+            world.take_sql_calls().is_empty(),
+            "a take handed the same calls over twice"
+        );
+
+        // And the summary rows the tick reports move with what is stored: a
+        // saved chunk forgets its summaries in the same transaction.
+        let other = ChunkPos::new(5, -1, 0);
+        world
+            .summary(overworld, 1, other, &mut flat)
+            .expect("a horizon summary");
+        let held = world.summary_rows();
+        assert!(held > 0, "a stored summary chain was not counted");
+        assert_eq!(
+            held,
+            world.db().summary_rows(overworld).expect("count") as u64,
+            "the kept count and the table disagree"
+        );
+        world.chunk(overworld, other, &mut flat).expect("visit");
+        world.save_dirty().expect("save");
+        assert_eq!(
+            world.summary_rows(),
+            world.db().summary_rows(overworld).expect("count") as u64,
+            "a save that forgot summaries did not move the count"
         );
     }
 

@@ -38,6 +38,7 @@ pub mod scaffold;
 pub mod shutdown;
 pub mod sim;
 pub mod skies;
+pub mod sqlclock;
 pub mod storage;
 pub mod trace;
 pub mod transport;

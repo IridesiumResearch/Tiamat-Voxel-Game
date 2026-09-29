@@ -452,6 +452,19 @@ pub struct Solver {
     sinks: Sinks,
 }
 
+/// How much work a [`Solver`] is holding, set by set — see [`Solver::load`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Load {
+    /// Blocks queued since the last tick: touched by an edit, or woken by a
+    /// neighbour that moved.
+    pub active: usize,
+    /// Blocks a capped tick did not reach, first in line on the next.
+    pub carried: usize,
+    /// Blocks of evaporable fluid lying open to the air, walked every tick for
+    /// their roll.
+    pub evaporating: usize,
+}
+
 /// How many blocked flows one tick will report.
 ///
 /// A cap on the HOOK's cost, not on the solver's — the visit budget already
@@ -504,6 +517,23 @@ impl Solver {
     #[must_use]
     pub fn active(&self) -> usize {
         self.active.len() + self.carried.len()
+    }
+
+    /// The size of each set the next tick will walk.
+    ///
+    /// For the server's tick breakdown. The visit budget bounds what a tick
+    /// settles and not what it walks to get there: the evaporating set is
+    /// walked whole every tick, and the pending queue is drained and rebuilt
+    /// however little of it is visited. A fluid phase that costs more than the
+    /// budget allows is explained by these sizes, and by nothing else the tick
+    /// can see.
+    #[must_use]
+    pub fn load(&self) -> Load {
+        Load {
+            active: self.active.len(),
+            carried: self.carried.len(),
+            evaporating: self.evaporating.len(),
+        }
     }
 
     /// Whether there is nothing to do.
@@ -2085,6 +2115,38 @@ mod tests {
             "a tick with a budget of four retired all {queued} blocks"
         );
         assert_eq!(scene.total(), MAX_VOLUME * 121, "a capped tick lost milk");
+    }
+
+    #[test]
+    fn the_load_names_each_set_the_next_tick_walks() {
+        // The server's breakdown reads these to explain a fluid phase that
+        // costs more than the visit budget allows, so each has to be the set
+        // it says: touched blocks are active, and what a capped tick did not
+        // reach is carried, not active.
+        let mut scene = Scene::floored(-6..=6, -6..=6);
+        let mut solver = Solver::new();
+        assert_eq!(solver.load(), Load::default(), "a new solver holds nothing");
+        for x in -5..=5 {
+            for z in -5..=5 {
+                scene.pour(BlockPos::new(x, 1, z), MAX_VOLUME);
+                solver.touch(BlockPos::new(x, 1, z));
+            }
+        }
+        let queued = solver.load();
+        assert_eq!(queued.active, solver.active(), "{queued:?}");
+        assert_eq!((queued.carried, queued.evaporating), (0, 0), "{queued:?}");
+
+        solver.tick(&mut scene, &Tunings::uniform(Tuning::DEFAULT), 4, SEED, 0);
+        let after = solver.load();
+        assert!(
+            after.carried > 0,
+            "a tick with a budget of four carried nothing: {after:?}"
+        );
+        assert_eq!(
+            after.active + after.carried,
+            solver.active(),
+            "the load and the count the server already asserts on disagree"
+        );
     }
 
     #[test]

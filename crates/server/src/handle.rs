@@ -622,7 +622,7 @@ fn entity_messages(
 /// Writes the hour to the world, beside the seed: what a played world resumes
 /// at. Logged rather than fatal, like every other save on the way out.
 fn save_time_of_day(world: &crate::world::World, shared: &crate::transport::Shared) {
-    if let Err(err) = world.db().set_time_of_day(shared.day_ticks()) {
+    if let Err(err) = world.timed("time of day", |db| db.set_time_of_day(shared.day_ticks())) {
         error!("could not save the time of day: {err}");
     }
 }
@@ -723,6 +723,17 @@ struct ServeReport {
     generating: Duration,
     /// Time relighting what was served.
     lighting: Duration,
+    /// The pieces of `lighting`, which was one number until the soak of
+    /// 2026-09-28 measured 3–4 ms a chunk against a 217 µs bench and nothing
+    /// could say where the rest went. The relight itself.
+    relight: Duration,
+    /// Sending the light to everybody holding the chunk.
+    broadcast: Duration,
+    /// Waiting for the lighting and fluid locks.
+    locks: Duration,
+    /// Reading the chunk's fluid into the simulation, a database row, before
+    /// it is lit — lava is a light source.
+    fluid_load: Duration,
     /// Chunks answered as dark from their palette, with no relight at all.
     dark: usize,
     /// Requests handed to the generation workers this tick.
@@ -745,19 +756,35 @@ impl ServeReport {
 
     /// The breakdown as one line, for a tick that has lost its budget.
     fn line(&self) -> String {
+        let ms = |took: Duration| took.as_secs_f64() * 1000.0;
         format!(
-            "{} chunks, {} summaries, {} deferred; gen {:.1}ms, light {:.1}ms ({} dark for free); \
-             {} to workers, {} back, {} waiting",
+            "{} chunks, {} summaries, {} deferred; gen {:.1}ms, light {:.1}ms \
+             (relight {:.1}ms, broadcast {:.1}ms, locks {:.1}ms, fluid load {:.1}ms; \
+             {} dark for free); {} to workers, {} back, {} waiting",
             self.chunks,
             self.summaries,
             self.deferred,
-            self.generating.as_secs_f64() * 1000.0,
-            self.lighting.as_secs_f64() * 1000.0,
+            ms(self.generating),
+            ms(self.lighting),
+            ms(self.relight),
+            ms(self.broadcast),
+            ms(self.locks),
+            ms(self.fluid_load),
             self.dark,
             self.to_workers,
             self.from_workers,
             self.waiting,
         )
+    }
+
+    /// The same pieces, for the means: the serve line prints them when a
+    /// tick runs over, so the phase list does not.
+    fn note(&self, phases: &mut sim::Phases) {
+        phases.quiet_part("serving", "gen", self.generating);
+        phases.quiet_part("serving", "relight", self.relight);
+        phases.quiet_part("serving", "broadcast", self.broadcast);
+        phases.quiet_part("serving", "locks", self.locks);
+        phases.quiet_part("serving", "fluid load", self.fluid_load);
     }
 }
 
@@ -1160,8 +1187,16 @@ fn serve_one_chunk(
         // A guard of its own, taken and dropped before the lighting lock
         // exists, so the two are never held at once in this order —
         // everything else here takes lighting first and fluid second.
+        //
+        // **Each piece timed on its own** — the lock waits, this read, the
+        // relight and the broadcast — because the total was measured at 3–4 ms
+        // a chunk against a 217 µs bench and one number could not say which of
+        // them was the difference.
         {
+            let waited = std::time::Instant::now();
             let mut ponds = fluidics.write().expect("fluid lock");
+            report.locks += waited.elapsed();
+            let loading = std::time::Instant::now();
             let fluid = ponds.of(&request.domain);
             if !fluid.knows(request.pos) {
                 match world.load_fluid(&request.domain, request.pos) {
@@ -1174,7 +1209,9 @@ fn serve_one_chunk(
                     }
                 }
             }
+            report.fluid_load += loading.elapsed();
         }
+        let waited = std::time::Instant::now();
         let mut lit = lighting.write().expect("lighting lock");
         // **The fluid of that space, read under the lighting lock and never the
         // other way round.** A pond of lava is a light source (`light::Glowing`)
@@ -1182,6 +1219,8 @@ fn serve_one_chunk(
         // in this order; nothing takes the lighting lock while holding the fluid
         // one, which is what keeps the pair acyclic.
         let ponds = fluidics.read().expect("fluid lock");
+        report.locks += waited.elapsed();
+        let relit = std::time::Instant::now();
         let dry = crate::light::Dry;
         let glow: &dyn crate::light::Glowing = ponds
             .get(&request.domain)
@@ -1200,7 +1239,10 @@ fn serve_one_chunk(
             report.dark += light.dark_shortcuts() - before;
             touched
         };
+        report.relight += relit.elapsed();
+        let sent = std::time::Instant::now();
         broadcast_light(shared, &request.domain, light, &touched);
+        report.broadcast += sent.elapsed();
         // **Before anything asks for the fluid lock for writing.** The layer
         // this same function sends below takes it, and an `RwLock` is not
         // reentrant: holding the read guard into that call is a deadlock.
@@ -1326,6 +1368,15 @@ const UNLOAD_INTERVAL_TICKS: u64 = 20;
 /// workers can hold at once, so a walk that the pool keeps up with says
 /// nothing.
 const GENERATION_REPORT_TICKS: u64 = 20;
+
+/// Ticks between the lines of per-phase means: one minute.
+///
+/// The over-budget line explains the ticks that lost, and only those; this is
+/// every tick's average, the quiet ones included, which is where a world that
+/// is slowly getting slower shows first. A minute is often enough to see a
+/// trend in a session and seldom enough that the log is still about the game.
+/// See `sim::PhaseLedger`.
+const MEANS_REPORT_TICKS: u64 = 1200;
 
 /// Chunks unloaded per tick, at most.
 ///
@@ -3275,6 +3326,10 @@ impl ServerHandle {
                         String,
                     > = std::collections::BTreeMap::new();
 
+                    // The database calls of start-up are not the first tick's:
+                    // dropped here, or the first tick would be charged for
+                    // opening the world.
+                    drop(world.take_sql_calls());
                     let mut held = Some(world);
                     // Whether the last save ran out of budget before it ran out
                     // of chunks. See the save itself, below.
@@ -3292,6 +3347,10 @@ impl ServerHandle {
                     // that has already lost its budget, and the marks
                     // themselves are an `Instant::now()` apiece.
                     let mut phases = sim::Phases::start();
+                    // Where the last once-a-minute means line left off: the
+                    // server keeps one running ledger, and a window is the
+                    // difference between two copies of it.
+                    let mut means_from = sim::PhaseLedger::default();
                     let mut clock = sim::MonotonicClock::new();
                     sim::run(&mut clock, &control, |tick| {
                         let mut world = held
@@ -3324,7 +3383,8 @@ impl ServerHandle {
                         // later.
                         if let Ok(mut identities) = shared.identities.try_lock()
                             && identities.is_dirty()
-                            && let Err(err) = store::flush(world.db(), &mut identities)
+                            && let Err(err) =
+                                world.timed("identities", |db| store::flush(db, &mut identities))
                         {
                             error!("could not persist identity changes: {err}");
                         }
@@ -4924,11 +4984,10 @@ impl ServerHandle {
                                     .into_iter()
                                     .map(|(id, at)| (id.to_owned(), at))
                                     .collect();
-                            if let Err(err) = world
-                                .db()
-                                .set_domain_instances(&instances)
-                                .and_then(|()| world.db().set_domain_positions(&positions))
-                            {
+                            if let Err(err) = world.timed("domain instances", |db| {
+                                db.set_domain_instances(&instances)
+                                    .and_then(|()| db.set_domain_positions(&positions))
+                            }) {
                                 error!("could not write the world's domain instances: {err}");
                             }
                         }
@@ -4949,6 +5008,7 @@ impl ServerHandle {
                             &mut parked,
                         );
                         control.note_generated_off_tick(served.from_workers);
+                        served.note(&mut phases);
                         // **Generation lag is a line in the log** (World ask
                         // 40). The over-budget warning watches the tick, and
                         // the workers exist to keep generation off it — so a
@@ -5006,6 +5066,8 @@ impl ServerHandle {
                             // them is a mob that is gone. The guard is because
                             // chunks arrive twice — the lighting defers what it
                             // cannot relight by putting them back on this list.
+                            phases.count("light", "arrived", arrived.len() as u64);
+                            let at = std::time::Instant::now();
                             let mut mobs = population.write().expect("entity lock");
                             for pos in &arrived {
                                 if mobs.knows(&domain, *pos) {
@@ -5022,6 +5084,7 @@ impl ServerHandle {
                                 }
                             }
                             drop(mobs);
+                            phases.part("light", "entities", at.elapsed());
 
                             // **Fluid is the overworld's alone, and that is a
                             // limitation rather than a decision.** `Fluidics`
@@ -5036,10 +5099,10 @@ impl ServerHandle {
                             // Light is not skipped: it is a store per domain,
                             // so a ship is lit by its own sky and its own lamps.
                             if domain == tiamat_core::domain::OVERWORLD {
+                                let at = std::time::Instant::now();
                                 load_domain_fluid(&fluidics, &world, &domain, &arrived);
+                                phases.part("light", "fluid load", at.elapsed());
                             }
-
-
 
                             let mut lit = lighting.write().expect("lighting lock");
                             // Same order as everywhere else that lights.
@@ -5078,7 +5141,10 @@ impl ServerHandle {
                                 done += 1;
                             }
                             drop(ponds);
+                            phases.part("light", "relight", started.elapsed());
+                            let at = std::time::Instant::now();
                             broadcast_light(&shared, &domain, light, &touched);
+                            phases.part("light", "broadcast", at.elapsed());
                         }
                         control.note_lit_chunks(lighting.read().expect("lighting lock").len());
 
@@ -5483,6 +5549,15 @@ impl ServerHandle {
                                 .map(str::to_owned)
                                 .collect();
                             for domain in wet {
+                            // **The phase in four pieces, and the sizes behind
+                            // the first.** `VISITS_PER_TICK` caps what the
+                            // solver settles at about 2.4 ms, and the fen soak
+                            // measured 11–45 ms here — so most of the phase was
+                            // outside the capped part and nothing said where:
+                            // the solver's uncapped walks (sized by the three
+                            // sets below), the broadcast per touched chunk,
+                            // the soak and wash edits, or the mods' hooks.
+                            let solving = std::time::Instant::now();
                             // **Land a mod poured into before it was loaded is
                             // loaded now**, before the solver reads it as solid
                             // and squeezes the pour out — see
@@ -5516,6 +5591,10 @@ impl ServerHandle {
                                     &terrain,
                                 );
                             }
+                            let load = fluid.load();
+                            phases.count("fluid", "active", load.active as u64);
+                            phases.count("fluid", "carried", load.carried as u64);
+                            phases.count("fluid", "evaporating", load.evaporating as u64);
                             let changes = fluid.tick(
                                 &domain,
                                 &world,
@@ -5553,12 +5632,16 @@ impl ServerHandle {
                                     }
                                 }
                             }
+                            phases.part("fluid", "solver", solving.elapsed());
+                            let sending = std::time::Instant::now();
+                            let touched = crate::fluid::Fluidics::touched_chunks(&changes);
+                            phases.count("fluid", "chunks", touched.len() as u64);
                             if !changes.is_empty() {
                                 // The whole layer, per touched chunk, rather
                                 // than a delta per block — see
                                 // `ServerMessage::ChunkFluid` for why that is
                                 // both smaller and safer.
-                                for pos in crate::fluid::Fluidics::touched_chunks(&changes) {
+                                for pos in touched {
                                     let Some(layer) = fluid.layer(pos) else {
                                         // The chunk drained completely, so it
                                         // has no layer any more. Clients still
@@ -5584,6 +5667,8 @@ impl ServerHandle {
                                     );
                                 }
                             }
+                            phases.part("fluid", "broadcast", sending.elapsed());
+                            let editing = std::time::Instant::now();
 
                             // **Where the milk tried to go and could not.**
                             //
@@ -5691,6 +5776,8 @@ impl ServerHandle {
                                     }
                                 }
                             }
+                            phases.part("fluid", "edits", editing.elapsed());
+                            let hooking = std::time::Instant::now();
                             // **Gathered first, dispatched under the
                             // lease.** Every field below needs the world
                             // mutably — `block_cells` may load a chunk — and
@@ -5767,6 +5854,7 @@ impl ServerHandle {
                                     error!(mod_id = %mod_id, "mod disabled after an on_fluid_flow failure: {err}");
                                 }
                             }
+                            phases.part("fluid", "hooks", hooking.elapsed());
                             }
                         }
 
@@ -5785,7 +5873,14 @@ impl ServerHandle {
                         // relighting between edits would do the work twice for
                         // two edits in the same room, and the second answer is
                         // the only one anybody sees.
+                        //
+                        // **Its own piece of the phase, and not fluid's.** It
+                        // relights every edit the tick made — digs, places,
+                        // mods — and only happens to run after the fluid, so
+                        // it is timed apart and counted by the blocks it had.
+                        let relighting = std::time::Instant::now();
                         if !relight.is_empty() {
+                            phases.count("fluid", "relit", relight.len() as u64);
                             let mut lit = lighting.write().expect("lighting lock");
                             // The fluid of that space, under the lighting lock
                             // and never the other way round — see the serve
@@ -5812,6 +5907,7 @@ impl ServerHandle {
                             drop(ponds);
                             broadcast_light(&shared, tiamat_core::domain::OVERWORLD, light, &touched);
                         }
+                        phases.part("fluid", "relight", relighting.elapsed());
 
                         phases.mark("fluid");
 
@@ -5896,7 +5992,11 @@ impl ServerHandle {
                             || control.take_save_request()
                         {
                             match world.save_dirty_within(SAVE_BUDGET) {
-                                Ok((_, remaining)) => save_backlog = remaining > 0,
+                                Ok((written, remaining)) => {
+                                    save_backlog = remaining > 0;
+                                    phases.count("save chunks", "written", written as u64);
+                                    phases.count("save chunks", "left", remaining as u64);
+                                }
                                 Err(err) => error!("could not save dirty chunks: {err}"),
                             }
                             phases.mark("save chunks");
@@ -5943,15 +6043,52 @@ impl ServerHandle {
                         // already lost it.
                         phases.mark("saving");
                         let took = phases.total();
+                        // Every database call the tick made, filed under the
+                        // phase it started in; and the tick into the running
+                        // means, which count the ticks that kept their budget
+                        // as well as the ones that did not.
+                        phases.attribute_sql(&world.take_sql_calls());
+                        control.note_phases(&phases);
+                        control.note_world_rows(world.summary_rows(), world.dirty());
+                        if tick > 0 && tick % MEANS_REPORT_TICKS == 0 {
+                            let ledger = control.phase_ledger();
+                            let window = ledger.since(&means_from);
+                            info!("tick means, last minute: {}", window.line());
+                            means_from = ledger;
+                        }
                         if took > tiamat_core::tick::TICK_DURATION {
+                            // The WAL beside a slow call. A checkpoint is the
+                            // one cost a commit can carry that is not its own,
+                            // and the log's size is what sets one off: `SQLite`
+                            // folds it back inside whichever commit takes it
+                            // past a thousand pages, about 4 MiB. Read only for
+                            // a tick with a slow call to print it by.
+                            if phases.has_slow_sql() {
+                                phases.note_wal(world.db().wal_bytes());
+                            }
                             // The serving line beside the phase breakdown: a
                             // phase that names itself is still only a name, and
                             // what serving costs is a property of the mod that
                             // generates the terrain rather than of the engine.
+                            //
+                            // And the world's two backlogs last: chunks the
+                            // disk has not been told about, and the summary
+                            // rows every forget used to walk — the number that
+                            // grows with the world's age rather than the
+                            // session's.
+                            let backlog = format!(
+                                "world {} chunks dirty, {} summary rows",
+                                world.dirty(),
+                                world.summary_rows()
+                            );
                             let report = if served.is_idle() {
-                                phases.report()
+                                format!("{} — {backlog}", phases.report())
                             } else {
-                                format!("{} — serving {}", phases.report(), served.line())
+                                format!(
+                                    "{} — serving {} — {backlog}",
+                                    phases.report(),
+                                    served.line()
+                                )
                             };
                             warn!("a tick ran over its budget — {report}");
                             control.note_tick_phases(

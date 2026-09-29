@@ -586,6 +586,13 @@ impl Fluidics {
         self.solver.active()
     }
 
+    /// The size of each set the solver's next tick walks — see
+    /// [`Solver::load`] for why the tick's breakdown wants them.
+    #[must_use]
+    pub fn load(&self) -> tiamat_core::fluid::Load {
+        self.solver.load()
+    }
+
     /// Whether there is no fluid work outstanding.
     #[must_use]
     pub fn is_settled(&self) -> bool {

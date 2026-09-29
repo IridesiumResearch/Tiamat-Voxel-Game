@@ -317,6 +317,12 @@ pub struct WorldDb {
     /// mechanism exists to remove.
     fluids: Option<FluidMap>,
     dictionaries: Vec<Dictionary>,
+    /// Rows in `chunk_summaries`, every domain, kept as they are written and
+    /// deleted rather than counted. See [`WorldDb::summary_rows_held`].
+    ///
+    /// A `Cell` because every write that forgets a summary takes `&self`, as
+    /// the connection it shares does; a `WorldDb` is not `Sync` anyway.
+    summary_rows: std::cell::Cell<u64>,
 }
 
 impl WorldDb {
@@ -453,6 +459,11 @@ impl WorldDb {
         let mut ids = IdTable::load(&conn)?;
         let materials = ids.reconcile(&conn, registry)?;
         let fluid_ids = FluidIdTable::load(&conn)?;
+        // Counted once, here, and kept from then on: a `COUNT(*)` of a table a
+        // played world has tens of thousands of rows in is milliseconds, and
+        // the tick wants the number every time it runs over.
+        let summary_rows: i64 =
+            conn.query_row("SELECT COUNT(*) FROM chunk_summaries", [], |row| row.get(0))?;
 
         Ok(Self {
             conn,
@@ -462,6 +473,7 @@ impl WorldDb {
             fluid_ids,
             fluids: None,
             dictionaries: Vec::new(),
+            summary_rows: std::cell::Cell::new(u64::try_from(summary_rows).unwrap_or(0)),
         })
     }
 
@@ -567,8 +579,9 @@ impl WorldDb {
                 blob
             ],
         )?;
-        transaction.execute(FORGET_SUMMARIES, params![domain, pos.x, pos.y, pos.z])?;
+        let gone = transaction.execute(FORGET_SUMMARIES, params![domain, pos.x, pos.y, pos.z])?;
         transaction.commit()?;
+        self.summaries_forgotten(gone);
         Ok(())
     }
 
@@ -608,6 +621,9 @@ impl WorldDb {
             .map(|(pos, chunk)| self.encode(domain, pos, chunk).map(|blob| (pos, blob)))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Counted as they go and applied once the commit lands: a batch that
+        // rolls back forgot nothing.
+        let mut gone = 0;
         let transaction = self.conn.transaction()?;
         {
             let mut statement = transaction.prepare_cached(
@@ -630,10 +646,11 @@ impl WorldDb {
             // `save_chunk_in`: a stored summary describes a stored chunk.
             let mut forget = transaction.prepare_cached(FORGET_SUMMARIES)?;
             for (pos, _) in &encoded {
-                forget.execute(params![domain, pos.x, pos.y, pos.z])?;
+                gone += forget.execute(params![domain, pos.x, pos.y, pos.z])?;
             }
         }
         transaction.commit()?;
+        self.summaries_forgotten(gone);
         Ok(encoded.len())
     }
 
@@ -883,6 +900,7 @@ impl WorldDb {
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
 
+        let mut gone = 0;
         let transaction = self.conn.transaction()?;
         {
             let mut write = transaction.prepare_cached(
@@ -897,7 +915,7 @@ impl WorldDb {
             // removals would leave a horizon showing a sea that has drained.
             let mut forget = transaction.prepare_cached(FORGET_SUMMARIES)?;
             for (pos, blob) in &encoded {
-                forget.execute(params![domain, pos.x, pos.y, pos.z])?;
+                gone += forget.execute(params![domain, pos.x, pos.y, pos.z])?;
                 match blob {
                     Some(blob) => {
                         write.execute(params![domain, pos.x, pos.y, pos.z, blob])?;
@@ -909,6 +927,7 @@ impl WorldDb {
             }
         }
         transaction.commit()?;
+        self.summaries_forgotten(gone);
         Ok(encoded.len())
     }
 
@@ -2075,13 +2094,18 @@ impl WorldDb {
             return Err(WorldError::OverworldIsNotDestroyable);
         }
         let transaction = self.conn.unchecked_transaction()?;
+        let mut gone = 0;
         for table in ["chunks", "chunk_fluid", "entities", "chunk_summaries"] {
-            transaction.execute(
+            let removed = transaction.execute(
                 &format!("DELETE FROM {table} WHERE domain = ?1"),
                 params![domain],
             )?;
+            if table == "chunk_summaries" {
+                gone = removed;
+            }
         }
         transaction.commit()?;
+        self.summaries_forgotten(gone);
         Ok(())
     }
 
@@ -2128,7 +2152,20 @@ impl WorldDb {
         pos: ChunkPos,
         levels: &[(u8, Vec<u8>)],
     ) -> Result<(), WorldError> {
+        // **Rows added, not rows touched.** An upsert reports one change
+        // whether it inserted or replaced, so what this adds to the kept count
+        // is read off the position before and after: two lookups on
+        // `chunk_summaries_by_pos` beside a chain of five writes.
+        let at_position = |transaction: &rusqlite::Transaction<'_>| {
+            transaction.query_row(
+                "SELECT COUNT(*) FROM chunk_summaries
+                 WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
+                params![domain, pos.x, pos.y, pos.z],
+                |row| row.get::<_, i64>(0),
+            )
+        };
         let transaction = self.conn.unchecked_transaction()?;
+        let before = at_position(&transaction)?;
         {
             let mut write = transaction.prepare(
                 "INSERT INTO chunk_summaries (domain, level, x, y, z, data)
@@ -2146,7 +2183,11 @@ impl WorldDb {
                 ])?;
             }
         }
+        let after = at_position(&transaction)?;
         transaction.commit()?;
+        let added = u64::try_from(after.saturating_sub(before)).unwrap_or(0);
+        self.summary_rows
+            .set(self.summary_rows.get().saturating_add(added));
         Ok(())
     }
 
@@ -2162,9 +2203,31 @@ impl WorldDb {
     ///
     /// Any SQL failure.
     pub fn forget_summaries(&self, domain: &str, pos: ChunkPos) -> Result<usize, WorldError> {
-        Ok(self
+        let gone = self
             .conn
-            .execute(FORGET_SUMMARIES, params![domain, pos.x, pos.y, pos.z])?)
+            .execute(FORGET_SUMMARIES, params![domain, pos.x, pos.y, pos.z])?;
+        self.summaries_forgotten(gone);
+        Ok(gone)
+    }
+
+    /// Takes rows a write deleted off the kept count.
+    fn summaries_forgotten(&self, rows: usize) {
+        let rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        self.summary_rows
+            .set(self.summary_rows.get().saturating_sub(rows));
+    }
+
+    /// How many summary rows the world holds, in every domain.
+    ///
+    /// **Kept, not counted.** The number is the world's age as the horizon
+    /// sees it — the table only grows while anybody plays — and it is what
+    /// every summary forget cost in proportion to until the position index,
+    /// so the tick reports it whenever it runs over. A `COUNT(*)` each time
+    /// would itself be milliseconds on a played world; this is counted once
+    /// at open and moved by every write that adds or deletes a row.
+    #[must_use]
+    pub fn summary_rows_held(&self) -> u64 {
+        self.summary_rows.get()
     }
 
     /// How many summary rows one domain holds, for the tests and the zero-cost
@@ -2241,6 +2304,20 @@ impl WorldDb {
     }
 
     // -- lifecycle --------------------------------------------------------
+
+    /// The size of the world's write-ahead log, if it has one on disk.
+    ///
+    /// **Read from the file, never asked of `SQLite`.** The pragma that
+    /// reports on the WAL is also the one that runs a checkpoint, and this is
+    /// asked by a tick that has just run over — the one moment nobody wants a
+    /// checkpoint started. `None` for an in-memory world and for a file with
+    /// no log beside it.
+    #[must_use]
+    pub fn wal_bytes(&self) -> Option<u64> {
+        let mut wal = self.path.clone().into_os_string();
+        wal.push("-wal");
+        std::fs::metadata(wal).ok().map(|meta| meta.len())
+    }
 
     /// Flushes pending work and folds the WAL back into the database.
     ///
@@ -2496,6 +2573,57 @@ mod tests {
     }
 
     #[test]
+    fn the_kept_summary_count_follows_every_write_that_moves_it() {
+        // The tick reports this number rather than counting, so every path
+        // that adds or deletes a summary row has to move it — and a chain
+        // rewritten in place, which an upsert reports as changes, must not.
+        // Checked against a real COUNT after each step.
+        let counted = |db: &WorldDb| -> u64 {
+            let rows: i64 = db
+                .conn
+                .query_row("SELECT COUNT(*) FROM chunk_summaries", [], |row| row.get(0))
+                .expect("count");
+            u64::try_from(rows).expect("a count is not negative")
+        };
+        let chain = |levels: std::ops::RangeInclusive<u8>| -> Vec<(u8, Vec<u8>)> {
+            levels.map(|level| (level, vec![level])).collect()
+        };
+        let mut registry = Registry::new();
+        let mut db = WorldDb::open_in_memory(&mut registry).expect("open");
+        let at: Vec<ChunkPos> = (0..5).map(|x| ChunkPos::new(x, 0, 0)).collect();
+        for pos in &at {
+            db.save_summaries(DEFAULT_DOMAIN, *pos, &chain(1..=5))
+                .expect("save");
+        }
+        db.save_summaries("ship", at[0], &chain(1..=5))
+            .expect("save");
+        assert_eq!((db.summary_rows_held(), counted(&db)), (30, 30));
+
+        // Rewritten in place adds nothing; a longer chain adds its new levels.
+        db.save_summaries(DEFAULT_DOMAIN, at[0], &chain(1..=5))
+            .expect("rewrite");
+        db.save_summaries(DEFAULT_DOMAIN, at[1], &chain(1..=6))
+            .expect("grow");
+        assert_eq!((db.summary_rows_held(), counted(&db)), (31, 31));
+
+        // Every path that forgets.
+        db.forget_summaries(DEFAULT_DOMAIN, at[0]).expect("forget");
+        db.save_chunk(at[1], &Chunk::air(at[1]))
+            .expect("save chunk");
+        db.save_chunks_batch([(at[2], &Chunk::air(at[2]))])
+            .expect("batch");
+        db.save_chunk_fluid_in(DEFAULT_DOMAIN, at[3], &FluidLayer::empty())
+            .expect("fluid");
+        db.save_chunk_fluid_batch([(at[4], &FluidLayer::empty())])
+            .expect("fluid batch");
+        assert_eq!((db.summary_rows_held(), counted(&db)), (5, 5));
+
+        db.remove_domain("ship").expect("remove");
+        assert_eq!((db.summary_rows_held(), counted(&db)), (0, 0));
+        assert_eq!(db.wal_bytes(), None, "an in-memory world has no log file");
+    }
+
+    #[test]
     fn a_world_saved_before_the_position_index_gets_it_on_open() {
         // **The fix has to reach the worlds that need it**, and those are the
         // old ones: a world gets slower the more summaries it has stored. The
@@ -2533,9 +2661,21 @@ mod tests {
             "reopening an older world did not build the position index"
         );
         assert_eq!(
+            db.summary_rows_held(),
+            1,
+            "the kept count did not start from what the file holds"
+        );
+        assert_eq!(
             db.forget_summaries(DEFAULT_DOMAIN, pos).expect("forget"),
             1,
             "the summary written before the index is found through it"
+        );
+        assert_eq!(db.summary_rows_held(), 0);
+        // The tick reports the log's size beside a slow write, read from the
+        // file: a write has just gone into it.
+        assert!(
+            db.wal_bytes().is_some_and(|bytes| bytes > 0),
+            "a file world just written to reports no WAL"
         );
 
         drop(db);
