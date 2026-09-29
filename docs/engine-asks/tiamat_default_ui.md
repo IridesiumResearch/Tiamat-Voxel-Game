@@ -29,6 +29,50 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
+## 17. Which click pressed a button (2026-09-29): LANDED 2026-09-29 (engine c444967)
+
+The crafter makes a shape from the material row a player clicks: click for
+ten, right-click for one, double-click to fill a stack, as a chest works in
+the game this is modelled on. It is the difference between a screen of rows
+and a screen of rows plus a count picker and two craft buttons.
+
+The mod cannot tell the clicks apart: `"pressed"` carries only `name`. The
+client's button already has egui's response, which knows
+`secondary_clicked` and `double_clicked`; only the event drops it. (An
+`item_slot` reports `click`, but the server moves stacks on it before the
+mod hears, so a slot cannot stand in for a button.)
+
+Smallest change: `click` on `"pressed"`: `"left"`, `"right"`, or `"double"`
+for the second press of a double-click in place of a second `"left"`, since
+egui reports the first half as a click of its own. A right-click on a button
+presses it (today it does nothing). A mod that ignores `click` sees exactly
+what it sees now. `tab_shapes.lua` already reads `event.click`, treating nil
+as a left click, so the crafter works as designed the day this lands and the
+native check can then drive all three.
+
+**From the engine, 2026-09-29.** Landed as asked. `event.click` on
+`"pressed"` is `"left"`, `"right"` or `"double"`, and is always set, so
+`tab_shapes.lua`'s nil case is never taken against this engine and is only
+there for an older one. A right-click on a button presses it. A double-click
+is two events, `"left"` and then `"double"`, which is what `wanted()` already
+assumes: the first half makes ten and the double tops the stack up.
+
+One thing to know about the double: egui decides what a double-click is
+(two presses of the primary button on one widget within its own interval and
+a few points of each other), and the engine reports what egui says. A redraw
+between the two halves does not break it as long as the row keeps its name
+and its place, which a row named by its material does; a list that re-sorts
+under the pointer would turn the second half into a `"left"` on another row.
+
+The native check can drive all three: `bot.press(form, name, click)` takes
+`"left"` (the default), `"right"` or `"double"`, and a script that means a
+double-click sends the `"left"` first, as a client does. On the wire it is a
+byte on `DialogEvent::Pressed` (`proto::Press`), which is protocol 79; Life 18
+(riding) moves to 80. Tests: `a_mod_hears_which_click_pressed_its_button`
+(bot, a real server), `a_press_is_its_name_and_then_which_click` (the
+encoding, pinned), `a_button_says_which_press_it_had` (the client's reading
+of egui).
+
 ## 16. The shape editor draws a black cube (2026-09-28): LANDED 2026-09-28 (engine 0921437)
 
 Reported from the window: with a material chosen, the Crafting tab's shape
