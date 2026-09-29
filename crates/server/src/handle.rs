@@ -1364,8 +1364,8 @@ const UNLOAD_INTERVAL_TICKS: u64 = 20;
 
 /// Ticks between looks at the generation backlog: one second.
 ///
-/// World ask 40. Reported only once every request the clients may have out
-/// has sat behind a full pool for several looks running — see
+/// World ask 40. Reported only once the workers have generated without pause
+/// for several looks running while requests waited — see
 /// [`crate::worldgen::Lag`] — so a walk the pool keeps up with says nothing.
 const GENERATION_REPORT_TICKS: u64 = 20;
 
@@ -3351,8 +3351,8 @@ impl ServerHandle {
                     // server keeps one running ledger, and a window is the
                     // difference between two copies of it.
                     let mut means_from = sim::PhaseLedger::default();
-                    // How long generation has been behind the clients, in
-                    // looks. See `worldgen::Lag`.
+                    // Whether generation has been setting the pace the world
+                    // arrives at, and since when. See `worldgen::Lag`.
                     let mut lag = crate::worldgen::Lag::default();
                     let mut clock = sim::MonotonicClock::new();
                     sim::run(&mut clock, &control, |tick| {
@@ -5021,27 +5021,38 @@ impl ServerHandle {
                         if tick % GENERATION_REPORT_TICKS == 0
                             && let Some(pool) = workers.as_ref()
                         {
-                            // **Waiting is the queue and the parking, counted
-                            // in requests**, because the yardstick is the
-                            // clients' windows and a window counts requests.
-                            // It used to be measured against the pool's
-                            // capacity, which one player's window outgrows —
-                            // so it fired on every single-player walk. See
-                            // `worldgen::Lag` for what "behind" is now.
+                            // **Behind is where the workers' time went, not how
+                            // much is queued.** Two rules that counted
+                            // requests failed opposite ways — against the
+                            // pool's capacity it fired on every single-player
+                            // walk, against the clients' windows it never
+                            // fired at all — because a stream the workers keep
+                            // up with and one they cannot look the same by
+                            // count. See `worldgen::Lag`. Waiting is the queue
+                            // and the parking, in requests: the depth the line
+                            // reports, and the "something is waiting" the
+                            // rule needs.
                             let waiting = shared.queued_chunk_requests() + parked.waiting();
-                            let windows = shared.request_windows();
-                            if let Some(looks) = lag.look(waiting, windows, !pool.has_room()) {
+                            let now = std::time::Instant::now();
+                            if let Some(behind) =
+                                lag.look(now, pool.busy(now), pool.workers(), waiting)
+                            {
                                 let cost = pool
                                     .recent_cost()
                                     .map_or(0.0, |cost| cost.as_secs_f64() * 1000.0);
                                 warn!(
                                     waiting,
-                                    windows,
                                     in_flight = pool.in_flight(),
                                     ms_per_chunk = format!("{cost:.1}"),
+                                    workers = pool.workers(),
+                                    busy_percent = behind.busy_percent,
+                                    behind_seconds = behind.lasted.as_secs(),
                                     "generation behind: {waiting} chunks waiting, {} in flight, {cost:.1} ms/chunk — \
-                                     the clients' whole window of {windows} has waited on the workers for {looks} s",
-                                    pool.in_flight()
+                                     {} workers generating {}% of the time for {} s",
+                                    pool.in_flight(),
+                                    pool.workers(),
+                                    behind.busy_percent,
+                                    behind.lasted.as_secs()
                                 );
                             }
                         }

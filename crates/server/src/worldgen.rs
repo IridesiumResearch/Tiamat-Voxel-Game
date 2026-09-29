@@ -63,6 +63,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use tiamat_core::script::{MluaVm, ModHost, ScriptVm as _, VmLimits};
 use tiamat_core::{Chunk, ChunkPos, MaterialId};
@@ -184,6 +185,22 @@ pub struct Pool {
     /// changes with the country a player is over, and the line that reports
     /// it (World ask 40) is about now.
     recent_micros: std::collections::VecDeque<u64>,
+    /// What each worker has spent generating, the job in hand included.
+    clocks: Arc<[Mutex<Busy>]>,
+}
+
+/// What one worker has spent generating, for [`Pool::busy`].
+///
+/// **The job in hand counts up to now**, not only the ones finished. A chunk
+/// that costs longer than a look would otherwise leave a look with nothing
+/// finished in it — a saturated pool reading as an idle one, exactly when
+/// generation is furthest behind.
+#[derive(Debug, Default)]
+struct Busy {
+    /// Time on the jobs it has finished.
+    spent: Duration,
+    /// When the job in hand began, if it has one.
+    since: Option<Instant>,
 }
 
 /// How many recent chunks the pool averages its cost over.
@@ -229,48 +246,120 @@ pub fn worker_count() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| (cores.get() / 2).clamp(1, 4))
 }
 
-/// Looks in a row the backlog must fill the clients' whole window before the
-/// lag line speaks: three seconds, at the tick's one look a second.
+/// Looks in a row the workers must have been saturated before the lag line
+/// speaks: three seconds, at the tick's one look a second.
 pub const LAG_LOOKS: u32 = 3;
+
+/// The share of the workers' time, in percent, spent generating at or above
+/// which the pool counts as saturated.
+///
+/// Not a hundred: a worker finishing its second job a moment before the tick
+/// hands it a third is idle for that moment, and a pool doing nothing but
+/// generating shows a few percent of such gaps. Well above what a pool the
+/// tick is pacing shows, because that pool idles for most of every tick — see
+/// [`Lag`].
+pub const LAG_BUSY_PERCENT: u64 = 90;
 
 /// Whether generation is keeping up with the players asking for it.
 ///
 /// # What "behind" means
 ///
-/// World ask 40 asked for a line when a world arrives as slabs. It shipped
-/// comparing the backlog with the pool's capacity — four workers of
-/// [`JOBS_PER_WORKER`], eight — while one player's own request window is eleven
-/// chunks and two horizon summaries. So a single player streaming normally
-/// always had more waiting than the pool could hold, and the line fired on
-/// every walk: "9–12 waiting, 8 in flight" was the ordinary shape of a stream
-/// the pool was keeping up with, logged at `warn` once a second.
+/// **Generation is behind when it sets the pace the world arrives at: the
+/// workers spent (nearly) all their time generating, and requests still
+/// waited.** For [`LAG_LOOKS`] looks running, so a burst — a join, a teleport —
+/// that the pool drains within a couple of seconds says nothing.
 ///
-/// **A client cannot have more out than its window**, so the backlog is
-/// bounded by the clients' windows together, and it only REACHES that bound
-/// when every request they may make is sitting behind the workers — nothing
-/// answered since the last look, nothing new asked. That, with the pool full,
-/// for [`LAG_LOOKS`] looks running, is generation not keeping up. One look is a
-/// tick on which nothing happened to come back; a full window with room in the
-/// pool is the serving clock running out, which is not generation's to report.
+/// Counting requests cannot tell that apart from a stream being answered, which
+/// is how the two rules before this one failed. World ask 40 shipped comparing
+/// the backlog with the pool's capacity, four workers of [`JOBS_PER_WORKER`],
+/// eight — but one player's request window is larger than that, so a single
+/// player walking always had more waiting than the pool held, and the line
+/// fired at `warn` once a second on every walk, at 0.6 ms a chunk as readily as
+/// at 45. The next rule waited for the backlog to fill every streaming
+/// player's whole window, which a stalled stream cannot do: a connection's
+/// chunks and summaries share one cap, the horizon waits behind the detail, and
+/// an idle second player's window counted towards the bound while adding
+/// nothing to the backlog. It never fired, however slow the generator.
+///
+/// What does tell them apart is **where the time goes**. The tick hands the
+/// pool at most its capacity per pass, so a pool of cheap chunks is full at
+/// every look and idle for most of every tick — the tick's pace is the stream's
+/// limit then, not the workers. Only when a worker's jobs outlast the pass that
+/// refills them — a chunk dearer than half a tick, at two jobs a worker — do
+/// they generate without pause, and then every millisecond more a chunk costs
+/// is that much longer for the world to arrive. Nothing about who is
+/// connected, or how many requests each may have out, enters it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Lag {
-    /// Looks in a row the window has been full behind a full pool.
+    /// Looks in a row the workers have been saturated with requests waiting.
     behind_for: u32,
+    /// When that run began: the look before its first, since a look's share
+    /// covers the time back to the one before it.
+    began: Option<Instant>,
+    /// When the last look was, and the workers' busy total then.
+    last: Option<(Instant, Duration)>,
+}
+
+/// What the lag line has to say: generation is behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Behind {
+    /// Looks in a row the workers have been saturated.
+    pub looks: u32,
+    /// How long that has been, by the clock rather than by counting looks: a
+    /// tick running over spaces the looks out.
+    pub lasted: Duration,
+    /// The share of the workers' time spent generating since the last look,
+    /// in percent.
+    pub busy_percent: u64,
 }
 
 impl Lag {
-    /// One look at the backlog: requests waiting on generation, the windows of
-    /// everybody streaming, and whether the pool has room for another job.
+    /// One look at the pool: the moment, the workers' busy total then
+    /// ([`Pool::busy`]), how many workers there are, and how many requests are
+    /// waiting on generation.
     ///
-    /// `Some(looks)` when the line should speak, with how many looks in a row
-    /// generation has been behind.
-    pub fn look(&mut self, waiting: usize, windows: usize, pool_full: bool) -> Option<u32> {
-        if windows > 0 && pool_full && waiting >= windows {
+    /// `Some` when the line should speak. The first look only sets the
+    /// baseline, since a share needs two readings.
+    pub fn look(
+        &mut self,
+        at: Instant,
+        busy: Duration,
+        workers: usize,
+        waiting: usize,
+    ) -> Option<Behind> {
+        let Some((then, before)) = self.last.replace((at, busy)) else {
+            self.behind_for = 0;
+            self.began = None;
+            return None;
+        };
+        let available = at
+            .saturating_duration_since(then)
+            .as_micros()
+            .saturating_mul(workers as u128);
+        let spent = busy.saturating_sub(before).as_micros();
+        // No time between the looks, or no workers, is no share at all. Over a
+        // hundred is only the moment between reading the clock and the
+        // workers, and it says "all of it".
+        let percent = spent
+            .saturating_mul(100)
+            .checked_div(available)
+            .map_or(0, |share| u64::try_from(share.min(100)).unwrap_or(100));
+        if waiting > 0 && percent >= LAG_BUSY_PERCENT {
+            if self.behind_for == 0 {
+                self.began = Some(then);
+            }
             self.behind_for = self.behind_for.saturating_add(1);
         } else {
             self.behind_for = 0;
+            self.began = None;
         }
-        (self.behind_for >= LAG_LOOKS).then_some(self.behind_for)
+        (self.behind_for >= LAG_LOOKS).then(|| Behind {
+            looks: self.behind_for,
+            lasted: self
+                .began
+                .map_or(Duration::ZERO, |began| at.saturating_duration_since(began)),
+            busy_percent: percent,
+        })
     }
 }
 
@@ -292,6 +381,7 @@ impl Pool {
         let job_queue = Arc::new(Mutex::new(job_queue));
         let (done_tx, done) = mpsc::channel::<Done>();
         let faulted = Arc::new(RwLock::new(BTreeSet::new()));
+        let clocks: Arc<[Mutex<Busy>]> = (0..workers).map(|_| Mutex::default()).collect();
         let (ready_tx, ready) = mpsc::channel::<(usize, Result<(), String>)>();
         let mut handles = Vec::with_capacity(workers);
         for index in 0..workers {
@@ -299,10 +389,21 @@ impl Pool {
             let queue = Arc::clone(&job_queue);
             let done = done_tx.clone();
             let faulted = Arc::clone(&faulted);
+            let clocks = Arc::clone(&clocks);
             let ready = ready_tx.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("worldgen-{index}"))
-                .spawn(move || worker(index, &spec, &queue, &done, &faulted, &ready))
+                .spawn(move || {
+                    worker(
+                        index,
+                        &spec,
+                        &queue,
+                        &done,
+                        &faulted,
+                        &ready,
+                        &clocks[index],
+                    );
+                })
                 .map_err(PoolError::Spawn)?;
             handles.push(handle);
         }
@@ -332,7 +433,33 @@ impl Pool {
             generated: 0,
             next_seq: 0,
             recent_micros: std::collections::VecDeque::with_capacity(RECENT_CHUNKS),
+            clocks,
         })
+    }
+
+    /// How many workers generate.
+    #[must_use]
+    pub fn workers(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// How long the workers have spent generating, all of them together,
+    /// since the pool started — each one's job in hand counted up to `now`.
+    ///
+    /// Two readings a known time apart give the share of the workers' time
+    /// that went on generation, which is what [`Lag`] calls behind.
+    #[must_use]
+    pub fn busy(&self, now: Instant) -> Duration {
+        self.clocks
+            .iter()
+            .filter_map(|clock| clock.lock().ok())
+            .map(|clock| {
+                clock.spent
+                    + clock
+                        .since
+                        .map_or(Duration::ZERO, |since| now.saturating_duration_since(since))
+            })
+            .sum()
     }
 
     /// Whether another job may be submitted now.
@@ -453,6 +580,7 @@ fn worker(
     done: &mpsc::Sender<Done>,
     faulted: &RwLock<BTreeSet<String>>,
     ready: &mpsc::Sender<(usize, Result<(), String>)>,
+    clock: &Mutex<Busy>,
 ) {
     // Charter rule 4: a thread generating terrain is a simulation thread.
     tiamat_core::assert_ieee_mode();
@@ -485,9 +613,18 @@ fn worker(
             }
             known_faulted.clone_from(&shared);
         }
-        let started = std::time::Instant::now();
+        let started = Instant::now();
+        if let Ok(mut clock) = clock.lock() {
+            clock.since = Some(started);
+        }
         let mut answer = generate(&mut host, &job, &spec.fluids, &mut known_faulted);
         answer.took = started.elapsed();
+        // Under the one lock, so a reading never counts this job both as
+        // finished and as in hand.
+        if let Ok(mut clock) = clock.lock() {
+            clock.spent += answer.took;
+            clock.since = None;
+        }
         if done.send(answer).is_err() {
             // The tick has dropped the pool.
             return;
@@ -597,71 +734,110 @@ mod tests {
 
     use super::*;
 
-    /// One player's window, from the constants the connection streams by.
-    fn one_players_window() -> usize {
-        use crate::transport::endpoint::{
-            CHUNKS_PER_TICK, MIN_CHUNKS_IN_FLIGHT, SUMMARIES_IN_FLIGHT_PER_CLIENT,
-        };
-        (CHUNKS_PER_TICK / 2).max(MIN_CHUNKS_IN_FLIGHT) + SUMMARIES_IN_FLIGHT_PER_CLIENT
+    /// Instants a second apart, as the tick looks.
+    fn seconds_from_now() -> impl Iterator<Item = Instant> {
+        let start = Instant::now();
+        (0u64..).map(move |second| start + Duration::from_secs(second))
+    }
+
+    /// What four workers spend in a second when the tick hands them eight
+    /// chunks a pass, twenty passes a second, at `cost` apiece.
+    fn a_paced_second(cost: Duration) -> Duration {
+        cost * u32::try_from(4 * JOBS_PER_WORKER * 20).expect("small")
     }
 
     #[test]
-    fn a_single_player_streaming_normally_is_not_behind() {
-        // The shape the old rule warned on once a second: nine to twelve
-        // waiting with the pool full, on every walk. More than the pool holds
-        // is ordinary — one player's window is larger than the pool — and a
-        // window that is never full is a stream being answered.
-        let window = one_players_window();
-        assert!(
-            window > 4 * JOBS_PER_WORKER,
-            "the premise: one player's window ({window}) outgrows a four-worker pool"
-        );
-        let mut lag = Lag::default();
-        for look in 0..60 {
-            let waiting = 9 + look % 4;
-            assert!(waiting < window);
-            assert_eq!(
-                lag.look(waiting, window, true),
-                None,
-                "{waiting} of a window of {window} was called behind"
-            );
+    fn a_stream_the_workers_keep_up_with_is_not_behind() {
+        // The shape the first rule warned on once a second: nine to twelve
+        // requests waiting on a four-worker pool that is full at every look.
+        // At the fen soak's 0.6 ms a chunk the workers idle for nearly all of
+        // every tick, and at 20 ms they still idle a fifth of it — the tick's
+        // pace is what the stream waits on, not generation.
+        for cost in [Duration::from_micros(600), Duration::from_millis(20)] {
+            let mut lag = Lag::default();
+            let mut busy = Duration::ZERO;
+            for (look, at) in seconds_from_now().take(60).enumerate() {
+                let waiting = 9 + look % 4;
+                assert_eq!(
+                    lag.look(at, busy, 4, waiting),
+                    None,
+                    "{waiting} waiting at {cost:?} a chunk was called behind"
+                );
+                busy += a_paced_second(cost);
+            }
         }
     }
 
     #[test]
-    fn a_window_full_behind_a_full_pool_for_three_looks_is_behind() {
-        let window = one_players_window();
+    fn workers_generating_without_pause_while_requests_wait_are_behind() {
+        // The case the second rule could not see: one player, a generator at
+        // 40 ms a chunk on a two-worker pool, and the eleven requests a stalled
+        // connection can have out. Both workers generate the whole second.
+        // Whether anybody else is connected, idle or not, is not an input.
+        let workers = 2;
+        let flat_out = Duration::from_secs(1) * 2;
         let mut lag = Lag::default();
-        assert_eq!(lag.look(window, window, true), None, "one look is one tick");
-        assert_eq!(lag.look(window, window, true), None);
-        assert_eq!(lag.look(window, window, true), Some(LAG_LOOKS));
+        let mut busy = Duration::ZERO;
+        let mut at = seconds_from_now();
+        let mut look = |lag: &mut Lag, busy: Duration| {
+            lag.look(at.next().expect("endless"), busy, workers, 11)
+        };
+        assert_eq!(look(&mut lag, busy), None, "the first look is a baseline");
+        for _ in 1..LAG_LOOKS {
+            busy += flat_out;
+            assert_eq!(look(&mut lag, busy), None, "a burst is not a backlog");
+        }
+        busy += flat_out;
         assert_eq!(
-            lag.look(window, window, true),
+            look(&mut lag, busy),
+            Some(Behind {
+                looks: LAG_LOOKS,
+                lasted: Duration::from_secs(u64::from(LAG_LOOKS)),
+                busy_percent: 100
+            })
+        );
+        busy += flat_out;
+        assert_eq!(
+            look(&mut lag, busy).map(|behind| behind.looks),
             Some(LAG_LOOKS + 1),
             "it keeps saying so, and for how long"
         );
-        // One chunk answered and the run is over; it starts again from nothing.
-        assert_eq!(lag.look(window - 1, window, true), None);
-        assert_eq!(lag.look(window, window, true), None);
+        // A second the workers spent half idle ends the run, and the count
+        // starts again from nothing.
+        busy += flat_out / 2;
+        assert_eq!(look(&mut lag, busy), None);
+        busy += flat_out;
+        assert_eq!(look(&mut lag, busy), None);
     }
 
     #[test]
-    fn a_full_window_with_room_in_the_pool_is_not_generation() {
-        // The serving clock ran out, or the lighting did: the workers are not
-        // what the requests are waiting on.
-        let window = one_players_window();
+    fn idle_workers_are_not_behind_however_much_waits() {
+        // A thousand requests behind workers generating 40% of the time are
+        // waiting on the tick — its pace, the serving clock, the lighting —
+        // and the over-budget line is the one that says so.
         let mut lag = Lag::default();
-        for _ in 0..10 {
-            assert_eq!(lag.look(window, window, false), None);
+        let mut busy = Duration::ZERO;
+        for at in seconds_from_now().take(10) {
+            assert_eq!(lag.look(at, busy, 4, 1000), None);
+            busy += Duration::from_millis(1600);
         }
     }
 
     #[test]
-    fn nobody_streaming_is_never_behind() {
+    fn busy_workers_with_nothing_waiting_or_no_time_passed_are_not_behind() {
+        let mut lag = Lag::default();
+        let mut busy = Duration::ZERO;
+        for at in seconds_from_now().take(10) {
+            assert_eq!(lag.look(at, busy, 1, 0), None, "nobody is waiting");
+            busy += Duration::from_secs(1);
+        }
+        // Two looks at one instant, and a pool with no workers: no share to
+        // take, and nothing divided by zero.
+        let at = Instant::now();
         let mut lag = Lag::default();
         for _ in 0..10 {
-            assert_eq!(lag.look(0, 0, true), None);
-            assert_eq!(lag.look(5, 0, true), None);
+            assert_eq!(lag.look(at, busy, 1, 5), None);
+            assert_eq!(lag.look(at + Duration::from_secs(1), busy, 0, 5), None);
         }
     }
 
@@ -916,5 +1092,121 @@ mod tests {
         // Not a test of the machine; a test that the clamp is there.
         let count = worker_count();
         assert!((0..=16).contains(&count));
+    }
+
+    /// A generator that takes a while — a tenth of a second or so of empty Lua
+    /// loop before the terrain, with the instruction cap lifted to allow it.
+    fn slow_spec(name: &str) -> WorkerSpec {
+        let root = write_mod(name, "    for _ = 1, 20000000 do end");
+        let (_host, mut spec) = spec_for(&root);
+        spec.limits.instructions_per_call = u32::MAX;
+        spec
+    }
+
+    #[test]
+    fn a_chunk_in_hand_counts_as_busy_before_it_finishes() {
+        // The lag rule's input. A chunk that outlasts a look must still read
+        // as time spent, or the pool furthest behind — every job longer than
+        // a second — would read as one doing nothing.
+        let mut pool = Pool::start(&slow_spec("in-hand"), 1).expect("pool");
+        assert_eq!(pool.busy(Instant::now()), Duration::ZERO);
+        assert!(pool.submit("overworld", ChunkPos::new(0, 0, 0), 1));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut in_hand = Vec::new();
+        let done = loop {
+            let now = Instant::now();
+            assert!(now < deadline, "one slow chunk took a minute");
+            let busy = pool.busy(now);
+            if let Some(done) = pool.finished().pop() {
+                break done;
+            }
+            if busy > Duration::ZERO {
+                in_hand.push(busy);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(
+            in_hand.len() >= 2,
+            "the chunk took {:?} and was seen generating {} times",
+            done.took,
+            in_hand.len()
+        );
+        assert!(
+            in_hand.windows(2).all(|pair| pair[0] < pair[1]),
+            "busy did not rise while the chunk generated: {in_hand:?}"
+        );
+        // Finished, it is exactly what the worker timed, and it stops rising.
+        let after = pool.busy(Instant::now());
+        assert_eq!(after, done.took);
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(pool.busy(Instant::now()), after, "nothing in hand");
+    }
+
+    #[test]
+    fn a_pool_that_never_pauses_is_behind() {
+        // Kept full of slow chunks, as a tick behind a stalled stream keeps
+        // it, looked at every 150 ms rather than every second. The eleven
+        // waiting are what one connection can have out; nothing else about
+        // the clients reaches the rule.
+        let mut pool = Pool::start(&slow_spec("never-pauses"), 1).expect("pool");
+        let mut lag = Lag::default();
+        let mut next = 0;
+        let mut said = None;
+        for _ in 0..20 {
+            let until = Instant::now() + Duration::from_millis(150);
+            while Instant::now() < until {
+                pool.finished();
+                while pool.has_room() {
+                    assert!(pool.submit("overworld", ChunkPos::new(next, 0, 0), 1));
+                    next += 1;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let now = Instant::now();
+            said = lag.look(now, pool.busy(now), pool.workers(), 11);
+            if said.is_some() {
+                break;
+            }
+        }
+        let behind = said.expect("a pool generating without pause was never called behind");
+        assert_eq!(behind.looks, LAG_LOOKS);
+        assert!(behind.busy_percent >= LAG_BUSY_PERCENT, "{behind:?}");
+    }
+
+    #[test]
+    fn a_pool_the_tick_paces_is_not_behind() {
+        // The first rule's false alarm, on a real pool: refilled once a tick,
+        // full at every look, eleven requests waiting — and cheap chunks, so
+        // the workers are idle for nearly all of every tick.
+        let root = write_mod("paced", "    do return end");
+        let (_host, spec) = spec_for(&root);
+        let mut pool = Pool::start(&spec, 1).expect("pool");
+        let mut lag = Lag::default();
+        let mut next = 0;
+        for look in 0..6 {
+            for _ in 0..4 {
+                pool.finished();
+                while pool.has_room() {
+                    assert!(pool.submit("overworld", ChunkPos::new(next, 0, 0), 1));
+                    next += 1;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            pool.finished();
+            while pool.has_room() {
+                assert!(pool.submit("overworld", ChunkPos::new(next, 0, 0), 1));
+                next += 1;
+            }
+            assert!(
+                !pool.has_room(),
+                "the premise: the pool is full at the look"
+            );
+            let now = Instant::now();
+            assert_eq!(
+                lag.look(now, pool.busy(now), pool.workers(), 11),
+                None,
+                "look {look}: a paced pool of cheap chunks was called behind"
+            );
+        }
     }
 }

@@ -1457,18 +1457,6 @@ impl Shared {
         (CHUNKS_PER_TICK / 2 / players).max(MIN_CHUNKS_IN_FLIGHT)
     }
 
-    /// Every request the streaming players may have out at once: each one's
-    /// chunk share and horizon allowance, together.
-    ///
-    /// The ceiling on the backlog the tick can see, which is what makes it the
-    /// yardstick for "generation behind" — see [`crate::worldgen::Lag`]. Zero
-    /// with nobody streaming.
-    #[must_use]
-    pub fn request_windows(&self) -> usize {
-        let players = self.bodies.lock().map_or(0, |bodies| bodies.len());
-        players * (self.chunks_in_flight_per_client() + SUMMARIES_IN_FLIGHT_PER_CLIENT)
-    }
-
     /// Stops simulating a player.
     pub fn remove_player(&self, uuid: &PlayerUuid) {
         if let Ok(mut bodies) = self.bodies.lock() {
@@ -4364,26 +4352,6 @@ mod tests {
         assert_eq!(
             shared.wire_material(MaterialId(9)),
             MaterialId::UNKNOWN.get()
-        );
-    }
-
-    #[test]
-    fn the_request_windows_are_every_streaming_players_share_and_horizon() {
-        // The yardstick the generation lag line measures against: what the
-        // clients may have out at once. One player's is larger than a
-        // four-worker pool, which is why comparing with the pool fired on
-        // every single-player walk.
-        let shared = shared();
-        assert_eq!(shared.request_windows(), 0, "nobody streaming, no window");
-        shared.add_player(player(1).0, shared.spawn);
-        let one = shared.chunks_in_flight_per_client() + SUMMARIES_IN_FLIGHT_PER_CLIENT;
-        assert_eq!(shared.request_windows(), one);
-        assert_eq!(one, CHUNKS_PER_TICK / 2 + SUMMARIES_IN_FLIGHT_PER_CLIENT);
-        shared.add_player(player(2).0, shared.spawn);
-        assert_eq!(
-            shared.request_windows(),
-            2 * (shared.chunks_in_flight_per_client() + SUMMARIES_IN_FLIGHT_PER_CLIENT),
-            "each player's share shrinks and the horizon allowance does not"
         );
     }
 
