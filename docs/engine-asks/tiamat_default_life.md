@@ -85,10 +85,10 @@ and while it is set the player's intent drives the ENTITY through the
 same `phys::step` with the entity's own tuning and collider, the body is
 placed at the mount's transform plus the seat every tick, and a
 `PlayerState` carries the mount's id so the client predicts the mount's
-body with the same function — which is a protocol bump (79: 77 went to
+body with the same function — which is a protocol bump (80: 77 went to
 the weather's bolt and the dialog tooltip on 2026-09-28, 78 to the
-cave fog the same evening, and 0.2.2 ships at whatever main carries
-when it is cut). Sneak dismounts, an `on_dismount` hook (an observation,
+cave fog the same evening, 79 to the click on a dialog's button on
+2026-09-29, and 0.2.2 ships at whatever main carries when it is cut). Sneak dismounts, an `on_dismount` hook (an observation,
 like `on_player_move`) says where they land, and a despawned mount drops
 its rider on the tick it goes. Order of work: server seat and drive with
 a bot test (a bot mounts a scarecrow, walks, the scarecrow moves and the

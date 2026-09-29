@@ -29,6 +29,54 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
+## 18. A cut of several materials (2026-09-29, from the designer): BEING BUILT, protocol 81
+
+Asked by the designer of the engine session, not by this mod: "in the
+shape crafter it is important that there is a way to build a shape out
+of all the different materials in the inventory", and, asked which was
+meant, both. A row for every material carried is this mod's new crafter
+and ask 17. The other half is ONE cut made of SEVERAL materials, each
+cell its own: a stone stair with an oak tread. That is the engine's to
+make possible and is written here so the crafter can be planned against
+it.
+
+**What exists already.** The world holds such blocks and always has: two
+cuts of different materials placed into one block make one, and breaking
+it pays out each material's cells. What is missing is the item, and an
+editor that keeps each cell's material.
+
+**The shape it will take.**
+
+```lua
+-- The editor, in several-material mode: 27 cells, one-based, cell i - 1
+-- being x + 3*y + 9*z, each a material id or 0 for empty. `material` is
+-- the BRUSH: a right-click adds a cell of it, a left-click takes the
+-- nearest cell off whatever it is made of.
+{ type = "shape_editor", name = "cut", shape = mask, material = brush, cells = cells }
+
+-- What it reports: the mask as before, and the cells.
+-- event.kind == "chiselled", event.shape, event.cells
+
+-- The item. One unit a cell, each of that cell's material, so the craft
+-- takes n * (cells of m) units of every material m and gives n of these.
+game.give(player, { cells = cells, count = n })
+
+-- In game.inventory and game.held a cut of several materials reports
+-- `cells`, with `material` the lowest id among them and `shape` the mask
+-- (the full mask, never absent, when the cut fills the block).
+```
+
+An editor sent without `cells` is what it is today, one material
+throughout, so nothing this mod does now changes. Choosing a row would
+set the brush rather than the whole cube's material; whether a click on
+a row still crafts, or a Make button comes back for a cut of several, is
+this mod's to decide.
+
+**What does not change.** A cut places as itself whatever tool is held,
+all of it or none, and only into air. Breaking what it made pays out
+loose material, one stack a material. Identical cuts stack and nothing
+else does.
+
 ## 17. Which click pressed a button (2026-09-29): LANDED 2026-09-29 (engine c444967)
 
 The crafter makes a shape from the material row a player clicks: click for
@@ -125,6 +173,29 @@ ones it has. What it looks like in the window is the designer's ([H]):
 the Crafting tab with dirt, stone or coal chosen, the cube in the
 material's true colour, and every slot, the hotbar and a carried stack
 noticeably lighter than before.
+
+**From the engine, 2026-09-29 (engine eaf0d2e, 0989d3d): the rest of what
+that look found.** The wire was one half. The other was inside the
+server: the tables the tick reads (hardness, drops, tool speeds, light
+given off, let through and dimmed, what a body walks through and slides
+on, what the ground drinks and turns into) were keyed by the world's ids
+and asked with the session's, which is what a chunk in memory holds. On a
+world made by the mod set that opens it the two are the same number, so
+nothing showed. On a world reopened with a mod added, removed or loading
+in another place, a lamp did not glow, glass was dark, some unrelated
+block was walked through, and a block was timed and paid out as another
+material. The far horizon was drawn in the wrong materials the same way,
+and an item lying on the ground was saved under the session's number and
+came back as something else. All keyed one way now: the session's ids in
+memory, the world's on disk and on the wire, and nowhere else.
+
+What that means for a mod: **adding a mod to a world that already exists
+is safe**, which it was not. It is what every world does the day Magic
+and Science are linked in. An existing world rebuilds its horizon once,
+the first time it is opened, because the cached one may have been
+written the old way. Tests: `crates/bot/tests/divergent_ids.rs`, six of
+them through a real bot on a world reopened under another mod set, each
+seen to fail before the fix.
 
 Landed so far, asserted by the native check except 11 and 12,
 which are the client's own drawing:
