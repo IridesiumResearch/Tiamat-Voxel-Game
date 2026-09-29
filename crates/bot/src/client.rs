@@ -408,6 +408,19 @@ impl Bot {
         })
     }
 
+    /// Skips every message already waiting to be read. They stay in the
+    /// history, where every `saw_*` and `expect_*` reads.
+    ///
+    /// **For a verb that must reach the server now, after the script has been
+    /// quiet.** [`Self::walk`] files its inputs under the ticks just after the
+    /// state it reads, and a bot that slept reads the OLDEST state first — so
+    /// its keys were filed under ticks the server had long passed and refused,
+    /// silently, and the walk returned having done nothing. Found by a script
+    /// that slept, then sneaked off a horse, and stayed on it.
+    pub fn catch_up(&mut self) {
+        while self.inbox.try_recv().is_ok() {}
+    }
+
     /// Reads until a message matching `want` arrives, or the server disconnects.
     ///
     /// # Errors

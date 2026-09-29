@@ -524,3 +524,72 @@ fn a_mount_that_cannot_be_had_is_refused_with_a_reason_and_leaving_frees_it() {
     });
     assert!(server.stop());
 }
+
+/// A multi-thread runtime: `bot::run_script` blocks the calling thread on the
+/// script channel while `bot::drive` answers it from a spawned task, and on a
+/// current-thread runtime the two would starve each other (see `station.rs`).
+fn multi_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+#[test]
+fn a_scripted_bot_gets_on_ahead_of_it_asks_what_it_rides_and_sneaks_off() {
+    // The `bot.*` verbs a pacing script rides with, against a real server:
+    // `use_ahead` is the right-click at what the bot faces — its scarecrow,
+    // two blocks north, where the mod seats whoever uses it — `mounted` is
+    // the server's latest word, and `sneak` gets it off.
+    let server = start("script");
+    let runtime = multi_thread_runtime();
+    let client = runtime
+        .block_on(Bot::connect(
+            server.local_addr(),
+            Identity::generate().expect("identity"),
+            server.cert_fingerprint(),
+        ))
+        .expect("connect");
+    let (channel, commands, replies) = bot::Channel::pair();
+    let driver = runtime.spawn(bot::drive(client, commands, replies));
+    let source = r#"
+bot.join('Scripted')
+local id
+for _ = 1, 400 do
+    for _, line in ipairs(bot.heard()) do
+        local found = line:match("^scarecrow (%d+)$")
+        if found then id = tonumber(found) end
+    end
+    if id then break end
+    bot.sleep_ticks(1)
+end
+bot.assert(id ~= nil, "the mod never put up a scarecrow")
+bot.assert(bot.mounted() == nil, "riding before getting on")
+bot.sleep_ticks(10)
+bot.use_ahead()
+local riding
+for _ = 1, 100 do
+    riding = bot.mounted()
+    if riding then break end
+    bot.sleep_ticks(1)
+end
+bot.assert(riding == id, "riding " .. tostring(riding) .. ", not the scarecrow " .. tostring(id))
+bot.sneak()
+local off = false
+local said = {}
+for _ = 1, 100 do
+    for _, line in ipairs(bot.heard()) do said[#said + 1] = line end
+    if bot.mounted() == nil then off = true break end
+    bot.sleep_ticks(1)
+end
+bot.assert(off, "sneaking did not get the bot off; the mod said: " .. table.concat(said, " | "))
+"#;
+    let outcome = bot::run_script(source, "ride", channel).expect("the VM should start");
+    runtime.block_on(async {
+        let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    });
+    assert!(outcome.passed, "{:?}", outcome.failure);
+    assert_eq!(outcome.assertions, 4);
+    assert!(server.stop());
+}

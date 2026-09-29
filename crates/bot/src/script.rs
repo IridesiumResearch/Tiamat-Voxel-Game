@@ -115,6 +115,19 @@ pub enum Command {
     /// The chat lines sent to this bot since the last call, oldest first.
     /// Draining: a second call in a row with nothing new answers empty.
     Heard,
+    /// The place control at whatever the bot is looking at, with nothing
+    /// named — a real client's right-click at what is under its crosshair.
+    ///
+    /// **Life ask 18's way on**: the server casts the bot's own look ray, so
+    /// a creature in front of it is used (`register_on_use_entity`, where a
+    /// mod seats a rider), and with nothing on the ray it is a use at nothing,
+    /// which only a `register_on_use` with `{ anywhere = true }` hears.
+    UseAhead,
+    /// Hold the sneak key for this many ticks, standing still — which is how
+    /// a rider gets off, on a seat that lets it.
+    Sneak(u64),
+    /// Ask which entity the bot is riding, as the server's latest state says.
+    Mounted,
     /// Close the connection.
     Disconnect,
 }
@@ -130,6 +143,8 @@ pub enum Reply {
     Text(String),
     /// Chat lines, oldest first — [`Command::Heard`]'s answer.
     Lines(Vec<String>),
+    /// An entity, or none — [`Command::Mounted`]'s answer.
+    Entity(Option<u64>),
     /// The command failed; the script should stop.
     Failed(String),
 }
@@ -349,6 +364,47 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
             press_named(p.2.as_deref()).map_err(mlua::Error::external)?,
         )
     });
+    // Sneak held for a few ticks, standing still: a rider's way off (Life
+    // ask 18). Two ticks unless the script says, which is one to be sent and
+    // one to be applied.
+    bind!("sneak", Option<u64>, |_lua, ticks| Command::Sneak(
+        ticks.unwrap_or(2)
+    ));
+
+    // `use_ahead` and `mounted` take no arguments, so they do not fit the
+    // macro's shape either. The first is the place control at whatever the
+    // bot looks at, the second which entity it rides — Life ask 18's way on,
+    // and the question after it.
+    {
+        let channel = Arc::clone(&channel);
+        let function = lua
+            .create_function(move |_, ()| {
+                call(&channel, Command::UseAhead)
+                    .map(|_| ())
+                    .map_err(mlua::Error::external)
+            })
+            .map_err(|err| format!("could not bind bot.use_ahead: {err}"))?;
+        table
+            .set("use_ahead", function)
+            .map_err(|err| format!("could not set bot.use_ahead: {err}"))?;
+    }
+    {
+        let channel = Arc::clone(&channel);
+        let function = lua
+            .create_function(move |_, ()| {
+                let reply = call(&channel, Command::Mounted).map_err(mlua::Error::external)?;
+                // An integer, as a mod's `game.mounted` answers, so a script
+                // can compare the two; nil on foot.
+                Ok(match reply {
+                    Reply::Entity(entity) => entity.map(|id| id as i64),
+                    _ => None,
+                })
+            })
+            .map_err(|err| format!("could not bind bot.mounted: {err}"))?;
+        table
+            .set("mounted", function)
+            .map_err(|err| format!("could not set bot.mounted: {err}"))?;
+    }
 
     // `disconnect` takes no arguments, so it does not fit the macro's shape.
     {
@@ -706,6 +762,51 @@ mod tests {
         assert_eq!(
             commands,
             vec![Command::ExpectBlock(BlockPos::new(1, 2, 3), 9, 5000)]
+        );
+    }
+
+    #[test]
+    fn a_ride_is_got_on_ahead_got_off_by_sneaking_and_asked_after() {
+        // Life ask 18's three verbs: the use at what is ahead that a mod
+        // seats a rider from, the sneak that gets them off, and the question
+        // whose answer is the mount's id as `game.mounted` gives it, or nil.
+        let riding = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = std::sync::Arc::clone(&riding);
+        let (outcome, seen) = run_with_replies(
+            "bot.join('Alice')\n\
+             bot.use_ahead()\n\
+             bot.assert(bot.mounted() == 12, 'mounted says ' .. tostring(bot.mounted()))\n\
+             bot.sneak()\n\
+             bot.sneak(5)\n\
+             bot.assert(bot.mounted() == nil, 'still mounted')",
+            move |command| {
+                use std::sync::atomic::Ordering;
+                match command {
+                    Command::UseAhead => state.store(true, Ordering::Relaxed),
+                    Command::Sneak(_) => state.store(false, Ordering::Relaxed),
+                    Command::Mounted => {
+                        return Reply::Entity(state.load(Ordering::Relaxed).then_some(12));
+                    }
+                    _ => {}
+                }
+                Reply::Done
+            },
+        );
+        assert!(outcome.passed, "{:?}", outcome.failure);
+        assert_eq!(outcome.assertions, 2);
+        assert!(!riding.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            seen,
+            vec![
+                Command::Join("Alice".to_owned()),
+                Command::UseAhead,
+                // Twice: Lua builds the assertion's message before the call.
+                Command::Mounted,
+                Command::Mounted,
+                Command::Sneak(2),
+                Command::Sneak(5),
+                Command::Mounted,
+            ]
         );
     }
 

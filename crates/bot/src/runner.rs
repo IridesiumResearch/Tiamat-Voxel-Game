@@ -146,6 +146,19 @@ async fn execute(bot: &mut Bot, command: &Command) -> Result<Reply, BotError> {
             Ok(Reply::Done)
         }
         Command::Heard => Ok(Reply::Lines(bot.heard())),
+        Command::UseAhead => {
+            bot.use_at_nothing().await?;
+            Ok(Reply::Done)
+        }
+        Command::Sneak(ticks) => {
+            // From the newest state, or a script that slept first files its
+            // keys under ticks the server has passed — see `Bot::catch_up`.
+            bot.catch_up();
+            bot.walk([0.0; 3], tiamat_core::proto::actions::SNEAK, *ticks)
+                .await?;
+            Ok(Reply::Done)
+        }
+        Command::Mounted => Ok(Reply::Entity(bot.riding().map(|ride| ride.entity))),
         Command::Disconnect => Ok(Reply::Done),
     }
 }
