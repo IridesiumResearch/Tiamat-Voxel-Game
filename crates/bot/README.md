@@ -105,7 +105,7 @@ measures the replayer rather than the server.
 | `bot.expect_units(material, units, timeout_ms)` | Block until the inventory holds at least that many units |
 | `bot.sleep_ticks(n)` | Wait roughly n server ticks |
 | `bot.use(x, y, z, dx?, dy?, dz?)` | The place control on a block with nothing to place — reaches `register_on_use`, at sub-node `(dx, dy, dz)` within the block (each `0..3`, default the centre `1, 1, 1`) |
-| `bot.press(form, name)` | Press a named button in a dialog the bot currently holds open; errors if it holds no such form |
+| `bot.press(form, name, click?)` | Press a named button in a dialog the bot currently holds open; errors if it holds no such form. `click` is `"left"` (the default), `"right"` or `"double"`, the words a mod hears in `event.click`; a player's double-click is a `"left"` and then a `"double"` |
 | `bot.heard()` | The chat lines sent to the bot since the last call, oldest first, then empties the buffer (last 256 PER CALL; the session itself is not bounded) |
 | `bot.assert(cond, message)` | Assert, and count it |
 | `bot.disconnect()` | Close cleanly |

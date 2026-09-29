@@ -487,6 +487,7 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
             "core_ui:inventory",
             tiamat_core::proto::DialogEvent::Pressed {
                 name: "tab_shapes".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await
@@ -525,6 +526,7 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
             "core_ui:inventory",
             tiamat_core::proto::DialogEvent::Pressed {
                 name: "make".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await
@@ -688,6 +690,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
             "core_ui:inventory",
             tiamat_core::proto::DialogEvent::Pressed {
                 name: "tab_shapes".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await
@@ -707,6 +710,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
             "core_ui:inventory",
             tiamat_core::proto::DialogEvent::Pressed {
                 name: "make_stack".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await

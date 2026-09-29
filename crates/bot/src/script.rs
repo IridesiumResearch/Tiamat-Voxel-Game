@@ -34,6 +34,7 @@
 
 use std::sync::mpsc;
 
+use tiamat_core::proto::Press;
 use tiamat_core::{BlockPos, SubNodePos};
 
 /// One thing a script asked the bot to do.
@@ -102,12 +103,15 @@ pub enum Command {
     /// reach — the fallback line, never a mod's `on_use`.
     Use(BlockPos, i32, i32, i32),
     /// Press a named button in a dialog this bot currently holds open, as
-    /// `(qualified form, widget name)`.
+    /// `(qualified form, widget name, which click)`.
     ///
     /// Errors — a Lua error, so it stops the script — if the bot holds no
     /// open dialog under that form, so a script learns it pressed nothing
     /// rather than sending an event the server silently drops.
-    Press(String, String),
+    ///
+    /// One press is one message. A player's double-click is a left and then
+    /// a double, and a script that means one sends both (UI ask 17).
+    Press(String, String, Press),
     /// The chat lines sent to this bot since the last call, oldest first.
     /// Draining: a second call in a row with nothing new answers empty.
     Heard,
@@ -218,6 +222,21 @@ fn remove_dangerous_globals(lua: &mlua::Lua) -> Result<(), String> {
 ///
 /// A poisoned lock means a previous binding panicked mid-call; reporting that
 /// beats blocking forever or unwrapping into a second panic.
+/// The click a script named, `"left"` when it named none.
+///
+/// The words a mod hears in `event.click`, so a script and the mod it drives
+/// are written in one vocabulary.
+fn press_named(click: Option<&str>) -> Result<Press, String> {
+    match click {
+        None | Some("left") => Ok(Press::Left),
+        Some("right") => Ok(Press::Right),
+        Some("double") => Ok(Press::Double),
+        Some(other) => Err(format!(
+            "bot.press: no click is called `{other}`; it is \"left\", \"right\" or \"double\""
+        )),
+    }
+}
+
 fn call(channel: &std::sync::Mutex<Channel>, command: Command) -> Result<Reply, String> {
     channel
         .lock()
@@ -321,9 +340,15 @@ pub fn run_script(source: &str, name: &str, channel: Channel) -> Result<ScriptOu
     // A button, by the qualified form a `ShowDialog`/`UpdateDialog` named and
     // the widget's own name. Errors — see `Command::Press` — if the bot holds
     // no such form.
-    bind!("press", (String, String), |_lua, p| Command::Press(
-        p.0, p.1
-    ));
+    // The click is `"left"` when left out, as every press was before a
+    // press had one.
+    bind!("press", (String, String, Option<String>), |_lua, p| {
+        Command::Press(
+            p.0,
+            p.1,
+            press_named(p.2.as_deref()).map_err(mlua::Error::external)?,
+        )
+    });
 
     // `disconnect` takes no arguments, so it does not fit the macro's shape.
     {
@@ -736,7 +761,46 @@ mod tests {
         assert!(outcome.passed, "{:?}", outcome.failure);
         assert_eq!(
             commands,
-            vec![Command::Press("warden:panel".to_owned(), "go".to_owned())]
+            vec![Command::Press(
+                "warden:panel".to_owned(),
+                "go".to_owned(),
+                Press::Left
+            )]
+        );
+    }
+
+    #[test]
+    fn a_press_may_say_which_click_it_was() {
+        // UI ask 17: what a player's right-click and double-click send, and
+        // a double-click is the left it began as and then the double.
+        let (outcome, commands) = run_with_stub(
+            "bot.press('ui:screen', 'row', 'right')
+             bot.press('ui:screen', 'row', 'left')
+             bot.press('ui:screen', 'row', 'double')",
+        );
+        assert!(outcome.passed, "{:?}", outcome.failure);
+        let press = |click| Command::Press("ui:screen".to_owned(), "row".to_owned(), click);
+        assert_eq!(
+            commands,
+            vec![
+                press(Press::Right),
+                press(Press::Left),
+                press(Press::Double)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_click_nobody_makes_fails_the_script() {
+        // Not read as a left: a script that misspells `double` would
+        // otherwise pass while testing something else.
+        let (outcome, commands) = run_with_stub("bot.press('ui:screen', 'row', 'middle')");
+        assert!(!outcome.passed);
+        assert!(commands.is_empty(), "nothing is sent: {commands:?}");
+        let failure = outcome.failure.expect("a failure message");
+        assert!(
+            failure.contains("`middle`") && failure.contains("\"double\""),
+            "the click and the choices must be named: {failure}"
         );
     }
 
@@ -747,7 +811,7 @@ mod tests {
         // so rather than carrying on as if the button had been pressed.
         let (outcome, _) =
             run_with_replies("bot.press('warden:nope', 'go')", |command| match command {
-                Command::Press(form, _) => {
+                Command::Press(form, ..) => {
                     Reply::Failed(format!("the bot holds no open dialog for form `{form}`"))
                 }
                 _ => Reply::Done,

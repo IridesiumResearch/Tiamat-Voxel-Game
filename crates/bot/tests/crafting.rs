@@ -421,6 +421,7 @@ fn what_a_player_chisels_is_what_the_mod_gets_back() {
             &form,
             tiamat_core::proto::DialogEvent::Pressed {
                 name: "make".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await

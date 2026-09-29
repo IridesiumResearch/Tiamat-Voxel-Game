@@ -331,6 +331,23 @@ fn client_messages() -> Vec<Vec<u8>> {
             form: "core_ui:inventory".to_owned(),
             event: DialogEvent::Pressed {
                 name: "close".to_owned(),
+                click: tiamat_core::proto::Press::Left,
+            },
+        },
+        // v79: the press says which click it was. One seed a click, so the
+        // fuzzer starts from every value the last byte may hold.
+        ClientMessage::DialogEvent {
+            form: "tiamat_default_ui:screen".to_owned(),
+            event: DialogEvent::Pressed {
+                name: "m/tiamat_default_world:stone".to_owned(),
+                click: tiamat_core::proto::Press::Right,
+            },
+        },
+        ClientMessage::DialogEvent {
+            form: "tiamat_default_ui:screen".to_owned(),
+            event: DialogEvent::Pressed {
+                name: "m/tiamat_default_world:stone".to_owned(),
+                click: tiamat_core::proto::Press::Double,
             },
         },
         ClientMessage::DialogEvent {

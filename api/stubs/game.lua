@@ -1871,7 +1871,7 @@ function game.close_dialog(spec) end
 ---
 ---`event.kind` says what the player did, and which other fields are set:
 ---
----  - `"pressed"` — `name`
+---  - `"pressed"` — `name`, `click` ("left", "right", "double")
 ---  - `"submitted"` — `name`, `text`
 ---  - `"toggled"` — `name`, `checked`
 ---  - `"slid"` — `name`, `value`
@@ -1883,6 +1883,14 @@ function game.close_dialog(spec) end
 ---**Every one is a REQUEST, never a result.** A slot click says what the player
 ---did with the mouse; whether any item moves is the server's decision, taken
 ---against its own inventory. A client saying "I moved this" does not make it so.
+---
+---**A button's `click` is which press it had**, and what each means is yours:
+---ten for a click, one for a right-click, a stackful for a double. It is always
+---set. A double-click arrives as TWO events, `"left"` and then `"double"`: the
+---first half is a click like any other, and nothing can know a second is
+---coming without making every button wait to answer. So on `"double"`, do what
+---is left of the larger thing rather than the whole of it again. A right-click
+---presses a button; a mod that never reads `click` treats it as a press.
 ---@param callback fun(event: { player: string, form: string, kind: string, name: string?, text: string?, checked: boolean?, value: integer?, index: integer?, view: string?, click: string?, shape: integer? })
 function game.register_on_dialog_event(callback) end
 

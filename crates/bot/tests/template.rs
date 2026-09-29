@@ -130,6 +130,7 @@ fn the_template_loads_on_a_server_and_its_tour_does_what_it_says() {
             "tour:wave",
             DialogEvent::Pressed {
                 name: "mark".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await

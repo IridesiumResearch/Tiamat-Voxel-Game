@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use crate::icons::Icons;
 
-use tiamat_core::proto::{Click, DialogEvent};
+use tiamat_core::proto::{Click, DialogEvent, Press};
 use tiamat_core::ui::{Laid, Measure, Node, Rect, Style, Tree, Widget, layout};
 
 /// What the player has done to a dialog that the server has not been told yet.
@@ -1298,6 +1298,11 @@ fn paint_button(
     raised: &mut Vec<Raised>,
 ) {
     let response = ui.allocate_rect(rect, egui::Sense::click());
+    let press = press_of(
+        response.clicked(),
+        response.double_clicked(),
+        response.secondary_clicked(),
+    );
     // **Lightened rather than a second constant.** The hover was `from_gray(90)`
     // against a base of `from_gray(64)`, which is this scale applied to that
     // grey — so a mod's colour keeps the cue instead of losing it to a shade of
@@ -1318,13 +1323,36 @@ fn paint_button(
     );
     // An unnamed button raises nothing: a mod that did not name it has no way
     // to tell it apart from any other, so telling it would be noise.
-    if response.clicked() && !node.name.is_empty() {
+    if let Some(click) = press
+        && !node.name.is_empty()
+    {
         paint.raise(
             raised,
             DialogEvent::Pressed {
                 name: node.name.clone(),
+                click,
             },
         );
+    }
+}
+
+/// Which press a button had this frame, from what egui says of it.
+///
+/// egui reports the second half of a double-click as a click AND a
+/// double-click, and the first half as a click alone: it cannot know a second
+/// is coming. So `double` is asked first, and a double-click reaches a mod as
+/// a left and then a double (see [`Press`]). The secondary button comes last:
+/// both buttons released on one frame is the primary's press, which is what
+/// the button did before it knew of any other.
+const fn press_of(clicked: bool, double: bool, secondary: bool) -> Option<Press> {
+    if double {
+        Some(Press::Double)
+    } else if clicked {
+        Some(Press::Left)
+    } else if secondary {
+        Some(Press::Right)
+    } else {
+        None
     }
 }
 
@@ -1653,6 +1681,21 @@ mod tests {
     use tiamat_core::ui::{Align, Build, Direction};
 
     use super::*;
+
+    #[test]
+    fn a_button_says_which_press_it_had() {
+        // What egui reports, in the order it reports a double-click: the
+        // first half is a click alone, the second a click AND a double.
+        assert_eq!(press_of(true, false, false), Some(Press::Left));
+        assert_eq!(press_of(true, true, false), Some(Press::Double));
+        // The secondary button presses a button too (UI ask 17); it used to
+        // do nothing.
+        assert_eq!(press_of(false, false, true), Some(Press::Right));
+        // Both on one frame is the primary's, as it was before.
+        assert_eq!(press_of(true, false, true), Some(Press::Left));
+        // And a frame with no release on the button is no press.
+        assert_eq!(press_of(false, false, false), None);
+    }
 
     #[test]
     fn the_turn_arrows_are_glyphs_the_font_has() {

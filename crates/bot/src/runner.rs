@@ -141,8 +141,8 @@ async fn execute(bot: &mut Bot, command: &Command) -> Result<Reply, BotError> {
             bot.use_block(pos.subnode(*dx, *dy, *dz)).await?;
             Ok(Reply::Done)
         }
-        Command::Press(form, name) => {
-            bot.press(form, name).await?;
+        Command::Press(form, name, click) => {
+            bot.press_with(form, name, *click).await?;
             Ok(Reply::Done)
         }
         Command::Heard => Ok(Reply::Lines(bot.heard())),

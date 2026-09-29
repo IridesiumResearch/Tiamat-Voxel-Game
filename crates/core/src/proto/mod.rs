@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 78;
+pub const PROTOCOL_VERSION: u32 = 79;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,14 @@ pub const PROTOCOL_VERSION: u32 = 78;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v79 (UI ask 17): `DialogEvent::Pressed` carries `click`, which press it was:
+// left, right, or the second half of a double-click. A button reported that it
+// was pressed and nothing else, so a row that crafts ten on a click, one on a
+// right-click and a stack on a double was a row plus a count picker and two
+// buttons. A right-click on a button presses it now; it used to do nothing.
+// **A field on an existing variant**, the unsafe kind of change, so the
+// version check is what keeps a v78 peer from reading a name's last byte as a
+// click.
 // v78 (weather W29): `SkyTable` carries `cave_fog`, the fog's colour where no
 // sky reaches, appended after `observer`. Fog faded to the keyframed sky's
 // colour, so the fog down a tunnel followed the clock; the client now blends
@@ -1348,6 +1356,8 @@ pub enum DialogEvent {
     Pressed {
         /// The widget's name.
         name: String,
+        /// Which press it was (protocol v79).
+        click: Press,
     },
     /// A text input was submitted.
     Submitted {
@@ -1429,6 +1439,37 @@ pub enum Click {
     Right,
     /// Move the stack to the other view in one go.
     ShiftLeft,
+}
+
+/// Which press a button had.
+///
+/// Named for what the player did, as [`Click`] is and for the same reason:
+/// what ten, one and a stackful mean is the mod's to say.
+///
+/// # Why not [`Click`]
+///
+/// A slot's click is a request the SERVER acts on before any mod hears of it,
+/// and its variants are the gestures an inventory knows. A button's press is
+/// only ever reported. Sharing the enum would hand the inventory a double-click
+/// it has no rule for and a button a shift-click it cannot make.
+///
+/// # A double-click is two presses
+///
+/// The first half of a double-click is a click like any other and is reported
+/// as one: nothing can know a second is coming without holding the first back,
+/// and a button that waited a third of a second to answer would feel broken.
+/// So a double-click reaches a mod as [`Press::Left`] and then
+/// [`Press::Double`], never as two lefts, and a mod that counts presses counts
+/// what it always did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Press {
+    /// The primary button, once.
+    #[default]
+    Left,
+    /// The secondary button.
+    Right,
+    /// The second press of a double-click with the primary button.
+    Double,
 }
 
 /// Messages a server sends.
@@ -3273,7 +3314,7 @@ fn check_dialog(form: &str, tree: Option<&crate::ui::Tree>) -> Result<(), Protoc
 fn check_dialog_event(form: &str, event: &DialogEvent) -> Result<(), ProtocolError> {
     check_len("dialog_form", form.len(), MAX_ID_BYTES)?;
     match event {
-        DialogEvent::Pressed { name }
+        DialogEvent::Pressed { name, .. }
         | DialogEvent::Toggled { name, .. }
         | DialogEvent::Slid { name, .. }
         | DialogEvent::Chose { name, .. }
@@ -4389,7 +4430,8 @@ mod tests {
         let ordinal = |event: &DialogEvent| encode(event).expect("encode")[0];
         assert_eq!(
             ordinal(&DialogEvent::Pressed {
-                name: String::new()
+                name: String::new(),
+                click: Press::Left,
             }),
             0
         );
@@ -4438,6 +4480,47 @@ mod tests {
             }),
             7
         );
+    }
+
+    /// **A press is its name and then one byte**, and which byte is which
+    /// click is pinned like any other ordinal (protocol v79).
+    ///
+    /// The whole encoding rather than the first byte, because the field is
+    /// what changed: a `click` written anywhere but last would still leave the
+    /// variant's ordinal at 0.
+    #[test]
+    fn a_press_is_its_name_and_then_which_click() {
+        let press = |click| {
+            encode(&DialogEvent::Pressed {
+                name: "go".to_owned(),
+                click,
+            })
+            .expect("encode")
+        };
+        assert_eq!(press(Press::Left), [0, 2, b'g', b'o', 0]);
+        assert_eq!(press(Press::Right), [0, 2, b'g', b'o', 1]);
+        assert_eq!(press(Press::Double), [0, 2, b'g', b'o', 2]);
+        // And back, through the door a server reads a client by.
+        let bytes = encode(&ClientMessage::DialogEvent {
+            form: "mod:panel".to_owned(),
+            event: DialogEvent::Pressed {
+                name: "go".to_owned(),
+                click: Press::Double,
+            },
+        })
+        .expect("encode");
+        assert_eq!(
+            decode::<ClientMessage>(&bytes).expect("decode"),
+            ClientMessage::DialogEvent {
+                form: "mod:panel".to_owned(),
+                event: DialogEvent::Pressed {
+                    name: "go".to_owned(),
+                    click: Press::Double,
+                },
+            }
+        );
+        // A click past the end is refused, not read as a left.
+        assert!(decode::<DialogEvent>(&[0, 2, b'g', b'o', 3]).is_err());
     }
 
     /// The widget set, for the same reason and with the same history.

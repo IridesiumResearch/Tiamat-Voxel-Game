@@ -2149,6 +2149,26 @@ impl Bot {
     /// [`BotError::NoSuchForm`] if the bot holds no open dialog under `form`.
     /// [`BotError::Frame`] if the write fails.
     pub async fn press(&mut self, form: &str, name: &str) -> Result<(), BotError> {
+        self.press_with(form, name, tiamat_core::proto::Press::Left)
+            .await
+    }
+
+    /// [`Bot::press`], saying which click it was (UI ask 17).
+    ///
+    /// One message, as a client sends one: a script that means a double-click
+    /// presses with [`Press::Left`](tiamat_core::proto::Press::Left) and then
+    /// with [`Press::Double`](tiamat_core::proto::Press::Double), which is
+    /// what a player's double-click is on the wire.
+    ///
+    /// # Errors
+    ///
+    /// As [`Bot::press`].
+    pub async fn press_with(
+        &mut self,
+        form: &str,
+        name: &str,
+        click: tiamat_core::proto::Press,
+    ) -> Result<(), BotError> {
         if !self.open_dialogs().contains_key(form) {
             return Err(BotError::NoSuchForm {
                 form: form.to_owned(),
@@ -2158,6 +2178,7 @@ impl Bot {
             form,
             tiamat_core::proto::DialogEvent::Pressed {
                 name: name.to_owned(),
+                click,
             },
         )
         .await

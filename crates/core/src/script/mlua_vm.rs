@@ -10630,12 +10630,22 @@ fn dialog_event_fields(
     table: &Table,
     event: &crate::proto::DialogEvent,
 ) -> mlua::Result<()> {
-    use crate::proto::{Click, DialogEvent};
+    use crate::proto::{Click, DialogEvent, Press};
     let _ = lua;
     match event {
-        DialogEvent::Pressed { name } => {
+        DialogEvent::Pressed { name, click } => {
             table.set("kind", "pressed")?;
             table.set("name", name.as_str())?;
+            // UI ask 17. Always set, so a mod compares a string and never
+            // has to decide what a missing one means.
+            table.set(
+                "click",
+                match click {
+                    Press::Left => "left",
+                    Press::Right => "right",
+                    Press::Double => "double",
+                },
+            )?;
         }
         DialogEvent::Submitted { name, text } => {
             table.set("kind", "submitted")?;

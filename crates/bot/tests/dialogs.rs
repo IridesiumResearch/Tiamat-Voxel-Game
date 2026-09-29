@@ -361,6 +361,102 @@ fn a_server_mod_shows_a_dialog_to_a_client_that_pushed_no_code() {
     server.stop();
 }
 
+/// A mod that says back which click it heard, in chat to the one who pressed.
+///
+/// Chat rather than a block in the world, which is how `write_shop` reports:
+/// three presses of one button are three lines in an order, and a block at a
+/// height can say that something happened but not what came first.
+fn write_clicks(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("clicks");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"clicks\"\nname = \"Clicks\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+game.register_tool{ id = "hand", brush = "block", speed_multiplier = 1.0, default = true }
+
+game.register_on_player_join(function(event)
+    game.show_dialog{
+        player = event.player,
+        form = "rows",
+        tree = { type = "button", name = "row", text = "Stone" },
+    }
+end)
+
+game.register_on_dialog_event(function(event)
+    if event.kind == "pressed" then
+        game.chat_to(event.player, event.name .. " " .. type(event.click) .. " " .. tostring(event.click))
+    end
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
+#[test]
+fn a_mod_hears_which_click_pressed_its_button() {
+    // UI ask 17. A row that crafts one on a right-click, ten on a click and a
+    // stackful on a double needs to know which it was, and `pressed` said only
+    // that it was pressed.
+    use tiamat_core::proto::Press;
+    let server = start("clicks", write_clicks("clicks"));
+    block_on(async {
+        let mut bot = join(&server, "Clicker").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+        let _ = bot.heard();
+
+        // A right-click, and then a double-click as a client sends one: the
+        // left it began as, and the double.
+        for click in [Press::Right, Press::Left, Press::Double] {
+            bot.press_with("clicks:rows", "row", click)
+                .await
+                .expect("send");
+        }
+
+        let mut lines = Vec::new();
+        let deadline = std::time::Instant::now() + PATIENCE;
+        while lines.len() < 3 && std::time::Instant::now() < deadline {
+            lines.extend(bot.heard());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            lines,
+            vec![
+                "row string right".to_owned(),
+                "row string left".to_owned(),
+                "row string double".to_owned(),
+            ],
+            "in the order they were made, each a word a mod can compare"
+        );
+
+        // And `press`, which says nothing of the click, is a left: what every
+        // press was before a press had one.
+        bot.press("clicks:rows", "row").await.expect("send");
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let mut lines = Vec::new();
+        while lines.is_empty() && std::time::Instant::now() < deadline {
+            lines.extend(bot.heard());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(lines, vec!["row string left".to_owned()]);
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
 #[test]
 fn a_button_press_reaches_the_mod_that_opened_the_dialog() {
     let server = start("press", write_shop("press"));
@@ -374,6 +470,7 @@ fn a_button_press_reaches_the_mod_that_opened_the_dialog() {
             "shop:till",
             DialogEvent::Pressed {
                 name: "buy".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await
@@ -422,12 +519,14 @@ fn a_forged_event_for_a_dialog_nobody_opened_changes_nothing() {
                 "shop:nosuchform",
                 DialogEvent::Pressed {
                     name: "buy".to_owned(),
+                    click: tiamat_core::proto::Press::Left,
                 },
             ),
             (
                 "otherMod:till",
                 DialogEvent::Pressed {
                     name: "buy".to_owned(),
+                    click: tiamat_core::proto::Press::Left,
                 },
             ),
             (
@@ -450,6 +549,7 @@ fn a_forged_event_for_a_dialog_nobody_opened_changes_nothing() {
             "shop:till",
             DialogEvent::Pressed {
                 name: "buy".to_owned(),
+                click: tiamat_core::proto::Press::Left,
             },
         )
         .await
