@@ -986,6 +986,94 @@ fn an_item_on_the_ground_is_the_same_material_under_another_mod_set() {
     assert_eq!(item.units, 40);
 }
 
+/// An entity as formats 2 and 3 laid it out: before a stack had cells.
+#[derive(serde::Serialize)]
+struct EntityAsV3 {
+    transform: tiamat_core::ent::Transform,
+    velocity: tiamat_core::ent::Velocity,
+    speed: f32,
+    collider: Option<tiamat_core::ent::Collider>,
+    model: Option<String>,
+    item: Option<StackAsV3>,
+    health: Option<tiamat_core::ent::Health>,
+    nametag: Option<tiamat_core::ent::Nametag>,
+    owner: Option<tiamat_core::ent::Owner>,
+    source: String,
+    script: Option<Vec<u8>>,
+}
+
+/// The stack an entity was in formats 2 and 3.
+#[derive(serde::Serialize)]
+struct StackAsV3 {
+    material: tiamat_core::MaterialId,
+    units: u32,
+    shape: Option<tiamat_core::inventory::Shape>,
+    detail: Option<String>,
+}
+
+#[test]
+fn a_cut_of_several_materials_on_the_ground_is_the_same_cut_under_another_mod_set() {
+    // Sub-Node Contract §9.1 and charter rule 8: every cell of a cut on the
+    // ground is a material, and every one goes to disk under the world's id.
+    // Reopened under a mod set that numbers them the other way round, each
+    // cell is still what it was, and the stack's material is derived again as
+    // THIS session's lowest.
+    use tiamat_core::ent::{Entity, Transform};
+    use tiamat_core::inventory::Stack;
+
+    let path = scratch("entity-mixed-ids");
+    let home = ChunkPos::new(0, 0, 0);
+    let (dirt_world, brick_world) = {
+        let mut registry = registry_with(&["a:stone", "a:dirt", "b:brick"]);
+        let dirt = registry.id_of("a:dirt").expect("registered");
+        let brick = registry.id_of("b:brick").expect("registered");
+        let db = WorldDb::open(&path, &mut registry).expect("open");
+        let mut cells = tiamat_core::block::EMPTY_CELLS;
+        cells[0] = brick;
+        cells[1] = brick;
+        cells[13] = dirt;
+        let cut = Stack::mixed(&cells, 2).expect("a cut of two");
+        assert_eq!(cut.material, dirt, "dirt is this session's lowest");
+        db.save_chunk_entities(
+            home,
+            &[Entity {
+                item: Some(cut),
+                ..Entity::at(Transform::at(home, [1.0, 2.0, 3.0]), "b")
+            }],
+        )
+        .expect("save");
+        let ids = (
+            db.materials().to_world(dirt).expect("a world id"),
+            db.materials().to_world(brick).expect("a world id"),
+        );
+        db.close().expect("close");
+        ids
+    };
+
+    let mut registry = registry_with(&["z:first", "b:brick", "a:dirt", "a:stone"]);
+    let dirt = registry.id_of("a:dirt").expect("registered");
+    let brick = registry.id_of("b:brick").expect("registered");
+    assert!(brick < dirt, "the fixture no longer swaps which is lowest");
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(db.materials().to_world(dirt).ok(), Some(dirt_world));
+    assert_eq!(db.materials().to_world(brick).ok(), Some(brick_world));
+
+    let thawed = db.load_chunk_entities(home).expect("load");
+    let item = thawed[0].item.as_ref().expect("still an item");
+    let cells = item.cells.as_deref().expect("still a cut of several");
+    assert_eq!(
+        (cells[0], cells[1], cells[13]),
+        (brick, brick, dirt),
+        "a cell came back as some other material"
+    );
+    assert_eq!(
+        item.material, brick,
+        "the material was trusted from disk instead of derived"
+    );
+    assert_eq!(item.count(), 2);
+    assert_eq!(item.units, 6);
+}
+
 #[test]
 fn an_item_written_before_its_material_was_translated_is_read_as_the_worlds_id() {
     // Format 2 wrote the session's number. On a world whose mod set never
@@ -994,7 +1082,6 @@ fn an_item_written_before_its_material_was_translated_is_read_as_the_worlds_id()
     // other mods loses nothing, and its rows are rewritten as 3 at the next
     // save.
     use tiamat_core::ent::{Entity, Transform};
-    use tiamat_core::inventory::Stack;
 
     let path = scratch("entity-item-v2");
     let home = ChunkPos::new(0, 0, 0);
@@ -1010,10 +1097,26 @@ fn an_item_written_before_its_material_was_translated_is_read_as_the_worlds_id()
         db.close().expect("close");
     }
     // A row exactly as format 2 wrote it: the entity through `postcard`, as it
-    // stood in memory.
-    let as_v2 = Entity {
-        item: Some(Stack::new(brick, 27).expect("a block")),
-        ..Entity::at(Transform::at(home, [1.0, 2.0, 3.0]), "b")
+    // stood in memory — which was before a stack had cells, so it is written
+    // through a copy of that layout rather than the live struct.
+    let at = Entity::at(Transform::at(home, [1.0, 2.0, 3.0]), "b");
+    let as_v2 = EntityAsV3 {
+        transform: at.transform,
+        velocity: at.velocity,
+        speed: at.speed,
+        collider: at.collider,
+        model: at.model,
+        item: Some(StackAsV3 {
+            material: brick,
+            units: 27,
+            shape: None,
+            detail: None,
+        }),
+        health: at.health,
+        nametag: at.nametag,
+        owner: at.owner,
+        source: at.source,
+        script: at.script,
     };
     let conn = rusqlite::Connection::open(&path).expect("raw connection");
     conn.execute(

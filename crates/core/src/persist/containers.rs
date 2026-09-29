@@ -24,15 +24,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::inventory::{Shape, Stack, View};
+use crate::inventory::{Shape, View};
 use crate::material::MaterialId;
+use crate::persist::cutcells;
 use crate::persist::idmap::MaterialMap;
 
 /// The version this build writes.
 ///
 /// Bumped for any change to what is stored. An older version is migrated
 /// rather than refused — see [`decode`].
-pub const CONTAINER_FORMAT_VERSION: u8 = 1;
+///
+/// 2: a stack may be a cut of several materials, and carries its cells.
+pub const CONTAINER_FORMAT_VERSION: u8 = 2;
 
 /// One stack, in world ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,13 +44,42 @@ struct StoredStack {
     units: u32,
     shape: Option<u32>,
     detail: Option<String>,
+    /// Each cell's material, in WORLD ids with `0` for air, for a cut of
+    /// several materials (format v2, Sub-Node Contract §9.1).
+    cells: Option<Vec<u16>>,
 }
 
-/// One container's contents.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredContainer {
-    slots: Vec<Option<StoredStack>>,
+/// A stack as format v1 wrote one: before a stack could hold several
+/// materials. A copy of the struct as it was, not the live one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredStackV1 {
+    material: u16,
+    units: u32,
+    shape: Option<u32>,
+    detail: Option<String>,
 }
+
+impl From<StoredStackV1> for StoredStack {
+    fn from(old: StoredStackV1) -> Self {
+        Self {
+            material: old.material,
+            units: old.units,
+            shape: old.shape,
+            detail: old.detail,
+            // Nothing written before v2 could be made of several materials.
+            cells: None,
+        }
+    }
+}
+
+/// One container's contents, holding stacks as some format stored them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredContainerOf<S> {
+    slots: Vec<Option<S>>,
+}
+
+/// One container's contents, as this build stores them.
+type StoredContainer = StoredContainerOf<StoredStack>;
 
 /// Why a container could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -85,11 +117,24 @@ pub fn encode(view: &View, materials: &MaterialMap) -> (Vec<u8>, usize) {
                     dropped += 1;
                     return None;
                 };
+                // Every cell named, or the stack is not written: see
+                // `persist::cutcells`.
+                let cells = match &stack.cells {
+                    Some(cells) => {
+                        let Some(world) = cutcells::to_world(cells, materials) else {
+                            dropped += 1;
+                            return None;
+                        };
+                        Some(world)
+                    }
+                    None => None,
+                };
                 Some(StoredStack {
                     material,
                     units: stack.units,
                     shape: stack.shape.map(Shape::occupancy),
                     detail: stack.detail.clone(),
+                    cells,
                 })
             })
             .collect(),
@@ -116,28 +161,41 @@ pub fn decode(
     slots: usize,
     materials: &MaterialMap,
 ) -> Result<(View, usize), ContainerError> {
-    if version != CONTAINER_FORMAT_VERSION {
-        return Err(ContainerError::UnknownVersion { version });
-    }
-    let stored: StoredContainer =
-        postcard::from_bytes(bytes).map_err(|_| ContainerError::Decode { version })?;
+    // **Migrated, not refused**, as a player's inventory is: postcard is not
+    // self-describing, so a v1 row read as v2 runs out of bytes, and refusing
+    // it would empty every chest filled before the upgrade.
+    let stored: StoredContainer = match version {
+        CONTAINER_FORMAT_VERSION => {
+            postcard::from_bytes(bytes).map_err(|_| ContainerError::Decode { version })?
+        }
+        1 => {
+            let old: StoredContainerOf<StoredStackV1> =
+                postcard::from_bytes(bytes).map_err(|_| ContainerError::Decode { version })?;
+            StoredContainerOf {
+                slots: old
+                    .slots
+                    .into_iter()
+                    .map(|slot| slot.map(Into::into))
+                    .collect(),
+            }
+        }
+        _ => return Err(ContainerError::UnknownVersion { version }),
+    };
 
     let mut dropped = 0;
     let mut view = View::empty(name, slots);
     for (index, slot) in stored.slots.iter().enumerate() {
         let Some(stack) = slot else { continue };
-        let Ok(material) = materials.to_runtime(stack.material) else {
+        let Some(built) = cutcells::thaw(
+            stack.material,
+            stack.units,
+            stack.shape,
+            stack.cells.as_deref(),
+            stack.detail.clone(),
+            materials,
+        ) else {
             dropped += 1;
             continue;
-        };
-        let Some(built) = Stack::new(material, stack.units) else {
-            dropped += 1;
-            continue;
-        };
-        let built = Stack {
-            shape: stack.shape.and_then(Shape::new),
-            detail: stack.detail.clone(),
-            ..built
         };
         match view.slots.get_mut(index) {
             Some(place) => *place = Some(built),
@@ -166,6 +224,7 @@ pub fn nameable(material: MaterialId, materials: &MaterialMap) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inventory::Stack;
 
     fn shifted() -> MaterialMap {
         // Deliberately not the identity, so a test cannot pass by ignoring the
@@ -239,6 +298,66 @@ mod tests {
         .expect("decode");
         assert_eq!(back.slots.len(), 2, "the mod's size wins, not the blob's");
         assert_eq!(lost, 1, "a row that no longer fits must be reported");
+    }
+
+    #[test]
+    fn a_cut_of_several_materials_survives_the_trip_in_world_ids() {
+        // Sub-Node Contract §9.1: every cell's material to disk under the
+        // world's id, and back under this session's.
+        let mut cells = crate::block::EMPTY_CELLS;
+        cells[0] = MaterialId(2);
+        cells[26] = MaterialId(1);
+        let mut view = View::empty("core_chest:at:1,2,3", 2);
+        view.slots[1] = crate::inventory::Stack::mixed(&cells, 4);
+        let (bytes, dropped) = encode(&view, &shifted());
+        assert_eq!(dropped, 0);
+        let (back, lost) = decode(
+            CONTAINER_FORMAT_VERSION,
+            &bytes,
+            "core_chest:at:1,2,3",
+            2,
+            &shifted(),
+        )
+        .expect("decode");
+        assert_eq!(lost, 0);
+        assert_eq!(back, view);
+        let stored: StoredContainer = postcard::from_bytes(&bytes).expect("v2");
+        let world = stored.slots[1]
+            .as_ref()
+            .and_then(|stack| stack.cells.clone())
+            .expect("cells on disk");
+        assert_eq!(
+            (world[0], world[26]),
+            (4, 7),
+            "the cells are not in world ids"
+        );
+    }
+
+    #[test]
+    fn a_container_written_before_cuts_of_several_materials_still_loads() {
+        let old = StoredContainerOf {
+            slots: vec![
+                Some(StoredStackV1 {
+                    material: 7,
+                    units: 10,
+                    shape: Some(0b111),
+                    detail: Some("wear=1".to_owned()),
+                }),
+                None,
+            ],
+        };
+        let bytes = postcard::to_allocvec(&old).expect("encode v1");
+        assert!(
+            postcard::from_bytes::<StoredContainer>(&bytes).is_err(),
+            "a v1 row decoded as v2, so the step is not needed"
+        );
+        let (back, lost) = decode(1, &bytes, "c", 2, &shifted()).expect("decode v1");
+        assert_eq!(lost, 0);
+        let stack = back.slots[0].as_ref().expect("the v1 stack");
+        assert_eq!(stack.material, MaterialId(1));
+        assert_eq!(stack.shape.map(Shape::occupancy), Some(0b111));
+        assert_eq!(stack.detail.as_deref(), Some("wear=1"));
+        assert_eq!(stack.cells, None);
     }
 
     #[test]

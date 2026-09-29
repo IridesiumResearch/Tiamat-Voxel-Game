@@ -31,6 +31,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::inventory::{Grab, Shape, Slots, Stack, View};
+use crate::persist::cutcells;
 use crate::persist::idmap::MaterialMap;
 
 /// The version this build writes.
@@ -39,9 +40,11 @@ use crate::persist::idmap::MaterialMap;
 /// out of bytes, which is what `ENTITY_FORMAT_VERSION`'s comment claimed
 /// otherwise until it was measured. A new field is a new version and a
 /// migration step.
-pub const PLAYER_FORMAT_VERSION: u8 = 2;
+///
+/// 3: a stack may be a cut of several materials, and carries its cells.
+pub const PLAYER_FORMAT_VERSION: u8 = 3;
 
-/// One stack, with a world material id.
+/// One stack, with world material ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredStack {
     material: u16,
@@ -53,10 +56,25 @@ struct StoredStack {
     /// half that came back whole after a rejoin would be a durability system
     /// the world forgets, and a named block would be a name that lasts one
     /// session.
+    detail: Option<String>,
+    /// Each cell's material, in WORLD ids with `0` for air, for a cut of
+    /// several materials (format v3, Sub-Node Contract §9.1).
     ///
-    /// `default` so a v1 row, written before this existed, reads as a plain
-    /// stack rather than failing the whole inventory.
-    #[serde(default)]
+    /// With it, `material` and `shape` are only what the writing session
+    /// derived; a load derives them again in its own ids.
+    cells: Option<Vec<u16>>,
+}
+
+/// A stack as format v2 wrote one: before a stack could hold several
+/// materials.
+///
+/// **A copy of the struct as it was**, not the live one with a field removed,
+/// for the reason `migrate::EntityV1` gives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredStackV2 {
+    material: u16,
+    units: u32,
+    shape: Option<u32>,
     detail: Option<String>,
 }
 
@@ -68,21 +86,7 @@ struct StoredStackV1 {
     shape: Option<u32>,
 }
 
-/// A view as v1 wrote one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredViewV1 {
-    name: String,
-    slots: Vec<Option<StoredStackV1>>,
-}
-
-/// An inventory as v1 wrote one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredSlotsV1 {
-    views: Vec<StoredViewV1>,
-    held: Option<StoredStackV1>,
-}
-
-impl From<StoredStackV1> for StoredStack {
+impl From<StoredStackV1> for StoredStackV2 {
     fn from(old: StoredStackV1) -> Self {
         Self {
             material: old.material,
@@ -94,13 +98,44 @@ impl From<StoredStackV1> for StoredStack {
     }
 }
 
-impl From<StoredSlotsV1> for StoredSlots {
-    fn from(old: StoredSlotsV1) -> Self {
+impl From<StoredStackV2> for StoredStack {
+    fn from(old: StoredStackV2) -> Self {
         Self {
-            views: old
+            material: old.material,
+            units: old.units,
+            shape: old.shape,
+            detail: old.detail,
+            // Nothing written before v3 could be made of several materials.
+            cells: None,
+        }
+    }
+}
+
+/// One view, by name, holding stacks as some format stored them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredViewOf<S> {
+    name: String,
+    slots: Vec<Option<S>>,
+}
+
+/// A player's inventory, holding stacks as some format stored them.
+///
+/// Generic over the stack because that is the only part of the layout any
+/// format change has touched, so a migration step is a step for one stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredSlotsOf<S> {
+    views: Vec<StoredViewOf<S>>,
+    held: Option<S>,
+}
+
+impl<S> StoredSlotsOf<S> {
+    /// The same inventory with every stack brought forward one format.
+    fn upgraded<T: From<S>>(self) -> StoredSlotsOf<T> {
+        StoredSlotsOf {
+            views: self
                 .views
                 .into_iter()
-                .map(|view| StoredView {
+                .map(|view| StoredViewOf {
                     name: view.name,
                     slots: view
                         .slots
@@ -109,24 +144,22 @@ impl From<StoredSlotsV1> for StoredSlots {
                         .collect(),
                 })
                 .collect(),
-            held: old.held.map(Into::into),
+            held: self.held.map(Into::into),
         }
     }
 }
 
-/// One view, by name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredView {
-    name: String,
-    slots: Vec<Option<StoredStack>>,
-}
-
-/// A player's inventory, as stored.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredSlots {
-    views: Vec<StoredView>,
-    held: Option<StoredStack>,
-}
+/// One view, by name, as this build stores it.
+type StoredView = StoredViewOf<StoredStack>;
+/// A player's inventory, as this build stores it.
+type StoredSlots = StoredSlotsOf<StoredStack>;
+/// An inventory as v2 wrote one.
+type StoredSlotsV2 = StoredSlotsOf<StoredStackV2>;
+/// An inventory as v1 wrote one.
+type StoredSlotsV1 = StoredSlotsOf<StoredStackV1>;
+/// A view as v1 wrote one.
+#[cfg(test)]
+type StoredViewV1 = StoredViewOf<StoredStackV1>;
 
 /// Why an inventory could not be written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -161,11 +194,24 @@ pub fn encode(slots: &Slots, materials: &MaterialMap) -> (Vec<u8>, usize) {
             dropped += 1;
             return None;
         };
+        // **Every cell named, or the stack is not written**: a cell of a
+        // material with no world id is the material case, twenty-seven times.
+        let cells = match &stack.cells {
+            Some(cells) => {
+                let Some(world) = cutcells::to_world(cells, materials) else {
+                    dropped += 1;
+                    return None;
+                };
+                Some(world)
+            }
+            None => None,
+        };
         Some(StoredStack {
             material,
             units: stack.units,
             shape: stack.shape.map(Shape::occupancy),
             detail: stack.detail.clone(),
+            cells,
         })
     };
 
@@ -213,10 +259,15 @@ pub fn decode(
         PLAYER_FORMAT_VERSION => {
             postcard::from_bytes(bytes).map_err(|_| PlayerDataError::Decode { version })?
         }
+        2 => {
+            let old: StoredSlotsV2 =
+                postcard::from_bytes(bytes).map_err(|_| PlayerDataError::Decode { version })?;
+            old.upgraded()
+        }
         1 => {
             let old: StoredSlotsV1 =
                 postcard::from_bytes(bytes).map_err(|_| PlayerDataError::Decode { version })?;
-            old.into()
+            old.upgraded::<StoredStackV2>().upgraded()
         }
         _ => return Err(PlayerDataError::UnknownVersion { version }),
     };
@@ -224,19 +275,18 @@ pub fn decode(
     let mut dropped = 0;
     let mut load = |stack: &Option<StoredStack>| -> Option<Stack> {
         let stack = stack.as_ref()?;
-        let Ok(material) = materials.to_runtime(stack.material) else {
+        let built = cutcells::thaw(
+            stack.material,
+            stack.units,
+            stack.shape,
+            stack.cells.as_deref(),
+            stack.detail.clone(),
+            materials,
+        );
+        if built.is_none() {
             dropped += 1;
-            return None;
-        };
-        let Some(built) = Stack::new(material, stack.units) else {
-            dropped += 1;
-            return None;
-        };
-        Some(Stack {
-            shape: stack.shape.and_then(Shape::new),
-            detail: stack.detail.clone(),
-            ..built
-        })
+        }
+        built
     };
 
     let mut slots = template.clone();
@@ -452,6 +502,100 @@ mod tests {
             stack.detail, None,
             "a v1 stack said nothing, so it says nothing"
         );
+    }
+
+    /// A cut of runtime materials 1 and 2 — world 7 and 4 under `shifted`.
+    fn two_material_cut() -> crate::block::Cells {
+        let mut cells = crate::block::EMPTY_CELLS;
+        cells[0] = MaterialId(1);
+        cells[1] = MaterialId(1);
+        cells[13] = MaterialId(2);
+        cells
+    }
+
+    #[test]
+    fn a_cut_of_several_materials_survives_the_trip_in_world_ids() {
+        // Sub-Node Contract §9.1 and charter rule 8: every cell is a material,
+        // and every material goes to disk under the world's id.
+        let mut slots = template();
+        slots.views[0].slots[1] = Stack::mixed(&two_material_cut(), 3);
+        let (bytes, dropped) = encode(&slots, &shifted());
+        assert_eq!(dropped, 0);
+        let (back, lost) =
+            decode(PLAYER_FORMAT_VERSION, &bytes, &template(), &shifted()).expect("decode");
+        assert_eq!(lost, 0);
+        assert_eq!(back, slots, "the cut came back as something else");
+
+        // Read under a session that numbers them the other way round: world 7
+        // is runtime 6 and world 4 is runtime 5. The cells follow, and the
+        // material is derived again as THIS session's lowest (runtime 5, the
+        // cell that was runtime 2) rather than trusted from the row.
+        let renumbered = MaterialMap::from_pairs(&[(MaterialId(6), 7), (MaterialId(5), 4)]);
+        let (back, lost) =
+            decode(PLAYER_FORMAT_VERSION, &bytes, &template(), &renumbered).expect("decode");
+        assert_eq!(lost, 0);
+        let stack = back.views[0].slots[1].as_ref().expect("the cut");
+        let cells = stack.cells.as_deref().expect("still several materials");
+        assert_eq!(
+            (cells[0], cells[1], cells[13]),
+            (MaterialId(6), MaterialId(6), MaterialId(5))
+        );
+        assert_eq!(
+            stack.material,
+            MaterialId(5),
+            "the material was not derived again"
+        );
+        assert_eq!(stack.count(), 3);
+    }
+
+    #[test]
+    fn a_cut_with_a_cell_the_world_cannot_name_is_dropped_and_counted() {
+        let mut cells = two_material_cut();
+        cells[20] = MaterialId(9);
+        let mut slots = template();
+        slots.views[0].slots[0] = Stack::mixed(&cells, 1);
+        let (bytes, dropped) = encode(&slots, &shifted());
+        assert_eq!(dropped, 1, "the caller has to be able to say so out loud");
+        let (back, _) =
+            decode(PLAYER_FORMAT_VERSION, &bytes, &template(), &shifted()).expect("decode");
+        assert_eq!(back.views[0].slots[0], None);
+    }
+
+    #[test]
+    fn an_inventory_written_before_cuts_of_several_materials_still_loads() {
+        // A v2 row, with its detail and its cut, read by a v3 build.
+        let old = StoredSlotsV2 {
+            views: vec![StoredViewOf {
+                name: "player:main".to_owned(),
+                slots: vec![
+                    None,
+                    Some(StoredStackV2 {
+                        material: 4,
+                        units: 6,
+                        shape: Some(0b11),
+                        detail: Some("named".to_owned()),
+                    }),
+                ],
+            }],
+            held: Some(StoredStackV2 {
+                material: 7,
+                units: 27,
+                shape: None,
+                detail: None,
+            }),
+        };
+        let bytes = postcard::to_allocvec(&old).expect("encode v2");
+        // The counter-example: a v2 row does not decode as v3.
+        assert!(postcard::from_bytes::<StoredSlots>(&bytes).is_err());
+
+        let (back, lost) = decode(2, &bytes, &template(), &shifted()).expect("decode v2");
+        assert_eq!(lost, 0);
+        let stack = back.views[0].slots[1].as_ref().expect("the v2 stack");
+        assert_eq!(stack.material, MaterialId(2));
+        assert_eq!(stack.shape.map(Shape::occupancy), Some(0b11));
+        assert_eq!(stack.detail.as_deref(), Some("named"));
+        assert_eq!(stack.cells, None);
+        assert_eq!(back.grab.held, Stack::new(MaterialId(1), 27));
     }
 
     #[test]

@@ -113,6 +113,36 @@ pub(crate) struct EntityV1 {
     script: Option<Vec<u8>>,
 }
 
+/// The v3 entity (and v2's bytes): v4 with a stack that could not be made of
+/// several materials.
+///
+/// A copy of the persisted fields as they were, for the reason [`EntityV1`]
+/// is one. The skipped fields (`on_ground`, `submerged`, `fell`, `drive`,
+/// `anim`, `hands`) were never in the bytes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct EntityV3 {
+    transform: crate::ent::Transform,
+    velocity: crate::ent::Velocity,
+    speed: f32,
+    collider: Option<crate::ent::Collider>,
+    model: Option<String>,
+    item: Option<StackV3>,
+    health: Option<crate::ent::Health>,
+    nametag: Option<crate::ent::Nametag>,
+    owner: Option<crate::ent::Owner>,
+    source: String,
+    script: Option<Vec<u8>>,
+}
+
+/// The stack a v3 entity is: before `inventory::Stack::cells`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct StackV3 {
+    material: crate::MaterialId,
+    units: u32,
+    shape: Option<crate::inventory::Shape>,
+    detail: Option<String>,
+}
+
 /// Brings one entity blob forward to [`crate::persist::ENTITY_FORMAT_VERSION`].
 ///
 /// # Errors
@@ -137,8 +167,14 @@ pub fn migrate_entity(
         // was. On a world whose mod set never changed that number IS the
         // world's, which is every world this defect had not already reached,
         // so it is read as one. The caller translates it like any v3 blob.
-        2 => postcard::from_bytes(serialised)
-            .map_err(|source| MigrationError::Decode { version: 2, source }),
+        //
+        // v3 → v4: the stack gained its cells, so both are read as v3's
+        // layout and brought forward holding none.
+        version @ (2 | 3) => {
+            let v3: EntityV3 = postcard::from_bytes(serialised)
+                .map_err(|source| MigrationError::Decode { version, source })?;
+            Ok(v3_to_v4(v3))
+        }
         other => Err(MigrationError::NoStep { from: other }),
     }
 }
@@ -170,6 +206,40 @@ fn v1_to_v2(v1: EntityV1) -> crate::ent::Entity {
         owner: v1.owner,
         source: v1.source,
         script: v1.script,
+    }
+}
+
+/// v3 → v4: a stack may be a cut of several materials (Sub-Node Contract
+/// §9.1).
+///
+/// Nothing written before v4 could be one, so `cells: None` is the correct
+/// value and not a default. The material is still the world's id, as v3's
+/// was; the caller translates it.
+fn v3_to_v4(v3: EntityV3) -> crate::ent::Entity {
+    crate::ent::Entity {
+        transform: v3.transform,
+        velocity: v3.velocity,
+        on_ground: false,
+        submerged: 0.0,
+        fell: 0.0,
+        drive: crate::phys::Intent::default(),
+        speed: v3.speed,
+        collider: v3.collider,
+        model: v3.model,
+        item: v3.item.map(|stack| crate::inventory::Stack {
+            material: stack.material,
+            units: stack.units,
+            shape: stack.shape,
+            cells: None,
+            detail: stack.detail,
+        }),
+        hands: crate::ent::Hands::default(),
+        anim: crate::ent::AnimTag::default(),
+        health: v3.health,
+        nametag: v3.nametag,
+        owner: v3.owner,
+        source: v3.source,
+        script: v3.script,
     }
 }
 
@@ -343,6 +413,66 @@ mod tests {
             entity.item.is_none(),
             "nothing written before v2 could be an item"
         );
+    }
+
+    #[test]
+    fn a_v3_item_reads_back_as_a_v4_one_holding_no_cells() {
+        // Written as a v3 build wrote it: the stack before it had cells.
+        #[derive(serde::Serialize)]
+        struct WriteStackV3 {
+            material: crate::MaterialId,
+            units: u32,
+            shape: Option<crate::inventory::Shape>,
+            detail: Option<String>,
+        }
+        #[derive(serde::Serialize)]
+        struct WriteV3 {
+            transform: crate::ent::Transform,
+            velocity: crate::ent::Velocity,
+            speed: f32,
+            collider: Option<crate::ent::Collider>,
+            model: Option<String>,
+            item: Option<WriteStackV3>,
+            health: Option<crate::ent::Health>,
+            nametag: Option<crate::ent::Nametag>,
+            owner: Option<crate::ent::Owner>,
+            source: String,
+            script: Option<Vec<u8>>,
+        }
+        let written = WriteV3 {
+            transform: crate::ent::Transform::from_world(1.0, 2.0, 3.0),
+            velocity: crate::ent::Velocity([0.0, 0.0, 0.0]),
+            speed: 0.5,
+            collider: None,
+            model: None,
+            item: Some(WriteStackV3 {
+                material: MaterialId(9),
+                units: 10,
+                shape: crate::inventory::Shape::new(0b11),
+                detail: Some("named".to_owned()),
+            }),
+            health: None,
+            nametag: None,
+            owner: None,
+            source: "a_mod".to_owned(),
+            script: None,
+        };
+        let blob = postcard::to_allocvec(&written).expect("encode");
+        assert!(
+            postcard::from_bytes::<crate::ent::Entity>(&blob).is_err(),
+            "a v3 blob decoded as v4, so the step is not needed"
+        );
+        for version in [2, 3] {
+            let entity = migrate_entity(version, &blob).expect("the step exists");
+            let item = entity.item.expect("still an item");
+            assert_eq!(item.material, MaterialId(9));
+            assert_eq!(item.units, 10);
+            assert_eq!(item.shape, crate::inventory::Shape::new(0b11));
+            assert_eq!(item.detail.as_deref(), Some("named"));
+            assert_eq!(item.cells, None);
+            assert_eq!(entity.speed.to_bits(), 0.5f32.to_bits());
+            assert_eq!(entity.source, "a_mod");
+        }
     }
 
     #[test]

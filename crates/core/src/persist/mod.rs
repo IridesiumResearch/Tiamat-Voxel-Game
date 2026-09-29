@@ -32,6 +32,7 @@
 
 pub mod codec;
 pub mod containers;
+mod cutcells;
 pub mod fluidmap;
 pub mod idmap;
 pub mod migrate;
@@ -147,7 +148,11 @@ pub mod meta_keys {
 /// 3: the stack an entity is names its material by the WORLD's id (charter
 /// rule 8). The bytes are laid out as 2's were; what changed is which number
 /// is in them, and a number whose meaning changed is a format change.
-pub const ENTITY_FORMAT_VERSION: u8 = 3;
+///
+/// 4: that stack may be a cut of several materials, and carries its cells,
+/// in world ids (Sub-Node Contract §9.1). `inventory::Stack` gained a field,
+/// so the bytes moved.
+pub const ENTITY_FORMAT_VERSION: u8 = 4;
 
 /// Anything that can go wrong talking to a world database.
 #[derive(Debug, thiserror::Error)]
@@ -1076,9 +1081,27 @@ impl WorldDb {
                     domain: domain.to_owned(),
                     reason: format!("the stack it is cannot be named on disk: {source}"),
                 })?;
+        // **And every cell of a cut of several materials** (Sub-Node
+        // Contract §9.1): twenty-seven more session numbers, translated by
+        // the same map at the same door.
+        let cells = match &item.cells {
+            Some(cells) => Some(cutcells::to_world(cells, &self.materials).ok_or_else(|| {
+                WorldError::Entity {
+                    pos,
+                    domain: domain.to_owned(),
+                    reason: "a cell of the stack it is cannot be named on disk".to_owned(),
+                }
+            })?),
+            None => None,
+        };
         let mut stored = entity.clone();
         if let Some(item) = &mut stored.item {
             item.material = crate::MaterialId(world);
+            if let (Some(held), Some(world)) = (&mut item.cells, cells) {
+                for (cell, id) in held.iter_mut().zip(world) {
+                    *cell = crate::MaterialId(id);
+                }
+            }
         }
         Ok(std::borrow::Cow::Owned(stored))
     }
@@ -1105,6 +1128,32 @@ impl WorldDb {
                     domain: domain.to_owned(),
                     reason: format!("the stack it is names no material of this world: {source}"),
                 })?;
+        }
+        // A cut of several materials: its cells back in this session's ids,
+        // and its material derived again from them (§9.1 rule 2) — the
+        // lowest RUNTIME id is a fact about this session, and the one the
+        // writing session derived need not be it.
+        if let Some(item) = entity.item.take() {
+            let item = match &item.cells {
+                Some(cells) => {
+                    let world: Vec<u16> = cells.iter().map(|cell| cell.get()).collect();
+                    let cells = cutcells::to_runtime(&world, &self.materials).ok_or_else(|| {
+                        WorldError::Entity {
+                            pos,
+                            domain: domain.to_owned(),
+                            reason: "a cell of the stack it is names no material of this world"
+                                .to_owned(),
+                        }
+                    })?;
+                    crate::inventory::Stack {
+                        cells: Some(Box::new(cells)),
+                        ..item
+                    }
+                    .canonical()
+                }
+                None => Some(item),
+            };
+            entity.item = item;
         }
         Ok(entity)
     }
