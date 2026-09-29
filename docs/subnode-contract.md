@@ -701,6 +701,25 @@ can be put back into the same cell of the same block. Without either half — a
 fill anchored to the block's bottom, or a refusal that looked at the whole block
 — sub-node resolution would exist only for removal.
 
+**A cut of several materials (§9.1) places every cell as its own material, all
+or nothing.** It is the same object as a cut of one material with a material
+per cell, and everything above holds for it — the brush is not consulted, and
+occupancy is judged per cell — with two things made stricter because a part of
+it is no material at all:
+
+- **Refused whole, never trimmed.** If any cell it would fill is not air the
+  placement is `Refusal::Occupied`, and if the inventory cannot pay for the
+  whole item it is `Refusal::NothingHeld`. A cut of one material that is paid
+  short is trimmed to what was paid (`place::trim`); a cut of several has no
+  "first N units", because the N units would have to be of particular
+  materials, and choosing which is the engine inventing a different object.
+- **The orientation turns the cells with the mask.** Turning a cut to face the
+  player and tipping it against a wall (`place::oriented`) moves every cell's
+  material with the cell: one permutation of the 27 indices, applied to the
+  occupancy mask and to the cells array alike. Written once, in
+  `inventory::turn_index` / `inventory::tip_index`, so a mask and its materials
+  cannot be turned two different ways.
+
 ### 7.2 Writing a placement — the plan's cells, and never a count
 
 **The edit a placement produces carries the planned cells themselves.** It is
@@ -722,6 +741,17 @@ caused and charter rule 5 forbids. Two shapes of write follow:
 - The block holds a different material: one `Edit::SubNode` per added cell, in
   `placement_mask`'s order. Each preserves what it does not name, and the
   result is a `Mixed` block — the storage form §0 exists for.
+
+**A cut of several materials is written one material at a time, in ascending
+`MaterialId` order**, each through the two shapes above with `filled` grown by
+the cells the materials before it wrote. The first material meets the block as
+it was — a `Partial` union if the block is empty or holds only that material,
+cells otherwise — and every material after it meets a block that already holds
+a different one, so it goes in cell by cell. Nothing new on the wire: these
+are the edits a player placing each material's cells in turn would send.
+Ascending id for the reason §9 orders drops by it — the edit order is
+observable in the deltas, and it must not depend on where in the cut a
+material happens to sit.
 
 Task 09 implements §7.1; `crates/core/src/place.rs` is the implementation and
 `a_chiselled_cell_goes_back_into_the_cell_it_came_out_of` is the test. §7.2 is
@@ -1140,6 +1170,48 @@ decides which stack an almost-full inventory keeps — so it must not depend on
 cell iteration order or anything else that could differ between machines running
 the same simulation.
 
+### 9.1 A cut of several materials — a `Mixed` block you can carry
+
+The world has held blocks of several materials since Task 02b (§0, `Mixed`).
+An inventory stack could hold only one: loose material, or a cut of one
+material to a 27-bit mask. A stack may also be **a cut of several materials**,
+each of its 27 cells its own — the `Mixed` storage form, carried. The rules
+are enforced by construction (`Stack::mixed`), never by the caller:
+
+1. **Canonical form, as §0's.** A stack carries per-cell materials only when
+   they hold two or more distinct non-air materials. One material and not full
+   is a cut of one material; one material and full is loose material; all air
+   is no stack. Exactly `BlockValue::canonical`'s rule, applied to a stack —
+   without it one object would have two spellings and they would not stack.
+2. **Its material is the lowest material id among its cells**, ascending id as
+   everything in this section is ordered. Derived, never chosen, and derived
+   again whenever a stack is rebuilt from the wire, from disk or from a mod,
+   because runtime ids are a fact about one session (charter rule 8).
+3. **Its shape is the occupancy of its cells**, and absent when the cut fills
+   the block: a `Shape` is never full, and that does not change.
+4. **Its units are `count × occupied cells`.** One quantity and no exchange
+   rate (charter rule 5); a slot holds ninety of them, as it holds ninety of
+   any cut.
+5. **Identity is material, shape, cells and detail.** Two stacks merge only if
+   all four agree, and every "is this the same stack" in the inventory asks
+   the one question (`Stack::same_item`, and `StackKey` for taking).
+6. **A cut of several materials is not loose material of anything.** A take
+   that names a material and no cells never takes from one — including a cut
+   that fills the block and so has no shape.
+7. **It moves in whole items.** A unit of a cut of one material is still a
+   unit of that material, so its stacks split by units as loose material
+   does; a unit of a cut of several is no material at all. So halving one,
+   putting one down, and taking from one move whole items, and `units` stays a
+   multiple of the cells.
+
+**Conservation (charter rule 5).** One item costs one unit per occupied cell,
+each unit of THAT cell's material. The engine does not craft: a mod takes
+`n × cells_of(m)` units of each material `m` and gives `n` of the cut, exactly
+as a shape crafter does for one material. Placing debits the cut (§7.1, §7.2);
+breaking the placed block yields one loose stack per material, as this
+section's list already says for `Mixed`, in ascending id. Made from loose
+units, placed, and broken, every material's units are what they were.
+
 ---
 
 ## 10. Networking — what a sub-node edit costs on the wire
@@ -1171,6 +1243,15 @@ These are the numbers Task 03's persistence budget should be set against. The
 chiselled figure of 1.8 KiB is the one to design for; Task 03's "uniform chunk
 ≤ 100 bytes" target is not met by this spike's deliberately naive encoding
 (157 B), which is expected — the real format will pack the palette properly.
+
+**Placing a cut of several materials (§9.1) into an empty block is at most 27
+edits**: one `Edit::Partial` for the lowest-id material (an `Edit::SubNode`
+when it has a single cell), then one `Edit::SubNode` for each cell of every
+material after it — up to 26 of them. At five bytes a sub-node delta that is
+at most ~140 bytes raw for one placement, the cost of a player chiselling the
+same cells in one tick, and far inside the budget above. A dedicated
+"several materials" edit is not worth the variant every peer would have to be
+taught (the argument §7.4 makes for the merge write).
 
 ---
 
