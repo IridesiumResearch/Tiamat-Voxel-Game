@@ -1364,9 +1364,9 @@ const UNLOAD_INTERVAL_TICKS: u64 = 20;
 
 /// Ticks between looks at the generation backlog: one second.
 ///
-/// World ask 40. Reported only while more chunks are waiting than the
-/// workers can hold at once, so a walk that the pool keeps up with says
-/// nothing.
+/// World ask 40. Reported only once every request the clients may have out
+/// has sat behind a full pool for several looks running — see
+/// [`crate::worldgen::Lag`] — so a walk the pool keeps up with says nothing.
 const GENERATION_REPORT_TICKS: u64 = 20;
 
 /// Ticks between the lines of per-phase means: one minute.
@@ -3351,6 +3351,9 @@ impl ServerHandle {
                     // server keeps one running ledger, and a window is the
                     // difference between two copies of it.
                     let mut means_from = sim::PhaseLedger::default();
+                    // How long generation has been behind the clients, in
+                    // looks. See `worldgen::Lag`.
+                    let mut lag = crate::worldgen::Lag::default();
                     let mut clock = sim::MonotonicClock::new();
                     sim::run(&mut clock, &control, |tick| {
                         let mut world = held
@@ -5013,26 +5016,31 @@ impl ServerHandle {
                         // 40). The over-budget warning watches the tick, and
                         // the workers exist to keep generation off it — so a
                         // world arriving as slabs said nothing anywhere. Once
-                        // a second while more is waiting than the pool can
-                        // hold: the depth, and what a chunk has been costing.
+                        // a second while generation is not keeping up: the
+                        // depth, and what a chunk has been costing.
                         if tick % GENERATION_REPORT_TICKS == 0
                             && let Some(pool) = workers.as_ref()
                         {
-                            // **Waiting is the queue, not the parking.** A
-                            // request is parked only once the pool has taken
-                            // its chunk, so what is parked never exceeds the
-                            // pool's capacity; the queue the tick has not yet
-                            // served is where a backlog forms.
-                            let waiting = shared.queued_chunk_requests() + parked.requests.len();
-                            if waiting > pool.capacity() {
+                            // **Waiting is the queue and the parking, counted
+                            // in requests**, because the yardstick is the
+                            // clients' windows and a window counts requests.
+                            // It used to be measured against the pool's
+                            // capacity, which one player's window outgrows —
+                            // so it fired on every single-player walk. See
+                            // `worldgen::Lag` for what "behind" is now.
+                            let waiting = shared.queued_chunk_requests() + parked.waiting();
+                            let windows = shared.request_windows();
+                            if let Some(looks) = lag.look(waiting, windows, !pool.has_room()) {
                                 let cost = pool
                                     .recent_cost()
                                     .map_or(0.0, |cost| cost.as_secs_f64() * 1000.0);
                                 warn!(
                                     waiting,
+                                    windows,
                                     in_flight = pool.in_flight(),
                                     ms_per_chunk = format!("{cost:.1}"),
-                                    "generation behind: {waiting} chunks waiting, {} in flight, {cost:.1} ms/chunk",
+                                    "generation behind: {waiting} chunks waiting, {} in flight, {cost:.1} ms/chunk — \
+                                     the clients' whole window of {windows} has waited on the workers for {looks} s",
                                     pool.in_flight()
                                 );
                             }

@@ -229,6 +229,51 @@ pub fn worker_count() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| (cores.get() / 2).clamp(1, 4))
 }
 
+/// Looks in a row the backlog must fill the clients' whole window before the
+/// lag line speaks: three seconds, at the tick's one look a second.
+pub const LAG_LOOKS: u32 = 3;
+
+/// Whether generation is keeping up with the players asking for it.
+///
+/// # What "behind" means
+///
+/// World ask 40 asked for a line when a world arrives as slabs. It shipped
+/// comparing the backlog with the pool's capacity — four workers of
+/// [`JOBS_PER_WORKER`], eight — while one player's own request window is eleven
+/// chunks and two horizon summaries. So a single player streaming normally
+/// always had more waiting than the pool could hold, and the line fired on
+/// every walk: "9–12 waiting, 8 in flight" was the ordinary shape of a stream
+/// the pool was keeping up with, logged at `warn` once a second.
+///
+/// **A client cannot have more out than its window**, so the backlog is
+/// bounded by the clients' windows together, and it only REACHES that bound
+/// when every request they may make is sitting behind the workers — nothing
+/// answered since the last look, nothing new asked. That, with the pool full,
+/// for [`LAG_LOOKS`] looks running, is generation not keeping up. One look is a
+/// tick on which nothing happened to come back; a full window with room in the
+/// pool is the serving clock running out, which is not generation's to report.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Lag {
+    /// Looks in a row the window has been full behind a full pool.
+    behind_for: u32,
+}
+
+impl Lag {
+    /// One look at the backlog: requests waiting on generation, the windows of
+    /// everybody streaming, and whether the pool has room for another job.
+    ///
+    /// `Some(looks)` when the line should speak, with how many looks in a row
+    /// generation has been behind.
+    pub fn look(&mut self, waiting: usize, windows: usize, pool_full: bool) -> Option<u32> {
+        if windows > 0 && pool_full && waiting >= windows {
+            self.behind_for = self.behind_for.saturating_add(1);
+        } else {
+            self.behind_for = 0;
+        }
+        (self.behind_for >= LAG_LOOKS).then_some(self.behind_for)
+    }
+}
+
 impl Pool {
     /// Starts `workers` threads, each loading its own VM from `spec`.
     ///
@@ -551,6 +596,74 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// One player's window, from the constants the connection streams by.
+    fn one_players_window() -> usize {
+        use crate::transport::endpoint::{
+            CHUNKS_PER_TICK, MIN_CHUNKS_IN_FLIGHT, SUMMARIES_IN_FLIGHT_PER_CLIENT,
+        };
+        (CHUNKS_PER_TICK / 2).max(MIN_CHUNKS_IN_FLIGHT) + SUMMARIES_IN_FLIGHT_PER_CLIENT
+    }
+
+    #[test]
+    fn a_single_player_streaming_normally_is_not_behind() {
+        // The shape the old rule warned on once a second: nine to twelve
+        // waiting with the pool full, on every walk. More than the pool holds
+        // is ordinary — one player's window is larger than the pool — and a
+        // window that is never full is a stream being answered.
+        let window = one_players_window();
+        assert!(
+            window > 4 * JOBS_PER_WORKER,
+            "the premise: one player's window ({window}) outgrows a four-worker pool"
+        );
+        let mut lag = Lag::default();
+        for look in 0..60 {
+            let waiting = 9 + look % 4;
+            assert!(waiting < window);
+            assert_eq!(
+                lag.look(waiting, window, true),
+                None,
+                "{waiting} of a window of {window} was called behind"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_full_behind_a_full_pool_for_three_looks_is_behind() {
+        let window = one_players_window();
+        let mut lag = Lag::default();
+        assert_eq!(lag.look(window, window, true), None, "one look is one tick");
+        assert_eq!(lag.look(window, window, true), None);
+        assert_eq!(lag.look(window, window, true), Some(LAG_LOOKS));
+        assert_eq!(
+            lag.look(window, window, true),
+            Some(LAG_LOOKS + 1),
+            "it keeps saying so, and for how long"
+        );
+        // One chunk answered and the run is over; it starts again from nothing.
+        assert_eq!(lag.look(window - 1, window, true), None);
+        assert_eq!(lag.look(window, window, true), None);
+    }
+
+    #[test]
+    fn a_full_window_with_room_in_the_pool_is_not_generation() {
+        // The serving clock ran out, or the lighting did: the workers are not
+        // what the requests are waiting on.
+        let window = one_players_window();
+        let mut lag = Lag::default();
+        for _ in 0..10 {
+            assert_eq!(lag.look(window, window, false), None);
+        }
+    }
+
+    #[test]
+    fn nobody_streaming_is_never_behind() {
+        let mut lag = Lag::default();
+        for _ in 0..10 {
+            assert_eq!(lag.look(0, 0, true), None);
+            assert_eq!(lag.look(5, 0, true), None);
+        }
+    }
 
     /// A mod with a real generator: sampled terrain, a pond, and a biome tint,
     /// so every field of a [`Done`] has something in it to compare.
