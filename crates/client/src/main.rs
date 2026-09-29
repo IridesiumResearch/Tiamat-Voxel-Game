@@ -1916,6 +1916,7 @@ fn paint_hud_command(
             size,
             material,
             shape,
+            cells: _,
         } => {
             let min = place(*anchor, *x, *y);
             let extent = egui::vec2(f32::from(*size) * scale, f32::from(*size) * scale);

@@ -206,6 +206,10 @@ pub enum Command {
         /// were stone. `0` draws the flat tile, which is what loose material
         /// is; anything else draws the cells.
         shape: u32,
+        /// Each cell's own material, for a cut of several materials: 27 ids,
+        /// `0` for an empty cell, or empty to draw every filled cell as
+        /// `material`. Anything but 0 or 27 entries is drawn as empty.
+        cells: Vec<u16>,
     },
 }
 

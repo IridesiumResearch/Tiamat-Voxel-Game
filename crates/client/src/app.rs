@@ -6649,6 +6649,9 @@ impl App {
                     units: stack.units,
                     shape: stack.shape,
                     detail: stack.detail.clone(),
+                    // A cut of several materials, cell by cell, in the ids the
+                    // atlas is keyed by — the wire's.
+                    cells: stack.cells.clone(),
                 })
             })
             .collect();
@@ -6662,6 +6665,7 @@ impl App {
             units: stack.units,
             shape: stack.shape,
             detail: stack.detail.clone(),
+            cells: stack.cells.clone(),
         });
         let voxels = phys::Voxels::new(&self.store, predictor.origin());
         let looking_at = self.looking_at().map(|hit| {

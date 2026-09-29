@@ -417,6 +417,36 @@ fn extent(table: &Table, key: &str, default: u16) -> mlua::Result<u16> {
     Ok(whole(raw, i64::from(default), 0, i64::from(u16::MAX)) as u16)
 }
 
+/// An icon's `cells`: absent is none, and present is exactly 27 material ids,
+/// each clamped as every other number here is.
+///
+/// **The length is refused rather than clamped**, unlike a number: 26 cells
+/// is not a block that is almost right, it is a script that has miscounted,
+/// and a renderer walks exactly 27. Read with `raw_get`, so a table with a
+/// metatable cannot make this run a script's code.
+fn icon_cells(table: &Table) -> mlua::Result<Vec<u16>> {
+    let Some(list) = table.get::<Option<Table>>("cells")? else {
+        return Ok(Vec::new());
+    };
+    let count = list.raw_len();
+    if count != crate::block::SUBNODES_PER_BLOCK {
+        return Err(mlua::Error::external(format!(
+            "hud.icon: `cells` has {count} entries; it is one per cell of a block, 27"
+        )));
+    }
+    let mut cells = Vec::with_capacity(count);
+    for index in 1..=count {
+        let raw = list.raw_get::<Option<f64>>(index)?;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to u16 range by `whole`"
+        )]
+        cells.push(whole(raw, 0, 0, i64::from(u16::MAX)) as u16);
+    }
+    Ok(cells)
+}
+
 /// A colour field, as four bytes. Absent means the default.
 fn colour(table: &Table, key: &str, default: Colour) -> mlua::Result<Colour> {
     let Some(list) = table.get::<Option<Table>>(key)? else {
@@ -604,6 +634,9 @@ impl HudVm {
 
     /// The `hud.icon` command, on its own because the draw table is at
     /// clippy's line ceiling and appending to it is what put it there.
+    ///
+    /// `cells`, for a cut of several materials (Sub-Node Contract §9.1), is
+    /// what `state.carried[i].cells` holds: 27 material ids, `0` for empty.
     fn install_icon(&self, hud: &Table) -> mlua::Result<()> {
         hud.set(
             "icon",
@@ -630,6 +663,7 @@ impl HudVm {
                     0,
                     i64::from(crate::inventory::Shape::ALL),
                 ) as u32;
+                let cells = icon_cells(&spec)?;
                 emit(
                     lua,
                     Command::Icon {
@@ -639,6 +673,7 @@ impl HudVm {
                         size: extent(&spec, "size", 48)?,
                         material,
                         shape,
+                        cells,
                     },
                 )
             })?,
@@ -753,7 +788,14 @@ impl HudVm {
             let (blocks, nodes) = entry.display();
             slot.set("blocks", blocks)?;
             slot.set("nodes", nodes)?;
-            slot.set("shape", (entry.shape != 0).then_some(entry.shape))?;
+            slot.set("shape", (entry.mask() != 0).then(|| entry.mask()))?;
+            // A cut of several materials, cell by cell, for `hud.icon`.
+            if !entry.cells.is_empty() {
+                slot.set(
+                    "cells",
+                    self.lua.create_sequence_from(entry.cells.iter().copied())?,
+                )?;
+            }
             // A mod's own word for which item this is, for the mod that set it
             // — a durability bar, or a name under the slot.
             slot.set("detail", entry.detail.clone())?;
@@ -777,7 +819,13 @@ impl HudVm {
                 let (blocks, nodes) = entry.display();
                 slot.set("blocks", blocks)?;
                 slot.set("nodes", nodes)?;
-                slot.set("shape", (entry.shape != 0).then_some(entry.shape))?;
+                slot.set("shape", (entry.mask() != 0).then(|| entry.mask()))?;
+                if !entry.cells.is_empty() {
+                    slot.set(
+                        "cells",
+                        self.lua.create_sequence_from(entry.cells.iter().copied())?,
+                    )?;
+                }
                 // Items, for a cut. `nil` for loose material, where blocks and
                 // spare nodes is the display and a count means nothing.
                 slot.set("count", entry.count())?;
@@ -864,6 +912,7 @@ mod tests {
                 units: 40,
                 shape: 0,
                 detail: None,
+                cells: Vec::new(),
             })],
             ..State::default()
         }
@@ -929,6 +978,7 @@ end)
             units: CUT.count_ones(),
             shape: CUT,
             detail: None,
+            cells: Vec::new(),
         })];
         assert!(vm.draw(&cut_state).is_empty(), "the reference HUD faulted");
         let drawn = commands(&vm);
@@ -977,6 +1027,91 @@ end)
                 Command::Icon { shape, .. } if *shape == 0
             )),
             "loose material asked for a shape"
+        );
+    }
+
+    #[test]
+    fn the_reference_hud_draws_a_cut_of_several_materials_cell_by_cell() {
+        // Sub-Node Contract §9.1 on the HUD: the real `hud.lua` hands
+        // `slot.cells` to `hud.icon`, and a cut that fills its block is told
+        // to the script as the full mask, never as loose material.
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../game/core_ui/hud.lua"
+        ))
+        .expect("the reference HUD script");
+        let mut vm = vm();
+        vm.load("core_ui", &source).expect("load");
+
+        let mut cells = vec![7u16; 27];
+        cells[13] = 9;
+        let mut mixed = state();
+        let entry = Carried {
+            material: MaterialId(7),
+            name: "core_blocks:white".to_owned(),
+            units: 54,
+            shape: 0,
+            detail: None,
+            cells: cells.clone(),
+        };
+        assert_eq!(entry.mask(), crate::inventory::Shape::ALL);
+        assert_eq!(entry.count(), Some(2), "two items, not two blocks of stone");
+        mixed.carried = vec![Some(entry.clone())];
+        mixed.offhand = Some(entry);
+        assert!(vm.draw(&mixed).is_empty(), "the reference HUD faulted");
+        let drawn = commands(&vm);
+        let icons: Vec<&Command> = drawn
+            .iter()
+            .filter(|command| matches!(command, Command::Icon { .. }))
+            .collect();
+        assert_eq!(icons.len(), 2, "the hotbar slot and the off-hand");
+        for icon in icons {
+            let Command::Icon {
+                shape,
+                cells: drawn,
+                ..
+            } = icon
+            else {
+                unreachable!()
+            };
+            assert_eq!(*shape, crate::inventory::Shape::ALL);
+            assert_eq!(drawn, &cells, "the icon was not given the cells");
+        }
+    }
+
+    #[test]
+    fn an_icon_is_given_twenty_seven_cells_or_none() {
+        let mut vm = vm();
+        vm.load(
+            "core_ui",
+            "
+hud.on_draw(function(state)
+    local cells = {}
+    for i = 1, 27 do cells[i] = (i == 1) and 5 or 0 end
+    hud.icon{ material = 5, shape = 1, cells = cells }
+end)
+",
+        )
+        .expect("load");
+        assert!(vm.draw(&state()).is_empty());
+        let drawn = commands(&vm);
+        let Some(Command::Icon { cells, .. }) = drawn.first() else {
+            panic!("the icon was not drawn: {drawn:?}");
+        };
+        assert_eq!(cells.len(), 27);
+        assert_eq!(cells[0], 5);
+
+        let mut short = self::vm();
+        short
+            .load(
+                "core_ui",
+                "hud.on_draw(function() hud.icon{ material = 5, cells = { 1, 2, 3 } } end)",
+            )
+            .expect("load");
+        assert_eq!(
+            short.draw(&state()).len(),
+            1,
+            "a run of three cells is refused"
         );
     }
 

@@ -132,6 +132,38 @@ partial ones. `game.inventory` reports each stack as
 are different numbers and confusing them is the commonest arithmetic bug here,
 and `blocks`/`nodes` are already worked out for you, so do not divide again.
 
+**A cut of several materials** — one carved shape, each of its 27 cells its own
+material — is a stack too, and it carries `cells`: 27 numeric ids, entry `i`
+being cell `i - 1` (`x + 3*y + 9*z`), `0` for empty. Its `material` is the
+LOWEST id in the cells and its `shape` their occupancy (the full mask
+`0x7FFFFFF` when it fills the block, never nil). Give one with
+`game.give(uuid, { cells = cells, count = n })` — no `material`, no `shape`;
+the engine derives both. **The engine does not craft it for you**: one item
+costs one unit of each cell's own material, so take `n * cells_of(m)` units of
+every material `m` first, then give the cut. Take it back with the same
+`cells`: a take naming only a material never touches a cut of several, and one
+moves in whole items. A `shape_editor` given `cells` edits one, and its
+`"chiselled"` event reports `cells` — pass them straight to `game.give`.
+
+```lua
+local need = {}                                  -- cells of each material, per item
+for _, id in ipairs(event.cells) do
+    if id ~= 0 then need[id] = (need[id] or 0) + 1 end
+end
+local taken, short = {}, false
+for id, per in pairs(need) do
+    taken[id] = game.take(uuid, { material = id, units = per * n })
+    short = short or taken[id] < per * n
+end
+if short then                                    -- put back exactly what was taken
+    for id, units in pairs(taken) do
+        if units > 0 then game.give(uuid, { material = id, units = units }) end
+    end
+else
+    game.give(uuid, { cells = event.cells, count = n })
+end
+```
+
 ### 3. String IDs are canonical; numbers are per-session
 
 `"core:white"` is the identity. The numeric ids `game.get_block_id` hands back

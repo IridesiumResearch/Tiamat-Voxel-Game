@@ -1603,12 +1603,20 @@ function game.set_tool(player, tool) end
 ---of a cut and is nil for loose material, so `if entry.shape then` is the test
 ---for "is this a shaped stack".
 ---
+---**A cut of several materials** also reports `cells`: 27 numeric ids, entry
+---`i` being cell `i - 1` (`x + 3*y + 9*z`), `0` for an empty cell. Its
+---`material` is the LOWEST id among them and its `shape` their occupancy —
+---and a cut of several that fills the block reports `shape = 0x7FFFFFF`, never
+---nil, so `if entry.shape then` still means "not loose material". `if
+---entry.cells then` is the test for "made of several materials".
+---
 ---Answers an empty list during worldgen, when nobody is carrying anything yet.
 ---@param player string A player UUID in hex, as a hook event reports one.
 ---@param view string? Which view. Defaults to "player:main".
----Each stack reports `{ material, units, blocks, nodes, count, shape, detail }`.
----`detail` is your own word for which item it is, absent when nothing said one —
----see `game.give`.
+---Each stack reports `{ material, units, blocks, nodes, count, shape, detail,
+---cells }`. `detail` is your own word for which item it is, absent when nothing
+---said one — see `game.give`. `cells` is absent except for a cut of several
+---materials.
 ---@return table[] stacks
 function game.inventory(player, view) end
 
@@ -1626,6 +1634,26 @@ function game.inventory(player, view) end
 ---cells in `shape` for a cut. `shape` is a 27-bit occupancy mask over the
 ---block's sub-nodes, indexed `x + 3*y + 9*z`; leave it out for loose material.
 ---
+---**A cut of several materials** is given by its `cells` instead: an array of
+---exactly 27 entries, entry `i` being cell `i - 1` (`x + 3*y + 9*z`), each a
+---block id, a numeric id, or `0` for an empty cell. The stack is built from
+---the cells — its `material` is the lowest id among them and its `shape` their
+---occupancy — so leave those two out; given and disagreeing, they are an error.
+---Cells of one material are the plain cut (or, filling the block, the loose
+---material) they are. `count` is items as before, and `units` must be a whole
+---number of them: a cut of several moves in whole items, because a unit of
+---it is no material at all. **The engine does not craft**: taking each
+---material's units and giving the cut is yours, and one item costs one unit of
+---each cell's own material.
+---
+---```lua
+---local cells = {}
+---for i = 1, 27 do cells[i] = 0 end
+---for i = 1, 9 do cells[i] = "core:stone" end      -- the bottom layer
+---for i = 10, 12 do cells[i] = "core:oak" end       -- a step at the back
+---game.give(uuid, { cells = cells, count = 4 })
+---```
+---
 ---`detail` is YOUR OWN word for which item this is, and the engine never looks
 ---inside it. **Without it, two swords are one sword**: stacks merge on being the
 ---same thing, and being the same thing was material and cut — so one sword worn
@@ -1642,8 +1670,10 @@ function game.inventory(player, view) end
 ---```
 ---
 ---Two stacks stack only if they are the same material AND the same shape AND the
----same detail, so giving somebody a cut never merges it into the rubble they were
----carrying, and giving them a named block never merges it into their plain ones.
+---same cells AND the same detail, so giving somebody a cut never merges it into
+---the rubble they were carrying, giving them a named block never merges it into
+---their plain ones, and a stair of stone and oak never merges into one of stone
+---and brick.
 ---
 ---Returns false for a player who is not connected, or for a quantity of zero.
 ---An inventory never refuses for lack of room — it grows.
@@ -1659,7 +1689,7 @@ function game.inventory(player, view) end
 ---the view filled — the view no longer grows past its size. A pickup that
 ---leaves something is a pickup to leave on the ground: give back `left`
 ---units to the entity rather than despawning it.
----@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string?, slot: integer? }
+---@param spec { material: string|integer?, units: integer?, count: integer?, shape: integer?, cells: (string|integer)[]?, detail: string?, view: string?, slot: integer? }
 ---@return boolean gave
 ---@return integer left
 function game.give(player, spec) end
@@ -1695,7 +1725,7 @@ function game.set_main_slots(slots) end
 ---reaches the server when it changes.
 ---
 ---The table is the same shape `game.inventory` reports a stack in:
----`{ material, units, blocks, nodes, count, shape, detail }`.
+---`{ material, units, blocks, nodes, count, shape, detail, cells }`.
 ---@param player string A player UUID in hex.
 ---@return table|nil held
 function game.held(player) end
@@ -1710,7 +1740,8 @@ function game.held(player) end
 ---`game.take(player, { ..., slot = 28 })` and gives the bar back into the same
 ---slot with `game.give(player, { ..., slot = 28 })`.
 ---
----The same table `game.held` answers: `material`, `units`, `shape`, `detail`.
+---The same table `game.held` answers: `material`, `units`, `shape`, `detail`,
+---and `cells` for a cut of several materials.
 ---@param player string A player UUID in hex.
 ---@param view string A view name, such as `"player:main"`.
 ---@param n integer The slot, from 1.
@@ -1754,9 +1785,16 @@ function game.heading(dx, dz) end
 ---stack — a recipe asking for stone must not melt down the named sword somebody
 ---left in the same view. A mod that does want any of them reads `game.inventory`,
 ---which reports each stack's detail, and asks for the ones it wants by name.
+---
+---**With `cells`, exactly that cut of several materials**, and a take that
+---names a material and no cells never takes from one — not even one that fills
+---the block, whose `material` and missing mask look like loose material's. A
+---stack table `game.inventory` reported is a spec for the same stack. A cut of
+---several is taken in whole items: asking for part of one takes the whole
+---ones the request covers.
 ---@param player string A player UUID in hex.
 ---`slot` names ONE slot of the view, one-based, to take from that slot alone.
----@param spec { material: string|integer, units: integer?, count: integer?, shape: integer?, detail: string?, view: string?, slot: integer? }
+---@param spec { material: string|integer?, units: integer?, count: integer?, shape: integer?, cells: (string|integer)[]?, detail: string?, view: string?, slot: integer? }
 ---@return integer units How many units were removed.
 function game.take(player, spec) end
 
@@ -1830,8 +1868,9 @@ function game.register_on_chat(callback) end
 ---@field first integer? `item_grid`: the first slot shown, one-based.
 ---@field count integer? `item_grid`: how many slots.
 ---@field permille integer? `progress`: how full, 0 to 1000.
----@field shape integer? `shape_editor`: the 27-bit occupancy mask, indexed `x + 3*y + 9*z`. Defaults to a whole block.
----@field material integer? `shape_editor`: which material the cells are drawn as.
+---@field shape integer? `shape_editor`: the 27-bit occupancy mask, indexed `x + 3*y + 9*z`. Defaults to a whole block; with `cells`, it is theirs and may be left out.
+---@field material integer? `shape_editor`: which material the cells are drawn as — with `cells`, the BRUSH a right-click adds, defaulting to the lowest material in them.
+---@field cells integer[]? `shape_editor`: an editor of several materials — 27 numeric ids, entry `i` being cell `i - 1`, `0` for an empty cell. Leave it out for one material.
 
 ---What a widget may say about how it looks. Deliberately small.
 ---@class Tiamat.WidgetStyle
@@ -1905,6 +1944,17 @@ function game.close_dialog(spec) end
 ---deciding what either means is yours. `shape` counts its own cells, so an item
 ---of that cut costs that many units.
 ---
+---**An editor of several materials** is given `cells` — 27 numeric ids, entry
+---`i` being cell `i - 1`, `0` for empty — and draws each cell as its own
+---material. `material` is then the BRUSH: a right-click puts a cell of it back,
+---and a left-click takes the nearest cell off whatever it is made of. Change
+---the brush with `game.update_dialog` and the cells the player has made stay as
+---they are; the client adopts your `cells` only when they differ from what it
+---last reported, as it does `shape`. Each change reports `"chiselled"` with
+---`shape` AND `cells`, in the ids `game.get_block_id` gives, and `{ cells =
+---event.cells, count = n }` is the spec that gives the cut. Without `cells` an
+---editor is one material, exactly as before.
+---
 ---Called when a player does something in one of YOUR dialogs.
 ---
 ---Only your own: a dialog's events are private to the mod that opened it.
@@ -1921,7 +1971,8 @@ function game.close_dialog(spec) end
 ---  - `"slid"` — `name`, `value`
 ---  - `"chose"` — `name`, `index` (one-based)
 ---  - `"clicked"` — `view`, `index` (one-based), `click` ("left", "right", "shift_left")
----  - `"chiselled"` — `name`, `shape` (the whole 27-bit mask)
+---  - `"chiselled"` — `name`, `shape` (the whole 27-bit mask), and `cells` (27
+    numeric ids, `0` for empty) from an editor of several materials
 ---  - `"closed"` — nothing else
 ---
 ---**Every one is a REQUEST, never a result.** A slot click says what the player
@@ -1935,7 +1986,7 @@ function game.close_dialog(spec) end
 ---coming without making every button wait to answer. So on `"double"`, do what
 ---is left of the larger thing rather than the whole of it again. A right-click
 ---presses a button; a mod that never reads `click` treats it as a press.
----@param callback fun(event: { player: string, form: string, kind: string, name: string?, text: string?, checked: boolean?, value: integer?, index: integer?, view: string?, click: string?, shape: integer? })
+---@param callback fun(event: { player: string, form: string, kind: string, name: string?, text: string?, checked: boolean?, value: integer?, index: integer?, view: string?, click: string?, shape: integer?, cells: integer[]? })
 function game.register_on_dialog_event(callback) end
 
 ---Registers a sound. Registration window only.
@@ -2370,7 +2421,7 @@ function game.chat_to(player, text) end
 ---    hud.hide_builtin("crosshair")
 ---    for index, slot in ipairs(state.carried) do
 ---        hud.icon{ anchor = "bottom", x = (index - 1) * 56 - 224, y = 72, size = 48,
----                  material = slot.material, shape = slot.shape }
+---                  material = slot.material, shape = slot.shape, cells = slot.cells }
 ---        hud.text{ anchor = "bottom", x = (index - 1) * 56 - 224, y = 26,
 ---                  text = slot.count or (slot.blocks .. "+" .. slot.nodes), size = 18 }
 ---    end
@@ -2400,6 +2451,14 @@ function game.chat_to(player, text) end
 ---`slot.count` is how many of that cut it is, and is nil for loose material —
 ---where `slot.blocks` and `slot.nodes` are the display instead. Labelling a
 ---thirteen-cell stair `+13` tells a player they have thirteen of something.
+---
+---**A cut of several materials carries `slot.cells`** too: 27 ids, `0` for an
+---empty cell. Pass it to `hud.icon` as `cells` and each cell is drawn as its
+---own material; leave it out and every cell is drawn as `material`, which is
+---only the lowest of them. Such a cut that fills the block has `slot.shape =
+---0x7FFFFFF` rather than nil, so a test for loose material still works.
+---`hud.icon`'s `cells` must be 27 entries or absent; any other length is a
+---fault in the frame.
 ---
 ---`state.offhand` is the twenty-eighth slot of the same view, or nil. It is
 ---handed over separately because a HUD draws it somewhere else entirely; the
@@ -3209,6 +3268,7 @@ function game.set_block(position, block, occupancy, options) end
 ---@field material integer What it would be made of.
 ---@field occupancy integer Bitmask of which of the block's 27 cells would be filled.
 ---@field units integer How many units it would cost, which is the number of set bits in `occupancy`.
+---@field cells integer[]|nil For a cut of several materials, each cell's material as it would land — turned to face the player as the placement turns it — 27 numeric ids with `0` for empty; `material` is then the lowest of them. Absent for anything else.
 
 ---The place control landing on a block with nothing to place.
 ---@class Tiamat.UseEvent
@@ -3218,7 +3278,7 @@ function game.set_block(position, block, occupancy, options) end
 ---@field z integer|nil
 ---@field domain string The space the player is in, so `game.get_block{ x, y, z, domain = e.domain }` reads the right world.
 ---@field material integer|nil What that cell is made of; absent for a use at nothing.
----@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil }|nil What is in the main hand — the shape `game.held` answers with — or `nil` for an empty one. An item, when not nil: a placeable stack is a placement, not a use.
+---@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil, cells: integer[]|nil }|nil What is in the main hand — the shape `game.held` answers with — or `nil` for an empty one. An item, when not nil: a placeable stack is a placement, not a use.
 
 ---Registers a veto on completed digs.
 ---
@@ -3462,7 +3522,7 @@ function game.register_on_punch(callback) end
 ---@field player string Who is using, as 64 hex characters.
 ---@field target integer The entity under the crosshair, as `game.entity` names one.
 ---@field owner string|nil The player that entity belongs to, if it is somebody's body — the same field `game.entity` reports.
----@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil }|nil What is in the main hand, as `on_use` has it, or `nil` for an empty one.
+---@field held { material: integer, units: integer, blocks: integer, nodes: integer, count: integer, shape: integer|nil, detail: string|nil, cells: integer[]|nil }|nil What is in the main hand, as `on_use` has it, or `nil` for an empty one.
 
 ---Registers a handler for USING an entity: the place control with an entity
 ---nearer than any block along the player's own reach ray — getting on a

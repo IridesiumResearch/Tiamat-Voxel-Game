@@ -2199,24 +2199,156 @@ fn units_of(spec: &Table, shape: Option<crate::inventory::Shape>) -> mlua::Resul
 
 /// One stack, as a mod writes it.
 ///
-/// The same three fields `game.give` takes, so a mod that can hand a player a
-/// stack can drop the same stack on the ground without learning a second
-/// spelling.
+/// The same fields `game.give` takes, so a mod that can hand a player a stack
+/// can drop the same stack on the ground without learning a second spelling.
 fn stack_of(lua: &mlua::Lua, spec: &Table) -> mlua::Result<Option<crate::inventory::Stack>> {
-    let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
-    let shape = shape_of(spec)?;
-    let units = units_of(spec, shape)?;
-    // **And its `detail`**, which `game.give` has always read and this did
-    // not: a named sword dropped on death came back a plain sword and merged
-    // with the others. Life mod's ask 4.
+    Ok(stack_spec_of(lua, spec)?.into_stack())
+}
+
+/// Which stack a mod's table names, and how much of it.
+///
+/// **One parse, where there were four.** `game.give`, `game.take`, a
+/// container's give and take, and an item on the ground each read material,
+/// shape, count or units, and detail inline, and a cut of several materials
+/// would have been a fifth field taught to each — which is how one of them
+/// ends up not knowing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StackSpec {
+    /// The material — derived from the cells, when there are some.
+    material: crate::material::MaterialId,
+    /// The cut, or `None` for loose material or a full cut of several.
+    shape: Option<crate::inventory::Shape>,
+    /// Each cell's material, for a cut of several materials.
+    cells: Option<crate::block::Cells>,
+    /// A mod's own word for which item.
+    detail: Option<String>,
+    /// How many units, from `units` or `count`.
+    units: u32,
+}
+
+impl StackSpec {
+    /// The key a take asks the inventory with: exactly this stack.
+    fn key(&self) -> crate::inventory::StackKey<'_> {
+        crate::inventory::StackKey {
+            material: self.material,
+            shape: self.shape,
+            cells: self.cells.as_ref(),
+            detail: self.detail.as_deref(),
+        }
+    }
+
+    /// The stack itself, or `None` for zero units.
+    fn into_stack(self) -> Option<crate::inventory::Stack> {
+        crate::inventory::Stack::new(self.material, self.units).map(|stack| {
+            crate::inventory::Stack {
+                shape: self.shape,
+                cells: self.cells.map(Box::new),
+                detail: self.detail,
+                ..stack
+            }
+        })
+    }
+}
+
+/// Reads a stack spec: `material`, `shape`, `count` or `units`, `detail`, and
+/// `cells` for a cut of several materials (Sub-Node Contract §9.1).
+///
+/// # `cells`
+///
+/// An array of exactly 27 entries, entry `i` (one-based) being cell `i - 1`
+/// (`x + 3*y + 9*z`), each a block name, a runtime id, or `0` for empty. With
+/// it the stack is rebuilt from the cells as a stack always is — the lowest
+/// material, the occupancy for a shape, a plain cut or loose material if they
+/// turn out to hold one — so `material` and `shape` need not be given, and
+/// are an error if they are and disagree: a mod that believes a stair is oak
+/// when its cells say stone should hear so. `count` is items; `units` must be
+/// a whole number of them, because a cut of several moves in nothing smaller.
+fn stack_spec_of(lua: &mlua::Lua, spec: &Table) -> mlua::Result<StackSpec> {
     let detail = detail_of(spec)?;
-    Ok(
-        crate::inventory::Stack::new(material, units).map(|stack| crate::inventory::Stack {
+    let Some(cells) = spec.get::<Option<Table>>("cells")? else {
+        let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
+        let shape = shape_of(spec)?;
+        let units = units_of(spec, shape)?;
+        return Ok(StackSpec {
+            material,
             shape,
+            cells: None,
             detail,
-            ..stack
-        }),
-    )
+            units,
+        });
+    };
+    let cells = cells_of(lua, &cells)?;
+    let Some(cut) = crate::inventory::Stack::of_cells(&cells, 1) else {
+        return Err(mlua::Error::external(
+            "a stack's `cells` are all empty, which is no stack",
+        ));
+    };
+    if let mlua::Value::Integer(_) | mlua::Value::String(_) = spec.get::<mlua::Value>("material")? {
+        let claimed = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
+        if claimed != cut.material {
+            return Err(mlua::Error::external(format!(
+                "a stack's `material` is {} but its cells make it {}: with `cells` the material \
+                 is the lowest of them, and need not be given",
+                claimed.0, cut.material.0
+            )));
+        }
+    }
+    if let Some(mask) = spec.get::<Option<u32>>("shape")? {
+        let occupancy = crate::inventory::occupancy_of(&cells);
+        if mask & crate::inventory::Shape::ALL != occupancy {
+            return Err(mlua::Error::external(format!(
+                "a stack's `shape` is {mask:#x} but its cells fill {occupancy:#x}: with `cells` \
+                 the shape is theirs, and need not be given"
+            )));
+        }
+    }
+    let per = cut.per_item();
+    let units = match spec.get::<Option<u32>>("units")? {
+        Some(units) if cut.cells.is_some() && units % per != 0 => {
+            return Err(mlua::Error::external(format!(
+                "{units} units is not a whole number of a {per}-cell cut of several materials, \
+                 which moves in whole items"
+            )));
+        }
+        Some(units) => units,
+        None => {
+            let count = spec.get::<Option<u32>>("count")?.unwrap_or(1);
+            count.checked_mul(per).ok_or_else(|| {
+                mlua::Error::external(format!(
+                    "{count} items of {per} units each does not fit in a stack"
+                ))
+            })?
+        }
+    };
+    Ok(StackSpec {
+        material: cut.material,
+        shape: cut.shape,
+        cells: cut.cells.map(|cells| *cells),
+        detail,
+        units,
+    })
+}
+
+/// A mod's `cells` array: 27 entries, each a block name, a runtime id, or `0`
+/// for empty. Anything else is an error that names the entry.
+fn cells_of(lua: &mlua::Lua, table: &Table) -> mlua::Result<crate::block::Cells> {
+    let count = table.raw_len();
+    if count != crate::block::SUBNODES_PER_BLOCK {
+        return Err(mlua::Error::external(format!(
+            "`cells` has {count} entries; it is one per cell of a block, 27, \
+             entry i being cell i - 1 (x + 3*y + 9*z)"
+        )));
+    }
+    let mut cells = crate::block::EMPTY_CELLS;
+    for (index, cell) in cells.iter_mut().enumerate() {
+        let value: mlua::Value = table.raw_get(index + 1)?;
+        *cell = match value {
+            mlua::Value::Integer(0) => crate::material::MaterialId::AIR,
+            other => material_of(lua, &other)
+                .map_err(|err| mlua::Error::external(format!("`cells[{}]`: {err}", index + 1)))?,
+        };
+    }
+    Ok(cells)
 }
 
 /// One stack, as a mod reads it.
@@ -2549,7 +2681,21 @@ fn stack_table(lua: &mlua::Lua, stack: &crate::inventory::Stack) -> mlua::Result
     // Absent rather than zero for loose material, so `if slot.shape then` is
     // the test for "is this a cut" and a mask of zero never has to mean two
     // different things.
-    entry.set("shape", stack.shape.map(crate::inventory::Shape::occupancy))?;
+    //
+    // **A cut of several materials that fills the block reports the full
+    // mask**, never absent (Sub-Node Contract §9.1): its `Shape` is `None`
+    // because a shape is never full, and a mod that reads "no shape" as loose
+    // material must not take a stair of stone and oak for a block of stone.
+    let shape = match (&stack.cells, stack.shape) {
+        (Some(_), None) => Some(crate::inventory::Shape::ALL),
+        (_, shape) => shape.map(crate::inventory::Shape::occupancy),
+    };
+    entry.set("shape", shape)?;
+    // Each cell's material, for a cut of several: 27 runtime ids, `0` for an
+    // empty cell. Absent otherwise, so `if slot.cells then` is the test.
+    if let Some(cells) = &stack.cells {
+        entry.set("cells", cells_table(lua, cells)?)?;
+    }
     // The mod's own word for which item this is, absent when it never said
     // one — so `if slot.detail then` is the test, and the empty string stays
     // available as something a mod could mean.
@@ -5171,24 +5317,15 @@ impl MluaVm {
             .lua
             .create_function(move |lua, (uuid, spec): (String, Table)| {
                 let player = player_of(&uuid, "give")?;
-                let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
-                let shape = shape_of(&spec)?;
-                let units = units_of(&spec, shape)?;
+                let wanted = stack_spec_of(lua, &spec)?;
                 let view = spec
                     .get::<Option<String>>("view")?
                     .unwrap_or_else(|| DEFAULT_VIEW.to_owned());
                 // Nothing to give is not an error and not a change: a recipe
                 // that yields zero of something is a recipe with a condition
                 // in it, and the mod already knows what it asked for.
-                let detail = detail_of(&spec)?;
                 let into = container_slot_of(&spec)?;
-                let Some(stack) = crate::inventory::Stack::new(material, units).map(|stack| {
-                    crate::inventory::Stack {
-                        shape,
-                        detail,
-                        ..stack
-                    }
-                }) else {
+                let Some(stack) = wanted.into_stack() else {
                     return Ok((false, 0));
                 };
                 let asked = stack.units;
@@ -5259,9 +5396,9 @@ impl MluaVm {
             .lua
             .create_function(move |lua, (uuid, spec): (String, Table)| {
                 let player = player_of(&uuid, "take")?;
-                let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
-                let shape = shape_of(&spec)?;
-                let units = units_of(&spec, shape)?;
+                // **Exactly that stack**: with `cells`, exactly that cut of
+                // several materials, and never loose material of any of them.
+                let wanted = stack_spec_of(lua, &spec)?;
                 let view = spec
                     .get::<Option<String>>("view")?
                     .unwrap_or_else(|| DEFAULT_VIEW.to_owned());
@@ -5269,18 +5406,10 @@ impl MluaVm {
                 // A mod that asked for more than the player has can put back
                 // what it took; one told only `false` would have to ask twice
                 // to find out how much that was.
-                let detail = detail_of(&spec)?;
                 let from = container_slot_of(&spec)?;
                 let took = slot.lock().ok().and_then(|slot| {
-                    slot.as_ref().map(|access| {
-                        access.take(
-                            player,
-                            &view,
-                            from,
-                            crate::inventory::StackKey::of(material, shape, detail.as_deref()),
-                            units,
-                        )
-                    })
+                    slot.as_ref()
+                        .map(|access| access.take(player, &view, from, wanted.key(), wanted.units))
                 });
                 Ok(took.unwrap_or(0))
             })
@@ -7664,18 +7793,8 @@ impl MluaVm {
         let give = self
             .lua
             .create_function(move |lua, (name, spec): (String, Table)| {
-                let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
-                let shape = shape_of(&spec)?;
-                let units = units_of(&spec, shape)?;
-                let detail = detail_of(&spec)?;
                 let into = container_slot_of(&spec)?;
-                let Some(stack) = crate::inventory::Stack::new(material, units).map(|stack| {
-                    crate::inventory::Stack {
-                        shape,
-                        detail,
-                        ..stack
-                    }
-                }) else {
+                let Some(stack) = stack_spec_of(lua, &spec)?.into_stack() else {
                     return Ok(0);
                 };
                 // **How many units it took, not whether it took them.** A
@@ -7695,23 +7814,14 @@ impl MluaVm {
         let take = self
             .lua
             .create_function(move |lua, (name, spec): (String, Table)| {
-                let material = material_of(lua, &spec.get::<mlua::Value>("material")?)?;
-                let shape = shape_of(&spec)?;
-                let units = units_of(&spec, shape)?;
-                let detail = detail_of(&spec)?;
+                let wanted = stack_spec_of(lua, &spec)?;
                 let from = container_slot_of(&spec)?;
                 Ok(slot
                     .lock()
                     .ok()
                     .and_then(|slot| {
-                        slot.as_ref().map(|access| {
-                            access.take(
-                                &name,
-                                from,
-                                crate::inventory::StackKey::of(material, shape, detail.as_deref()),
-                                units,
-                            )
-                        })
+                        slot.as_ref()
+                            .map(|access| access.take(&name, from, wanted.key(), wanted.units))
                     })
                     .unwrap_or(0))
             })
@@ -10844,13 +10954,19 @@ fn dialog_event_fields(
             // mod itself wrote. Off-by-one here would be silent and constant.
             table.set("index", u32::from(*index) + 1)?;
         }
-        DialogEvent::Chiselled { name, shape, .. } => {
+        DialogEvent::Chiselled { name, shape, cells } => {
             table.set("kind", "chiselled")?;
             table.set("name", name.as_str())?;
             // The raw mask, not a `Shape` — an editor can be chiselled to
             // nothing, and a mod deciding what to do about that is the whole
             // reason it hears about every change rather than only valid ones.
             table.set("shape", *shape)?;
+            // An editor of several materials says what each cell is made of
+            // (protocol v81): 27 runtime ids, `0` for empty — the server put
+            // them back in the mod's ids. Absent from an editor of one.
+            if !cells.is_empty() {
+                table.set("cells", lua.create_sequence_from(cells.iter().copied())?)?;
+            }
         }
         DialogEvent::Clicked { view, index, click } => {
             table.set("kind", "clicked")?;
@@ -10924,6 +11040,62 @@ fn widget_build(spec: &Table, depth: usize) -> mlua::Result<crate::ui::Build> {
         }
     }
     Ok(crate::ui::Build::of(node, children))
+}
+
+/// A shape editor from a mod's table: `shape`, `material`, and — for an editor
+/// of several materials (Sub-Node Contract §9.1) — `cells`.
+///
+/// **A full block by default**, because chiselling is subtraction: an editor
+/// that opened empty would have nothing to take a cell off. With `cells`, 27
+/// runtime ids with `0` for empty, the mask is theirs: `shape` may be left
+/// out, and is an error if given and different, since two answers to "which
+/// cells are filled" is an editor that draws one and reports the other.
+/// `material` is then the brush a right-click adds, and defaults to the
+/// lowest material in the cells.
+fn shape_editor_of(spec: &Table) -> mlua::Result<crate::ui::Widget> {
+    let material = spec.get::<Option<u16>>("material")?;
+    let shape = spec.get::<Option<u32>>("shape")?;
+    let Some(table) = spec.get::<Option<Table>>("cells")? else {
+        return Ok(crate::ui::Widget::ShapeEditor {
+            shape: shape.unwrap_or(crate::inventory::Shape::ALL),
+            material: material.unwrap_or(1),
+            cells: Vec::new(),
+        });
+    };
+    let count = table.raw_len();
+    if count != crate::block::SUBNODES_PER_BLOCK {
+        return Err(mlua::Error::external(format!(
+            "shape_editor: `cells` has {count} entries; it is one per cell of a block, 27"
+        )));
+    }
+    let mut cells = Vec::with_capacity(count);
+    for index in 1..=count {
+        let id: u16 = table.raw_get(index).map_err(|_| {
+            mlua::Error::external(format!(
+                "shape_editor: `cells[{index}]` is a material id, or 0 for an empty cell"
+            ))
+        })?;
+        cells.push(id);
+    }
+    let occupancy = cells
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| **id != 0)
+        .fold(0u32, |mask, (index, _)| mask | (1 << index));
+    if let Some(mask) = shape
+        && mask != occupancy
+    {
+        return Err(mlua::Error::external(format!(
+            "shape_editor: `shape` is {mask:#x} but its cells fill {occupancy:#x}; with `cells` \
+             the shape is theirs and need not be given"
+        )));
+    }
+    let lowest = cells.iter().copied().filter(|id| *id != 0).min();
+    Ok(crate::ui::Widget::ShapeEditor {
+        shape: occupancy,
+        material: material.or(lowest).unwrap_or(1),
+        cells,
+    })
 }
 
 /// The widget itself, from its `type` and the fields that type uses.
@@ -11020,15 +11192,7 @@ fn widget_of(kind: &str, spec: &Table) -> mlua::Result<crate::ui::Widget> {
         },
         "scroll" => Widget::Scroll,
         "spacer" => Widget::Spacer,
-        // **A full block by default**, because chiselling is subtraction: an
-        // editor that opened empty would have nothing to take a cell off.
-        "shape_editor" => Widget::ShapeEditor {
-            shape: spec
-                .get::<Option<u32>>("shape")?
-                .unwrap_or(crate::inventory::Shape::ALL),
-            material: spec.get::<Option<u16>>("material")?.unwrap_or(1),
-            cells: Vec::new(),
-        },
+        "shape_editor" => shape_editor_of(spec)?,
         "progress" => Widget::Progress {
             permille: spec.get::<Option<u16>>("permille")?.unwrap_or(0),
         },
@@ -11118,7 +11282,7 @@ fn content_hash(table: &Table, key: &str) -> mlua::Result<[u8; 32]> {
 
 /// Keys a widget table accepts. Same rule as `BLOCK_FIELDS`: a typo is an
 /// error, because the alternative is a silently ignored field.
-const WIDGET_FIELDS: [&str; 30] = [
+const WIDGET_FIELDS: [&str; 31] = [
     "type",
     "name",
     "tooltip",
@@ -11153,6 +11317,8 @@ const WIDGET_FIELDS: [&str; 30] = [
     // the dialog simply never opens. Caught by the bot test that opens one.
     "shape",
     "material",
+    // Protocol v81: an editor of several materials.
+    "cells",
 ];
 
 /// Keys a style table accepts.
@@ -14142,6 +14308,136 @@ mod tests {
             units: 3,
             cells: None,
         }
+    }
+
+    #[test]
+    fn a_shape_editor_of_several_materials_carries_its_cells_and_its_mask_is_theirs() {
+        // Sub-Node Contract §9.1 in the editor: 27 cells, the mask derived
+        // from them, and the brush defaulting to the lowest material.
+        let shown = show(
+            r#"
+            local cells = {}
+            for i = 1, 27 do cells[i] = 0 end
+            cells[1] = 9
+            cells[2] = 4
+            game.show_dialog{
+              player = "abc", form = "bench",
+              tree = { type = "shape_editor", name = "cut", cells = cells },
+            }
+            "#,
+        )
+        .expect("load");
+        let crate::ui::Widget::ShapeEditor {
+            shape,
+            material,
+            cells,
+        } = &shown[0].tree.nodes[0].widget
+        else {
+            panic!("not an editor");
+        };
+        assert_eq!(*shape, 0b11);
+        assert_eq!(*material, 4, "the brush is the lowest material");
+        assert_eq!((cells[0], cells[1], cells.len()), (9, 4, 27));
+
+        // A mask that disagrees with the cells is refused, and so is a run
+        // that is not a block's.
+        let wrong = show(
+            r#"
+            local cells = {}
+            for i = 1, 27 do cells[i] = 0 end
+            cells[1] = 9
+            game.show_dialog{
+              player = "abc", form = "bench",
+              tree = { type = "shape_editor", shape = 3, cells = cells },
+            }
+            "#,
+        );
+        assert!(wrong.is_err(), "a mask that is not its cells' occupancy");
+        let short = show(
+            r#"game.show_dialog{ player = "abc", form = "bench",
+                 tree = { type = "shape_editor", cells = { 1, 2 } } }"#,
+        );
+        assert!(short.is_err(), "two cells");
+        // And one material is as it always was.
+        let plain = show(
+            r#"game.show_dialog{ player = "abc", form = "bench",
+                 tree = { type = "shape_editor", material = 3 } }"#,
+        )
+        .expect("load");
+        assert_eq!(
+            plain[0].tree.nodes[0].widget,
+            crate::ui::Widget::ShapeEditor {
+                shape: crate::inventory::Shape::ALL,
+                material: 3,
+                cells: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_chisel_of_several_materials_reaches_the_mod_with_its_cells() {
+        let lua = Lua::new();
+        let table = lua.create_table().expect("table");
+        let mut cells = vec![0u16; 27];
+        cells[0] = 9;
+        cells[26] = 4;
+        dialog_event_fields(
+            &lua,
+            &table,
+            &crate::proto::DialogEvent::Chiselled {
+                name: "cut".to_owned(),
+                shape: (1 << 26) | 1,
+                cells,
+            },
+        )
+        .expect("fields");
+        let reported: Table = table.get("cells").expect("cells");
+        assert_eq!(reported.raw_len(), 27);
+        assert_eq!(reported.get::<u16>(1).expect("first"), 9);
+        assert_eq!(reported.get::<u16>(27).expect("last"), 4);
+
+        // One material: no cells, as before.
+        let table = lua.create_table().expect("table");
+        dialog_event_fields(
+            &lua,
+            &table,
+            &crate::proto::DialogEvent::Chiselled {
+                name: "cut".to_owned(),
+                shape: 1,
+                cells: Vec::new(),
+            },
+        )
+        .expect("fields");
+        assert!(table.get::<Option<Table>>("cells").expect("read").is_none());
+    }
+
+    #[test]
+    fn a_placement_of_several_materials_is_told_to_a_veto_cell_by_cell() {
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "chapel",
+            "game.register_on_place(function(event)\n\
+                 if event.cells and event.cells[2] == 9 then return 'no oak in the chapel' end\n\
+                 return true\n\
+             end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        let mut cells = crate::block::EMPTY_CELLS;
+        cells[0] = MaterialId(7);
+        cells[1] = MaterialId(9);
+        let verdict = vm.place(&crate::script::PlaceEvent {
+            cells: Some(cells),
+            occupancy: 0b11,
+            units: 2,
+            ..a_place()
+        });
+        assert!(!verdict.allowed, "the veto never saw the oak cell");
+        assert!(
+            vm.place(&a_place()).allowed,
+            "a plain placement is untouched"
+        );
     }
 
     #[test]
@@ -18027,6 +18323,106 @@ mod entity_tests {
             slots[2].is_some(),
             "the ingot never reached the output slot"
         );
+    }
+
+    #[test]
+    fn a_mod_gives_reads_and_takes_a_cut_of_several_materials_by_its_cells() {
+        // Sub-Node Contract §9.1 through the mod API, which is the only API
+        // (charter rule 1). One parse serves `game.give`, `game.take`, a
+        // container's give and take and an item on the ground, so the
+        // container's pair stands for all of them here.
+        let (mut vm, boxes) = vm_with_containers();
+        load(
+            &mut vm,
+            "mason",
+            "game.register_block{ id = 'stone' }\n\
+             game.register_block{ id = 'oak' }\n\
+             game.register_on_tick(function() end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+
+        vm.eval_in(
+            "mason",
+            "game.make_container('mason:bench', 4)\n\
+             local stone = game.get_block_id('mason:stone')\n\
+             local oak = game.get_block_id('mason:oak')\n\
+             -- A stair: stone on the bottom layer, an oak step behind.\n\
+             local cells = {}\n\
+             for i = 1, 27 do cells[i] = 0 end\n\
+             for i = 1, 9 do cells[i] = (i <= 3) and 'mason:oak' or 'mason:stone' end\n\
+             -- Oak by name, stone by name, and one stone cell by number.\n\
+             cells[4] = stone\n\
+             assert(game.container_give('mason:bench', { cells = cells, count = 2, slot = 1 }) == 18)\n\
+             local held = game.container('mason:bench')\n\
+             assert(#held == 1)\n\
+             local cut = held[1]\n\
+             assert(cut.material == math.min(stone, oak), 'material is the lowest id')\n\
+             assert(cut.shape == 511, 'shape is the occupancy, got ' .. tostring(cut.shape))\n\
+             assert(cut.count == 2 and cut.units == 18)\n\
+             assert(#cut.cells == 27, 'the cells are reported')\n\
+             assert(cut.cells[1] == oak and cut.cells[4] == stone and cut.cells[10] == 0)\n\
+             -- Loose stone of the same outline is not it (rule 6).\n\
+             assert(game.container_take('mason:bench', { material = stone, count = 1 }) == 0)\n\
+             assert(game.container_take('mason:bench', { material = stone, shape = 511, count = 1 }) == 0)\n\
+             -- A stack table read back is a spec for the same stack.\n\
+             assert(game.container_take('mason:bench', { cells = cut.cells, count = 1 }) == 9)\n\
+             assert(game.container_take('mason:bench', { material = cut.material, shape = cut.shape, \n\
+                 cells = cut.cells, units = 9 }) == 9)\n\
+             -- A full block of two materials reports the full mask, not no shape.\n\
+             local full = {}\n\
+             for i = 1, 27 do full[i] = stone end\n\
+             full[14] = oak\n\
+             assert(game.container_give('mason:bench', { cells = full, slot = 2 }) == 27)\n\
+             local whole = game.container('mason:bench')[1]\n\
+             assert(whole.shape == 0x7FFFFFF, 'a full cut of two read as loose: ' .. tostring(whole.shape))\n\
+             assert(game.container_take('mason:bench', { material = stone, count = 1 }) == 0)\n\
+             -- One material in the cells is a plain cut.\n\
+             local slab = {}\n\
+             for i = 1, 27 do slab[i] = (i <= 9) and stone or 0 end\n\
+             assert(game.container_give('mason:bench', { cells = slab, slot = 3 }) == 9)\n\
+             assert(game.container_take('mason:bench', { material = stone, shape = 511, count = 1 }) == 9)",
+        )
+        .expect("the cut went in and came back out");
+        let slots = crate::inventory::Containers::slots(&*boxes, "mason:bench");
+        assert!(slots[0].is_none(), "the stair was all taken");
+        assert!(
+            slots[1].as_ref().is_some_and(|stack| stack.cells.is_some()),
+            "the full cut of two is still there"
+        );
+
+        // And what a mod gets wrong is said, not guessed at.
+        for (spec, says) in [
+            ("{ cells = { 1, 2, 3 } }", "27"),
+            (
+                "{ cells = (function() local c = {} for i = 1, 27 do c[i] = 0 end return c end)() }",
+                "empty",
+            ),
+            (
+                "{ material = 'mason:oak', cells = (function() local c = {} \
+                 for i = 1, 27 do c[i] = 0 end c[1] = 'mason:stone' c[2] = 'mason:oak' \
+                 c[3] = 'mason:oak' return c end)() }",
+                "lowest",
+            ),
+            (
+                "{ units = 2, cells = (function() local c = {} for i = 1, 27 do c[i] = 0 end \
+                 c[1] = 'mason:stone' c[2] = 'mason:oak' c[3] = 'mason:oak' return c end)() }",
+                "whole number",
+            ),
+            (
+                "{ cells = (function() local c = {} for i = 1, 27 do c[i] = 0 end \
+                 c[5] = 'mason:nothing' return c end)() }",
+                "cells[5]",
+            ),
+        ] {
+            let err = vm
+                .eval_in(
+                    "mason",
+                    &format!("game.container_give('mason:bench', {spec})"),
+                )
+                .expect_err(spec);
+            assert!(format!("{err:?}").contains(says), "{spec}: {err:?}");
+        }
     }
 
     #[test]

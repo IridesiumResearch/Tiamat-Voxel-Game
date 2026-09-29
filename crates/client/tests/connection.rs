@@ -836,6 +836,7 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
                 units: 27,
                 shape: 0,
                 detail: None,
+                cells: Vec::new(),
             }),
             Some(tiamat_core::hud::Carried {
                 material: tiamat_core::MaterialId(4),
@@ -845,6 +846,7 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
                 units: 40,
                 shape: 0,
                 detail: None,
+                cells: Vec::new(),
             }),
             None,
             Some(tiamat_core::hud::Carried {
@@ -853,6 +855,7 @@ fn core_ui_owns_the_hotbar_and_taking_it_away_leaves_the_engine_alone() {
                 units: 9,
                 shape: 0,
                 detail: None,
+                cells: Vec::new(),
             }),
         ],
         ..tiamat_core::hud::State::default()

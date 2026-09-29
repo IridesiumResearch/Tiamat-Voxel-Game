@@ -247,7 +247,12 @@ game.register_on_action(function(event)
     -- **Taken before it is thrown, and only as much as was taken.** `game.take`
     -- reports what it actually got, so a stack that changed between the two
     -- calls cannot be duplicated: the thing that lands is the thing that left.
-    local spec = { material = holding.material, shape = holding.shape, units = holding.units }
+    -- `cells` too, for a cut of several materials: without them the spec
+    -- names a plain cut of the lowest one, which is not what is in the hand.
+    local spec = {
+        material = holding.material, shape = holding.shape, units = holding.units,
+        cells = holding.cells,
+    }
     local moved = game.take(event.player, spec)
     if moved <= 0 then
         return
@@ -308,6 +313,7 @@ game.register_on_tick(function()
                                 material = item.item.material,
                                 shape = item.item.shape,
                                 units = item.item.units,
+                                cells = item.item.cells,
                             })
                             game.despawn_entity(id)
                             dropped[id] = nil

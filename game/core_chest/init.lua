@@ -112,7 +112,12 @@ game.register_on_dig_complete(function(event)
     for _, stack in ipairs(game.break_container(name)) do
         -- Units, not `count`: a stack is whole blocks and loose nodes, and
         -- `count` would round the nodes away (charter rule 5).
-        local spec = { material = stack.material, units = stack.units, shape = stack.shape, detail = stack.detail }
+        -- `cells` too: a cut of several materials is its cells, and a spec
+        -- without them would be a plain cut of the lowest one.
+        local spec = {
+            material = stack.material, units = stack.units, shape = stack.shape,
+            detail = stack.detail, cells = stack.cells,
+        }
         if not game.give(event.player, spec) then
             game.spawn_entity{
                 pos = { x = x + 0.5, y = y + 0.5, z = z + 0.5 },

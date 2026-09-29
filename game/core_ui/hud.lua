@@ -115,10 +115,11 @@ local function hotbar(state)
         if slot then
             -- **The shape as well as the material.** A cut is drawn as its
             -- cells rather than as the block it came from, because the shape is
-            -- the only thing that tells two stacks of one stone apart.
+            -- the only thing that tells two stacks of one stone apart. And a
+            -- cut of several materials is drawn cell by cell, each its own.
             hud.icon{
                 anchor = "bottom", x = x, y = SLOT + 6, size = SLOT,
-                material = slot.material, shape = slot.shape,
+                material = slot.material, shape = slot.shape, cells = slot.cells,
             }
             hud.text{
                 anchor = "bottom", x = x + 2, y = 20, text = label_of(slot), size = 17,
@@ -150,6 +151,7 @@ local function offhand(state)
     hud.icon{
         anchor = "bottom", x = left - PITCH, y = SLOT + 6, size = SLOT,
         material = state.offhand.material, shape = state.offhand.shape,
+        cells = state.offhand.cells,
     }
     hud.text{
         anchor = "bottom", x = left - PITCH + 2, y = 20,

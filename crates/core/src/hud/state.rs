@@ -25,6 +25,10 @@ pub struct Carried {
     /// A durability bar under a slot, or a name over it. Opaque to the engine
     /// — see [`crate::inventory::Stack::detail`].
     pub detail: Option<String>,
+    /// Each cell's material, for a cut of several materials (Sub-Node
+    /// Contract §9.1): 27 ids in the same space as [`Self::material`], `0`
+    /// for an empty cell, or empty for anything else.
+    pub cells: Vec<u16>,
 }
 
 impl Carried {
@@ -46,7 +50,22 @@ impl Carried {
     /// every script should be making separately.
     #[must_use]
     pub const fn count(&self) -> Option<u32> {
-        crate::inventory::items(self.units, self.shape)
+        crate::inventory::items(self.units, self.mask())
+    }
+
+    /// The occupancy a script is told: [`Self::shape`], except that a cut of
+    /// several materials filling the block is the full mask rather than `0`.
+    ///
+    /// Zero means loose material to every reader, and a stair of stone and
+    /// oak that fills its block is not a block of stone — the rule
+    /// `stack_table` keeps on the server side.
+    #[must_use]
+    pub const fn mask(&self) -> u32 {
+        if self.shape == 0 && !self.cells.is_empty() {
+            crate::inventory::Shape::ALL
+        } else {
+            self.shape
+        }
     }
 }
 
