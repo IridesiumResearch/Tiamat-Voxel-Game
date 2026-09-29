@@ -4259,27 +4259,29 @@ impl ServerHandle {
                             // were sent; held, charged and written in runtime
                             // ids, as the inventory and the chunk in memory
                             // are. A number this world has no material for is
-                            // nothing anybody can be carrying.
-                            let Some(material) = shared.runtime_material(request.material) else {
+                            // nothing anybody can be carrying — in the
+                            // material, or in any cell of a cut of several
+                            // (Sub-Node Contract §9.1), whose material and
+                            // shape are derived from its cells here rather
+                            // than read off the wire.
+                            let Some(claim) = crate::placing::claim(&shared, &request) else {
                                 shared.tell(
                                     &request.actor,
                                     tiamat_core::place::Refusal::NothingHeld.to_string(),
                                 );
                                 continue;
                             };
+                            let material = claim.material;
                             // **What they hold of THIS stack**, not of this
                             // material. A player with one named block and
                             // sixty plain ones has sixty-one of neither, and
                             // counting the total would let them place a block
                             // they do not have — the shape defect the cut
-                            // fixed, in the detail's clothes.
+                            // fixed, in the detail's clothes, and in a
+                            // mixture's: stone-and-oak is not stone.
                             let held = tiamat_core::inventory::units_of_exactly(
                                 &shared.inventory_of(&request.actor),
-                                tiamat_core::inventory::StackKey::of(
-                                    material,
-                                    tiamat_core::inventory::Shape::new(request.shape),
-                                    request.detail.as_deref(),
-                                ),
+                                claim.key(),
                             );
 
                             // **An item is not a block.** Everything a player
@@ -4290,7 +4292,7 @@ impl ServerHandle {
                             // meshes a sword. Refused here rather than
                             // filtered later, because a refusal a player can
                             // read is the whole point of this loop.
-                            if shared.items.contains(&material) {
+                            if claim.materials().any(|each| shared.items.contains(&each)) {
                                 shared.tell(
                                     &request.actor,
                                     "that is not something you can build with".to_owned(),
@@ -4320,7 +4322,7 @@ impl ServerHandle {
                             // the engine does not consider a shape — empty, or
                             // a full block — is loose material, which is what a
                             // client that knows nothing about shapes sends.
-                            let shape = tiamat_core::inventory::Shape::new(request.shape);
+                            let shape = claim.shape;
 
                             // **Turned to face whoever placed it**, and toward
                             // their feet against a wall — reported from the
@@ -4328,33 +4330,32 @@ impl ServerHandle {
                             // The charge below matches on the AUTHORED shape,
                             // which is what the player is carrying; only the
                             // geometry turns.
+                            let block = request.target.block();
+                            let toward = shared
+                                .player_eye(&request.actor)
+                                .map_or([0.0, 1.0], |(origin, eye)| {
+                                    // In cells, through the chunk difference —
+                                    // never a world-space f32 (charter rule 7).
+                                    // The block's centre is a cell and a half
+                                    // in from its corner.
+                                    let span = |axis: usize| {
+                                        let chunks = match axis {
+                                            0 => origin.x - block.chunk().x,
+                                            _ => origin.z - block.chunk().z,
+                                        } as f32
+                                            * tiamat_core::CHUNK_SUBNODES as f32;
+                                        let corner = match axis {
+                                            0 => block.x,
+                                            _ => block.z,
+                                        }
+                                        .rem_euclid(tiamat_core::CHUNK_BLOCKS as i32)
+                                            as f32
+                                            * tiamat_core::SUBNODES_PER_AXIS as f32;
+                                        chunks + eye[axis] - (corner + 1.5)
+                                    };
+                                    [span(0), span(2)]
+                                });
                             let placed_shape = shape.and_then(|shape| {
-                                let block = request.target.block();
-                                let toward = shared
-                                    .player_eye(&request.actor)
-                                    .map_or([0.0, 1.0], |(origin, eye)| {
-                                        // In cells, through the chunk
-                                        // difference — never a world-space f32
-                                        // (charter rule 7). The block's centre
-                                        // is a cell and a half in from its
-                                        // corner.
-                                        let span = |axis: usize| {
-                                            let chunks = match axis {
-                                                0 => origin.x - block.chunk().x,
-                                                _ => origin.z - block.chunk().z,
-                                            } as f32
-                                                * tiamat_core::CHUNK_SUBNODES as f32;
-                                            let corner = match axis {
-                                                0 => block.x,
-                                                _ => block.z,
-                                            }
-                                            .rem_euclid(tiamat_core::CHUNK_BLOCKS as i32)
-                                                as f32
-                                                * tiamat_core::SUBNODES_PER_AXIS as f32;
-                                            chunks + eye[axis] - (corner + 1.5)
-                                        };
-                                        [span(0), span(2)]
-                                    });
                                 tiamat_core::inventory::Shape::new(
                                     tiamat_core::place::oriented(
                                         shape.occupancy(),
@@ -4362,6 +4363,13 @@ impl ServerHandle {
                                         toward,
                                     ),
                                 )
+                            });
+                            // **And a cut of several materials turns its cells
+                            // with it** (Sub-Node Contract §7.1): the same
+                            // turn and tip, so each material goes where its
+                            // cell's bit does.
+                            let placed_cells = claim.cells.as_ref().map(|cells| {
+                                tiamat_core::place::oriented_cells(cells, request.face, toward)
                             });
 
                             // **What a block already holds**, as a mask of
@@ -4412,8 +4420,20 @@ impl ServerHandle {
                             let filled =
                                 contents(target.block(), &building_in, &mut world, &mut source);
 
-                            let outcome =
-                                tiamat_core::place::plan(target, held, placed_shape, brush, filled)
+                            // A cut of several materials is planned whole, its
+                            // own cells whatever the brush, and never trimmed
+                            // (§7.1); everything else as it always was.
+                            let planned = match &placed_cells {
+                                Some(cells) => tiamat_core::place::plan_cut(target, held, cells),
+                                None => tiamat_core::place::plan(
+                                    target,
+                                    held,
+                                    placed_shape,
+                                    brush,
+                                    filled,
+                                ),
+                            };
+                            let outcome = planned
                                 .and_then(|plan| {
                                     // Air only, judged cell by cell. Placing
                                     // into occupied space would have to decide
@@ -4482,6 +4502,7 @@ impl ServerHandle {
                                     material: as_registered,
                                     occupancy: plan.occupancy,
                                     units: plan.units,
+                                    cells: placed_cells,
                                 })
                             });
                             world = returned;
@@ -4509,15 +4530,31 @@ impl ServerHandle {
                             // on any path where the debit came up short —
                             // another connection of theirs spending it between
                             // the check and here is enough.
-                            let paid = shared.debit(
-                                &request.actor,
-                                tiamat_core::inventory::StackKey::of(
-                                    material,
-                                    shape,
-                                    request.detail.as_deref(),
-                                ),
-                                plan.units,
-                            );
+                            let paid = shared.debit(&request.actor, claim.key(), plan.units);
+                            // **A cut of several materials is paid for whole
+                            // or not at all** (§7.1): it has no first N units
+                            // to trim to. The inventory hands out whole items
+                            // of one, so this is a guard rather than a path —
+                            // and what was taken goes back as what it was.
+                            if placed_cells.is_some() && paid > 0 && paid < plan.units {
+                                shared.credit(
+                                    request.actor,
+                                    tiamat_core::inventory::Stack::new(material, paid)
+                                        .map(|stack| tiamat_core::inventory::Stack {
+                                            shape,
+                                            cells: claim.cells.map(Box::new),
+                                            detail: request.detail.clone(),
+                                            ..stack
+                                        })
+                                        .into_iter()
+                                        .collect(),
+                                );
+                                shared.tell(
+                                    &request.actor,
+                                    tiamat_core::place::Refusal::NothingHeld.to_string(),
+                                );
+                                continue;
+                            }
                             if paid == 0 {
                                 shared.tell(
                                     &request.actor,
@@ -4546,49 +4583,92 @@ impl ServerHandle {
                             // can carry the union or each cell has to go in on
                             // its own — a `Partial` SETS the block, so one
                             // naming only the new cells deletes the rest.
+                            let existing = world
+                                .block_cells(&building_in, plan.block, &mut source)
+                                .unwrap_or(tiamat_core::block::EMPTY_CELLS);
                             let same = filled == 0
-                                || world
-                                    .block_cells(&building_in, plan.block, &mut source)
-                                    .is_ok_and(|held| {
-                                        held.iter()
-                                            .all(|cell| cell.is_air() || *cell == material)
-                                    });
-                            let edits = tiamat_core::place::writes(
-                                plan.block,
-                                cells,
-                                material.get(),
-                                filled,
-                                same,
-                            );
+                                || existing
+                                    .iter()
+                                    .all(|cell| cell.is_air() || *cell == material);
+                            // One material's edits, or — for a cut of several
+                            // (§7.2) — each material's in ascending id, the
+                            // filled mask growing as each lands. Kept per
+                            // material, with the cells it is for, so a refund
+                            // knows what did not land.
+                            let writes: Vec<(tiamat_core::MaterialId, u32, Vec<tiamat_core::proto::Edit>)> =
+                                match &placed_cells {
+                                    Some(placed) => {
+                                        tiamat_core::place::cut_writes(plan.block, placed, &existing)
+                                            .into_iter()
+                                            .map(|(each, edits)| {
+                                                let mask = placed.iter().enumerate().fold(
+                                                    0u32,
+                                                    |mask, (index, cell)| {
+                                                        if *cell == each {
+                                                            mask | (1 << index)
+                                                        } else {
+                                                            mask
+                                                        }
+                                                    },
+                                                );
+                                                (each, mask, edits)
+                                            })
+                                            .collect()
+                                    }
+                                    None => vec![(
+                                        material,
+                                        cells,
+                                        tiamat_core::place::writes(
+                                            plan.block,
+                                            cells,
+                                            material.get(),
+                                            filled,
+                                            same,
+                                        ),
+                                    )],
+                                };
 
                             // Counted, because a per-cell write is several
                             // edits and refunding the whole charge after some
                             // of them landed would mint material.
                             let mut failure = None;
                             let mut applied = 0;
-                            for edit in edits {
-                                match world.apply(&building_in, &edit, &mut source) {
-                                    Ok(_) => {
-                                        applied += tiamat_core::place::edit_units(&edit);
-                                        relight.push(edited_block(&edit));
-                                        // A pond finds out there is somewhere
-                                        // new to go the same way it finds out a
-                                        // wall came down: every edit wakes it,
-                                        // whichever path the edit arrived by.
-                                        fluidics
-                                            .write()
-                                            .expect("fluid lock")
-                                            .of(&building_in)
-                                            .touch(edited_block(&edit));
-                                        shared.broadcast_in(
-                                            &building_in,
-                                            ServerMessage::BlockDelta {
-                                                edit,
-                                                actor: Some(*request.actor.as_bytes()),
-                                            },
-                                        );
+                            // Per material, for a cut of several: the loose
+                            // units of whatever did not land.
+                            let mut short: Vec<tiamat_core::inventory::Stack> = Vec::new();
+                            for (each, mask, edits) in writes {
+                                let mut landed = 0;
+                                for edit in edits {
+                                    match world.apply(&building_in, &edit, &mut source) {
+                                        Ok(_) => {
+                                            landed += crate::placing::landed(mask, &edit);
+                                            applied += tiamat_core::place::edit_units(&edit);
+                                            relight.push(edited_block(&edit));
+                                            // A pond finds out there is
+                                            // somewhere new to go the same way
+                                            // it finds out a wall came down:
+                                            // every edit wakes it, whichever
+                                            // path the edit arrived by.
+                                            fluidics
+                                                .write()
+                                                .expect("fluid lock")
+                                                .of(&building_in)
+                                                .touch(edited_block(&edit));
+                                            shared.broadcast_in(
+                                                &building_in,
+                                                ServerMessage::BlockDelta {
+                                                    edit,
+                                                    actor: Some(*request.actor.as_bytes()),
+                                                },
+                                            );
+                                        }
+                                        Err(err) => failure = Some(err),
                                     }
-                                    Err(err) => failure = Some(err),
+                                }
+                                if placed_cells.is_some() {
+                                    let missing =
+                                        mask.count_ones().saturating_sub(landed.min(mask.count_ones()));
+                                    short.extend(tiamat_core::inventory::Stack::new(each, missing));
                                 }
                             }
                             if let Some(err) = failure {
@@ -4601,8 +4681,16 @@ impl ServerHandle {
                                 // crafted stair, or somebody's named block,
                                 // into loose rubble on a path they did not
                                 // cause and cannot see.
-                                shared.credit(
-                                    request.actor,
+                                //
+                                // **Except a cut of several materials**, part of
+                                // which is now in the world: what did not land
+                                // is no whole item, so it comes back as what
+                                // breaking the rest would give — loose units of
+                                // each material, in ascending id (§9.1). Every
+                                // material's units are conserved.
+                                let refund = if placed_cells.is_some() {
+                                    short
+                                } else {
                                     tiamat_core::inventory::Stack::new(
                                         material,
                                         paid.saturating_sub(applied),
@@ -4613,8 +4701,9 @@ impl ServerHandle {
                                         ..stack
                                     })
                                     .into_iter()
-                                    .collect(),
-                                );
+                                    .collect()
+                                };
+                                shared.credit(request.actor, refund);
                                 debug!(
                                     actor = %request.actor.short(),
                                     "a placement would not apply: {err}"

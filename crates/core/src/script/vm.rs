@@ -938,6 +938,11 @@ pub struct PlaceEvent {
     pub occupancy: u32,
     /// How many units it would cost, which is `occupancy.count_ones()`.
     pub units: u32,
+    /// Each cell's material as it would land, for a cut of several materials
+    /// (Sub-Node Contract §9.1), turned as the placement turns it; `None` for
+    /// anything else, whose one material is [`Self::material`]. With cells,
+    /// `material` is the lowest of them.
+    pub cells: Option<crate::block::Cells>,
 }
 
 /// The place control pressed with nothing to place.

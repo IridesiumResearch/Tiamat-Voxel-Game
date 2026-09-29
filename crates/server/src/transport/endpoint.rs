@@ -4464,6 +4464,63 @@ mod tests {
     }
 
     #[test]
+    fn a_placement_names_its_cut_by_cells_in_world_ids_and_is_read_in_runtime_ones() {
+        // Sub-Node Contract §9.1 at the server's door: the request's cells
+        // are world ids, the claim is in this session's, and its material
+        // and shape are derived from the cells rather than read off the wire.
+        use tiamat_core::MaterialId;
+        let mut shared = shared();
+        shared.id_map = tiamat_core::persist::idmap::MaterialMap::from_pairs(&[
+            (MaterialId::AIR, 0),
+            (MaterialId::UNKNOWN, 1),
+            (MaterialId(2), 7),
+            (MaterialId(3), 2),
+        ]);
+        let (actor, _) = player(1);
+        let request = |material: u16, shape: u32, cells: Vec<u16>| PlacementRequest {
+            actor,
+            target: tiamat_core::SubNodePos::new(0, 0, 0),
+            material,
+            shape,
+            face: [0; 3],
+            detail: None,
+            cells,
+        };
+        let mut cells = vec![0u16; 27];
+        cells[0] = 7;
+        cells[4] = 2;
+        // A claim of world 7 and a wrong mask: the claim is corrected.
+        let claim =
+            crate::placing::claim(&shared, &request(7, 0b1, cells.clone())).expect("a claim");
+        assert_eq!(claim.material, MaterialId(2), "the lowest RUNTIME id");
+        assert_eq!(
+            claim.shape.map(tiamat_core::inventory::Shape::occupancy),
+            Some(0b1_0001)
+        );
+        let held = claim.cells.expect("several materials");
+        assert_eq!((held[0], held[4]), (MaterialId(2), MaterialId(3)));
+
+        // Cells of one material are the plain cut they are.
+        let mut one = vec![0u16; 27];
+        one[3] = 2;
+        let claim = crate::placing::claim(&shared, &request(2, 0, one)).expect("a claim");
+        assert_eq!(claim.cells, None);
+        assert_eq!(claim.material, MaterialId(3));
+        assert_eq!(
+            claim.shape.map(tiamat_core::inventory::Shape::occupancy),
+            Some(1 << 3)
+        );
+
+        // A cell of a world id nobody has is nothing anybody holds.
+        cells[9] = 55;
+        assert_eq!(crate::placing::claim(&shared, &request(7, 0, cells)), None);
+        // And no cells at all is the claim it always was.
+        let claim = crate::placing::claim(&shared, &request(2, 0b11, Vec::new())).expect("claim");
+        assert_eq!(claim.material, MaterialId(3));
+        assert_eq!(claim.cells, None);
+    }
+
+    #[test]
     fn a_player_slot_is_released_when_dropped() {
         let shared = shared();
         {

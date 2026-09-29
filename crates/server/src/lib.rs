@@ -33,6 +33,7 @@ pub mod hud;
 pub mod lease;
 pub mod light;
 pub mod mount;
+pub mod placing;
 pub mod plans;
 pub mod rcon;
 pub mod scaffold;

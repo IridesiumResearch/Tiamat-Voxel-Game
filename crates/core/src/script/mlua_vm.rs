@@ -2557,6 +2557,15 @@ fn stack_table(lua: &mlua::Lua, stack: &crate::inventory::Stack) -> mlua::Result
     Ok(entry)
 }
 
+/// A cut's 27 cells as a Lua array: entry `i` (one-based) is cell `i - 1`,
+/// indexed `x + 3*y + 9*z`, as a runtime material id with `0` for empty.
+///
+/// The one spelling of cells a mod reads, wherever it reads them — a stack, a
+/// place event, a chisel — so a mod that learns it once has learnt it.
+fn cells_table(lua: &mlua::Lua, cells: &crate::block::Cells) -> mlua::Result<Table> {
+    lua.create_sequence_from(cells.iter().map(|cell| cell.get()))
+}
+
 /// Resolves a `require` name against a mod's directory, refusing to escape it.
 ///
 /// Returns `None` for anything that leaves the directory — checked after
@@ -3314,6 +3323,12 @@ impl ScriptVm for MluaVm {
             table.set("material", event.material.0)?;
             table.set("occupancy", event.occupancy)?;
             table.set("units", event.units)?;
+            // A cut of several materials, cell by cell as it would land
+            // (Sub-Node Contract §9.1): what a veto needs to judge "no oak in
+            // the chapel" by, and what `material` alone cannot say.
+            if let Some(cells) = &event.cells {
+                table.set("cells", cells_table(&self.lua, cells)?)?;
+            }
             Ok(table)
         }) else {
             return HookOutcome::allow();
@@ -14125,6 +14140,7 @@ mod tests {
             material: MaterialId(7),
             occupancy: 0b111,
             units: 3,
+            cells: None,
         }
     }
 
