@@ -1392,9 +1392,7 @@ impl Shared {
     pub fn debit(
         &self,
         uuid: &PlayerUuid,
-        material: tiamat_core::MaterialId,
-        shape: Option<tiamat_core::inventory::Shape>,
-        detail: Option<&str>,
+        which: tiamat_core::inventory::StackKey<'_>,
         units: u32,
     ) -> u32 {
         let Ok(mut inventories) = self.inventories.lock() else {
@@ -1403,7 +1401,7 @@ impl Shared {
         let Some(held) = inventories.get_mut(uuid) else {
             return 0;
         };
-        let taken = held.take(PLAYER_MAIN, material, shape, detail, units);
+        let taken = held.take(PLAYER_MAIN, which, units);
         if taken > 0
             && let Ok(mut dirty) = self.inventory_dirty.lock()
         {
@@ -2370,19 +2368,14 @@ impl Shared {
 
     /// Takes up to `units` of one material and cut out of a view, for a mod.
     ///
-    /// Returns how many it got, which may be fewer than asked.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the mod API's `take`, argument for argument; see `inventory::Access`"
-    )]
+    /// Returns how many it got, which may be fewer than asked. `which` names
+    /// exactly which stack, as `inventory::Access::take` does.
     pub fn take(
         &self,
         uuid: &PlayerUuid,
         view: &str,
         slot: Option<usize>,
-        material: tiamat_core::material::MaterialId,
-        shape: Option<tiamat_core::inventory::Shape>,
-        detail: Option<&str>,
+        which: tiamat_core::inventory::StackKey<'_>,
         units: u32,
     ) -> u32 {
         let took = self
@@ -2390,8 +2383,8 @@ impl Shared {
             .lock()
             .map(|mut inventories| match inventories.get_mut(uuid) {
                 Some(slots) => match slot {
-                    Some(slot) => slots.take_from(view, slot, material, shape, detail, units),
-                    None => slots.take(view, material, shape, detail, units),
+                    Some(slot) => slots.take_from(view, slot, which, units),
+                    None => slots.take(view, which, units),
                 },
                 None => 0,
             })

@@ -175,6 +175,33 @@ pub fn plan(
     }
 }
 
+/// What placing one item of a cut of several materials would write.
+///
+/// Sub-Node Contract §7.1: the cut's own cells, whatever the brush, and only
+/// if the whole item is held — a cut of several is never trimmed, because it
+/// has no "first N units" that are not a choice of materials. `cells` is the
+/// cut as it will land, already turned by [`oriented_cells`].
+///
+/// # Errors
+///
+/// [`Refusal::NothingHeld`] if `held` is less than one item.
+pub fn plan_cut(
+    target: SubNodePos,
+    held: u32,
+    cells: &crate::block::Cells,
+) -> Result<Placement, Refusal> {
+    let occupancy = crate::inventory::occupancy_of(cells);
+    let units = occupancy.count_ones();
+    if units == 0 || held < units {
+        return Err(Refusal::NothingHeld);
+    }
+    Ok(Placement {
+        block: target.block(),
+        occupancy,
+        units,
+    })
+}
+
 /// Which of its block's 27 cells a world cell is.
 ///
 /// `rem_euclid` rather than `%`: at negative coordinates the remainder is
@@ -352,25 +379,41 @@ fn last_cell_touched(high: f64) -> i64 {
 /// happened to be nearby would be the engine second-guessing it.
 #[must_use]
 pub fn oriented(occupancy: u32, face: [i8; 3], toward: [f32; 2]) -> u32 {
+    let (turns, tips) = orientation(face, toward);
+    // Turned toward the player FIRST, then tipped. The two axes do not
+    // commute, and this order is the one a player can describe: "it faces me,
+    // and on a wall it faces my feet."
+    crate::inventory::tipped(crate::inventory::turned(occupancy, turns), tips)
+}
+
+/// [`oriented`] for a cut of several materials' cells (Sub-Node Contract
+/// §7.1): the same turn and tip, so every cell's material goes where the
+/// cell's bit does in the mask.
+#[must_use]
+pub fn oriented_cells(
+    cells: &crate::block::Cells,
+    face: [i8; 3],
+    toward: [f32; 2],
+) -> crate::block::Cells {
+    let (turns, tips) = orientation(face, toward);
+    crate::inventory::tipped_cells(&crate::inventory::turned_cells(cells, turns), tips)
+}
+
+/// How many quarter turns, then how many tips, [`oriented`] and
+/// [`oriented_cells`] apply. Decided once, so a mask and its cells cannot be
+/// turned two different ways.
+fn orientation(face: [i8; 3], toward: [f32; 2]) -> (u32, u32) {
     // **No face, no opinion.** A mod writing computed geometry, and a client
     // that knows nothing about orientation, both send this — and turning a
     // shape they did not ask to have turned is the engine second-guessing
     // them.
     if face == [0; 3] {
-        return occupancy & crate::block::OCCUPANCY_FULL;
+        return (0, 0);
     }
     let against_a_wall = face[1] == 0 && (face[0] != 0 || face[2] != 0);
-    // Turned toward the player FIRST, then tipped. The two axes do not
-    // commute, and this order is the one a player can describe: "it faces me,
-    // and on a wall it faces my feet."
     let facing = crate::inventory::Facing::toward(toward[0], toward[1]);
-    let turned = crate::inventory::turned(occupancy, facing.quarters());
-    if against_a_wall {
-        // Three, not one: one turn takes the front to the ceiling.
-        crate::inventory::tipped(turned, 3)
-    } else {
-        turned
-    }
+    // Three tips, not one, against a wall: one takes the front to the ceiling.
+    (facing.quarters(), if against_a_wall { 3 } else { 0 })
 }
 
 /// The lowest `units` cells of `occupancy`, in [`crate::inventory::placement_mask`]'s
@@ -456,6 +499,42 @@ pub fn writes(
         .map(|index| Edit::SubNode {
             pos: cell_pos(pos, index),
             material,
+        })
+        .collect()
+}
+
+/// The edits that write a cut of several materials into `pos`, per Sub-Node
+/// Contract §7.2: one material at a time, in ascending id.
+///
+/// `cut` is what is being placed, already turned (see [`oriented_cells`]);
+/// `existing` is what the block holds now. Every cell `cut` fills must be air
+/// in `existing` — the caller has checked, because a cut of several places
+/// all or nothing (§7.1) — and the cells `cut` leaves empty are untouched.
+///
+/// Each material goes through [`writes`] with `filled` grown by the materials
+/// before it, so the first meets the block as it was and every one after
+/// meets a block holding a different material and goes in cell by cell.
+/// Returned per material, with the edits in the order they must be applied,
+/// so a caller refunding a write that failed part-way knows what landed.
+#[must_use]
+pub fn cut_writes(
+    pos: BlockPos,
+    cut: &crate::block::Cells,
+    existing: &crate::block::Cells,
+) -> Vec<(crate::MaterialId, Vec<crate::proto::Edit>)> {
+    let mut holds = *existing;
+    crate::inventory::by_material(cut)
+        .into_iter()
+        .map(|(material, cells)| {
+            let filled = crate::inventory::occupancy_of(&holds);
+            let same = holds.iter().all(|held| held.is_air() || *held == material);
+            let edits = writes(pos, cells, material.get(), filled, same);
+            for (index, held) in holds.iter_mut().enumerate() {
+                if cells & (1 << index) != 0 {
+                    *held = material;
+                }
+            }
+            (material, edits)
         })
         .collect()
 }
@@ -1133,6 +1212,111 @@ mod tests {
         assert!(
             blocks_a_body(&plan, &[(ChunkPos::new(0, 0, 0), body)]),
             "a block at head height was allowed on top of a standing player"
+        );
+    }
+}
+
+/// Sub-Node Contract §7.1 and §7.2 for a cut of several materials.
+#[cfg(test)]
+mod cut_tests {
+    use super::*;
+    use crate::MaterialId;
+    use crate::block::{Cells, EMPTY_CELLS, subnode_index};
+    use crate::proto::Edit;
+
+    const STONE: MaterialId = MaterialId(2);
+    const OAK: MaterialId = MaterialId(5);
+
+    /// Stone on the bottom layer, one oak cell on the front of the middle one.
+    fn cut() -> Cells {
+        let mut cells = EMPTY_CELLS;
+        for z in 0..3 {
+            for x in 0..3 {
+                cells[subnode_index(x, 0, z)] = STONE;
+            }
+        }
+        cells[subnode_index(1, 1, 2)] = OAK;
+        cells
+    }
+
+    #[test]
+    fn a_cut_of_several_is_written_one_material_at_a_time_in_ascending_id() {
+        // Into an empty block: the lowest id as one Partial, the next cell by
+        // cell. Oak is the higher id and goes second wherever it sits.
+        let pos = BlockPos::new(4, 5, 6);
+        let writes = cut_writes(pos, &cut(), &EMPTY_CELLS);
+        let materials: Vec<_> = writes.iter().map(|(m, _)| *m).collect();
+        assert_eq!(materials, vec![STONE, OAK]);
+        assert_eq!(
+            writes[0].1,
+            vec![Edit::Partial {
+                pos,
+                material: STONE.get(),
+                occupancy: 0b111 | (0b111 << 9) | (0b111 << 18),
+            }]
+        );
+        assert!(
+            matches!(writes[1].1.as_slice(), [Edit::SubNode { material, .. }] if *material == OAK.get()),
+            "oak went in as {:?}",
+            writes[1].1
+        );
+    }
+
+    #[test]
+    fn a_cut_of_several_beside_something_else_goes_in_cell_by_cell() {
+        // §7.2: a Partial SETS the block, so one naming only the new cells
+        // would delete what was there. The block holds brick in its top
+        // corner; nothing may be a Partial.
+        let mut existing = EMPTY_CELLS;
+        existing[26] = MaterialId(9);
+        let writes = cut_writes(BlockPos::new(0, 0, 0), &cut(), &existing);
+        let edits: Vec<&Edit> = writes.iter().flat_map(|(_, edits)| edits).collect();
+        assert_eq!(edits.len(), 10, "one per cell: {edits:?}");
+        assert!(
+            edits
+                .iter()
+                .all(|edit| matches!(edit, Edit::SubNode { .. }))
+        );
+    }
+
+    #[test]
+    fn a_turned_cut_takes_its_materials_with_it() {
+        // §7.1: one permutation for the mask and the cells, so the oak cell is
+        // where the mask says the front went.
+        let cut = cut();
+        for face in [[0i8, 1, 0], [1, 0, 0], [0, 0, -1], [0; 3]] {
+            for toward in [[0.0, 5.0], [5.0, 0.0], [0.0, -5.0], [-5.0, 0.0]] {
+                let cells = oriented_cells(&cut, face, toward);
+                for material in [STONE, OAK] {
+                    let mask = |cells: &Cells| {
+                        (0..27).fold(
+                            0u32,
+                            |m, i| if cells[i] == material { m | 1 << i } else { m },
+                        )
+                    };
+                    assert_eq!(
+                        mask(&cells),
+                        oriented(mask(&cut), face, toward),
+                        "{material:?} against {face:?} toward {toward:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_of_several_is_planned_whole_or_not_at_all() {
+        let target = SubNodePos::new(3, 0, 0);
+        let plan = plan_cut(target, 10, &cut()).expect("ten units is one item");
+        assert_eq!(plan.units, 10);
+        assert_eq!(plan.occupancy, crate::inventory::occupancy_of(&cut()));
+        assert_eq!(plan.block, target.block());
+        // Nine units is not one item of a ten-cell cut, and nothing is
+        // placed short.
+        assert_eq!(plan_cut(target, 9, &cut()), Err(Refusal::NothingHeld));
+        assert_eq!(
+            plan_cut(target, 99, &EMPTY_CELLS),
+            Err(Refusal::NothingHeld)
         );
     }
 }

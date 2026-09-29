@@ -4275,9 +4275,11 @@ impl ServerHandle {
                             // fixed, in the detail's clothes.
                             let held = tiamat_core::inventory::units_of_exactly(
                                 &shared.inventory_of(&request.actor),
-                                material,
-                                tiamat_core::inventory::Shape::new(request.shape),
-                                request.detail.as_deref(),
+                                tiamat_core::inventory::StackKey::of(
+                                    material,
+                                    tiamat_core::inventory::Shape::new(request.shape),
+                                    request.detail.as_deref(),
+                                ),
                             );
 
                             // **An item is not a block.** Everything a player
@@ -4509,9 +4511,11 @@ impl ServerHandle {
                             // the check and here is enough.
                             let paid = shared.debit(
                                 &request.actor,
-                                material,
-                                shape,
-                                request.detail.as_deref(),
+                                tiamat_core::inventory::StackKey::of(
+                                    material,
+                                    shape,
+                                    request.detail.as_deref(),
+                                ),
                                 plan.units,
                             );
                             if paid == 0 {
@@ -6540,14 +6544,11 @@ impl tiamat_core::inventory::Access for Carried {
         player: [u8; 32],
         view: &str,
         slot: Option<usize>,
-        material: tiamat_core::material::MaterialId,
-        shape: Option<tiamat_core::inventory::Shape>,
-        detail: Option<&str>,
+        which: tiamat_core::inventory::StackKey<'_>,
         units: u32,
     ) -> u32 {
         let uuid = tiamat_core::identity::PlayerUuid::from_bytes(player);
-        self.shared
-            .take(&uuid, view, slot, material, shape, detail, units)
+        self.shared.take(&uuid, view, slot, which, units)
     }
 }
 

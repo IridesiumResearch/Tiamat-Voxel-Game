@@ -418,12 +418,10 @@ impl tiamat_core::inventory::Containers for Shared {
         &self,
         name: &str,
         slot: Option<usize>,
-        material: tiamat_core::MaterialId,
-        shape: Option<tiamat_core::inventory::Shape>,
-        detail: Option<&str>,
+        which: tiamat_core::inventory::StackKey<'_>,
         units: u32,
     ) -> u32 {
-        self.with_view(name, |view| view.draw(slot, material, shape, detail, units))
+        self.with_view(name, |view| view.draw(slot, which, units))
             .unwrap_or(0)
     }
 

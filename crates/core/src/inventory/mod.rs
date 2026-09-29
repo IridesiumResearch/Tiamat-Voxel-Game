@@ -14,8 +14,10 @@
 //! drops. [`break_block`] is the conservation law, and the property test
 //! `units_conserved` asserts it against arbitrary block contents.
 
+pub mod cut;
 pub mod slots;
 
+pub use cut::{StackKey, by_material, occupancy_of};
 pub use slots::{
     Grab, MAX_VIEW_SLOTS, PLAYER_HOTBAR_SLOTS, PLAYER_MAIN, PLAYER_MAIN_SLOTS, PLAYER_OFFHAND_SLOT,
     Slots, View, ViewDef,
@@ -45,8 +47,23 @@ pub struct Stack {
     /// The arrangement each item of this stack is cut to, if any.
     ///
     /// See [`Shape`]. `None` is loose material — what digging yields and what
-    /// a full block places from.
+    /// a full block places from — or a cut of several materials that fills
+    /// the block, which [`Self::cells`] tells apart.
     pub shape: Option<Shape>,
+
+    /// The material of each of the cut's 27 cells, for a cut of several.
+    ///
+    /// Sub-Node Contract §9.1: the `Mixed` storage form, carried. `Some` only
+    /// when the cells hold two or more distinct non-air materials, and then
+    /// [`Self::material`] is the lowest of them and [`Self::shape`] their
+    /// occupancy — both derived, never chosen. Built by [`Stack::mixed`] and
+    /// [`Stack::of_cells`], which are the only constructors that canonicalise;
+    /// a stack assembled by hand with a `Some` here that does not meet those
+    /// rules is a stack two spellings of which will not stack.
+    ///
+    /// Boxed because it is 54 bytes that almost no stack has: `None` costs a
+    /// word, as [`Self::detail`] does.
+    pub cells: Option<Box<crate::block::Cells>>,
 
     /// What a MOD says this particular stack is, and the engine never reads.
     ///
@@ -112,6 +129,9 @@ pub const MAX_DETAIL: usize = 256;
 /// Two stacks merge only if they are the same material AND the same shape.
 /// That is the whole of "blocks crafted into the same shape stack": identical
 /// things stack, and a stair and a slab of the same stone are not identical.
+///
+/// A shape is an outline and names no material; a cut of SEVERAL materials
+/// carries its cells beside it — see [`Stack::cells`] and [`cut`].
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -163,6 +183,14 @@ pub enum StackError {
         right: Option<Shape>,
     },
 
+    /// Merging two cuts whose cells are made of different materials.
+    ///
+    /// Sub-Node Contract §9.1: a stair of stone and oak and a stair of stone
+    /// and brick have the same material (the lowest) and the same shape, and
+    /// are not the same thing.
+    #[error("cannot merge cuts made of different materials cell by cell")]
+    CellsMismatch,
+
     /// Merging two stacks a mod has said are different things.
     ///
     /// See [`Stack::detail`]. The engine has no idea what the difference IS,
@@ -208,6 +236,7 @@ impl Stack {
             material,
             units,
             shape: None,
+            cells: None,
             detail: None,
         })
     }
@@ -279,6 +308,13 @@ impl Stack {
                 right: other.shape,
             });
         }
+        // **Nor are the same shape of two different mixtures**, Sub-Node
+        // Contract §9.1 — and a cut of several materials that fills the block
+        // is not loose material of its lowest one, which the shape alone
+        // (`None` for both) cannot tell apart.
+        if self.cells != other.cells {
+            return Err(StackError::CellsMismatch);
+        }
         // **And a mod's own answer to "is this the same item".** Two swords
         // worn to different amounts are not one stack of swords; nor are a
         // named item and a plain one. The engine cannot tell what the
@@ -319,6 +355,7 @@ impl Stack {
             material: self.material,
             units,
             shape: self.shape,
+            cells: self.cells.clone(),
             // **The split half is the same item.** Taking ten arrows off a
             // stack of ninety gives ten of what was there, detail included, or
             // the two halves would refuse to merge back together.
@@ -433,7 +470,7 @@ impl Facing {
 pub fn turned(mask: u32, quarters: u32) -> u32 {
     let mut mask = mask & Shape::ALL;
     for _ in 0..quarters % 4 {
-        mask = permute(mask, |x, y, z| (z, y, 2 - x));
+        mask = permute(mask, turn_index);
     }
     mask
 }
@@ -447,21 +484,69 @@ pub fn turned(mask: u32, quarters: u32) -> u32 {
 pub fn tipped(mask: u32, quarters: u32) -> u32 {
     let mut mask = mask & Shape::ALL;
     for _ in 0..quarters % 4 {
-        mask = permute(mask, |x, y, z| (x, z, 2 - y));
+        mask = permute(mask, tip_index);
     }
     mask
 }
 
+/// Where one quarter [`turned`] sends the cell at `index`.
+///
+/// **The one statement of the turn**, shared by a mask ([`turned`]) and a cut
+/// of several materials' cells ([`turned_cells`]): Sub-Node Contract §7.1 has
+/// a cut's materials turn with its mask, and two copies of the permutation
+/// are two chances for a stair's oak step to end up somewhere its outline is
+/// not.
+#[must_use]
+pub const fn turn_index(index: usize) -> usize {
+    let (x, y, z) = crate::block::subnode_offset(index);
+    crate::block::subnode_index(z, y, 2 - x)
+}
+
+/// Where one quarter [`tipped`] sends the cell at `index`. See
+/// [`turn_index`] for why it is written once.
+#[must_use]
+pub const fn tip_index(index: usize) -> usize {
+    let (x, y, z) = crate::block::subnode_offset(index);
+    crate::block::subnode_index(x, z, 2 - y)
+}
+
+/// [`turned`] for a cut's cells: every cell's material moves to where the
+/// turn sends the cell, `quarters` times.
+#[must_use]
+pub fn turned_cells(cells: &crate::block::Cells, quarters: u32) -> crate::block::Cells {
+    let mut cells = *cells;
+    for _ in 0..quarters % 4 {
+        cells = permute_cells(&cells, turn_index);
+    }
+    cells
+}
+
+/// [`tipped`] for a cut's cells.
+#[must_use]
+pub fn tipped_cells(cells: &crate::block::Cells, quarters: u32) -> crate::block::Cells {
+    let mut cells = *cells;
+    for _ in 0..quarters % 4 {
+        cells = permute_cells(&cells, tip_index);
+    }
+    cells
+}
+
 /// Moves every set cell of `mask` to where `to` sends it.
-fn permute(mask: u32, to: impl Fn(u32, u32, u32) -> (u32, u32, u32)) -> u32 {
+fn permute(mask: u32, to: fn(usize) -> usize) -> u32 {
     let mut out = 0;
     for index in 0..crate::UNITS_PER_BLOCK as usize {
-        if mask & (1 << index) == 0 {
-            continue;
+        if mask & (1 << index) != 0 {
+            out |= 1 << to(index);
         }
-        let (x, y, z) = crate::block::subnode_offset(index);
-        let (x, y, z) = to(x, y, z);
-        out |= 1 << crate::block::subnode_index(x, y, z);
+    }
+    out
+}
+
+/// Moves every cell's material to where `to` sends the cell.
+fn permute_cells(cells: &crate::block::Cells, to: fn(usize) -> usize) -> crate::block::Cells {
+    let mut out = crate::block::EMPTY_CELLS;
+    for (index, material) in cells.iter().enumerate() {
+        out[to(index)] = *material;
     }
     out
 }
@@ -582,6 +667,7 @@ pub fn break_block(block: BlockView<'_>) -> Vec<Stack> {
                             material,
                             units: 1,
                             shape: None,
+                            cells: None,
                             detail: None,
                         },
                     ),
@@ -621,6 +707,7 @@ pub fn removed_units(before: BlockView<'_>, after: BlockView<'_>) -> Vec<Stack> 
                     material: was,
                     units: 1,
                     shape: None,
+                    cells: None,
                     detail: None,
                 },
             ),
@@ -645,19 +732,14 @@ pub fn consolidate(stacks: impl IntoIterator<Item = Stack>) -> Vec<Stack> {
         // and sorting by the pair keeps the result ordered without a second
         // pass. Ascending material first, so drop order is unchanged for the
         // loose material that is almost all of it.
-        let key = (stack.material, stack.shape, stack.detail.as_deref());
+        let key = stack.key();
         // **And the detail, or consolidating loses it.** Two stacks a mod says
         // are different items must stay two entries; sorting by the pair alone
         // put them next to each other and the merge below then refused, which
-        // is correct but only because the key found the right neighbour.
-        match merged.binary_search_by(|existing| {
-            (
-                existing.material,
-                existing.shape,
-                existing.detail.as_deref(),
-            )
-                .cmp(&key)
-        }) {
+        // is correct but only because the key found the right neighbour. The
+        // cells of a cut of several materials likewise (§9.1): the key is the
+        // whole of a stack's identity, in one place.
+        match merged.binary_search_by(|existing| existing.key().cmp(&key)) {
             Ok(found) => {
                 if merged[found].merge(&stack).is_err() {
                     // Overflow, or a mod's own difference: keep it separate
@@ -678,11 +760,15 @@ pub fn total_units(stacks: &[Stack]) -> u64 {
 }
 
 /// Units of one material held across a set of stacks.
+///
+/// A cut of several materials counts toward none of them (Sub-Node Contract
+/// §9.1): its units are not all of its lowest material, which is the only one
+/// it could be filed under.
 #[must_use]
 pub fn units_of(stacks: &[Stack], material: MaterialId) -> u32 {
     stacks
         .iter()
-        .filter(|stack| stack.material == material)
+        .filter(|stack| stack.material == material && stack.cells.is_none())
         .fold(0u32, |total, stack| total.saturating_add(stack.units))
 }
 
@@ -695,17 +781,10 @@ pub fn units_of(stacks: &[Stack], material: MaterialId) -> u32 {
 /// [`crate::inventory::Slots::take`] matches, so what is counted is what can
 /// then be spent.
 #[must_use]
-pub fn units_of_exactly(
-    stacks: &[Stack],
-    material: MaterialId,
-    shape: Option<Shape>,
-    detail: Option<&str>,
-) -> u32 {
+pub fn units_of_exactly(stacks: &[Stack], key: StackKey<'_>) -> u32 {
     stacks
         .iter()
-        .filter(|stack| {
-            stack.material == material && stack.shape == shape && stack.detail.as_deref() == detail
-        })
+        .filter(|stack| key.matches(stack))
         .fold(0u32, |total, stack| total.saturating_add(stack.units))
 }
 
@@ -720,13 +799,16 @@ pub fn units_of_exactly(
 ///
 /// Empty stacks are dropped, so an inventory does not accumulate zero-unit
 /// entries that display as materials the player does not have.
+///
+/// Never from a cut of several materials (Sub-Node Contract §9.1): it is not
+/// loose material of the lowest one, and a unit of it is no material at all.
 pub fn debit(stacks: &mut Vec<Stack>, material: MaterialId, units: u32) -> u32 {
     let mut remaining = units;
     for stack in stacks.iter_mut() {
         if remaining == 0 {
             break;
         }
-        if stack.material != material {
+        if stack.material != material || stack.cells.is_some() {
             continue;
         }
         let take = stack.units.min(remaining);
@@ -805,19 +887,15 @@ pub trait Access: Send + Sync {
     /// has gets what there was and can decide whether to give it back; the
     /// alternative — all or nothing — hides the amount and makes the mod ask
     /// twice.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "who, where, and exactly which stack: the slot (Craft ask 4) is the \
-                  one that pushed it over, and a struct for it would be the one call's"
-    )]
+    ///
+    /// `which` names exactly which stack: material, cut, cells and detail,
+    /// matched as [`StackKey::matches`] says.
     fn take(
         &self,
         player: [u8; 32],
         view: &str,
         slot: Option<usize>,
-        material: MaterialId,
-        shape: Option<Shape>,
-        detail: Option<&str>,
+        which: StackKey<'_>,
         units: u32,
     ) -> u32;
 }
@@ -1051,6 +1129,7 @@ mod tests {
                 material: STONE,
                 units: 27,
                 shape: None,
+                cells: None,
                 detail: None,
             }]
         );
@@ -1073,6 +1152,7 @@ mod tests {
                 material: STONE,
                 units: 3,
                 shape: None,
+                cells: None,
                 detail: None,
             }]
         );
@@ -1094,18 +1174,21 @@ mod tests {
                     material: STONE,
                     units: 2,
                     shape: None,
+                    cells: None,
                     detail: None,
                 },
                 Stack {
                     material: DIRT,
                     units: 1,
                     shape: None,
+                    cells: None,
                     detail: None,
                 },
                 Stack {
                     material: GRASS,
                     units: 1,
                     shape: None,
+                    cells: None,
                     detail: None,
                 },
             ]
@@ -1143,6 +1226,7 @@ mod tests {
             material: STONE,
             units: 10,
             shape: None,
+            cells: None,
             detail: None,
         };
         stack
@@ -1150,6 +1234,7 @@ mod tests {
                 material: STONE,
                 units: 5,
                 shape: None,
+                cells: None,
                 detail: None,
             })
             .expect("merge");
@@ -1212,6 +1297,7 @@ mod tests {
             material: STONE,
             units: 10,
             shape: None,
+            cells: None,
             detail: None,
         };
         let err = stack
@@ -1219,6 +1305,7 @@ mod tests {
                 material: DIRT,
                 units: 5,
                 shape: None,
+                cells: None,
                 detail: None,
             })
             .expect_err("materials differ");
@@ -1234,6 +1321,7 @@ mod tests {
             material: STONE,
             units: u32::MAX,
             shape: None,
+            cells: None,
             detail: None,
         };
         let err = stack
@@ -1241,6 +1329,7 @@ mod tests {
                 material: STONE,
                 units: 1,
                 shape: None,
+                cells: None,
                 detail: None,
             })
             .expect_err("should overflow");
@@ -1258,6 +1347,7 @@ mod tests {
             material: STONE,
             units: 30,
             shape: None,
+            cells: None,
             detail: None,
         };
         let taken = stack.split(12).expect("split");
@@ -1267,6 +1357,7 @@ mod tests {
                 material: STONE,
                 units: 12,
                 shape: None,
+                cells: None,
                 detail: None,
             }
         );
@@ -1279,6 +1370,7 @@ mod tests {
             material: STONE,
             units: 30,
             shape: None,
+            cells: None,
             detail: None,
         };
         let taken = stack.split(30).expect("split");
@@ -1292,6 +1384,7 @@ mod tests {
             material: STONE,
             units: 5,
             shape: None,
+            cells: None,
             detail: None,
         };
         let err = stack.split(6).expect_err("insufficient");
@@ -1306,24 +1399,28 @@ mod tests {
                 material: GRASS,
                 units: 3,
                 shape: None,
+                cells: None,
                 detail: None,
             },
             Stack {
                 material: STONE,
                 units: 4,
                 shape: None,
+                cells: None,
                 detail: None,
             },
             Stack {
                 material: GRASS,
                 units: 2,
                 shape: None,
+                cells: None,
                 detail: None,
             },
             Stack {
                 material: STONE,
                 units: 1,
                 shape: None,
+                cells: None,
                 detail: None,
             },
         ]);
@@ -1334,12 +1431,14 @@ mod tests {
                     material: STONE,
                     units: 5,
                     shape: None,
+                    cells: None,
                     detail: None,
                 },
                 Stack {
                     material: GRASS,
                     units: 5,
                     shape: None,
+                    cells: None,
                     detail: None,
                 },
             ]
@@ -1353,12 +1452,14 @@ mod tests {
                 material: STONE,
                 units: u32::MAX,
                 shape: None,
+                cells: None,
                 detail: None,
             },
             Stack {
                 material: STONE,
                 units: 100,
                 shape: None,
+                cells: None,
                 detail: None,
             },
         ]);
@@ -1373,18 +1474,21 @@ mod tests {
                 material: MaterialId::AIR,
                 units: 27,
                 shape: None,
+                cells: None,
                 detail: None,
             },
             Stack {
                 material: STONE,
                 units: 0,
                 shape: None,
+                cells: None,
                 detail: None,
             },
             Stack {
                 material: STONE,
                 units: 3,
                 shape: None,
+                cells: None,
                 detail: None,
             },
         ]);
@@ -1394,6 +1498,7 @@ mod tests {
                 material: STONE,
                 units: 3,
                 shape: None,
+                cells: None,
                 detail: None,
             }]
         );
@@ -1665,15 +1770,7 @@ pub trait Containers: Send + Sync {
     ///
     /// `slot` names one, or `None` for anywhere in it. Partial by design, for
     /// the reason [`Access::take`] is.
-    fn take(
-        &self,
-        name: &str,
-        slot: Option<usize>,
-        material: MaterialId,
-        shape: Option<Shape>,
-        detail: Option<&str>,
-        units: u32,
-    ) -> u32;
+    fn take(&self, name: &str, slot: Option<usize>, which: StackKey<'_>, units: u32) -> u32;
 
     /// Removes a container and hands back what was in it.
     ///

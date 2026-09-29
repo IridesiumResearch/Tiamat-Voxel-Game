@@ -5262,9 +5262,7 @@ impl MluaVm {
                             player,
                             &view,
                             from,
-                            material,
-                            shape,
-                            detail.as_deref(),
+                            crate::inventory::StackKey::of(material, shape, detail.as_deref()),
                             units,
                         )
                     })
@@ -7692,7 +7690,12 @@ impl MluaVm {
                     .ok()
                     .and_then(|slot| {
                         slot.as_ref().map(|access| {
-                            access.take(&name, from, material, shape, detail.as_deref(), units)
+                            access.take(
+                                &name,
+                                from,
+                                crate::inventory::StackKey::of(material, shape, detail.as_deref()),
+                                units,
+                            )
                         })
                     })
                     .unwrap_or(0))
@@ -17921,9 +17924,7 @@ mod entity_tests {
             &self,
             name: &str,
             slot: Option<usize>,
-            material: crate::MaterialId,
-            shape: Option<crate::inventory::Shape>,
-            detail: Option<&str>,
+            which: crate::inventory::StackKey<'_>,
             units: u32,
         ) -> u32 {
             let mut held = self.held.lock().expect("lock");
@@ -17934,7 +17935,7 @@ mod entity_tests {
                 name: name.to_owned(),
                 slots: std::mem::take(slots),
             };
-            let took = view.draw(slot, material, shape, detail, units);
+            let took = view.draw(slot, which, units);
             *slots = view.slots;
             took
         }

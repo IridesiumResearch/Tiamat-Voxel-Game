@@ -1212,6 +1212,14 @@ breaking the placed block yields one loose stack per material, as this
 section's list already says for `Mixed`, in ascending id. Made from loose
 units, placed, and broken, every material's units are what they were.
 
+Implemented by `crates/core/src/inventory/cut.rs` — `Stack::mixed`,
+`Stack::of_cells` and `Stack::canonical` for rules 1 to 3, `Stack::same_item`
+and `StackKey` for 5 and 6, `Stack::grain` for 7 — with a test per rule there,
+and `made_placed_and_broken_every_material_comes_back` as the conservation
+property. The inventory's click property test
+(`no_slot_is_ever_left_holding_nothing`) generates cuts of several materials
+and asserts no slot ever holds part of one.
+
 ---
 
 ## 10. Networking — what a sub-node edit costs on the wire

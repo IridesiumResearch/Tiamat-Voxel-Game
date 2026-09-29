@@ -28,8 +28,7 @@
 //! split that rounded to whole blocks would quietly destroy or invent units,
 //! and `proptest` asserts it does not.
 
-use super::Stack;
-use crate::material::MaterialId;
+use super::{Stack, StackKey};
 
 /// A named run of slots.
 ///
@@ -125,17 +124,14 @@ impl View {
             let Some(slot) = self.slots[index].as_mut() else {
                 continue;
             };
-            // Material AND shape AND detail: three stacks that look alike and
-            // are not. `Slots::insert` records what went wrong when only the
-            // first was tested.
-            if slot.material != stack.material
-                || slot.shape != stack.shape
-                || slot.detail != stack.detail
-            {
+            // Material AND shape AND cells AND detail: stacks that look alike
+            // and are not. `Slots::insert` records what went wrong when only
+            // the first was tested.
+            if !slot.same_item(&stack) {
                 continue;
             }
             let room = slot.capacity().saturating_sub(slot.units);
-            let giving = stack.units.min(room);
+            let giving = stack.takeable(room);
             if giving > 0
                 && let Ok(part) = stack.split(giving)
                 && slot.merge(&part).is_err()
@@ -170,17 +166,10 @@ impl View {
     /// Takes up to `units` of one material out, returning how many it got.
     ///
     /// `from` names one slot, or `None` for "anywhere in it". The match is
-    /// exact on material, shape and detail, for the reason [`Slots::take`] is:
-    /// a recipe asking for stone must not melt down the named sword somebody
-    /// left in the same box.
-    pub fn draw(
-        &mut self,
-        from: Option<usize>,
-        material: MaterialId,
-        shape: Option<super::Shape>,
-        detail: Option<&str>,
-        units: u32,
-    ) -> u32 {
+    /// exact on material, shape, cells and detail, for the reason
+    /// [`Slots::take`] is: a recipe asking for stone must not melt down the
+    /// named sword somebody left in the same box.
+    pub fn draw(&mut self, from: Option<usize>, which: StackKey<'_>, units: u32) -> u32 {
         let slots: Vec<usize> = match from {
             Some(index) if index < self.slots.len() => vec![index],
             Some(_) => return 0,
@@ -194,13 +183,10 @@ impl View {
             let Some(stack) = self.slots[index].as_mut() else {
                 continue;
             };
-            if stack.material != material
-                || stack.shape != shape
-                || stack.detail.as_deref() != detail
-            {
+            if !which.matches(stack) {
                 continue;
             }
-            let taking = stack.units.min(left);
+            let taking = stack.takeable(left);
             if let Ok(part) = stack.split(taking) {
                 left -= part.units;
             }
@@ -440,7 +426,10 @@ impl Slots {
             (None, Some(mut stack)) => {
                 // The half left BEHIND, so the hand keeps the remainder and an
                 // odd count rounds the player's way rather than into thin air.
-                let behind = stack.units / 2;
+                // Counted in grains, which are units except for a cut of
+                // several materials, which halves in whole items (§9.1).
+                let grain = stack.grain();
+                let behind = stack.units / grain / 2 * grain;
                 let taken = stack.split(stack.units - behind).ok();
                 ((!stack.is_empty()).then_some(stack), taken)
             }
@@ -476,12 +465,12 @@ impl Slots {
         // Matching stacks first, so shift-clicking twenty units into a view
         // that already holds some tops that up instead of taking a new slot.
         for slot in self.views[to].slots.iter_mut().flatten() {
-            // Shape as well as material — see `Slots::insert` for what the
-            // material-only test destroyed.
-            if slot.material != moving.material || slot.shape != moving.shape {
+            // The whole identity, not the material alone — see
+            // `Slots::insert` for what the material-only test destroyed.
+            if !slot.same_item(&moving) {
                 continue;
             }
-            let giving = moving.units.min(u32::MAX - slot.units);
+            let giving = moving.takeable(u32::MAX - slot.units);
             if giving > 0
                 && let Ok(part) = moving.split(giving)
                 && slot.merge(&part).is_err()
@@ -565,10 +554,10 @@ impl Slots {
             let Some(stack) = &mut self.views[at].slots[slot] else {
                 continue;
             };
-            if stack.material != moving.material || stack.shape != moving.shape {
+            if !stack.same_item(&moving) {
                 continue;
             }
-            let giving = moving.units.min(u32::MAX - stack.units);
+            let giving = moving.takeable(u32::MAX - stack.units);
             if giving > 0
                 && let Ok(part) = moving.split(giving)
                 && stack.merge(&part).is_err()
@@ -649,9 +638,7 @@ impl Slots {
                 true
             }
             Some(held)
-                if held.material == stack.material
-                    && held.shape == stack.shape
-                    && held.detail == stack.detail
+                if held.same_item(&stack)
                     && held.capacity().saturating_sub(held.units) >= stack.units =>
             {
                 held.merge(&stack).is_ok()
@@ -662,25 +649,17 @@ impl Slots {
 
     /// Takes up to `units` of one material out of ONE slot of a view, matched
     /// exactly as [`Self::take`] matches. Returns how many it got.
-    pub fn take_from(
-        &mut self,
-        view: &str,
-        slot: usize,
-        material: MaterialId,
-        shape: Option<super::Shape>,
-        detail: Option<&str>,
-        units: u32,
-    ) -> u32 {
+    pub fn take_from(&mut self, view: &str, slot: usize, which: StackKey<'_>, units: u32) -> u32 {
         let Some(at) = self.locate(view, slot) else {
             return 0;
         };
         let Some(stack) = &mut self.views[at].slots[slot] else {
             return 0;
         };
-        if stack.material != material || stack.shape != shape || stack.detail.as_deref() != detail {
+        if !which.matches(stack) {
             return 0;
         }
-        let taking = stack.units.min(units);
+        let taking = stack.takeable(units);
         let Ok(part) = stack.split(taking) else {
             return 0;
         };
@@ -728,14 +707,15 @@ impl Slots {
             // incoming stack, `merge` refuses the mismatch, and the part it
             // refused is dropped on the floor. A player putting stairs into a
             // bag holding loose stone of the same material lost the stairs.
-            if slot.material != stack.material || slot.shape != stack.shape {
+            // The cells and the detail are the rest of it (§9.1).
+            if !slot.same_item(&stack) {
                 continue;
             }
             // **A slot holds one stack and no more.** What does not fit falls
             // through to the next matching slot, then to an empty one, then to
             // a slot the view grows for it.
             let room = slot.capacity().saturating_sub(slot.units);
-            let giving = stack.units.min(room);
+            let giving = stack.takeable(room);
             if giving > 0
                 && let Ok(part) = stack.split(giving)
                 && slot.merge(&part).is_err()
@@ -781,14 +761,10 @@ impl Slots {
     /// melt down the named sword somebody left in the same view, and a mod
     /// that does want any reads the inventory and asks for each detail it
     /// finds. See [`super::Stack::detail`].
-    pub fn take(
-        &mut self,
-        view: &str,
-        material: MaterialId,
-        shape: Option<super::Shape>,
-        detail: Option<&str>,
-        units: u32,
-    ) -> u32 {
+    ///
+    /// A cut of several materials is taken in whole items (Sub-Node Contract
+    /// §9.1), so asking for part of one takes the whole ones it covers.
+    pub fn take(&mut self, view: &str, which: StackKey<'_>, units: u32) -> u32 {
         let Some(at) = self.index_of(view) else {
             return 0;
         };
@@ -802,13 +778,10 @@ impl Slots {
             // stair must not have it paid for out of their loose rubble, or the
             // stairs they crafted would sit in the inventory while the material
             // quietly drained away.
-            if stack.material != material
-                || stack.shape != shape
-                || stack.detail.as_deref() != detail
-            {
+            if !which.matches(stack) {
                 continue;
             }
-            let taking = stack.units.min(left);
+            let taking = stack.takeable(left);
             if let Ok(part) = stack.split(taking) {
                 left -= part.units;
             }
@@ -856,8 +829,10 @@ fn merge_or_swap(held: Stack, there: Stack) -> (Option<Stack>, Option<Stack>) {
     // test, so a held stair left-clicked onto loose stone of the same material
     // fell through to the merge, was refused, and NOTHING HAPPENED — which
     // from the window is a slot that ignores clicks. A different cut is a
-    // different item, and a different item swaps.
-    if held.material != there.material || held.shape != there.shape {
+    // different item, and a different item swaps — including a different
+    // mixture of materials (§9.1), and a detail a mod says makes it another
+    // thing, which `merge` refusing used to answer by doing nothing at all.
+    if !held.same_item(&there) {
         // Swap. The hand takes what was there.
         return (Some(held), Some(there));
     }
@@ -873,8 +848,11 @@ fn merge_or_swap(held: Stack, there: Stack) -> (Option<Stack>, Option<Stack>) {
 /// Putting a single unit down out of a held stack.
 ///
 /// Returns `(what goes in the slot, what stays in the hand)`.
+///
+/// "One" is one unit, or one whole item of a cut of several materials, which
+/// moves in nothing smaller (Sub-Node Contract §9.1).
 fn place_one(mut held: Stack, there: Option<Stack>) -> (Option<Stack>, Option<Stack>) {
-    let Ok(one) = held.split(1) else {
+    let Ok(one) = held.split(held.grain().min(held.units)) else {
         return ((!held.is_empty()).then_some(held), there);
     };
     let slot = match there {
@@ -889,11 +867,7 @@ fn place_one(mut held: Stack, there: Option<Stack>) -> (Option<Stack>, Option<St
         // mod says is different from the one in the slot must not merge, and
         // `merge` refusing after the unit has been split out of the hand is
         // where a unit goes missing.
-        Some(mut there)
-            if there.material == one.material
-                && there.shape == one.shape
-                && there.detail == one.detail =>
-        {
+        Some(mut there) if there.same_item(&one) => {
             if there.merge(&one).is_err() {
                 let _ = held.merge(&one);
             }
@@ -1083,7 +1057,7 @@ mod tests {
         assert_eq!(inv.total_units(), 1);
         // The rewrite: out of that slot alone, then back into it.
         assert_eq!(
-            inv.take_from(PLAYER_MAIN, 2, STONE, None, Some("d=100"), 1),
+            inv.take_from(PLAYER_MAIN, 2, StackKey::of(STONE, None, Some("d=100")), 1),
             1
         );
         assert!(at(&inv, PLAYER_MAIN, 2).is_none());
@@ -1095,11 +1069,11 @@ mod tests {
         // The wrong detail in that slot takes nothing; a slot that is not
         // there takes nothing.
         assert_eq!(
-            inv.take_from(PLAYER_MAIN, 2, STONE, None, Some("d=100"), 1),
+            inv.take_from(PLAYER_MAIN, 2, StackKey::of(STONE, None, Some("d=100")), 1),
             0
         );
         assert_eq!(
-            inv.take_from(PLAYER_MAIN, 99, STONE, None, Some("d=99"), 1),
+            inv.take_from(PLAYER_MAIN, 99, StackKey::of(STONE, None, Some("d=99")), 1),
             0
         );
         assert!(
@@ -1264,7 +1238,11 @@ mod tests {
 
         // Taking the cut takes it from the cut slot only.
         assert_eq!(
-            inv.take(PLAYER_MAIN, STONE, Some(shape), None, shape.cells()),
+            inv.take(
+                PLAYER_MAIN,
+                StackKey::of(STONE, Some(shape), None),
+                shape.cells()
+            ),
             shape.cells()
         );
         assert_eq!(
@@ -1284,7 +1262,7 @@ mod tests {
         );
 
         // And loose takes from loose, not from the cut.
-        assert_eq!(inv.take(PLAYER_MAIN, STONE, None, None, 50), 50);
+        assert_eq!(inv.take(PLAYER_MAIN, StackKey::loose(STONE), 50), 50);
         assert!(inv.views[0].slots[0].is_none());
         assert_eq!(
             inv.views[0].slots[1]
@@ -1296,7 +1274,10 @@ mod tests {
 
         // Asking for a cut nobody holds takes nothing rather than falling back.
         let other = Shape::new(0b11).expect("another cut");
-        assert_eq!(inv.take(PLAYER_MAIN, STONE, Some(other), None, 2), 0);
+        assert_eq!(
+            inv.take(PLAYER_MAIN, StackKey::of(STONE, Some(other), None), 2),
+            0
+        );
     }
 
     use super::*;
@@ -1351,6 +1332,18 @@ mod tests {
                 // has to refuse and everything around it has to survive.
                 2 => (2u16..6, 1u32..0x07ff_ffff, 1u32..8).prop_map(|(m, mask, count)| {
                     Shape::new(mask).and_then(|shape| Stack::shaped(MaterialId(m), shape, count))
+                }),
+                // **And cuts of several materials of those same ones**
+                // (Sub-Node Contract §9.1), whose lowest material and shape
+                // collide with the loose and shaped stacks above, and which
+                // move in whole items: a right click that halved one by
+                // units would leave a fraction of a stair.
+                2 => (prop::collection::vec(0u16..6, 27), 1u32..8).prop_map(|(ids, count)| {
+                    let mut cells = crate::block::EMPTY_CELLS;
+                    for (cell, id) in cells.iter_mut().zip(ids) {
+                        *cell = MaterialId(if id < 2 { 0 } else { id });
+                    }
+                    Stack::mixed(&cells, count)
                 }),
             ]
         }
@@ -1429,7 +1422,7 @@ mod tests {
                     );
                 }
                 for (material, units) in takes {
-                    let took = slots.take("player:main", MaterialId(material), None, None, units);
+                    let took = slots.take("player:main", StackKey::loose(MaterialId(material)), units);
                     expected -= u64::from(took);
                     prop_assert_eq!(
                         slots.total_units(),
@@ -1458,10 +1451,13 @@ mod tests {
                 for view in &slots.views {
                     for slot in view.slots.iter().flatten() {
                         prop_assert!(slot.units > 0, "a slot held a zero stack");
+                        // §9.1 rule 7: never a fraction of a mixture.
+                        prop_assert_eq!(slot.units % slot.grain(), 0, "a slot held part of an item");
                     }
                 }
                 if let Some(held) = &slots.grab.held {
                     prop_assert!(held.units > 0, "the cursor held a zero stack");
+                    prop_assert_eq!(held.units % held.grain(), 0, "the cursor held part of an item");
                 }
             }
         }
@@ -1635,7 +1631,7 @@ mod tests {
             main_fixed: false,
         };
         // Spanning two slots, first one emptied.
-        assert_eq!(inv.take("player:main", STONE, None, None, 7), 7);
+        assert_eq!(inv.take("player:main", StackKey::loose(STONE), 7), 7);
         assert!(
             at(&inv, "player:main", 0).is_none(),
             "an emptied slot must be None"
@@ -1647,11 +1643,14 @@ mod tests {
         assert_eq!(inv.total_units(), 11);
 
         // Asking for more than there is takes what there is and says so.
-        assert_eq!(inv.take("player:main", STONE, None, None, 99), 2);
-        assert_eq!(inv.take("player:main", STONE, None, None, 1), 0);
+        assert_eq!(inv.take("player:main", StackKey::loose(STONE), 99), 2);
+        assert_eq!(inv.take("player:main", StackKey::loose(STONE), 1), 0);
         // A material nobody has, and a view nobody has.
-        assert_eq!(inv.take("player:main", MaterialId(77), None, None, 5), 0);
-        assert_eq!(inv.take("nosuch:view", DIRT, None, None, 5), 0);
+        assert_eq!(
+            inv.take("player:main", StackKey::loose(MaterialId(77)), 5),
+            0
+        );
+        assert_eq!(inv.take("nosuch:view", StackKey::loose(DIRT), 5), 0);
         assert_eq!(inv.total_units(), 9, "only the dirt should be left");
     }
 
@@ -1917,7 +1916,7 @@ mod tests {
             name: "mymod:furnace".to_owned(),
             slots: vec![stack(STONE, 10), stack(STONE, 6)],
         };
-        assert_eq!(view.draw(Some(0), STONE, None, None, 4), 4);
+        assert_eq!(view.draw(Some(0), StackKey::loose(STONE), 4), 4);
         assert_eq!(view.slots[0].as_ref().expect("left").units, 6);
         assert_eq!(
             view.slots[1].as_ref().expect("untouched").units,
@@ -1926,9 +1925,13 @@ mod tests {
         );
 
         // Asking for more than the slot holds gets what there was, and says so.
-        assert_eq!(view.draw(Some(0), STONE, None, None, 99), 6);
+        assert_eq!(view.draw(Some(0), StackKey::loose(STONE), 99), 6);
         assert!(view.slots[0].is_none(), "an emptied slot is None");
-        assert_eq!(view.draw(None, DIRT, None, None, 1), 0, "no dirt to take");
+        assert_eq!(
+            view.draw(None, StackKey::loose(DIRT), 1),
+            0,
+            "no dirt to take"
+        );
     }
 
     #[test]
