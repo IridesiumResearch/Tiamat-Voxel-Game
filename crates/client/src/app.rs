@@ -55,6 +55,11 @@ const UNDERWATER_VISIBILITY: f32 = 16.0;
 /// than a hole in the picture.
 const PARTICLE_FLOOR: f32 = 0.12;
 
+/// How tall the engine's own rig stands, in cells: the collider every player
+/// has. What the local player's figure is lit over
+/// ([`crate::world::ChunkStore::light_on_body`]).
+const HUMANOID_HEIGHT: f32 = 5.4;
+
 /// The sub-node cell a world position is in.
 #[expect(
     clippy::disallowed_methods,
@@ -3117,6 +3122,12 @@ impl App {
                 anim: pose.anim,
                 phase: now.as_secs_f32() + (id % 977) as f32 * 0.037,
                 carrying: [entity.hands[0].is_some(), entity.hands[1].is_some()],
+                // Read by nothing here: a hand hangs off the pose. Set as
+                // `place_entities` sets it all the same, so the two figures
+                // are one figure.
+                light: self
+                    .store
+                    .light_on_body(feet, entity.collider.map_or(0.0, |size| size[1])),
             };
             props.extend(self.hand_props(&figure, &entity.hands));
         }
@@ -5502,6 +5513,8 @@ impl App {
                 self.hotbar.get(self.selected).cloned().flatten().is_some(),
                 self.offhand().is_some(),
             ],
+            // The engine's own rig, which was lit as flatly as any mob.
+            light: self.store.light_on_body(feet, HUMANOID_HEIGHT),
         };
         self.renderer.set_player(Some(figure));
         self.place_blobs();
@@ -6173,6 +6186,11 @@ impl App {
                 // What the entity stream says it is holding, so the arm is out
                 // for something that is actually drawn — see `place_props`.
                 carrying: [entity.hands[0].is_some(), entity.hands[1].is_some()],
+                // Life ask 19: lit by the light where it stands. A body with
+                // no collider is read at its feet.
+                light: self
+                    .store
+                    .light_on_body(feet, entity.collider.map_or(0.0, |size| size[1])),
             };
             if let Some(model) = mods.filter(|_| !own) {
                 by_model.entry(model.to_owned()).or_default().push(figure);

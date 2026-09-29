@@ -12,11 +12,12 @@
 // normal, four joint indices and four weights, and the vertex stage moves it by
 // the matrices its joints are holding this frame.
 //
-// The lighting is deliberately simpler than the world's. A voxel face knows
-// which way it points and what light was propagated to it; a figure has neither
-// — it moves through the world rather than being part of it — so it takes the
-// sun, the ambient and the fog, and nothing else. Matte white, which is what an
-// untextured `engine:humanoid` is.
+// The lighting is simpler than the world's and is lit by the same light. A
+// voxel face carries the light propagated to the block it looks into; a figure
+// moves through the world rather than being part of it, so its instance
+// carries the light of the blocks it is standing in (Life ask 19), and the
+// sun, the sky and a lamp reach it as far as they reach there. Matte white,
+// which is what an untextured `engine:humanoid` is.
 
 struct Globals {
     view_projection: mat4x4<f32>,
@@ -93,6 +94,9 @@ struct VertexIn {
     // Per-instance: heading in radians (x), where this figure's palette starts
     // (y, as a bit-cast u32). Two spare.
     @location(6) placement: vec4<f32>,
+    // Per-instance: the light where the figure stands. How much sky reaches
+    // it (x), then the block light on it (y, z, w), each 0..1.
+    @location(7) light: vec4<f32>,
 };
 
 struct VertexOut {
@@ -102,6 +106,8 @@ struct VertexOut {
     // The model's own UV, carried since Life ask 0 step 2. The attribute has
     // been uploaded since models landed and nothing read it.
     @location(2) uv: vec2<f32>,
+    // The instance's light, the same at every vertex of a figure.
+    @location(3) @interpolate(flat) light: vec4<f32>,
 };
 
 // The vertex, moved by its joints.
@@ -168,6 +174,7 @@ fn vertex_main(input: VertexIn) -> VertexOut {
     out.normal = normalize(vec3<f32>(n.x * c + n.z * s, n.y, -n.x * s + n.z * c));
     out.distance = length(world);
     out.uv = input.uv;
+    out.light = input.light;
     return out;
 }
 
@@ -180,27 +187,91 @@ fn vertex_shadow(input: VertexIn) -> @builtin(position) vec4<f32> {
     return cascade.view_projection * vec4<f32>(world, 1.0);
 }
 
-// The model's skin, lit by the sun and the ambient, then fogged. White where
-// no skin was pushed, which is what every figure was until Life ask 0.
+// The numbers below are `world.wgsl`'s, by the same names and for the reasons
+// given there. Copied rather than shared because a shader here is one file;
+// they are what makes a body beside a wall the colour of the wall.
+const FALLOFF: f32 = 1.35;
+const EMISSIVE_GAIN: f32 = 1.2;
+const EMISSIVE_SATURATION: f32 = 2.9;
+const SKY_TINT_SCALE: f32 = 1.732;
+const CLASSIC_AMBIENT: f32 = 1.0 / 3.0;
+const SIMPLE_FLOOR: f32 = 1.0 / 12.0;
+
+fn luma(colour: vec3<f32>) -> f32 {
+    return dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// The block light on a figure, shaped as the world shapes it on a face: a
+// falloff steeper than the stored one, the hue let go as the level falls, and
+// in mode 3 the gain and the colour a lamp has there. A body by a lamp is the
+// colour of the floor it stands on.
+fn lamp_light(stored: vec3<f32>) -> vec3<f32> {
+    var block = clamp(stored, vec3<f32>(0.0), vec3<f32>(1.0));
+    let peak = max(block.r, max(block.g, block.b));
+    let steep = peak * peak * FALLOFF;
+    block = block * select(0.0, steep / peak, peak > 0.0);
+    block = mix(vec3<f32>(steep), block, sqrt(peak));
+    if (globals.lighting_mode == 2u) {
+        block = block * EMISSIVE_GAIN;
+        let grey = vec3<f32>(luma(block));
+        block = max(mix(grey, block, EMISSIVE_SATURATION), vec3<f32>(0.0));
+    }
+    return block;
+}
+
+// What a figure where no sky reaches and no lamp shines is lit by: the floor
+// the rock round it has, so it is dark as the cave is dark and no darker. The
+// sky's hue at a brightness nothing outside can move; one grey in mode 1.
+fn cave_floor() -> vec3<f32> {
+    if (globals.lighting_mode == 0u) {
+        return vec3<f32>(SIMPLE_FLOOR);
+    }
+    let sky_hue = normalize(globals.sky_colour.rgb + vec3<f32>(0.0001)) * SKY_TINT_SCALE;
+    var level = globals.ambient;
+    if (globals.lighting_mode == 1u) {
+        level = level * CLASSIC_AMBIENT;
+    }
+    return sky_hue * level;
+}
+
+// The model's skin, lit by the light where the figure stands, then fogged.
+// White where no skin was pushed, which is what every figure was until Life
+// ask 0.
 //
 // The half-lambert wrap is not stylistic: a body lit by a straight dot product
 // goes flat black on the shaded side, and a figure with a black half reads as a
 // hole rather than as a person. Wrapping keeps the far side dim and legible,
 // which is what every character shader in every voxel game does.
+//
+// # The light where it stands (Life ask 19)
+//
+// The sun and the sky reach a figure as far as the sky reaches the block it is
+// in, which the server worked out and which is nothing at the bottom of a
+// cave. Block light is taken with `max`, as the world takes it and for its
+// reason: adding a lamp to daylight washes out everything standing near one.
+//
+// **Under the open sky with no lamp, this is the arithmetic it always was.**
+// The reach is one, the lamp is nothing, and the floor is scaled by how much
+// of the sky does NOT reach, so it is nothing too: `albedo * (sun + sky)`, to
+// the bit. A figure in a field at midnight is as dark as it was, and only a
+// figure the sky cannot see is lifted to the cave's floor.
 @fragment
 fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     let normal = normalize(input.normal);
     let facing = dot(normal, -globals.sun_direction.xyz);
     let wrapped = clamp(facing * 0.5 + 0.5, 0.0, 1.0);
 
-    let sun = globals.sun_colour.rgb * globals.sun_intensity * wrapped;
-    let sky = globals.sky_colour.rgb * globals.ambient;
+    let reach = clamp(input.light.x, 0.0, 1.0);
+    let sun = globals.sun_colour.rgb * globals.sun_intensity * wrapped * reach;
+    let sky = globals.sky_colour.rgb * globals.ambient * reach;
+    let lamp = lamp_light(input.light.yzw);
+    let floor = cave_floor() * (1.0 - reach);
     // The model's own skin, times the matte white the rig was drawn in
     // before it had one — a model with no texture is bound to a white pixel,
     // so this is bit-for-bit the old colour for every figure that has none.
     let skin = textureSample(skin_texture, skin_sampler, input.uv).rgb;
     let albedo = skin * vec3<f32>(0.92, 0.92, 0.94);
-    let lit = albedo * (sun + sky);
+    let lit = albedo * max(max(sun + sky, lamp), floor);
 
     let far = globals.sky_colour.w;
     let haze = clamp(

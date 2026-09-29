@@ -3166,6 +3166,7 @@ fn a_figure_on_screen_does_not_take_the_terrains_shadows_with_it() {
         anim: 0,
         phase: 0.0,
         carrying: [false; 2],
+        light: client::render::skinned::OPEN_SKY,
     }]);
     let peopled = ratio(&mut renderer);
     renderer.set_entities(Vec::new());
@@ -3658,6 +3659,7 @@ fn player_at(offset: [f32; 3]) -> client::render::skinned::Figure {
         anim: 0,
         phase: 0.0,
         carrying: [false; 2],
+        light: client::render::skinned::OPEN_SKY,
     }
 }
 
@@ -4937,6 +4939,7 @@ fn an_entity_is_drawn_where_the_server_put_it() {
         anim: 0,
         phase: 0.0,
         carrying: [false; 2],
+        light: client::render::skinned::OPEN_SKY,
     }]);
     let peopled = target.capture(&mut renderer, &camera).expect("capture");
     let after = average(
@@ -5011,6 +5014,7 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: client::render::skinned::OPEN_SKY,
         }],
     );
     renderer.set_model_figures(posed);
@@ -5109,6 +5113,7 @@ fn a_mods_model_casts_a_shadow_like_the_engines_own_rig() {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: client::render::skinned::OPEN_SKY,
         }],
     );
     renderer.set_model_figures(posed);
@@ -5167,6 +5172,7 @@ fn a_hundred_entities_all_reach_the_instance_buffer() {
                 anim: (index % 6) as u8,
                 phase: index as f32 * 0.05,
                 carrying: [false; 2],
+                light: client::render::skinned::OPEN_SKY,
             }
         })
         .collect();
@@ -5213,6 +5219,7 @@ fn a_figure_is_posed_by_its_clip_rather_than_drawn_at_rest() {
             anim,
             phase,
             carrying: [false; 2],
+            light: client::render::skinned::OPEN_SKY,
         }]);
         target.capture(&mut renderer, &camera).expect("capture")
     };
@@ -5234,6 +5241,117 @@ fn a_figure_is_posed_by_its_clip_rather_than_drawn_at_rest() {
         "only {differing} bytes differ between a figure standing and the same \
          figure mid-stride, so the joint palette is not reaching the shader"
     );
+}
+
+#[test]
+fn a_figure_is_lit_by_the_light_where_it_stands() {
+    // **Life ask 19.** Every figure took the sun and the sky from the frame
+    // and nothing from the place, so a bat in a pitch-dark cave was as bright
+    // as a cow at noon and seemed to glow against the rock round it. The light
+    // the world propagated to the block a figure stands in, which every face
+    // beside it is lit by, never reached the figure.
+    //
+    // One figure in one place under one sky, and only the light its instance
+    // carries changes. Read off the pixels the figure covers: the ones that
+    // differ from the same frame with nobody in it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+
+    for mode in [
+        client::config::LightingMode::Simple,
+        client::config::LightingMode::Classic,
+        client::config::LightingMode::Beautiful,
+    ] {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let camera = viewpoint();
+        let ahead = camera.forward();
+        let offset = [ahead.x * 2.5, ahead.y * 2.5 - 1.0, ahead.z * 2.5];
+
+        let empty = target.capture(&mut renderer, &camera).expect("capture");
+        let mut lit_by = |light: [f32; 4]| {
+            renderer.set_entities(vec![client::render::skinned::Figure {
+                offset,
+                yaw: 0.0,
+                anim: 0,
+                phase: 0.0,
+                carrying: [false; 2],
+                light,
+            }]);
+            target.capture(&mut renderer, &camera).expect("capture")
+        };
+        let open = lit_by(client::render::skinned::OPEN_SKY);
+        // No sky and no lamp: the bottom of a cave.
+        let cave = lit_by([0.0; 4]);
+        // No sky, and a warm lamp close by.
+        let lamp = lit_by([0.0, 1.0, 0.6, 0.2]);
+        // Half the sky, as under a canopy or a little way into a tunnel.
+        let shade = lit_by([0.5, 0.0, 0.0, 0.0]);
+
+        // The figure's own pixels, which are the same ones in every capture:
+        // it has not moved.
+        let body: Vec<usize> = open
+            .rgba
+            .chunks_exact(4)
+            .zip(empty.rgba.chunks_exact(4))
+            .enumerate()
+            .filter(|(_, (with, without))| with != without)
+            .map(|(pixel, _)| pixel)
+            .collect();
+        assert!(
+            body.len() > 200,
+            "in {mode:?} the figure covers {} pixels, too few to read",
+            body.len()
+        );
+        let mean = |image: &Image| -> [f32; 3] {
+            let mut total = [0.0f32; 3];
+            for pixel in &body {
+                for (channel, sum) in total.iter_mut().enumerate() {
+                    *sum += f32::from(image.rgba[pixel * 4 + channel]) / 255.0;
+                }
+            }
+            #[expect(clippy::cast_precision_loss, reason = "a pixel count, as a float")]
+            let count = body.len() as f32;
+            total.map(|sum| sum / count)
+        };
+        let brightness = |colour: [f32; 3]| (colour[0] + colour[1] + colour[2]) / 3.0;
+        let (open, cave, lamp, shade) = (mean(&open), mean(&cave), mean(&lamp), mean(&shade));
+
+        // Dark where no light reaches, which is the ask.
+        assert!(
+            brightness(cave) < brightness(open) * 0.5,
+            "in {mode:?} a figure where no sky reaches is {cave:?} against \
+             {open:?} in the open: it is still lit as if it stood in a field"
+        );
+        // And not a hole: the floor the rock round it has.
+        assert!(
+            brightness(cave) > 0.01,
+            "in {mode:?} a figure in the dark is {cave:?}, which is black: a \
+             cave's floor keeps the rock legible and must keep a body so"
+        );
+        // Between the two where some of the sky reaches.
+        assert!(
+            brightness(shade) > brightness(cave) && brightness(shade) < brightness(open),
+            "in {mode:?} a figure half the sky reaches is {shade:?}, which is \
+             not between the cave's {cave:?} and the field's {open:?}"
+        );
+        // A lamp lights it, where nothing else does.
+        assert!(
+            brightness(lamp) > brightness(cave) * 1.5,
+            "in {mode:?} a figure beside a lamp is {lamp:?} against {cave:?} \
+             with none: the block light on it is not reaching it"
+        );
+        // And in the lamp's colour, in the modes that have colour. Mode 1
+        // spends light on one number, for a face and so for a body.
+        if mode != client::config::LightingMode::Simple {
+            assert!(
+                lamp[0] > lamp[2] * 1.2,
+                "in {mode:?} a figure beside a warm lamp is {lamp:?}: no warmer \
+                 than it is blue"
+            );
+        }
+    }
 }
 
 #[test]
@@ -5308,6 +5426,7 @@ fn a_figure_in_the_frame_does_not_move_the_milk() {
         anim: 1,
         phase: 0.25,
         carrying: [false; 2],
+        light: client::render::skinned::OPEN_SKY,
     }]);
     let peopled = target.capture(&mut renderer, &camera).expect("capture");
 

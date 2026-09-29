@@ -5416,6 +5416,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false, None);
         assert_eq!(boxes.len(), 1, "a whole block is one box");
@@ -5444,6 +5445,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false, None);
         let at = placement(&boxes[0]);
@@ -5473,6 +5475,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let block = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None);
         let item = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], true, None);
@@ -5510,6 +5513,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let mask = 0b111 << 12;
         let cut = held_boxes(&figure, &joint([0.0; 3]), mask, [0.0; 4], false, None);
@@ -5573,6 +5577,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let uv = [0.2, 0.2, 0.6, 0.6];
         let held = held_boxes(&figure, &joint([0.0; 3]), 0, uv, true, Some(mask));
@@ -5643,6 +5648,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let boxes = held_boxes(
             &figure,

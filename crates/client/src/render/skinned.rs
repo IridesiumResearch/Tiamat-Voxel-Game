@@ -26,10 +26,10 @@
 //! # What is deliberately not here
 //!
 //! Figures do not sample the shadow map. They cast into it — a mob with no
-//! shadow floats — but they are lit by the sun, the ambient and the fog and
-//! nothing else. Reading cascades on a moving body is a self-shadowing problem
-//! (an arm across a chest, at a bias tuned for terrain) that belongs after
-//! somebody has looked at one.
+//! shadow floats — but what darkens one is the light where it stands
+//! ([`Figure::light`]) and never a cascade. Reading cascades on a moving body
+//! is a self-shadowing problem (an arm across a chest, at a bias tuned for
+//! terrain) that belongs after somebody has looked at one.
 
 use tiamat_core::model::{self, Model};
 use wgpu::util::DeviceExt as _;
@@ -61,7 +61,24 @@ pub struct Figure {
     /// so it is a pose applied over the clip rather than four more clips. See
     /// [`Skinned::carry_pose`].
     pub carrying: [bool; 2],
+    /// The light where it stands: how much sky reaches it, then the block
+    /// light on it as red, green and blue, each `0.0..=1.0` — Life ask 19.
+    ///
+    /// **What the world worked out, and a figure never read.** Every voxel
+    /// face is lit by the light propagated to the block it looks into: the sky
+    /// light that is nothing at the bottom of a cave, the block light a lamp
+    /// gives. A figure took the sun and the sky from the frame and nothing
+    /// from the place, so a bat in a pitch-dark cave was as bright as a cow at
+    /// noon and seemed to glow against the rock round it.
+    ///
+    /// The caller's to sample, because the caller has the world.
+    /// [`OPEN_SKY`] draws a figure exactly as every figure was drawn before.
+    pub light: [f32; 4],
 }
+
+/// [`Figure::light`] under the open sky with no lamp near: all of the sky and
+/// no block light, which is what every figure was lit as before Life ask 19.
+pub const OPEN_SKY: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
 /// One instance, as the shader reads it.
 #[repr(C)]
@@ -71,6 +88,8 @@ struct Instance {
     /// Heading in x, the palette's first matrix in y (bit-cast from `u32`).
     /// Two spare, because a vertex attribute is a `vec4` either way.
     placement: [f32; 4],
+    /// [`Figure::light`], as it is.
+    light: [f32; 4],
 }
 
 /// Everything needed to draw skinned figures.
@@ -325,6 +344,7 @@ impl Skinned {
                 // rounding, and a palette index that rounds draws somebody
                 // else's arm.
                 placement: [figure.yaw, f32::from_bits(base), 0.0, 0.0],
+                light: figure.light,
             });
         }
 
@@ -433,9 +453,10 @@ fn vertex_layout() -> [wgpu::VertexBufferLayout<'static>; 2] {
         3 => Uint32x4,
         4 => Float32x4,
     ];
-    const INSTANCE: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+    const INSTANCE: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
         5 => Float32x4,
         6 => Float32x4,
+        7 => Float32x4,
     ];
     [
         wgpu::VertexBufferLayout {

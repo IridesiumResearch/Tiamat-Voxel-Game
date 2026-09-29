@@ -484,6 +484,72 @@ impl ChunkStore {
         })
     }
 
+    /// The light a body stands in: how much sky reaches it, then the block
+    /// light on it as red, green and blue, each `0.0..=1.0` — Life ask 19, and
+    /// what [`crate::render::skinned::Figure::light`] carries.
+    ///
+    /// `feet` is where it stands, in blocks, and `height` how tall it is, in
+    /// cells.
+    ///
+    /// **The brightest of the blocks its body is in, a channel**, read at its
+    /// feet, its middle and its head. Light is stored a block (Sub-Node
+    /// Contract §3), and a body is rarely in one: a cow's feet are in the
+    /// grass and its back is in the block above, and feet in a block that is
+    /// sealed on the side the light comes from read as dark in full sun. Some
+    /// part of a body that can be seen is in a block the light reaches.
+    ///
+    /// Never above its head: a mouse in a crawlspace is not lit by the sky
+    /// over the floor above it.
+    ///
+    /// The stored levels as they are. What the clock makes of the sky's, and
+    /// how a lamp falls off, are the shader's, as they are for a voxel face.
+    /// Where no light has arrived the world reads as dark and so does this,
+    /// for [`Self::light_at`]'s reason: a bat must not flash white in a cave
+    /// that is still streaming in.
+    #[must_use]
+    pub fn light_on_body(&self, feet: [f64; 3], height: f32) -> [f32; 4] {
+        /// Clear of the floor and of the ceiling, in blocks, so a body that
+        /// exactly fills a gap reads the gap and not the rock either side.
+        const INSET: f64 = 0.05;
+        #[expect(clippy::cast_precision_loss, reason = "three, as a float")]
+        let cells = tiamat_core::SUBNODES_PER_AXIS as f32;
+        let tall = f64::from(height.max(0.0) / cells);
+        let top = (tall - INSET).max(INSET);
+        let level = |value: u8| f32::from(value) / f32::from(tiamat_core::light::MAX_LEVEL);
+        // The block a coordinate is in. Off the end of the world is the
+        // last block of it, where no light is held and the answer is dark.
+        let block = |value: f64| {
+            i32::try_from(tiamat_core::detgen::floor_to_i64(value)).unwrap_or(if value < 0.0 {
+                i32::MIN
+            } else {
+                i32::MAX
+            })
+        };
+        [INSET, tall / 2.0, top]
+            .into_iter()
+            .map(|up| {
+                let light = self.light_at(BlockPos::new(
+                    block(feet[0]),
+                    block(feet[1] + up),
+                    block(feet[2]),
+                ));
+                [
+                    level(light.sun()),
+                    level(light.red()),
+                    level(light.green()),
+                    level(light.blue()),
+                ]
+            })
+            .fold([0.0; 4], |most, here| {
+                [
+                    most[0].max(here[0]),
+                    most[1].max(here[1]),
+                    most[2].max(here[2]),
+                    most[3].max(here[3]),
+                ]
+            })
+    }
+
     /// Whether any light has arrived for a chunk.
     #[must_use]
     pub fn has_light(&self, pos: ChunkPos) -> bool {
@@ -1540,6 +1606,65 @@ mod tests {
         assert_eq!(store.open_sky(pos), OpenSky::NONE);
         store.set_summary(south, summary(tiamat_core::lod::FINEST, 1));
         assert_eq!(store.open_sky(pos), OpenSky::side(2, false));
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "a stored level over fifteen, which is the same division on both sides"
+    )]
+    fn a_body_is_lit_by_the_brightest_of_the_blocks_it_stands_in() {
+        // Life ask 19. A figure two blocks tall, its feet at y = 4: it is in
+        // the blocks at y = 4 and y = 5, and in no other.
+        let mut store = ChunkStore::new();
+        let mut layer = LightLayer::dark();
+        let at = |y: u32| tiamat_core::coords::LocalBlock::new(3, y, 3);
+        // Feet in a block only a lamp reaches, head in one only the sky does.
+        layer.set(at(4), Light::new(0, 15, 9, 3));
+        layer.set(at(5), Light::new(12, 0, 0, 0));
+        // Over its head, and under its feet: brighter than either, and not
+        // its to take.
+        layer.set(at(6), Light::new(15, 15, 15, 15));
+        layer.set(at(3), Light::new(15, 15, 15, 15));
+        store.set_light(ChunkPos::new(0, 0, 0), layer);
+
+        let light = store.light_on_body([3.5, 4.0, 3.5], 6.0);
+        assert_eq!(
+            light,
+            [12.0 / 15.0, 1.0, 9.0 / 15.0, 3.0 / 15.0],
+            "each channel is the most any block of the body holds"
+        );
+
+        // A body half a block tall is in the one block, whatever is over it.
+        assert_eq!(
+            store.light_on_body([3.5, 4.0, 3.5], 1.5),
+            [0.0, 1.0, 9.0 / 15.0, 3.0 / 15.0]
+        );
+        // One that exactly fills a gap a block high reads the gap: its head
+        // is under the ceiling, not in it.
+        assert_eq!(
+            store.light_on_body([3.5, 5.0, 3.5], 3.0),
+            [12.0 / 15.0, 0.0, 0.0, 0.0]
+        );
+        // A body with no height is read at its feet.
+        assert_eq!(
+            store.light_on_body([3.5, 5.0, 3.5], 0.0),
+            [12.0 / 15.0, 0.0, 0.0, 0.0]
+        );
+        // West of the origin and below it the block is the one the body is
+        // in, not the one nearer zero.
+        let mut west = LightLayer::dark();
+        west.set(
+            tiamat_core::coords::LocalBlock::new(15, 15, 15),
+            Light::new(7, 0, 0, 0),
+        );
+        store.set_light(ChunkPos::new(-1, -1, -1), west);
+        assert_eq!(
+            store.light_on_body([-0.5, -0.9, -0.5], 1.0),
+            [7.0 / 15.0, 0.0, 0.0, 0.0]
+        );
+        // And dark where no light has arrived, as the world round it is.
+        assert_eq!(store.light_on_body([100.5, 4.0, 3.5], 6.0), [0.0; 4]);
     }
 
     #[test]
