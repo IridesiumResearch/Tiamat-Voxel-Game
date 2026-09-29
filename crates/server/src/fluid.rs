@@ -71,9 +71,9 @@ pub const VISITS_PER_TICK: usize = 512;
 
 /// Builds an absorbency table from what the mods registered.
 ///
-/// Keyed by WORLD material id, like emissions and hardness: a world that has
-/// seen a different mod set numbers its materials differently, and a table of
-/// this session's runtime ids would name every block one number out (charter
+/// Keyed by RUNTIME material id, like emissions and hardness: it is compared
+/// against what a chunk in memory holds, and a table in world ids would name
+/// every block one number out on a world whose mod set has changed (charter
 /// rule 8). The successor goes through the same lookup, so a saturation chain
 /// survives a world being opened by a client with other mods installed.
 ///
@@ -503,9 +503,9 @@ impl Fluidics {
     /// plant, which is also what a body swimming through it feels: `submersion`
     /// reads the same layer.
     ///
-    /// **Runtime ids, not world ids**, unlike the absorbency table beside it:
-    /// this is compared against what a chunk IN MEMORY holds, which is the
-    /// runtime space (`lease.rs` says the same thing about `surface_at`).
+    /// **Runtime ids**, like the absorbency table beside it: this is compared
+    /// against what a chunk IN MEMORY holds, which is the runtime space
+    /// (`lease.rs` says the same thing about `surface_at`).
     /// Sorted, and read by linear scan — it holds a handful of ids and beating
     /// a hash for that many is not close.
     pub fn set_passable(&mut self, passable: std::sync::Arc<Vec<u16>>) {
@@ -998,11 +998,11 @@ impl crate::light::Glowing for Fluidics {
 
 /// Builds the fluid registry from what the mods registered.
 ///
-/// `id_of` maps a block id to its **world** material id, exactly as light's
-/// equivalent does and for the same reason: a world that has seen a different
-/// mod set numbers its materials differently, and a table of this session's
-/// runtime ids would name every fluid's material one number out (charter rule
-/// 8).
+/// `id_of` maps a block id to its **runtime** material id, exactly as light's
+/// equivalent does and for the same reason: the fluid's material is looked up
+/// in the emission table and in summaries, both of which read what a chunk in
+/// memory holds. A client is told it in world ids where the fluid table is
+/// built for the wire (charter rule 8).
 ///
 /// A fluid naming a block nothing registered is dropped with a warning rather
 /// than refused. The alternative is a server that will not start because one

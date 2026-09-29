@@ -2153,43 +2153,50 @@ impl ServerHandle {
             .map(|(runtime, name)| (name.to_owned(), runtime.get()))
             .collect();
 
-        // Breaking rules, keyed by WORLD id because that is what a chunk holds.
-        // Built here, after the world's id map exists, for the same reason the
-        // material table is: a table of this session's runtime ids would name
-        // every material one number out on any world that has seen a different
-        // mod set (charter rule 8).
+        // **Every table below is keyed in RUNTIME ids, and that is the one
+        // rule.** The tick consults them with a material read from a chunk in
+        // memory, and a chunk in memory holds runtime ids: `persist::codec`
+        // translates to the world's own numbers on save and back on load, and
+        // `World::apply` writes runtime ids (see `block_names` above). World ids
+        // exist at exactly two places, the persistence boundary and the wire —
+        // the material table sent to a client, `Shared::wire_material` and the
+        // summary encoder — and nothing that is consulted inside the tick is
+        // one of them.
+        //
+        // These were keyed by world id, on the belief that a chunk held that,
+        // and the two spaces coincide on a world opened by the mod set that
+        // made it. On a world reopened under a changed mod set a lamp did not
+        // glow, some unrelated block was walk-through, and a block's hardness,
+        // drops and tool speeds belonged to another material (charter rule 8).
+        // `divergent_ids.rs` in the bot tests reopens a world that way.
+        //
+        // One lookup, so a `to_world` cannot creep back into one table and not
+        // the next.
+        let runtime_of =
+            |name: &str| tiamat_core::material::MaterialRegistry::id_of(&registry, name);
+
+        // Breaking rules, from the same block rules the material table reads.
         let hardness = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_block_rules())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|rules| {
-                // `Registry` has no name lookup — it is an ordered list, and
-                // adding an index for one caller at startup would be a data
-                // structure for a hot path that does not exist.
-                let runtime = registry
-                    .iter()
-                    .find(|(_, name)| *name == rules.block)
-                    .map(|(id, _)| id)?;
-                let world_id = world.materials().to_world(runtime).ok()?;
-                Some((tiamat_core::MaterialId(world_id), rules.resistance()))
-            })
+            .filter_map(|rules| Some((runtime_of(&rules.block)?, rules.resistance())))
             .collect::<std::collections::BTreeMap<_, _>>();
-        // Every material by the id this world uses: for the tables below, and
-        // for resolving a dig hook's `drops` answer while the dig runs.
+        // Every material by name, in the ids the chunks in memory hold: for the
+        // tables below, and for resolving a dig hook's `drops` answer while the
+        // dig runs — whose stacks are credited to an inventory, which also
+        // holds runtime ids.
         let material_ids: std::collections::BTreeMap<String, tiamat_core::MaterialId> = registry
             .iter()
-            .filter_map(|(runtime, name)| {
-                let world_id = world.materials().to_world(runtime).ok()?;
-                Some((name.to_owned(), tiamat_core::MaterialId(world_id)))
-            })
+            .map(|(runtime, name)| (name.to_owned(), runtime))
             .collect();
         // What a full block of each material yields where its mod said
-        // (`register_block{ drops = ... }`), keyed by world id like the
-        // hardness. A drop naming a material nobody registered is logged and
-        // left out: it may be any mod's block (Craft ask 7), so the name may
-        // be a typo or a mod that is not loaded, and neither should cost the
-        // block its other drops.
+        // (`register_block{ drops = ... }`), keyed like the hardness. A drop
+        // naming a material nobody registered is logged and left out: it may
+        // be any mod's block (Craft ask 7), so the name may be a typo or a mod
+        // that is not loaded, and neither should cost the block its other
+        // drops.
         let drop_rules = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_block_rules())
@@ -2215,26 +2222,16 @@ impl ServerHandle {
                 Some((id, resolved))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        // Emissive blocks, keyed by world id for the same reason hardness is.
-        // A world that has seen a different mod set numbers its materials
-        // differently, and a table of this session's runtime ids would name
-        // every lamp one number out (charter rule 8).
+        // Emissive blocks, keyed like the hardness: the light pass reads the
+        // material of a chunk in memory, so a table in world ids would name
+        // every lamp one number out on a world whose mod set has changed
+        // (charter rule 8).
         let emissions = crate::light::emissions_from_rules(
             &host
                 .as_ref()
                 .map(|loaded| loaded.vm().registered_block_rules())
                 .unwrap_or_default(),
-            |block| {
-                let runtime = registry
-                    .iter()
-                    .find(|(_, name)| *name == block)
-                    .map(|(id, _)| id)?;
-                world
-                    .materials()
-                    .to_world(runtime)
-                    .ok()
-                    .map(tiamat_core::MaterialId)
-            },
+            runtime_of,
         );
 
         // The same table for glass, built from the same rules and keyed the
@@ -2245,17 +2242,7 @@ impl ServerHandle {
                 .as_ref()
                 .map(|loaded| loaded.vm().registered_block_rules())
                 .unwrap_or_default(),
-            |block| {
-                let runtime = registry
-                    .iter()
-                    .find(|(_, name)| *name == block)
-                    .map(|(id, _)| id)?;
-                world
-                    .materials()
-                    .to_world(runtime)
-                    .ok()
-                    .map(tiamat_core::MaterialId)
-            },
+            runtime_of,
         );
 
         // And how much each material dims what passes through it, from the
@@ -2266,17 +2253,7 @@ impl ServerHandle {
                 .as_ref()
                 .map(|loaded| loaded.vm().registered_block_rules())
                 .unwrap_or_default(),
-            |block| {
-                let runtime = registry
-                    .iter()
-                    .find(|(_, name)| *name == block)
-                    .map(|(id, _)| id)?;
-                world
-                    .materials()
-                    .to_world(runtime)
-                    .ok()
-                    .map(tiamat_core::MaterialId)
-            },
+            runtime_of,
         );
 
         // And the materials a body walks through, from the same rules and keyed
@@ -2287,27 +2264,13 @@ impl ServerHandle {
         // body's sweep, it holds a handful of ids, and a linear scan of four
         // `u16`s beats hashing one.
         let passable: Vec<u16> = {
-            let rules = host
+            let mut ids: Vec<u16> = host
                 .as_ref()
                 .map(|loaded| loaded.vm().registered_block_rules())
-                .unwrap_or_default();
-            let mut ids: Vec<u16> = rules
+                .unwrap_or_default()
                 .iter()
                 .filter(|rule| rule.passable)
-                .filter_map(|rule| {
-                    // **World ids, not this session's runtime ones**, for the
-                    // reason `see_through` says: a chunk holds world ids, and a
-                    // table of runtime ids would name a different material in
-                    // any world that has seen a different mod set (charter rule
-                    // 8). Getting this wrong makes some unrelated block
-                    // walk-through-able, which is a bug nobody would look for
-                    // here.
-                    let runtime = registry
-                        .iter()
-                        .find(|(_, name)| *name == rule.block)
-                        .map(|(id, _)| id)?;
-                    world.materials().to_world(runtime).ok()
-                })
+                .filter_map(|rule| runtime_of(&rule.block).map(|id| id.0))
                 .collect();
             ids.sort_unstable();
             ids
@@ -2329,50 +2292,21 @@ impl ServerHandle {
             let mut ids: Vec<(u16, f32)> = rules
                 .iter()
                 .filter(|rule| rule.friction != 1.0)
-                .filter_map(|rule| {
-                    let runtime = registry
-                        .iter()
-                        .find(|(_, name)| *name == rule.block)
-                        .map(|(id, _)| id)?;
-                    Some((world.materials().to_world(runtime).ok()?, rule.friction))
-                })
+                .filter_map(|rule| Some((runtime_of(&rule.block)?.0, rule.friction)))
                 .collect();
             ids.sort_unstable_by_key(|(id, _)| *id);
             ids
         };
 
-        // The same materials in the id space the chunks in memory hold, for
-        // `game.surface_at` to look through a tuft: `lease.rs` reads chunks
-        // without translation and says why.
-        let passable_runtime: Vec<u16> = host
-            .as_ref()
-            .map(|loaded| loaded.vm().registered_block_rules())
-            .unwrap_or_default()
-            .iter()
-            .filter(|rule| rule.passable)
-            .filter_map(|rule| {
-                registry
-                    .iter()
-                    .find(|(_, name)| *name == rule.block)
-                    .map(|(id, _)| id.0)
-            })
-            .collect();
-
-        // And the materials a flow sweeps away, in the same id space as
-        // `passable_runtime` above and for the same reason: it is compared
-        // against what a chunk in memory holds (World ask 37).
-        let washes_away_runtime: Vec<u16> = host
+        // And the materials a flow sweeps away, sorted like `passable` and for
+        // the same reason (World ask 37).
+        let washes_away: Vec<u16> = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_block_rules())
             .unwrap_or_default()
             .iter()
             .filter(|rule| rule.washes_away)
-            .filter_map(|rule| {
-                registry
-                    .iter()
-                    .find(|(_, name)| *name == rule.block)
-                    .map(|(id, _)| id.0)
-            })
+            .filter_map(|rule| runtime_of(&rule.block).map(|id| id.0))
             .collect();
 
         // The domains the mods registered. Read here, with everything else the
@@ -2383,24 +2317,16 @@ impl ServerHandle {
             .map(|loaded| loaded.vm().registered_domains())
             .unwrap_or_default();
 
-        // The fluids the mods registered, keyed by world material id for the
-        // same reason emissions are.
+        // The fluids the mods registered, each with the material it is drawn
+        // as in the ids chunks in memory hold, like emissions: that material is
+        // what the light pass and a summary look up. The wire gets it in world
+        // ids, where `fluid_table` is built.
         let mut fluids = crate::fluid::fluids_from_rules(
             &host
                 .as_ref()
                 .map(|loaded| loaded.vm().registered_fluids())
                 .unwrap_or_default(),
-            |block| {
-                let runtime = registry
-                    .iter()
-                    .find(|(_, name)| *name == block)
-                    .map(|(id, _)| id)?;
-                world
-                    .materials()
-                    .to_world(runtime)
-                    .ok()
-                    .map(tiamat_core::MaterialId)
-            },
+            runtime_of,
         );
 
         // **And the VM is told what the numbers came out as.** A mod names a
@@ -2489,6 +2415,7 @@ impl ServerHandle {
                     // World ask 28: a worker encodes the summaries for the
                     // chunk it generated, and a summary carries the sea.
                     fluids: fluids.clone(),
+                    materials: world.materials().clone(),
                     maps: world.all_maps().unwrap_or_else(|err| {
                         error!("could not read this world's maps for the workers: {err}");
                         Vec::new()
@@ -2505,25 +2432,12 @@ impl ServerHandle {
             }
             _ => None,
         };
-        // Which materials drink, keyed by world id for the same reason
-        // emissions are — and with the SUCCESSOR resolved through the same
-        // table, so `becomes = "damp_dirt"` names the same block on a world
-        // that has seen a different mod set.
-        let absorbency = crate::fluid::absorbency_from_rules(
-            &block_rules,
-            |block| {
-                let runtime = registry
-                    .iter()
-                    .find(|(_, name)| *name == block)
-                    .map(|(id, _)| id)?;
-                world
-                    .materials()
-                    .to_world(runtime)
-                    .ok()
-                    .map(tiamat_core::MaterialId)
-            },
-            |fluid| fluids.id_of(fluid),
-        );
+        // Which materials drink, keyed like emissions — and with the SUCCESSOR
+        // resolved through the same table, so `becomes = "damp_dirt"` names the
+        // same block on a world that has seen a different mod set.
+        let absorbency = crate::fluid::absorbency_from_rules(&block_rules, runtime_of, |fluid| {
+            fluids.id_of(fluid)
+        });
 
         // **Stable ids for the fluids, and adoption of any the world already
         // knew.** Charter rule 8: a fluid byte on disk carries a number, and
@@ -2563,7 +2477,13 @@ impl ServerHandle {
                     color: registered.color,
                     id: id.0,
                     name: registered.name.clone(),
-                    material: registered.material.get(),
+                    // **A client's atlas is keyed by world ids**, and the
+                    // registry holds this session's, like every table the
+                    // tick reads: translated here, at the wire.
+                    material: world
+                        .materials()
+                        .to_world(registered.material)
+                        .unwrap_or(tiamat_core::MaterialId::UNKNOWN.get()),
                     opacity: registered.opacity,
                 }
             })
@@ -3043,8 +2963,8 @@ impl ServerHandle {
                         let mut ponds = crate::fluid::Ponds::new(fluids, absorbency);
                         // World ask 29: a plant does not displace the water
                         // round it, so a tuft is not a bubble of air in a pond.
-                        ponds.set_passable(passable_runtime.clone());
-                        ponds.set_washes_away(washes_away_runtime.clone());
+                        ponds.set_passable(passable.clone());
+                        ponds.set_washes_away(washes_away.clone());
                         ponds
                     }));
                     // And the entities, behind the same kind of lock for the
@@ -3078,7 +2998,7 @@ impl ServerHandle {
                     // so the only safe handle is one that is empty except while
                     // it is deliberately lent.
                     let sight = crate::lease::Lease::new()
-                        .with_terrain(passable_runtime, std::sync::Arc::clone(&fluidics))
+                        .with_terrain(passable.clone(), std::sync::Arc::clone(&fluidics))
                         .with_players(std::sync::Arc::clone(&shared.bodies))
                         .with_entities(std::sync::Arc::clone(&population));
 

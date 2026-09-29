@@ -2574,7 +2574,8 @@ pub struct FluidDef {
     /// diagnostic anybody writes about fluid will want the name rather than the
     /// number.
     pub name: String,
-    /// The world material id a full block of it is drawn as.
+    /// The world material id a full block of it is drawn as: the id in chunk
+    /// blobs and the material table, not the server's session number.
     pub material: u16,
     /// What being inside it looks like, as sRGB `0..=255`.
     ///

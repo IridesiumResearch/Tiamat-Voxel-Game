@@ -94,6 +94,9 @@ pub struct WorkerSpec {
     /// here: a worker that numbered anything differently would encode a horizon
     /// the world does not agree with.
     pub fluids: tiamat_core::fluid::Fluids,
+    /// The world's material translation, for the same encode: a summary is sent
+    /// and stored in the world's ids, and a worker's chunk holds the session's.
+    pub materials: tiamat_core::persist::idmap::MaterialMap,
     /// Every map the world holds, as the pre-pass left them.
     pub maps: Vec<(String, String, tiamat_core::detgen::Map)>,
     /// The materials the tick's VM registered, in order, with their ids.
@@ -617,7 +620,13 @@ fn worker(
         if let Ok(mut clock) = clock.lock() {
             clock.since = Some(started);
         }
-        let mut answer = generate(&mut host, &job, &spec.fluids, &mut known_faulted);
+        let mut answer = generate(
+            &mut host,
+            &job,
+            &spec.fluids,
+            &spec.materials,
+            &mut known_faulted,
+        );
         answer.took = started.elapsed();
         // Under the one lock, so a reading never counts this job both as
         // finished and as in hand.
@@ -671,6 +680,7 @@ fn generate(
     host: &mut ModHost<MluaVm>,
     job: &Job,
     fluids: &tiamat_core::fluid::Fluids,
+    materials: &tiamat_core::persist::idmap::MaterialMap,
     known_faulted: &mut BTreeSet<String>,
 ) -> Done {
     let before: BTreeSet<String> = host.disabled().into_iter().collect();
@@ -712,7 +722,7 @@ fn generate(
             )
         }
     };
-    let summaries = crate::world::World::encode_chain(&chunk, &fluid, fluids);
+    let summaries = crate::world::World::encode_chain(&chunk, &fluid, fluids, materials);
     let after: BTreeSet<String> = host.disabled().into_iter().collect();
     let faults: Vec<String> = after.difference(&before).cloned().collect();
     known_faulted.extend(faults.iter().cloned());
@@ -891,6 +901,7 @@ mod tests {
             limits: VmLimits::default(),
             fluid_ids: Vec::new(),
             fluids: tiamat_core::fluid::Fluids::new(),
+            materials: tiamat_core::persist::idmap::MaterialMap::passthrough(),
             maps: Vec::new(),
             blocks: host.vm().registered_blocks(),
         };
@@ -980,7 +991,7 @@ mod tests {
                 .expect("tint");
             assert_eq!(tint, done.tint, "tint at {:?} differs", done.job.pos);
             assert_eq!(
-                crate::world::World::encode_chain(&chunk, &fluid, &spec.fluids),
+                crate::world::World::encode_chain(&chunk, &fluid, &spec.fluids, &spec.materials),
                 done.summaries,
                 "summary chain at {:?} differs",
                 done.job.pos

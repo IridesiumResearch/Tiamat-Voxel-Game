@@ -382,6 +382,10 @@ pub struct Registered {
     /// Fluid has no material of its own in the block store — a block holds
     /// terrain and fluid independently — so this is what the mesher and the
     /// texture atlas look up.
+    ///
+    /// In the id space the chunks of whoever holds this registry hold: a
+    /// server's are in memory and so runtime ids, translated to the world's
+    /// where the registry goes on the wire.
     pub material: MaterialId,
     /// How much of what is behind it a surface of this fluid hides, `0.0..=1.0`.
     ///

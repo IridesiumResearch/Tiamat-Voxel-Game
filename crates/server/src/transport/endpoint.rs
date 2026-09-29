@@ -420,21 +420,22 @@ pub struct Shared {
     /// dig at all, which is deliberate. See [`Shared::resolve_tool`].
     pub default_tool: Option<String>,
     /// Each tool's speed on particular materials, resolved from the names it
-    /// registered to the ids this world uses (Craft ask 2). A material not
+    /// registered to runtime ids (Craft ask 2). A material not
     /// named digs at the tool's `speed_multiplier`.
     pub tool_speeds: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<tiamat_core::MaterialId, f32>,
     >,
     /// What a full block of each material yields where its mod overrode the
-    /// ordinary rule (`register_block{ drops = ... }`), by world id, in
+    /// ordinary rule (`register_block{ drops = ... }`), by runtime id, in
     /// units. Absent means Contract §9: the block drops itself. **Never read
     /// until Craft ask 3**: the field was accepted and sorted, and the dig
     /// credited what the edit removed regardless.
     pub drop_rules:
         std::collections::BTreeMap<tiamat_core::MaterialId, Vec<(tiamat_core::MaterialId, u32)>>,
-    /// Every registered material by name, to the id this world uses — what a
-    /// dig hook's `drops` answer is resolved with, at the moment it is given.
+    /// Every registered material by name, to its runtime id — what a dig
+    /// hook's `drops` answer is resolved with, at the moment it is given, and
+    /// what an inventory holds.
     pub material_ids: std::collections::BTreeMap<String, tiamat_core::MaterialId>,
     /// The size a mod fixed `player:main` at, if one did (UI ask 14).
     ///
@@ -445,7 +446,9 @@ pub struct Shared {
     /// How each material resists a tool: its bare-handed seconds, and how
     /// strongly it imposes that on a block it is only part of.
     ///
-    /// Keyed by WORLD material id, because that is what a chunk holds. A
+    /// Keyed by RUNTIME material id, because that is what a chunk in memory
+    /// holds — the world's own numbers exist only in the database and on the
+    /// wire (see [`Shared::id_map`]). A
     /// material with no entry gets the engine default rather than being
     /// unbreakable — see `BlockRules::DEFAULT_HARDNESS`.
     pub hardness: std::collections::BTreeMap<tiamat_core::MaterialId, tiamat_core::dig::Resistance>,

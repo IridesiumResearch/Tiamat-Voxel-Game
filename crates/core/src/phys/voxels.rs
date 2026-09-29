@@ -113,8 +113,10 @@ pub struct Voxels<'a, S: ChunkLookup, F: FluidLookup = Dry> {
     /// for every view that has no opinion, which is every ray cast and every
     /// test.
     passable: &'a [u16],
-    /// Materials a body grips less than ordinarily, as `(world id, friction)`
-    /// sorted by id — Sub-Node Contract §2.
+    /// Materials a body grips less than ordinarily, as `(id, friction)`
+    /// sorted by id — Sub-Node Contract §2. The ids are whatever the chunks
+    /// this view reads hold: a server's are in memory and so runtime ids, a
+    /// client's arrived as blobs and are world ids.
     ///
     /// Borrowed for the reason `passable` is. Empty for every view with no
     /// opinion, which answers ordinary grip everywhere.

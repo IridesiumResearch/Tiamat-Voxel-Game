@@ -827,15 +827,15 @@ impl Neighbourhood for Lit<'_> {
 
 /// Builds a transparency table from what the mods registered.
 ///
-/// Keyed by WORLD id for the same reason emissions are: a world that has seen a
-/// different mod set numbers its materials differently, and a table of this
-/// session's runtime ids would name every window one number out (charter rule
+/// Keyed by RUNTIME id for the same reason emissions are: the light pass reads
+/// the material of a chunk in memory, and a table in world ids would name every
+/// window one number out on a world whose mod set has changed (charter rule
 /// 8).
 /// Builds a dimming table from what the mods registered.
 ///
-/// World ask 24, Sub-Node Contract §8.2: a canopy that shades. Keyed by WORLD
-/// id for the reason the two tables beside it are — a world that has seen a
-/// different mod set numbers its materials differently.
+/// World ask 24, Sub-Node Contract §8.2: a canopy that shades. Keyed by RUNTIME
+/// id for the reason the two tables beside it are — the light pass reads a chunk
+/// in memory.
 ///
 /// Only the materials that dim, so [`tiamat_core::light::Dimming::any`] is
 /// false for every world until a mod asks, and the lighting hot path skips the

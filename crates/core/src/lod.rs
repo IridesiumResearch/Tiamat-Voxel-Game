@@ -80,7 +80,11 @@ pub const SOLID_CHILDREN: usize = 4;
 /// changes**: a world opened under another rule forgets its cached summaries,
 /// because a horizon half built by one rule and half by another is a patchwork
 /// nobody can tell is stale. See `persist::WorldDb::open`.
-pub const SUMMARY_RULE: i64 = 2;
+///
+/// 3: a stored summary names its materials by the WORLD's ids, as a client is
+/// told them. Rows written before that held whatever the session numbered them,
+/// which is another material on a world reopened under a changed mod set.
+pub const SUMMARY_RULE: i64 = 3;
 
 /// The coarsest level, where the whole chunk is one cell.
 ///
@@ -484,6 +488,22 @@ impl Summary {
     #[must_use]
     pub fn cells(&self) -> &[MaterialId] {
         &self.cells
+    }
+
+    /// The same summary with every material passed through `translate`.
+    ///
+    /// **How a summary changes id space.** One is built from a chunk in memory,
+    /// which holds the session's runtime ids, and is stored and sent in the
+    /// world's — the ids a client's atlas and chunks are keyed by (charter rule
+    /// 8). Air maps to air, since `translate` is the caller's. Applied to a
+    /// finished level rather than while building it, so the tie-breaks and
+    /// thresholds above see one consistent order.
+    #[must_use]
+    pub fn map_materials(&self, translate: impl Fn(MaterialId) -> MaterialId) -> Self {
+        Self {
+            level: self.level,
+            cells: self.cells.iter().map(|cell| translate(*cell)).collect(),
+        }
     }
 
     /// One cell, or `None` outside the summary.

@@ -1252,7 +1252,7 @@ impl World {
         // — World ask 28. Every source that places no fluid gets the default
         // empty layer and is unchanged.
         let (chunk, fluid) = source.generate_with_fluid(domain, pos, self.seed);
-        let chain = Self::encode_chain(&chunk, &fluid, &self.fluids);
+        let chain = Self::encode_chain(&chunk, &fluid, &self.fluids, self.db.materials());
         self.adopt_summaries(domain, level, pos, &chain)
     }
 
@@ -1306,12 +1306,9 @@ impl World {
             .timed("load fluid", |db| db.load_chunk_fluid_in(domain, pos))?
             .unwrap_or_else(tiamat_core::fluid::FluidLayer::empty);
         let chain = match self.domains.get(domain).and_then(|s| s.cache.get(&pos)) {
-            Some(chunk) => lod::Summary::chain_wet(chunk, &wet, &self.fluids)
-                .iter()
-                .map(|summary| (summary.level(), lod::codec::encode(summary)))
-                .collect(),
+            Some(chunk) => Self::encode_chain(chunk, &wet, &self.fluids, self.db.materials()),
             None => match self.timed("load chunk", |db| db.load_chunk_in(domain, pos))? {
-                Some(chunk) => Self::encode_chain(&chunk, &wet, &self.fluids),
+                Some(chunk) => Self::encode_chain(&chunk, &wet, &self.fluids, self.db.materials()),
                 None => return Ok(None),
             },
         };
@@ -1357,16 +1354,31 @@ impl World {
 
     /// A chunk's summary chain, each level encoded as a client receives it.
     ///
+    /// **In the world's ids.** The chunk and `fluids` are in memory and hold
+    /// this session's runtime ids; the bytes are stored beside the chunk and
+    /// sent to a client, whose atlas and chunks are keyed by the world's, so
+    /// `materials` translates each finished level (charter rule 8). A material
+    /// the world has no id for cannot be reached from a chunk; it is encoded as
+    /// `engine:unknown` rather than as a number that names something else.
+    ///
     /// Pure, so the workers compute the same bytes off the tick.
     #[must_use]
     pub fn encode_chain(
         chunk: &Chunk,
         fluid: &tiamat_core::fluid::FluidLayer,
         fluids: &tiamat_core::fluid::Fluids,
+        materials: &tiamat_core::persist::idmap::MaterialMap,
     ) -> Vec<(u8, Vec<u8>)> {
         lod::Summary::chain_wet(chunk, fluid, fluids)
             .iter()
-            .map(|summary| (summary.level(), lod::codec::encode(summary)))
+            .map(|summary| {
+                let named = summary.map_materials(|runtime| {
+                    materials
+                        .to_world(runtime)
+                        .map_or(MaterialId::UNKNOWN, MaterialId)
+                });
+                (named.level(), lod::codec::encode(&named))
+            })
             .collect()
     }
 
@@ -2870,6 +2882,69 @@ mod tests {
                 .expect("read"),
             ids[0],
             "the neighbouring cell must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_summary_names_its_materials_by_the_worlds_ids_not_the_sessions() {
+        // **Charter rule 8, at the seam.** A summary is built from a chunk in
+        // memory, which holds runtime ids, and is stored and sent in the
+        // world's. The two are made to differ here, for the ground AND for the
+        // material a fluid is drawn as — the second is what puts a sea on the
+        // horizon (World ask 28).
+        use tiamat_core::coords::LocalBlock;
+        use tiamat_core::fluid::{Fluid, Fluids, Registered};
+        let ground = MaterialId(2);
+        let water_block = MaterialId(3);
+        let map = tiamat_core::persist::idmap::MaterialMap::from_pairs(&[
+            (MaterialId::AIR, 0),
+            (ground, 7),
+            (water_block, 9),
+        ]);
+        let mut fluids = Fluids::new();
+        let water = fluids
+            .register(Registered {
+                name: "test:water".to_owned(),
+                waterlogs_at: 0,
+                tick_rate: 1,
+                washes: false,
+                evaporates: 0,
+                color: [0, 0, 255],
+                material: water_block,
+                opacity: 0.5,
+                light_falloff: 0,
+            })
+            .expect("register");
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+        chunk.fill_region(SubNodePos::new(0, 0, 0), SubNodePos::new(2, 2, 2), ground);
+        let mut wet = FluidLayer::empty();
+        wet.set(
+            LocalBlock::new(8, 8, 8),
+            Fluid::new(water, tiamat_core::fluid::MAX_VOLUME),
+        );
+
+        let chain = World::encode_chain(&chunk, &wet, &fluids, &map);
+        let finest = tiamat_core::lod::codec::decode(&chain[0].1).expect("decodes");
+        assert_eq!(
+            finest.cell(0, 0, 0),
+            Some(MaterialId(7)),
+            "the ground is named as the world numbers it"
+        );
+        assert_eq!(
+            finest.cell(8, 8, 8),
+            Some(MaterialId(9)),
+            "the sea is drawn as the world numbers its block"
+        );
+        assert_eq!(finest.cell(12, 12, 12), Some(MaterialId::AIR));
+        assert!(
+            chain.iter().all(|(_, bytes)| {
+                tiamat_core::lod::codec::decode(bytes)
+                    .expect("decodes")
+                    .cells()
+                    .iter()
+                    .all(|cell| ![ground, water_block].contains(cell))
+            }),
+            "no level may carry a runtime id for either"
         );
     }
 
