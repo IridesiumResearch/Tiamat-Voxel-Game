@@ -9593,6 +9593,7 @@ fn a_dialog_draws_dirt_as_dirt(gpu: Gpu) {
     let mut editor = Node::new(Widget::ShapeEditor {
         shape: tiamat_core::block::OCCUPANCY_FULL,
         material: 2,
+        cells: Vec::new(),
     });
     editor.name = "cut".to_owned();
     editor.grow = 1;
@@ -9617,6 +9618,7 @@ fn a_dialog_draws_dirt_as_dirt(gpu: Gpu) {
                 units: 27,
                 shape: 0,
                 detail: None,
+                cells: Vec::new(),
             })],
             held: None,
         },

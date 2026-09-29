@@ -10829,7 +10829,7 @@ fn dialog_event_fields(
             // mod itself wrote. Off-by-one here would be silent and constant.
             table.set("index", u32::from(*index) + 1)?;
         }
-        DialogEvent::Chiselled { name, shape } => {
+        DialogEvent::Chiselled { name, shape, .. } => {
             table.set("kind", "chiselled")?;
             table.set("name", name.as_str())?;
             // The raw mask, not a `Shape` — an editor can be chiselled to
@@ -11012,6 +11012,7 @@ fn widget_of(kind: &str, spec: &Table) -> mlua::Result<crate::ui::Widget> {
                 .get::<Option<u32>>("shape")?
                 .unwrap_or(crate::inventory::Shape::ALL),
             material: spec.get::<Option<u16>>("material")?.unwrap_or(1),
+            cells: Vec::new(),
         },
         "progress" => Widget::Progress {
             permille: spec.get::<Option<u16>>("permille")?.unwrap_or(0),

@@ -311,21 +311,62 @@ fn check_node(node: &Node, limits: Limits) -> Result<(), UiError> {
                 });
             }
         }
-        Widget::ShapeEditor { shape, .. } => {
-            // **A mask with bits above the twenty-seventh is a mod that has
-            // misunderstood the field**, and telling it so is cheaper than
-            // silently masking them off and having it wonder why cell 31 never
-            // appears. Charter rule 14's spirit applied to a mod's own tree:
-            // refuse what cannot be meant.
-            if shape & !crate::inventory::Shape::ALL != 0 {
-                return Err(UiError::Malformed {
-                    what: format!(
-                        "shape editor mask {shape:#x} has bits outside a block's 27 sub-nodes"
-                    ),
-                });
-            }
-        }
+        Widget::ShapeEditor { shape, cells, .. } => check_shape_editor(*shape, cells)?,
         Widget::Container { .. } | Widget::Image { .. } | Widget::Scroll | Widget::Spacer => {}
+    }
+    Ok(())
+}
+
+/// A shape editor's mask and cells.
+///
+/// Its own function because [`check_node`] sits at clippy's line limit.
+fn check_shape_editor(shape: u32, cells: &[u16]) -> Result<(), UiError> {
+    // **A mask with bits above the twenty-seventh is a mod that has
+    // misunderstood the field**, and telling it so is cheaper than silently
+    // masking them off and having it wonder why cell 31 never appears.
+    // Charter rule 14's spirit applied to a mod's own tree: refuse what cannot
+    // be meant.
+    if shape & !crate::inventory::Shape::ALL != 0 {
+        return Err(UiError::Malformed {
+            what: format!("shape editor mask {shape:#x} has bits outside a block's 27 sub-nodes"),
+        });
+    }
+    check_editor_cells(shape, cells)
+}
+
+/// A shape editor's cells: none, or twenty-seven whose occupancy IS its mask.
+///
+/// Sub-Node Contract §9.1 and protocol v81. Twenty-seven because a block has
+/// that many cells and a renderer walks exactly that many; agreeing with the
+/// mask because two answers to "which cells are filled" is an editor that
+/// draws one and reports the other.
+///
+/// # Errors
+///
+/// [`UiError::Malformed`] for any other length, or cells that disagree.
+pub fn check_editor_cells(shape: u32, cells: &[u16]) -> Result<(), UiError> {
+    if cells.is_empty() {
+        return Ok(());
+    }
+    if cells.len() != crate::block::SUBNODES_PER_BLOCK {
+        return Err(UiError::Malformed {
+            what: format!(
+                "shape editor cells has {} entries; it is empty or one per cell, 27",
+                cells.len()
+            ),
+        });
+    }
+    let occupancy = cells
+        .iter()
+        .enumerate()
+        .filter(|(_, material)| **material != 0)
+        .fold(0u32, |mask, (index, _)| mask | (1 << index));
+    if occupancy != shape {
+        return Err(UiError::Malformed {
+            what: format!(
+                "shape editor mask {shape:#x} is not its cells' occupancy {occupancy:#x}"
+            ),
+        });
     }
     Ok(())
 }
@@ -380,6 +421,32 @@ mod tests {
             });
         }
         Tree { nodes }
+    }
+
+    #[test]
+    fn an_editor_of_several_materials_has_a_cell_per_cell_and_they_are_its_mask() {
+        // Protocol v81, Sub-Node Contract §9.1: none is one material, 27 is
+        // several, and the 27 must be the mask's occupancy.
+        let editor = |shape: u32, cells: Vec<u16>| {
+            one(Widget::ShapeEditor {
+                shape,
+                material: 3,
+                cells,
+            })
+        };
+        let limits = Limits::default();
+        assert!(check(&editor(0b111, Vec::new()), limits).is_ok());
+        let mut cells = vec![0u16; 27];
+        cells[0] = 3;
+        cells[1] = 9;
+        assert!(check(&editor(0b11, cells.clone()), limits).is_ok());
+        let err = check(&editor(0b111, cells.clone()), limits).expect_err("disagrees");
+        assert!(matches!(err, UiError::Malformed { .. }), "{err}");
+        assert!(check(&editor(0b11, cells[..26].to_vec()), limits).is_err());
+        assert!(
+            check(&editor(0, vec![0; 27]), limits).is_ok(),
+            "all air is an empty mask"
+        );
     }
 
     #[test]

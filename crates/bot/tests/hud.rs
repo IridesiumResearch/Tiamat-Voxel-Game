@@ -518,6 +518,7 @@ fn core_uis_shape_tab_cuts_a_block_and_the_cut_comes_back() {
             tiamat_core::proto::DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: CARVED,
+                cells: Vec::new(),
             },
         )
         .await
@@ -702,6 +703,7 @@ fn making_a_stack_makes_as_many_as_the_player_can_pay_for() {
             tiamat_core::proto::DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: cut,
+                cells: Vec::new(),
             },
         )
         .await

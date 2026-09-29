@@ -55,5 +55,5 @@ mod proptests;
 mod tree;
 
 pub use layout::{Laid, Measure, Rect, layout, natural};
-pub use limits::{Limits, UiError, check};
+pub use limits::{Limits, UiError, check, check_editor_cells};
 pub use tree::{Align, Build, Children, Colour, Direction, Node, Style, Tree, Widget};

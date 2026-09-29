@@ -113,6 +113,10 @@ pub enum Action {
         /// Which stack is being spent, when a mod says two are different
         /// things. See [`crate::inventory::Stack::detail`].
         detail: Option<String>,
+        /// Each cell's material, as world ids, when what is being placed is
+        /// a cut of several materials; empty otherwise. See
+        /// [`crate::inventory::Stack::cells`].
+        cells: Vec<u16>,
     },
 
     /// The place control was pressed with nothing to place.
@@ -480,12 +484,14 @@ impl Session {
                 shape,
                 face,
                 detail,
+                cells,
             } => Response::act(Action::Place {
                 target: *target,
                 material: *material,
                 shape: *shape,
                 face: *face,
                 detail: detail.clone(),
+                cells: cells.clone(),
             }),
             ClientMessage::Use { target } => Response::act(Action::Use { target: *target }),
             _ => return None,

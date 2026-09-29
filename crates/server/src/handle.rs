@@ -5336,6 +5336,9 @@ impl ServerHandle {
                             // a dialog that is not open, which is dropped rather
                             // than guessed at.
                             for (uuid, form, event) in shared.drain_dialog_events() {
+                                // In the ids the mod speaks: an editor of
+                                // several materials reports world ids.
+                                let event = shared.runtime_event(event);
                                 let player = uuid.to_hex();
                                 let Some(owner) = dialog_screens
                                     .as_ref()

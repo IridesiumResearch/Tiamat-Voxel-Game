@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 80;
+pub const PROTOCOL_VERSION: u32 = 81;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,16 @@ pub const PROTOCOL_VERSION: u32 = 80;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v81 (a cut of several materials, Sub-Node Contract §9.1): a stack may carry
+// the material of each of its 27 cells, so `StackDef` gains `cells` — empty,
+// or exactly 27 world ids with 0 for air — and so do the two messages that
+// name one: `ClientMessage::Place`, so the server finds that exact cut in the
+// inventory, and the shape editor's `Widget::ShapeEditor` and
+// `DialogEvent::Chiselled`, where 27 cells is an editor of several materials
+// and none is one material as before. Each is bounded on decode: 0 or 27,
+// and an editor's cells must be its mask's occupancy. **Fields on existing
+// shapes**, the unsafe kind of change, so the version check is what keeps a
+// v80 peer from reading a length prefix as the next field.
 // v80 (Life 18, riding): `PlayerState` carries `riding`, the mount's body when
 // the player is seated on an entity, appended after `jump_cooldown`. While it
 // is `Some` the player's keys drive the ENTITY on the server, so the client
@@ -748,6 +758,15 @@ pub struct StackDef {
     /// Capped on decode at [`crate::inventory::MAX_DETAIL`], because this is
     /// what a server sent (charter rule 14).
     pub detail: Option<String>,
+    /// Each cell's material, for a cut of several materials (protocol v81,
+    /// Sub-Node Contract §9.1): empty for anything else, or exactly 27 WORLD
+    /// ids indexed `x + 3*y + 9*z`, `0` for an empty cell.
+    ///
+    /// With cells, `material` is the lowest of them and `shape` their
+    /// occupancy, as the server derived them — a reader that wants to be
+    /// certain derives them again. Bounded on decode to 0 or 27, because a
+    /// renderer walks exactly 27 (charter rule 14).
+    pub cells: Vec<u16>,
 }
 
 /// A sound bound to a named event.
@@ -1191,6 +1210,16 @@ pub enum ClientMessage {
         /// plain ones, which is the shape defect the `shape` field above was
         /// added to fix.
         detail: Option<String>,
+        /// Each cell's material, when what is being placed is a cut of
+        /// several materials (protocol v81): the stack's own
+        /// [`StackDef::cells`], in world ids, empty otherwise.
+        ///
+        /// **Which stack, again.** A stair of stone and oak and one of stone
+        /// and brick have the same lowest material and the same outline, so
+        /// without the cells the server could not tell which the player
+        /// meant to spend. A claim, like the rest: matched against what is
+        /// held, and bounded to 0 or 27 on the way in.
+        cells: Vec<u16>,
     },
 
     /// Ask for how far the server should stream chunks to this player.
@@ -1432,6 +1461,10 @@ pub enum DialogEvent {
         name: String,
         /// Which cells are filled, indexed `x + 3*y + 9*z`.
         shape: u32,
+        /// Each cell's material, from an editor of several materials
+        /// (protocol v81): 27 world ids, `0` for an empty cell, whose
+        /// occupancy is `shape`. Empty from an editor of one material.
+        cells: Vec<u16>,
     },
 }
 
@@ -2910,6 +2943,14 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
             }
         }
         ClientMessage::BlockDelta { edit } => check_occupancy(edit)?,
+        // Which stack is being spent: a mod's detail and a cut's cells, both
+        // echoed from what the server sent and both bounded as it bounds them.
+        ClientMessage::Place { detail, cells, .. } => {
+            if let Some(detail) = detail {
+                check_len("place_detail", detail.len(), crate::inventory::MAX_DETAIL)?;
+            }
+            check_cells("place_cells", cells)?;
+        }
 
         ClientMessage::AuthResponse { .. }
         | ClientMessage::JoinWorld
@@ -2918,7 +2959,6 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
         | ClientMessage::StartDig { .. }
         | ClientMessage::CancelDig
         | ClientMessage::SelectTool { tool: None }
-        | ClientMessage::Place { .. }
         // A cell position. Reach is the server's check, as it is for a dig.
         | ClientMessage::Use { .. }
         // Two bytes, and `ViewDistance::clamped` bounds them on the way in —
@@ -3342,7 +3382,11 @@ fn check_play(message: &ServerMessage) -> Result<(), ProtocolError> {
 ///
 /// Its own function because `validate_server_message` sits at clippy's line
 /// limit — a real constraint here rather than a lint being obeyed.
-fn check_view(view: &str, slots: &[Option<StackDef>]) -> Result<(), ProtocolError> {
+fn check_view(
+    view: &str,
+    slots: &[Option<StackDef>],
+    held: Option<&StackDef>,
+) -> Result<(), ProtocolError> {
     check_len("view", view.len(), MAX_ID_BYTES)?;
     // A server claiming a million slots is a server making the client allocate
     // a million slots (charter rule 14). The cap is the dialog schema's, so a
@@ -3352,10 +3396,29 @@ fn check_view(view: &str, slots: &[Option<StackDef>]) -> Result<(), ProtocolErro
         slots.len(),
         crate::ui::Limits::default().grid_slots,
     )?;
-    for stack in slots.iter().flatten() {
+    // And what is on the cursor, which reaches the same slot painter.
+    for stack in slots.iter().flatten().chain(held) {
         check_stack(stack)?;
     }
     Ok(())
+}
+
+/// Bounds a cut's cells from a peer: none, or one per cell.
+///
+/// Twenty-seven exactly, because every reader walks a block's 27 cells and a
+/// shorter or longer run would be read past or partly ignored (charter rule
+/// 14). The ids are not checked here — a world id nobody has is drawn as the
+/// placeholder or matches nothing held, which is every other id's rule.
+fn check_cells(field: &'static str, cells: &[u16]) -> Result<(), ProtocolError> {
+    if cells.is_empty() || cells.len() == crate::block::SUBNODES_PER_BLOCK {
+        Ok(())
+    } else {
+        Err(ProtocolError::FieldTooLarge {
+            field,
+            len: cells.len(),
+            limit: crate::block::SUBNODES_PER_BLOCK,
+        })
+    }
 }
 
 /// Bounds one stack a server sent.
@@ -3365,10 +3428,10 @@ fn check_view(view: &str, slots: &[Option<StackDef>]) -> Result<(), ProtocolErro
 /// bound lives in one place rather than at each of them — which is where one of
 /// them would quietly stop having it.
 fn check_stack(stack: &StackDef) -> Result<(), ProtocolError> {
-    match &stack.detail {
-        Some(detail) => check_len("stack_detail", detail.len(), crate::inventory::MAX_DETAIL),
-        None => Ok(()),
+    if let Some(detail) = &stack.detail {
+        check_len("stack_detail", detail.len(), crate::inventory::MAX_DETAIL)?;
     }
+    check_cells("stack_cells", &stack.cells)
 }
 
 /// Bounds a dialog a server sent, and the tree in it.
@@ -3401,9 +3464,28 @@ fn check_dialog_event(form: &str, event: &DialogEvent) -> Result<(), ProtocolErr
         DialogEvent::Pressed { name, .. }
         | DialogEvent::Toggled { name, .. }
         | DialogEvent::Slid { name, .. }
-        | DialogEvent::Chose { name, .. }
-        | DialogEvent::Chiselled { name, .. } => {
+        | DialogEvent::Chose { name, .. } => {
             check_len("widget_name", name.len(), MAX_ID_BYTES)?;
+        }
+        DialogEvent::Chiselled { name, shape, cells } => {
+            check_len("widget_name", name.len(), MAX_ID_BYTES)?;
+            // The editor's own rule, from the side that did the editing: a
+            // mask with no bits past the block, and cells that are none or
+            // one per cell and agree with it. A mod reads both, and a peer
+            // sending two different answers is asking it to believe one.
+            if shape & !crate::inventory::Shape::ALL != 0 {
+                return Err(ProtocolError::FieldTooLarge {
+                    field: "chiselled_shape",
+                    len: *shape as usize,
+                    limit: crate::inventory::Shape::ALL as usize,
+                });
+            }
+            check_cells("chiselled_cells", cells)?;
+            crate::ui::check_editor_cells(*shape, cells).map_err(|err| {
+                ProtocolError::Unusable {
+                    what: format!("chiselled `{name}`: {err}"),
+                }
+            })?;
         }
         DialogEvent::Submitted { name, text } => {
             check_len("widget_name", name.len(), MAX_ID_BYTES)?;
@@ -3547,7 +3629,9 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
             check_dialog(form, Some(tree))?;
         }
         ServerMessage::CloseDialog { form } => check_dialog(form, None)?,
-        ServerMessage::ViewUpdate { view, slots, .. } => check_view(view, slots)?,
+        ServerMessage::ViewUpdate {
+            view, slots, held, ..
+        } => check_view(view, slots, held.as_ref())?,
         ServerMessage::ActionTable { actions } => check_actions(actions)?,
         ServerMessage::SoundTable { sounds } => check_sounds(sounds)?,
         ServerMessage::FontTable { fonts } => check_fonts(fonts)?,
@@ -4214,6 +4298,7 @@ mod tests {
                     shape: 0,
                     face: [0; 3],
                     detail: None,
+                    cells: Vec::new(),
                 },
                 13,
             ),
@@ -4671,6 +4756,7 @@ mod tests {
             ordinal(&DialogEvent::Chiselled {
                 name: String::new(),
                 shape: 0,
+                cells: Vec::new(),
             }),
             7
         );
@@ -4715,6 +4801,150 @@ mod tests {
         );
         // A click past the end is refused, not read as a left.
         assert!(decode::<DialogEvent>(&[0, 2, b'g', b'o', 3]).is_err());
+    }
+
+    /// Twenty-seven cells of a cut of several materials: stone (world 2) on
+    /// cell 0 and oak (world 300, two varint bytes) on cell 26.
+    fn two_material_cells() -> Vec<u16> {
+        let mut cells = vec![0u16; 27];
+        cells[0] = 2;
+        cells[26] = 300;
+        cells
+    }
+
+    /// The postcard bytes of [`two_material_cells`]: the length, then one
+    /// varint per cell.
+    fn two_material_cells_bytes() -> Vec<u8> {
+        let mut bytes = vec![27, 2];
+        bytes.extend([0; 25]);
+        bytes.extend([0xAC, 0x02]);
+        bytes
+    }
+
+    /// **A stack's cells come after its detail** (protocol v81), and an empty
+    /// run is one byte: the whole encoding pinned, because the field is what
+    /// changed and a `cells` written anywhere else would leave every ordinal
+    /// where it was.
+    #[test]
+    fn a_stack_is_its_detail_and_then_its_cells() {
+        let plain = StackDef {
+            material: 5,
+            units: 27,
+            shape: 0,
+            detail: None,
+            cells: Vec::new(),
+        };
+        assert_eq!(encode(&plain).expect("encode"), [5, 27, 0, 0, 0]);
+
+        let mixed = StackDef {
+            material: 2,
+            units: 4,
+            shape: (1 << 26) | 1,
+            detail: Some("x".to_owned()),
+            cells: two_material_cells(),
+        };
+        let mut expected = vec![2, 4, 0x81, 0x80, 0x80, 0x20, 1, 1, b'x'];
+        expected.extend(two_material_cells_bytes());
+        assert_eq!(encode(&mixed).expect("encode"), expected);
+        assert_eq!(decode::<StackDef>(&expected).expect("decode"), mixed);
+    }
+
+    /// A placement names the cut it spends by its cells, last (protocol v81).
+    #[test]
+    fn a_placement_is_its_detail_and_then_its_cells() {
+        let place = ClientMessage::Place {
+            target: SubNodePos::new(0, 0, 0),
+            material: 2,
+            shape: 0,
+            face: [0, 1, 0],
+            detail: None,
+            cells: two_material_cells(),
+        };
+        let bytes = encode(&place).expect("encode");
+        let mut expected = vec![13, 0, 0, 0, 2, 0, 0, 1, 0, 0];
+        expected.extend(two_material_cells_bytes());
+        assert_eq!(bytes, expected);
+        assert_eq!(decode::<ClientMessage>(&bytes).expect("decode"), place);
+    }
+
+    /// A chiselled editor reports its mask and then its cells (protocol v81).
+    #[test]
+    fn a_chisel_is_its_mask_and_then_its_cells() {
+        let one = DialogEvent::Chiselled {
+            name: "e".to_owned(),
+            shape: 1,
+            cells: Vec::new(),
+        };
+        assert_eq!(encode(&one).expect("encode"), [7, 1, b'e', 1, 0]);
+        let several = DialogEvent::Chiselled {
+            name: "e".to_owned(),
+            shape: (1 << 26) | 1,
+            cells: two_material_cells(),
+        };
+        let mut expected = vec![7, 1, b'e', 0x81, 0x80, 0x80, 0x20];
+        expected.extend(two_material_cells_bytes());
+        assert_eq!(encode(&several).expect("encode"), expected);
+        assert_eq!(decode::<DialogEvent>(&expected).expect("decode"), several);
+    }
+
+    /// **Cells are none or one per cell**, on every road they arrive by
+    /// (charter rule 14): a stack in a view, on the cursor, in a hand, on the
+    /// ground; a placement; a chisel, whose cells must also be its mask.
+    #[test]
+    fn a_run_of_cells_that_is_not_a_block_is_refused() {
+        let stack = |cells: Vec<u16>| StackDef {
+            material: 2,
+            units: 1,
+            shape: 1,
+            detail: None,
+            cells,
+        };
+        let view = |slot: StackDef, held: Option<StackDef>| ServerMessage::ViewUpdate {
+            view: "player:main".to_owned(),
+            slots: vec![Some(slot)],
+            held,
+        };
+        assert!(validate_server_message(&view(stack(two_material_cells()), None)).is_ok());
+        assert!(validate_server_message(&view(stack(vec![2; 26]), None)).is_err());
+        assert!(validate_server_message(&view(stack(vec![2; 28]), None)).is_err());
+        // The cursor, which went unchecked until now.
+        assert!(
+            validate_server_message(&view(stack(Vec::new()), Some(stack(vec![2; 3])))).is_err()
+        );
+        assert!(
+            validate_server_message(&ServerMessage::InventoryUpdate {
+                stacks: vec![stack(vec![1])],
+            })
+            .is_err()
+        );
+
+        let place = |cells: Vec<u16>| ClientMessage::Place {
+            target: SubNodePos::new(0, 0, 0),
+            material: 2,
+            shape: 0,
+            face: [0; 3],
+            detail: None,
+            cells,
+        };
+        assert!(validate_client_message(&place(Vec::new())).is_ok());
+        assert!(validate_client_message(&place(two_material_cells())).is_ok());
+        assert!(validate_client_message(&place(vec![2; 5])).is_err());
+
+        let chisel = |shape: u32, cells: Vec<u16>| ClientMessage::DialogEvent {
+            form: "f".to_owned(),
+            event: DialogEvent::Chiselled {
+                name: "e".to_owned(),
+                shape,
+                cells,
+            },
+        };
+        assert!(validate_client_message(&chisel(5, Vec::new())).is_ok());
+        assert!(validate_client_message(&chisel((1 << 26) | 1, two_material_cells())).is_ok());
+        assert!(
+            validate_client_message(&chisel(1, two_material_cells())).is_err(),
+            "cells that disagree with the mask"
+        );
+        assert!(validate_client_message(&chisel(1, vec![2; 9])).is_err());
     }
 
     /// The widget set, for the same reason and with the same history.
@@ -4797,7 +5027,8 @@ mod tests {
         assert_eq!(
             ordinal(&Widget::ShapeEditor {
                 shape: 0,
-                material: 0
+                material: 0,
+                cells: Vec::new(),
             }),
             13
         );

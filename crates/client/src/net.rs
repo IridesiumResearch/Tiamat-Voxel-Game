@@ -675,6 +675,10 @@ pub enum Command {
         /// Which stack is being spent, when a mod says two of the same
         /// material and cut are different things.
         detail: Option<String>,
+        /// The cells of a cut of several materials being placed, in world
+        /// ids, or empty for anything else (protocol v81): which cut, when
+        /// two share a lowest material and an outline.
+        cells: Vec<u16>,
     },
 
     /// The place control was pressed with nothing to place.
@@ -2225,12 +2229,14 @@ fn to_wire(command: Command) -> ClientMessage {
             shape,
             face,
             detail,
+            cells,
         } => ClientMessage::Place {
             face,
             detail,
             target,
             material,
             shape,
+            cells,
         },
         Command::Use { target } => ClientMessage::Use { target },
         Command::Action { id, pressed } => ClientMessage::Action { id, pressed },

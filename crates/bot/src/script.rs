@@ -703,6 +703,7 @@ mod tests {
                     units: 243,
                     shape: 0,
                     detail: None,
+                    cells: Vec::new(),
                 }]),
                 _ => Reply::Done,
             },

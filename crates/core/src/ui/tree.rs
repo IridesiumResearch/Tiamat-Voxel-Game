@@ -194,8 +194,22 @@ pub enum Widget {
         /// mod's step, and the point at which "you have chiselled it away to
         /// nothing" is something a player can be told.
         shape: u32,
-        /// Which material the filled cells are drawn as.
+        /// Which material the filled cells are drawn as — or, with `cells`,
+        /// the BRUSH: the material a cell put back is made of.
         material: u16,
+        /// Each cell's own material, for a cut of several materials
+        /// (protocol v81, Sub-Node Contract §9.1).
+        ///
+        /// **Empty is one material**, exactly as before: every filled cell is
+        /// `material`, and a mod that changes `material` changes the whole
+        /// cube. **Twenty-seven is several**: entry `i` is cell `i`'s
+        /// material, `0` for an empty cell; `shape` must be those cells'
+        /// occupancy (refused otherwise, see `ui::check`); and `material` is
+        /// only the brush. Any other length is refused.
+        ///
+        /// In the ids the mod speaks — runtime ids — and in world ids on the
+        /// wire, as `material` is.
+        cells: Vec<u16>,
     },
 }
 

@@ -181,6 +181,30 @@ fn seeds() -> Vec<(&'static str, Tree)> {
                 ),
                 Build::leaf(Widget::Spacer),
                 Build::leaf(Widget::Progress { permille: 250 }),
+                // Protocol v25's editor, in one material, and v81's in
+                // several: twenty-seven cells whose occupancy is the mask,
+                // the rule `check` holds a mod's tree to.
+                named(
+                    "cut",
+                    Widget::ShapeEditor {
+                        shape: 0b111,
+                        material: 3,
+                        cells: Vec::new(),
+                    },
+                ),
+                named(
+                    "mixed",
+                    Widget::ShapeEditor {
+                        shape: 0b11,
+                        material: 4,
+                        cells: {
+                            let mut cells = vec![0u16; 27];
+                            cells[0] = 3;
+                            cells[1] = 300;
+                            cells
+                        },
+                    },
+                ),
             ])
             .flatten(),
         ),

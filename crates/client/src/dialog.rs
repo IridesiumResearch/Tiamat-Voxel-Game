@@ -915,7 +915,9 @@ fn paint_widget(
             &paint,
             raised,
         ),
-        Widget::ShapeEditor { shape, material } => {
+        Widget::ShapeEditor {
+            shape, material, ..
+        } => {
             paint_shape_editor(ui, rect, node, (*shape, *material), &paint, local, raised);
             false
         }
@@ -1037,6 +1039,7 @@ fn paint_shape_editor(
                 DialogEvent::Chiselled {
                     name: node.name.clone(),
                     shape: mask,
+                    cells: Vec::new(),
                 },
             );
         }
@@ -2072,6 +2075,7 @@ mod tests {
                     units: 27,
                     shape: 0,
                     detail: None,
+                    cells: Vec::new(),
                 })],
                 held: None,
             },
@@ -2164,6 +2168,7 @@ mod tests {
             let mut node = Node::new(Widget::ShapeEditor {
                 shape: 0x7FF_FFFF,
                 material: 1,
+                cells: Vec::new(),
             });
             node.name = "cut".to_owned();
             let mut open = BTreeMap::new();
@@ -2306,6 +2311,7 @@ mod tests {
         let mut node = Node::new(Widget::ShapeEditor {
             shape: tiamat_core::block::OCCUPANCY_FULL,
             material,
+            cells: Vec::new(),
         });
         node.name = "cut".to_owned();
         // What the reporting mod sets: a clear background, which is a style

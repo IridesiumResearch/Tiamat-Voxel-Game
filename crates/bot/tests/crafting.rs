@@ -413,6 +413,7 @@ fn what_a_player_chisels_is_what_the_mod_gets_back() {
             tiamat_core::proto::DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: CARVED,
+                cells: Vec::new(),
             },
         )
         .await

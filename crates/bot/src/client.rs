@@ -2305,6 +2305,8 @@ impl Bot {
             // Plain material. A bot spending a stack a mod has marked builds
             // the message itself, the way it does for a cut.
             detail: None,
+            // Nor a cut of several materials: see `place_stack_against`.
+            cells: Vec::new(),
         })
         .await
     }

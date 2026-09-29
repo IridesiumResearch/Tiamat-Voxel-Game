@@ -75,7 +75,7 @@ fn sample_tree() -> tiamat_core::ui::Tree {
                 grow: 1,
                 size: None,
                 cross_size: None,
-                children: Children { first: 1, count: 3 },
+                children: Children { first: 1, count: 4 },
             },
             Node {
                 widget: Widget::Label {
@@ -111,6 +111,7 @@ fn sample_tree() -> tiamat_core::ui::Tree {
                 widget: Widget::ShapeEditor {
                     shape: 0b0000_0001_1111,
                     material: 3,
+                    cells: Vec::new(),
                 },
                 name: "cut".to_owned(),
                 tooltip: None,
@@ -120,8 +121,34 @@ fn sample_tree() -> tiamat_core::ui::Tree {
                 cross_size: None,
                 children: Children { first: 0, count: 0 },
             },
+            // Protocol v81: an editor of several materials, twenty-seven
+            // cells whose occupancy is the mask — the one widget field whose
+            // length and contents both have a rule.
+            Node {
+                widget: Widget::ShapeEditor {
+                    shape: 0b0000_0001_1111,
+                    material: 4,
+                    cells: mixed_cells(),
+                },
+                name: "mixed".to_owned(),
+                tooltip: None,
+                style: Style::default(),
+                grow: 0,
+                size: None,
+                cross_size: None,
+                children: Children { first: 0, count: 0 },
+            },
         ],
     }
+}
+
+/// Twenty-seven world ids for a cut of two materials over the mask
+/// `0b1_1111`: three cells of 3 and two of a two-byte id (protocol v81).
+fn mixed_cells() -> Vec<u16> {
+    let mut cells = vec![0u16; 27];
+    cells[..3].fill(3);
+    cells[3..5].fill(300);
+    cells
 }
 
 /// One encoding of every `ClientMessage` variant.
@@ -273,6 +300,26 @@ fn client_messages() -> Vec<Vec<u8>> {
             shape: 0,
             face: [0; 3],
             detail: None,
+            cells: Vec::new(),
+        },
+        // Protocol v81: a cut of several materials being placed, named by
+        // its cells, and a run of cells that is not a block's, which the
+        // validator refuses.
+        ClientMessage::Place {
+            target: SubNodePos::new(1, 2, 3),
+            material: 3,
+            shape: 0b1_1111,
+            face: [0, 1, 0],
+            detail: None,
+            cells: mixed_cells(),
+        },
+        ClientMessage::Place {
+            target: SubNodePos::new(1, 2, 3),
+            material: 3,
+            shape: 0b1_1111,
+            face: [0; 3],
+            detail: Some("named".to_owned()),
+            cells: vec![3; 26],
         },
         ClientMessage::Place {
             target: SubNodePos::new(i32::MAX, i32::MIN, 0),
@@ -283,6 +330,7 @@ fn client_messages() -> Vec<Vec<u8>> {
             shape: u32::MAX,
             face: [0; 3],
             detail: None,
+            cells: Vec::new(),
         },
         ClientMessage::Place {
             target: SubNodePos::new(0, 0, 0),
@@ -292,6 +340,7 @@ fn client_messages() -> Vec<Vec<u8>> {
             // that turns the geometry rather than leaving it as authored.
             face: [1, 0, 0],
             detail: None,
+            cells: Vec::new(),
         },
         // Protocol v12. Missing until v15 — the checklist's re-seed step is the
         // one people skip, and a corpus that stops at an older variant means
@@ -397,6 +446,7 @@ fn client_messages() -> Vec<Vec<u8>> {
             event: DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: 0b0000_0111,
+                cells: Vec::new(),
             },
         },
         ClientMessage::DialogEvent {
@@ -404,6 +454,25 @@ fn client_messages() -> Vec<Vec<u8>> {
             event: DialogEvent::Chiselled {
                 name: "cut".to_owned(),
                 shape: u32::MAX,
+                cells: Vec::new(),
+            },
+        },
+        // Protocol v81: an editor of several materials reporting its cells,
+        // and one whose cells disagree with its mask.
+        ClientMessage::DialogEvent {
+            form: "bench:craft".to_owned(),
+            event: DialogEvent::Chiselled {
+                name: "mixed".to_owned(),
+                shape: 0b1_1111,
+                cells: mixed_cells(),
+            },
+        },
+        ClientMessage::DialogEvent {
+            form: "bench:craft".to_owned(),
+            event: DialogEvent::Chiselled {
+                name: "mixed".to_owned(),
+                shape: 0b1,
+                cells: mixed_cells(),
             },
         },
     ];
@@ -923,6 +992,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                     units: 40,
                     shape: 0,
                     detail: None,
+                    cells: Vec::new(),
                 }),
                 None,
                 // Protocol v24: a shaped stack, which is the shape a decoder
@@ -932,6 +1002,16 @@ fn server_messages() -> Vec<Vec<u8>> {
                     units: 27,
                     shape: 0b1_0101,
                     detail: None,
+                    cells: Vec::new(),
+                }),
+                // Protocol v81: a cut of several materials, its cells in
+                // world ids.
+                Some(tiamat_core::proto::StackDef {
+                    material: 3,
+                    units: 10,
+                    shape: 0b1_1111,
+                    detail: None,
+                    cells: mixed_cells(),
                 }),
             ],
             held: Some(tiamat_core::proto::StackDef {
@@ -939,6 +1019,20 @@ fn server_messages() -> Vec<Vec<u8>> {
                 units: 13,
                 shape: 0,
                 detail: None,
+                cells: Vec::new(),
+            }),
+        },
+        // And a cursor holding a run of cells that is not a block's: the
+        // bound the cursor went without until v81.
+        ServerMessage::ViewUpdate {
+            view: "player:main".to_owned(),
+            slots: Vec::new(),
+            held: Some(tiamat_core::proto::StackDef {
+                material: 3,
+                units: 5,
+                shape: 0b1_1111,
+                detail: None,
+                cells: vec![3; 5],
             }),
         },
         // Protocol v23: the cue table and the loops.

@@ -951,6 +951,10 @@ pub struct PlacementRequest {
     /// Which stack they claim to be spending, when a mod says two of the same
     /// material and cut are different things.
     pub detail: Option<String>,
+    /// The cells of the cut of several materials they claim to be spending,
+    /// as the wire names them — world ids, `0` for air — or empty for
+    /// anything else (protocol v81). A claim like the rest.
+    pub cells: Vec<u16>,
 }
 
 /// How many chunk requests the simulation serves per tick, across all players.
@@ -1183,6 +1187,62 @@ impl Shared {
                 .shape
                 .map_or(0, tiamat_core::inventory::Shape::occupancy),
             detail: stack.detail.clone(),
+            // **Every cell of a cut of several materials** (protocol v81), in
+            // the world's ids as the material beside them is: the client
+            // draws each cell from the atlas slot its number names.
+            cells: stack.cells.as_deref().map_or_else(Vec::new, |cells| {
+                cells.iter().map(|cell| self.wire_cell(*cell)).collect()
+            }),
+        }
+    }
+
+    /// One cell's material as the wire carries it: air is `0` in every id
+    /// space, and anything else is [`Shared::wire_material`].
+    #[must_use]
+    pub fn wire_cell(&self, runtime: tiamat_core::MaterialId) -> u16 {
+        if runtime.is_air() {
+            0
+        } else {
+            self.wire_material(runtime)
+        }
+    }
+
+    /// One cell's material off the wire, in this session's ids: `0` is air,
+    /// and a world id this world has no material for is
+    /// `engine:unknown` — charter rule 8's placeholder, which nobody holds
+    /// and so nothing made of it can be spent or made.
+    #[must_use]
+    pub fn runtime_cell(&self, world: u16) -> tiamat_core::MaterialId {
+        if world == 0 {
+            tiamat_core::MaterialId::AIR
+        } else {
+            self.runtime_material(world)
+                .unwrap_or(tiamat_core::MaterialId::UNKNOWN)
+        }
+    }
+
+    /// A dialog event as a mod hears it: in the ids the mod speaks.
+    ///
+    /// The other half of [`Shared::wire_tree`]. Only an editor of several
+    /// materials sends a material back — its cells — and a mod compares those
+    /// against `game.get_block_id`, which is a runtime id (UI 16's rule).
+    #[must_use]
+    pub fn runtime_event(
+        &self,
+        event: tiamat_core::proto::DialogEvent,
+    ) -> tiamat_core::proto::DialogEvent {
+        match event {
+            tiamat_core::proto::DialogEvent::Chiselled { name, shape, cells } => {
+                tiamat_core::proto::DialogEvent::Chiselled {
+                    name,
+                    shape,
+                    cells: cells
+                        .into_iter()
+                        .map(|cell| self.runtime_cell(cell).get())
+                        .collect(),
+                }
+            }
+            other => other,
         }
     }
 
@@ -1224,8 +1284,15 @@ impl Shared {
     #[must_use]
     pub fn wire_tree(&self, mut tree: tiamat_core::ui::Tree) -> tiamat_core::ui::Tree {
         for node in &mut tree.nodes {
-            if let tiamat_core::ui::Widget::ShapeEditor { material, .. } = &mut node.widget {
+            if let tiamat_core::ui::Widget::ShapeEditor {
+                material, cells, ..
+            } = &mut node.widget
+            {
                 *material = self.wire_material(tiamat_core::MaterialId(*material));
+                // And each cell of an editor of several materials (v81).
+                for cell in cells.iter_mut() {
+                    *cell = self.wire_cell(tiamat_core::MaterialId(*cell));
+                }
             }
         }
         tree
@@ -1256,29 +1323,14 @@ impl Shared {
     ///
     /// Returns whether it was accepted. Bounded like the edit queue and for the
     /// same reason: a client can send these faster than 20 Hz can decide them.
-    pub fn queue_placement(
-        &self,
-        actor: PlayerUuid,
-        target: tiamat_core::SubNodePos,
-        material: u16,
-        shape: u32,
-        face: [i8; 3],
-        detail: Option<String>,
-    ) -> bool {
+    pub fn queue_placement(&self, request: PlacementRequest) -> bool {
         let Ok(mut queue) = self.placements.lock() else {
             return false;
         };
         if queue.len() >= MAX_QUEUED_EDITS {
             return false;
         }
-        queue.push_back(PlacementRequest {
-            actor,
-            target,
-            material,
-            shape,
-            face,
-            detail,
-        });
+        queue.push_back(request);
         true
     }
 
@@ -3758,16 +3810,18 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 shape,
                 face,
                 detail,
+                cells,
             } => {
                 if let Some(uuid) = session.uuid()
-                    && !shared.queue_placement(
-                        uuid,
-                        *target,
-                        *material,
-                        *shape,
-                        *face,
-                        detail.clone(),
-                    )
+                    && !shared.queue_placement(PlacementRequest {
+                        actor: uuid,
+                        target: *target,
+                        material: *material,
+                        shape: *shape,
+                        face: *face,
+                        detail: detail.clone(),
+                        cells: cells.clone(),
+                    })
                 {
                     warn!("placement queue is full; dropping a placement");
                 }
@@ -4342,6 +4396,7 @@ mod tests {
             tiamat_core::ui::Widget::ShapeEditor {
                 shape: 0b111,
                 material: 2,
+                cells: Vec::new(),
             },
         ));
         assert_eq!(
@@ -4349,7 +4404,51 @@ mod tests {
             tiamat_core::ui::Widget::ShapeEditor {
                 shape: 0b111,
                 material: 7,
+                cells: Vec::new(),
             }
+        );
+
+        // Protocol v81: a cut of several materials, cell by cell — as a
+        // stack, as an editor's cells, and back from a chisel.
+        let mut cells = tiamat_core::block::EMPTY_CELLS;
+        cells[0] = MaterialId(2);
+        cells[1] = MaterialId(3);
+        let mixed = tiamat_core::inventory::Stack::mixed(&cells, 1).expect("a cut of two");
+        let sent = shared.wire_stack(&mixed);
+        assert_eq!(sent.cells.len(), 27);
+        assert_eq!((sent.cells[0], sent.cells[1], sent.cells[2]), (7, 2, 0));
+        let plain = tiamat_core::inventory::Stack::new(MaterialId(2), 27).expect("a stack");
+        assert!(
+            shared.wire_stack(&plain).cells.is_empty(),
+            "a plain stack sends none"
+        );
+        let mut editor_cells = vec![0u16; 27];
+        editor_cells[0] = 2;
+        editor_cells[1] = 3;
+        let tree = shared.wire_tree(tiamat_core::ui::Tree::leaf(
+            tiamat_core::ui::Widget::ShapeEditor {
+                shape: 0b11,
+                material: 3,
+                cells: editor_cells.clone(),
+            },
+        ));
+        let tiamat_core::ui::Widget::ShapeEditor { cells: wired, .. } = &tree.nodes[0].widget
+        else {
+            panic!("not an editor");
+        };
+        assert_eq!((wired[0], wired[1], wired[2]), (7, 2, 0));
+        assert_eq!(
+            shared.runtime_event(tiamat_core::proto::DialogEvent::Chiselled {
+                name: "e".to_owned(),
+                shape: 0b11,
+                cells: wired.clone(),
+            }),
+            tiamat_core::proto::DialogEvent::Chiselled {
+                name: "e".to_owned(),
+                shape: 0b11,
+                cells: editor_cells,
+            },
+            "a chisel reached the mod in world ids"
         );
 
         // And back: what a client names, in the ids its stack was sent in.

@@ -2584,6 +2584,9 @@ impl App {
             // same reason the cut travels: a player placing a named block must
             // not have it paid for out of their plain ones.
             detail: stack.detail.clone(),
+            // And which mixture, for a cut of several materials (v81): two
+            // can share a lowest material and an outline.
+            cells: stack.cells.clone(),
         });
     }
 
