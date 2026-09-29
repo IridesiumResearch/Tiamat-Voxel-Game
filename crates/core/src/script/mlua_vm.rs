@@ -207,6 +207,8 @@ const ENTITY_USERS: &str = "tiamat.entity_users";
 const JOINERS: &str = "tiamat.joiners";
 /// Mods that registered `on_player_move`, in load order.
 const MOVERS: &str = "tiamat.movers";
+/// Mods that registered `on_dismount`, in load order (Life ask 18).
+const DISMOUNTERS: &str = "tiamat.dismounters";
 
 /// How far a hook walk goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +239,8 @@ const RANDOM_TICK_OWNERS: &str = "tiamat.random_tick_owners";
 /// Hook name used in registry keys and in fault messages.
 const HOOK_JOIN: &str = "on_player_join";
 const HOOK_MOVE: &str = "on_player_move";
+/// The hook told that a rider came off their mount.
+const HOOK_DISMOUNT: &str = "on_dismount";
 /// The `on_player_leave` hook's name.
 const HOOK_LEAVE: &str = "on_player_leave";
 /// The hook asked before a body leaves a domain.
@@ -3441,6 +3445,24 @@ impl ScriptVm for MluaVm {
         self.observe_hook(HOOK_MOVE, MOVERS, &table)
     }
 
+    fn dismounted(&mut self, event: &crate::script::DismountEvent) -> HookOutcome {
+        let Ok(table) = self.hook_event(event.player).and_then(|table| {
+            table.set("entity", event.entity.0 as i64)?;
+            table.set("reason", event.reason.as_str())?;
+            table.set("domain", event.domain.as_str())?;
+            // World blocks, as `game.move_player` takes them: a mod that
+            // wants its rider a step to the side adds to these and hands
+            // them straight back.
+            table.set("x", event.at[0])?;
+            table.set("y", event.at[1])?;
+            table.set("z", event.at[2])?;
+            Ok(table)
+        }) else {
+            return HookOutcome::allow();
+        };
+        self.observe_hook(HOOK_DISMOUNT, DISMOUNTERS, &table)
+    }
+
     fn player_leave(&mut self, event: &crate::script::LeaveEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.player).and_then(|table| {
             table.set("name", event.name.as_str())?;
@@ -4323,6 +4345,13 @@ impl MluaVm {
         game.set(
             "register_on_player_move",
             self.hook_registrar(mod_id, HOOK_MOVE, MOVERS)?,
+        )
+        .map_err(|err| self.vm_error(&err))?;
+        // An observation like the move above: the rider is already off when
+        // it is heard (Life ask 18).
+        game.set(
+            "register_on_dismount",
+            self.hook_registrar(mod_id, HOOK_DISMOUNT, DISMOUNTERS)?,
         )
         .map_err(|err| self.vm_error(&err))?;
         game.set(
@@ -7385,7 +7414,75 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("push_player", shove)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_mount(game)?;
         Ok(())
+    }
+
+    /// `game.mount`, `game.dismount` and `game.mounted` — Life ask 18.
+    ///
+    /// **A mount writes the authoritative body**, as `move_player` does, and
+    /// for the same reason: a player's mirror is a copy the tick overwrites.
+    ///
+    /// Two kinds of "no", kept apart on purpose. A mistake in the CALL — a seat
+    /// that is not numbers, an option that does not exist, an id that is not
+    /// one — is a Lua error, raised where the mod can see it. Everything the
+    /// world can say instead — the horse despawned, somebody else got on first,
+    /// the player left — is `nil, reason`, because a mod doing nothing wrong
+    /// meets every one of those, and an error disables the mod that raised it.
+    fn install_mount(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.entities);
+        let mount = self
+            .lua
+            .create_function(
+                move |lua, (uuid, id, options): (String, mlua::Value, Option<Table>)| {
+                    let player = player_of(&uuid, "game.mount")?;
+                    let id = entity_id_from_lua(&id)?;
+                    let seat = seat_from_lua(options.as_ref())?;
+                    let answer = slot
+                        .lock()
+                        .ok()
+                        .and_then(|slot| slot.as_ref().map(|store| store.mount(player, id, seat)))
+                        // No world at all: nobody is connected to it.
+                        .unwrap_or(Err(crate::ent::mount::Refusal::NotConnected));
+                    match answer {
+                        Ok(()) => Ok(mlua::MultiValue::from_iter([mlua::Value::Boolean(true)])),
+                        Err(refused) => refusal(lua, refused.reason()),
+                    }
+                },
+            )
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("mount", mount)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let slot = std::sync::Arc::clone(&self.entities);
+        let dismount = self
+            .lua
+            .create_function(move |_, uuid: String| {
+                let player = player_of(&uuid, "game.dismount")?;
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|store| store.dismount(player)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("dismount", dismount)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let slot = std::sync::Arc::clone(&self.entities);
+        let mounted = self
+            .lua
+            .create_function(move |_, uuid: String| {
+                let player = player_of(&uuid, "game.mounted")?;
+                let riding = slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().and_then(|store| store.mounted(player)));
+                Ok(riding.map(|id| id.0 as i64))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("mounted", mounted)
+            .map_err(|err| self.vm_error(&err))
     }
 
     /// Puts the container calls on the `game` table.
@@ -8654,6 +8751,7 @@ impl MluaVm {
             FLOWERS,
             JOINERS,
             MOVERS,
+            DISMOUNTERS,
             LEAVERS,
             DOMAIN_EXITERS,
             DOMAIN_ENTERERS,
@@ -10432,6 +10530,65 @@ const CLOUD_STATE_FIELDS: [&str; 8] = [
 /// `register_fluid` gives: a misspelled field is a mod that thinks it
 /// configured something.
 const ABILITY_FIELDS: [&str; 4] = ["fly", "speed", "sprint", "wind_sky"];
+
+/// Options `game.mount` accepts, checked for the same reason.
+const MOUNT_FIELDS: [&str; 2] = ["seat", "sneak_dismounts"];
+
+/// The seat a `game.mount` call asked for.
+///
+/// **Blocks in, cells out**: a mod says a rider sits 1.6 blocks up, and the
+/// engine carries them 4.8 cells up (charter rule 5). An axis left out is
+/// zero, so `seat = { y = 1.6 }` is a seat over the middle. No `seat` at all
+/// is on top of the mount's box — [`crate::ent::mount::Seat::resolve`].
+///
+/// # Errors
+///
+/// An option that does not exist, a seat axis that is not a number, or one
+/// further than sixteen blocks from the mount's feet — each a mistake in the
+/// call, raised where the mod made it.
+fn seat_from_lua(options: Option<&Table>) -> mlua::Result<crate::ent::mount::Seat> {
+    let mut seat = crate::ent::mount::Seat::default();
+    let Some(options) = options else {
+        return Ok(seat);
+    };
+    for pair in options.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let known = matches!(
+            &key,
+            Value::String(name) if MOUNT_FIELDS.contains(&name.to_string_lossy().as_ref())
+        );
+        if !known {
+            let named = match &key {
+                Value::String(name) => name.to_string_lossy(),
+                other => format!("{other:?}"),
+            };
+            return Err(mlua::Error::external(format!(
+                "game.mount: unknown option `{named}`. The options are {MOUNT_FIELDS:?}."
+            )));
+        }
+    }
+    if let Some(at) = options.get::<Option<Table>>("seat")? {
+        let cells = f64::from(crate::SUBNODES_PER_AXIS);
+        let axis = |name: &str| -> mlua::Result<f32> {
+            let blocks = at.get::<Option<f64>>(name)?.unwrap_or(0.0);
+            Ok((blocks * cells) as f32)
+        };
+        let offset = [axis("x")?, axis("y")?, axis("z")?];
+        if !crate::ent::mount::seat_is_valid(offset) {
+            return Err(mlua::Error::external(format!(
+                "game.mount: `seat` is {{ x, y, z }} in blocks from the mount's feet, each a \
+                 number no further than {} away, got {:?} blocks",
+                crate::ent::mount::MAX_SEAT_CELLS / crate::SUBNODES_PER_AXIS as f32,
+                offset.map(|axis| axis / crate::SUBNODES_PER_AXIS as f32)
+            )));
+        }
+        seat.offset = Some(offset);
+    }
+    if let Some(flag) = options.get::<Option<bool>>("sneak_dismounts")? {
+        seat.sneak_dismounts = flag;
+    }
+    Ok(seat)
+}
 
 const FLUID_FIELDS: [&str; 9] = [
     "id",
@@ -14704,6 +14861,67 @@ mod tests {
     }
 
     #[test]
+    fn a_dismount_is_heard_by_every_mod_with_why_and_where() {
+        // An observation, like a move: every mod hears it whatever the first
+        // returns, and the event says where the engine put the rider in the
+        // world blocks `game.move_player` takes.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "first",
+            "game.register_on_dismount(function(e) seen = e return false end)",
+        )
+        .expect("first");
+        load(
+            &mut vm,
+            "second",
+            "heard = 0\ngame.register_on_dismount(function() heard = heard + 1 end)",
+        )
+        .expect("second");
+        vm.freeze().expect("freeze");
+        let outcome = vm.dismounted(&crate::script::DismountEvent {
+            player: [0xAB; 32],
+            entity: crate::ent::EntityId(0x0000_0002_0000_0005),
+            reason: crate::ent::mount::Dismount::Sneak,
+            domain: crate::domain::OVERWORLD.to_owned(),
+            at: [10.5, 64.0, -3.25],
+        });
+        assert!(outcome.faults.is_empty());
+        vm.eval_in(
+            "first",
+            &format!(
+                "assert(seen.player == '{}', 'the uuid in hex')\n\
+                 assert(seen.entity == {}, 'the mount')\n\
+                 assert(seen.reason == 'sneak', 'the reason')\n\
+                 assert(seen.domain == '{}', 'the domain')\n\
+                 assert(seen.x == 10.5 and seen.y == 64 and seen.z == -3.25, 'where')",
+                "ab".repeat(32),
+                0x0000_0002_0000_0005_u64,
+                crate::domain::OVERWORLD
+            ),
+        )
+        .expect("the event");
+        vm.eval_in("second", "assert(heard == 1, 'not heard')")
+            .expect("the second mod was told");
+    }
+
+    #[test]
+    fn a_dismount_hook_registered_after_freeze_is_refused() {
+        // Charter rule 9.
+        let mut vm = vm();
+        vm.freeze().expect("freeze");
+        assert!(
+            load(
+                &mut vm,
+                "latecomer",
+                "game.register_on_dismount(function() end)"
+            )
+            .is_err(),
+            "`on_dismount` was registered after the freeze"
+        );
+    }
+
+    #[test]
     fn a_use_at_a_block_reaches_the_handler_registered_for_that_block_first() {
         // Craft ask 8. Life loads first and eats whatever is held, anywhere;
         // Craft loads after it and owns the campfire. Meat held out over the
@@ -16860,9 +17078,41 @@ mod entity_tests {
         selected: std::sync::Mutex<Vec<([u8; 32], u16)>>,
         /// Abilities granted, likewise: the last word wins, as on the server.
         granted: std::sync::Mutex<Vec<([u8; 32], Option<crate::phys::Abilities>)>>,
+        /// Who is riding what, and the seat they were given — the server's
+        /// rules are the server's tests; this is the trip through Lua.
+        rides: std::sync::Mutex<
+            std::collections::BTreeMap<[u8; 32], (crate::ent::EntityId, crate::ent::mount::Seat)>,
+        >,
+        /// What the next `mount` is told, when a test wants a refusal.
+        refuse: std::sync::Mutex<Option<crate::ent::mount::Refusal>>,
     }
 
     impl crate::ent::Access for Menagerie {
+        fn mount(
+            &self,
+            uuid: [u8; 32],
+            id: crate::ent::EntityId,
+            seat: crate::ent::mount::Seat,
+        ) -> Result<(), crate::ent::mount::Refusal> {
+            if let Some(refused) = *self.refuse.lock().expect("refuse") {
+                return Err(refused);
+            }
+            self.rides.lock().expect("rides").insert(uuid, (id, seat));
+            Ok(())
+        }
+
+        fn dismount(&self, uuid: [u8; 32]) -> bool {
+            self.rides.lock().expect("rides").remove(&uuid).is_some()
+        }
+
+        fn mounted(&self, uuid: [u8; 32]) -> Option<crate::ent::EntityId> {
+            self.rides
+                .lock()
+                .expect("rides")
+                .get(&uuid)
+                .map(|(id, _)| *id)
+        }
+
         fn select_slot(&self, uuid: [u8; 32], slot: u16) -> bool {
             self.selected.lock().expect("selected").push((uuid, slot));
             true
@@ -16960,6 +17210,105 @@ mod entity_tests {
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn crate::ent::Access>
         );
         (vm, store)
+    }
+
+    #[test]
+    fn a_mount_carries_its_seat_in_cells_and_a_refusal_comes_back_as_nil_and_a_reason() {
+        // Life ask 18. Blocks in, cells out; an axis left out is zero; and a
+        // refusal is `nil, reason` — never an error, because every refusal
+        // can happen to a mod that did nothing wrong.
+        let (mut vm, store) = vm_with_entities();
+        let uuid = "ab".repeat(32);
+        load(
+            &mut vm,
+            "stable",
+            &format!(
+                "function ride(id, options) return game.mount('{uuid}', id, options) end\n\
+                 function off() return game.dismount('{uuid}') end\n\
+                 function on() return game.mounted('{uuid}') end"
+            ),
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+
+        vm.eval_in(
+            "stable",
+            "local ok, why = ride(7, { seat = { y = 1.6, z = -0.3 }, sneak_dismounts = false })\n\
+             assert(ok == true and why == nil, 'refused: ' .. tostring(why))\n\
+             assert(on() == 7, 'mounted says ' .. tostring(on()))",
+        )
+        .expect("a mount");
+        let rides = store.rides.lock().expect("rides").clone();
+        let (id, seat) = rides.get(&[0xAB; 32]).copied().expect("a ride");
+        assert_eq!(id, crate::ent::EntityId(7));
+        let offset = seat.offset.expect("a seat was named");
+        assert!(offset[0].abs() < f32::EPSILON, "{offset:?}");
+        assert!(
+            (offset[1] - 4.8).abs() < 1e-5,
+            "1.6 blocks is 4.8 cells: {offset:?}"
+        );
+        assert!((offset[2] + 0.9).abs() < 1e-5, "{offset:?}");
+        assert!(!seat.sneak_dismounts, "the option was dropped");
+
+        // No options is the default seat: on top of the box, sneak gets off.
+        vm.eval_in("stable", "assert(ride(8) == true)")
+            .expect("no options");
+        let rides = store.rides.lock().expect("rides").clone();
+        assert_eq!(
+            rides.get(&[0xAB; 32]).map(|(_, seat)| *seat),
+            Some(crate::ent::mount::Seat::default())
+        );
+
+        vm.eval_in(
+            "stable",
+            "assert(off() == true, 'was riding')\n\
+             assert(off() == false, 'still riding')\n\
+             assert(on() == nil, 'mounted after the dismount')",
+        )
+        .expect("a dismount");
+
+        for refused in [
+            crate::ent::mount::Refusal::NoSuchEntity,
+            crate::ent::mount::Refusal::Ridden,
+            crate::ent::mount::Refusal::AlreadyRiding,
+        ] {
+            *store.refuse.lock().expect("refuse") = Some(refused);
+            vm.eval_in(
+                "stable",
+                &format!(
+                    "local ok, why = ride(9)\n\
+                     assert(ok == nil, 'accepted')\n\
+                     assert(why == '{}', 'the reason was ' .. tostring(why))",
+                    refused.reason()
+                ),
+            )
+            .unwrap_or_else(|err| panic!("{refused:?}: {err}"));
+        }
+    }
+
+    #[test]
+    fn a_mount_asked_for_wrongly_is_an_error_where_the_mod_can_see_it() {
+        // The other kind of "no": a mistake in the CALL, which no race can
+        // cause, is an error — not a refusal a mod would read as "taken".
+        let (mut vm, _store) = vm_with_entities();
+        let uuid = "ab".repeat(32);
+        load(&mut vm, "stable", "").expect("load");
+        vm.freeze().expect("freeze");
+        for call in [
+            format!("game.mount('{uuid}', 7, {{ seat = {{ y = 0/0 }} }})"),
+            format!("game.mount('{uuid}', 7, {{ seat = {{ y = 17 }} }})"),
+            format!("game.mount('{uuid}', 7, {{ saddle = true }})"),
+            format!("game.mount('{uuid}', 7, {{ 1 }})"),
+            format!("game.mount('{uuid}', 'horse')"),
+            "game.mount('Alice', 7)".to_owned(),
+            "game.dismount('Alice')".to_owned(),
+            "game.mounted('Alice')".to_owned(),
+        ] {
+            assert!(
+                vm.eval_in("stable", &call).is_err(),
+                "`{call}` was accepted"
+            );
+        }
     }
 
     #[test]

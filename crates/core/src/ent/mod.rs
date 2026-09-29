@@ -40,6 +40,7 @@
 
 pub mod access;
 pub mod component;
+pub mod mount;
 pub mod replicate;
 
 use std::collections::BTreeMap;

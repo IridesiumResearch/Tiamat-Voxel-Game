@@ -39,10 +39,10 @@ mod vm;
 pub use host::{HostError, ModHost, Phase, read_manifest};
 pub use vm::{
     AbsorbsRule, ActionEvent, Backend, BlockRules, BlockTexture, Brush, ChatEvent, DialogEvent,
-    DigEvent, DomainEvent, FluidFlowEvent, FluidRules, HookOutcome, JoinEvent, LeaveEvent,
-    MAX_REFUSAL_BYTES, MoveEvent, PlaceEvent, PunchEvent, RandomTickEvent, ScriptError, ScriptVm,
-    Sky, SkyGrade, SkyKeyframe, Tool, UseAim, UseEntityEvent, UseEvent, VmLimits, WorldEdit,
-    resolve_tool_speeds,
+    DigEvent, DismountEvent, DomainEvent, FluidFlowEvent, FluidRules, HookOutcome, JoinEvent,
+    LeaveEvent, MAX_REFUSAL_BYTES, MoveEvent, PlaceEvent, PunchEvent, RandomTickEvent, ScriptError,
+    ScriptVm, Sky, SkyGrade, SkyKeyframe, Tool, UseAim, UseEntityEvent, UseEvent, VmLimits,
+    WorldEdit, resolve_tool_speeds,
 };
 
 #[cfg(feature = "script")]

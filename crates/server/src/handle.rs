@@ -3245,6 +3245,10 @@ impl ServerHandle {
                         tiamat_core::PlayerUuid,
                         String,
                     > = std::collections::BTreeMap::new();
+                    // **Who was riding what**, for the same reason the names
+                    // are kept: a player who leaves takes their body, and their
+                    // ride with it, before the tick notices (Life ask 18).
+                    let mut rides = crate::mount::Rides::new();
 
                     // The database calls of start-up are not the first tick's:
                     // dropped here, or the first tick would be charged for
@@ -3478,6 +3482,15 @@ impl ServerHandle {
                             let mut people: Vec<PlayerUuid> = Vec::new();
                             if let Ok(bodies) = shared.bodies.lock() {
                                 for (uuid, player) in bodies.iter() {
+                                    // **A rider is carried, not crowded**
+                                    // (Life ask 18). Their body sits inside
+                                    // the mount's box by design, and the two
+                                    // would shove each other apart every
+                                    // tick; the mount is in the crowd as
+                                    // itself, and makes room for both.
+                                    if player.riding.is_some() {
+                                        continue;
+                                    }
                                     people.push(*uuid);
                                     occupants.push(Occupant {
                                         origin: player.origin,
@@ -3512,6 +3525,18 @@ impl ServerHandle {
                         // `on_player_move` (Progress ask 3), heard after the
                         // arrivals below.
                         let mut moved: Vec<tiamat_core::script::MoveEvent> = Vec::new();
+                        // Rides that ended in this pass, heard by `on_dismount`
+                        // once the entities have moved (Life ask 18).
+                        let mut dismounted: Vec<tiamat_core::script::DismountEvent> = Vec::new();
+                        // **The entity store as well, and taken first**: a
+                        // rider's keys step their mount (Life ask 18).
+                        // Population before bodies is the order every path
+                        // takes the two in, and nothing in this loop enters a
+                        // mod, so holding it across the loop re-enters nothing.
+                        // Dropped the moment the loop ends — the mirrors below
+                        // take it again.
+                        let mut mobs = population.write().expect("entity lock");
+                        mobs.begin_rides();
                         if let Ok(mut bodies) = shared.bodies.lock() {
                             let ponds = fluidics.read().expect("fluid lock");
                             // A space nobody has poured in is dry, and dry is
@@ -3529,7 +3554,11 @@ impl ServerHandle {
                                 let abilities = player.abilities(shared.is_operator(uuid));
                                 let tuning =
                                     abilities.tuning(&tiamat_core::phys::Tuning::DEFAULT);
-                                let intent = abilities.allow(player.inputs.take(tick));
+                                // The keys as they came. A rider's go to the
+                                // mount unfiltered: the rider's abilities are
+                                // theirs, and the horse moves at its own pace.
+                                let asked = player.inputs.take(tick);
+                                let intent = abilities.allow(asked);
                                 // Bound to the domain this body is in before
                                 // the physics sees it: `ChunkLookup` takes a
                                 // position and no domain, so a body would
@@ -3540,6 +3569,23 @@ impl ServerHandle {
                                 // in what is around it, and a pond in the
                                 // overworld is not around somebody in a ship.
                                 let wet = ponds.get(&player.domain).unwrap_or(&dry);
+                                let before = player.body;
+                                // **A rider's keys drive their mount, and the
+                                // mount carries the rider** (Life ask 18) —
+                                // or the keys get them off it. Either way the
+                                // player's own body is not stepped this tick:
+                                // it is at the seat, or where they landed.
+                                let carried = match crate::mount::ride(
+                                    &mut mobs, uuid, player, asked, &world, wet, &passable,
+                                    &friction,
+                                ) {
+                                    crate::mount::Ride::Walking => false,
+                                    crate::mount::Ride::Rode => true,
+                                    crate::mount::Ride::Off(event) => {
+                                        dismounted.push(event);
+                                        true
+                                    }
+                                };
                                 let voxels = tiamat_core::phys::Voxels::with_fluid(
                                     &terrain,
                                     wet,
@@ -3547,10 +3593,22 @@ impl ServerHandle {
                                 )
                                 .passing(&passable)
                                 .gripping(&friction);
-                                let before = player.body;
-                                player.body =
-                                    tiamat_core::phys::step(&voxels, player.body, intent, &tuning);
-                                crate::transport::measure_fall(player, &before, intent.fly);
+                                if !carried {
+                                    player.body = tiamat_core::phys::step(
+                                        &voxels,
+                                        player.body,
+                                        intent,
+                                        &tuning,
+                                    );
+                                }
+                                // Carried is not falling, whatever the mount
+                                // does: the rider fell nowhere. The flight
+                                // rule already says exactly that.
+                                crate::transport::measure_fall(
+                                    player,
+                                    &before,
+                                    intent.fly || carried,
+                                );
                                 // How wet, measured where the body ENDED UP.
                                 // The step measures it where the body started,
                                 // because a force has to be computed from the
@@ -3566,21 +3624,28 @@ impl ServerHandle {
                                 // What a client draws this body doing, decided
                                 // where both halves are known: what was asked
                                 // for, and what came of it.
-                                player.anim = crate::transport::anim_from_motion(
-                                    intent,
-                                    &player.body,
-                                    player.dig.is_some()
-                                        || tick.saturating_sub(player.swung_on)
-                                            < crate::transport::SWING_TICKS,
-                                );
+                                let swinging = player.dig.is_some()
+                                    || tick.saturating_sub(player.swung_on)
+                                        < crate::transport::SWING_TICKS;
+                                player.anim = if carried {
+                                    // Sitting: the mount's gait is not theirs.
+                                    crate::mount::seated_anim(swinging)
+                                } else {
+                                    crate::transport::anim_from_motion(
+                                        intent,
+                                        &player.body,
+                                        swinging,
+                                    )
+                                };
                                 // **The server's half of the picture.** A client
                                 // log established that the two simulations part
                                 // company by cells while the PLAYER IS STANDING
                                 // STILL and the server is loading chunks hard —
                                 // so the body that moves is this one, and only
                                 // this side can say what it was standing on when
-                                // it did.
-                                if let Some(trace) = trace.as_ref() {
+                                // it did. Not a rider's: their body was placed,
+                                // not stepped, and the step was the mount's.
+                                if !carried && let Some(trace) = trace.as_ref() {
                                     trace.tick(&crate::trace::Moment {
                                         tick,
                                         origin: player.origin,
@@ -3631,6 +3696,7 @@ impl ServerHandle {
                                 }
                             }
                         }
+                        drop(mobs);
 
                         // **Every player is also an entity** (charter rule 2).
                         // The body that moves is the `PlayerSim` stepped above;
@@ -3693,6 +3759,12 @@ impl ServerHandle {
                                         shared.hands_of(uuid),
                                     );
                                 }
+                                // **Leaving dismounts** (Life ask 18). The
+                                // body, and the ride on it, went with the
+                                // connection, so the ride is read from last
+                                // tick's note — before this tick's replaces it.
+                                dismounted.extend(rides.departed(&present));
+                                rides.note(&bodies);
                             }
                             // Whoever is not in the roster has gone. Driven by
                             // who IS here rather than by a disconnect event: a
@@ -5404,6 +5476,35 @@ impl ServerHandle {
                                     &friction,
                                 );
                             }
+                        }
+
+                        // **Rides that ended, told to the mods** (Life ask 18).
+                        // Here, after the entities have moved, so a hook sees
+                        // the mount where it came to rest — and after every mod
+                        // callback of the tick that could have ended one, a
+                        // despawn from an entity's own step included. The
+                        // riders are already off: this is an observation, and a
+                        // hook that wants its rider elsewhere moves them, which
+                        // reaches their client in this tick's state.
+                        dismounted.extend(
+                            entity_access
+                                .as_ref()
+                                .map(|access| access.take_dismounts())
+                                .unwrap_or_default(),
+                        );
+                        if !dismounted.is_empty() {
+                            let (returned, ()) = sight.lending(world, || {
+                                for event in &dismounted {
+                                    let outcome = source.player_dismounted(event);
+                                    for (mod_id, err) in &outcome.faults {
+                                        error!(
+                                            mod_id = %mod_id,
+                                            "mod disabled after an on_dismount failure: {err}"
+                                        );
+                                    }
+                                }
+                            });
+                            world = returned;
                         }
 
                         // **What each player is told about the entities.**

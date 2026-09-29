@@ -113,6 +113,15 @@ pub struct Population {
     /// itself, and putting it on the record would carry it onto the wire and
     /// into the world file, where the row's own domain column already says it.
     domains: BTreeMap<EntityId, String>,
+    /// Entities a rider's keys have already stepped this tick (Life ask 18).
+    ///
+    /// **Cleared at the top of the players' pass and read by [`Self::tick`]
+    /// later the same tick**, which leaves these alone for the reason it leaves
+    /// a mirror alone: their physics has already happened. Derived afresh every
+    /// tick from who actually rode, so there is no second record of who rides
+    /// what to fall out of step with the rider's own body — that is
+    /// `PlayerSim::riding`, and only that.
+    driven: BTreeSet<EntityId>,
 }
 
 impl Population {
@@ -601,7 +610,11 @@ impl Population {
             // inputs. Stepping it again would apply a second tick of gravity to
             // a body that has had one — and the correction would arrive as the
             // other players on your screen sinking into the floor.
-            if self.transient.contains(&id) {
+            //
+            // **And so has a mount** (Life ask 18): its rider's keys stepped it
+            // in the players' pass, and a second step here would be the same
+            // second tick of gravity, under the rider's own camera.
+            if self.transient.contains(&id) || self.driven.contains(&id) {
                 continue;
             }
             // Somebody else's domain. Stepped when that domain's turn comes
@@ -611,74 +624,17 @@ impl Population {
             if self.domain_of(id) != domain {
                 continue;
             }
-            let Some(entity) = self.entities.get(id) else {
+            let Some(drive) = self.entities.get(id).map(|entity| entity.drive) else {
                 continue;
             };
-            let Some(collider) = entity.collider else {
-                continue;
-            };
-
-            let origin = entity.transform.chunk;
-            let body = Body {
-                position: entity.transform.local,
-                velocity: entity.velocity.0,
-                on_ground: entity.on_ground,
-                jump_cooldown: 0,
-            };
-            let drive = entity.drive;
-
-            // Resident chunks only, exactly as the player's step does: a mob
-            // walking into unloaded terrain stops rather than generating a
-            // chunk inside the tick budget. It reads the fluid too, so a mob
-            // floats in the same milk a player does — charter rule 2, one
-            // simulation.
-            let voxels = phys::Voxels::with_fluid(&terrain, fluid, origin)
-                .passing(passable)
-                .gripping(friction);
-            // **The mob's own pace** (Life ask 14), through the same
-            // `Abilities::tuning` a slowed player goes through: one
-            // implementation of "slower" rather than two, and a speed of
-            // exactly 1 returns the base tuning untouched.
-            let tuning = phys::Abilities {
-                speed: entity.speed,
-                ..phys::Abilities::DEFAULT
+            // What a mob decides for itself, with no cooldown carried between
+            // ticks: an entity's store has none, and never did.
+            if let Some(Advanced {
+                moved: Some(moved), ..
+            }) = self.advance(id, &terrain, fluid, (passable, friction), drive, 0)
+            {
+                moved_chunks.push(moved);
             }
-            .tuning(&phys::Tuning::DEFAULT);
-            let stepped = phys::step_shaped(&voxels, body, drive, &tuning, collider);
-
-            // Charter rule 7: keep the local part inside one chunk so it never
-            // becomes a world-space f32 that loses precision far from the
-            // origin. The chunk an entity is anchored to is also where it
-            // persists, so this is what moves a mob between chunk rows.
-            let (moved, local) = phys::voxels::renormalise(origin, stepped.position);
-            let (chunk, local) = if moved.in_world() {
-                (moved, local)
-            } else {
-                // The world is finite (charter rule 6). A mob over the edge
-                // stops rather than falling for ever — the same answer the
-                // player gets, and for the same reason: an entity falling
-                // without end drags its interest set down with it.
-                (origin, stepped.position)
-            };
-
-            let Some(entity) = self.entities.get_mut(id) else {
-                continue;
-            };
-            if chunk != entity.transform.chunk {
-                // It changed chunks, so BOTH are dirty: the one it left has to
-                // stop claiming it, and the one it arrived in has to start.
-                // Marking only the destination is how a world fills up with
-                // copies of everything that ever moved.
-                moved_chunks.push((entity.transform.chunk, chunk));
-            }
-            entity.transform.chunk = chunk;
-            entity.transform.local = local;
-            entity.velocity.0 = if moved.in_world() {
-                stepped.velocity
-            } else {
-                [0.0; 3]
-            };
-            entity.on_ground = stepped.on_ground;
         }
         // It changed chunks, so BOTH are dirty: the one it left has to stop
         // claiming it, and the one it arrived in has to start. Marking only the
@@ -689,6 +645,174 @@ impl Population {
             self.dirty_chunk(domain, arrived);
         }
     }
+
+    /// Forgets which entities riders moved last tick.
+    ///
+    /// Called at the top of the players' pass, before any rider drives: the
+    /// set is only ever "this tick's", and [`Self::tick`] reads it the same
+    /// tick to leave those bodies alone.
+    pub fn begin_rides(&mut self) {
+        self.driven.clear();
+    }
+
+    /// Steps an entity from its RIDER's intent, as [`Self::tick`] would have
+    /// stepped it from its own (Life ask 18).
+    ///
+    /// **The same step, not a copy of it**: [`Self::advance`] is what both
+    /// call, so a mount falls, climbs a lip and floats exactly as it does
+    /// unridden — with its own pace and its own box, and the rider's keys in
+    /// place of its `drive`. Two things are the rider's: `jump_cooldown`,
+    /// which an entity's store has no room for and a rider's held jump needs
+    /// spaced as a player's is, and `yaw`, where the mount now faces.
+    ///
+    /// Marks the entity as driven, so [`Self::tick`] does not step it again.
+    /// `None` — nothing moved — when there is no such entity, it is somebody's
+    /// body, it is in another domain than the rider, or it has no box a body
+    /// can be stepped as; each is a mount the rider has lost.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the step's world, its intent, and the two things that are the rider's"
+    )]
+    pub fn drive(
+        &mut self,
+        id: EntityId,
+        domain: &str,
+        world: &World,
+        fluid: &crate::fluid::Fluidics,
+        grip: (&[u16], &[(u16, f32)]),
+        intent: phys::Intent,
+        jump_cooldown: u8,
+        yaw: f32,
+    ) -> Option<Driven> {
+        if self.transient.contains(&id) || self.domain_of(id) != domain {
+            return None;
+        }
+        let shape = self
+            .entities
+            .get(id)?
+            .collider
+            .filter(|shape| tiamat_core::ent::mount::fits(*shape))?;
+        let terrain = world.solid(domain);
+        let advanced = self.advance(id, &terrain, fluid, grip, intent, jump_cooldown)?;
+        if let Some((left, arrived)) = advanced.moved {
+            self.dirty_chunk(domain, left);
+            self.dirty_chunk(domain, arrived);
+        }
+        // The arena directly, like the step: a heading is not a reason to
+        // rewrite a chunk's row, any more than a stride within it is.
+        let entity = self.entities.get_mut(id)?;
+        entity.transform.yaw = yaw;
+        self.driven.insert(id);
+        Some(Driven {
+            origin: entity.transform.chunk,
+            body: advanced.body,
+            shape,
+            speed: entity.speed,
+        })
+    }
+
+    /// One entity's step: the physics every entity takes, from `drive`.
+    ///
+    /// Reads the body from the store, steps it with the entity's own box and
+    /// pace, and writes it back. `None` for an entity that has gone or has no
+    /// collider — a marker has no physics to run.
+    fn advance(
+        &mut self,
+        id: EntityId,
+        terrain: &crate::world::Solid<'_>,
+        fluid: &crate::fluid::Fluidics,
+        (passable, friction): (&[u16], &[(u16, f32)]),
+        drive: phys::Intent,
+        jump_cooldown: u8,
+    ) -> Option<Advanced> {
+        let entity = self.entities.get(id)?;
+        let collider = entity.collider?;
+
+        let origin = entity.transform.chunk;
+        let body = Body {
+            position: entity.transform.local,
+            velocity: entity.velocity.0,
+            on_ground: entity.on_ground,
+            jump_cooldown,
+        };
+
+        // Resident chunks only, exactly as the player's step does: a mob
+        // walking into unloaded terrain stops rather than generating a
+        // chunk inside the tick budget. It reads the fluid too, so a mob
+        // floats in the same milk a player does — charter rule 2, one
+        // simulation.
+        let voxels = phys::Voxels::with_fluid(terrain, fluid, origin)
+            .passing(passable)
+            .gripping(friction);
+        // **The mob's own pace** (Life ask 14), through the same
+        // `Abilities::tuning` a slowed player goes through: one
+        // implementation of "slower" rather than two, and a speed of
+        // exactly 1 returns the base tuning untouched. Named in `core` so a
+        // riding client predicts its mount with the same numbers.
+        let tuning = tiamat_core::ent::mount::tuning(entity.speed);
+        let stepped = phys::step_shaped(&voxels, body, drive, &tuning, collider);
+
+        // Charter rule 7: keep the local part inside one chunk so it never
+        // becomes a world-space f32 that loses precision far from the
+        // origin. The chunk an entity is anchored to is also where it
+        // persists, so this is what moves a mob between chunk rows.
+        let (moved, local) = phys::voxels::renormalise(origin, stepped.position);
+        let (chunk, local) = if moved.in_world() {
+            (moved, local)
+        } else {
+            // The world is finite (charter rule 6). A mob over the edge
+            // stops rather than falling for ever — the same answer the
+            // player gets, and for the same reason: an entity falling
+            // without end drags its interest set down with it.
+            (origin, stepped.position)
+        };
+
+        let entity = self.entities.get_mut(id)?;
+        // It changed chunks, so BOTH are dirty — the caller marks them, since
+        // it knows the domain and this borrow holds the store.
+        let changed = (chunk != entity.transform.chunk).then_some((entity.transform.chunk, chunk));
+        entity.transform.chunk = chunk;
+        entity.transform.local = local;
+        entity.velocity.0 = if moved.in_world() {
+            stepped.velocity
+        } else {
+            [0.0; 3]
+        };
+        entity.on_ground = stepped.on_ground;
+        Some(Advanced {
+            body: Body {
+                position: local,
+                velocity: entity.velocity.0,
+                on_ground: entity.on_ground,
+                jump_cooldown: stepped.jump_cooldown,
+            },
+            moved: changed,
+        })
+    }
+}
+
+/// What one entity's step left it doing, for its caller.
+struct Advanced {
+    /// The body as it now stands, local to the chunk it is anchored to.
+    body: Body,
+    /// The chunk it left and the one it arrived in, if it crossed.
+    moved: Option<(ChunkPos, ChunkPos)>,
+}
+
+/// What a rider's drive left their mount doing — see [`Population::drive`].
+///
+/// Everything the rider's client needs to predict the next step exactly as
+/// the server will take it: where, how fast, its box and its pace.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Driven {
+    /// The chunk the mount is anchored to now.
+    pub origin: ChunkPos,
+    /// Its body, local to that chunk, with the rider's jump cooldown.
+    pub body: Body,
+    /// Its box.
+    pub shape: phys::Shape,
+    /// Its pace, as a multiple of the ordinary one.
+    pub speed: f32,
 }
 
 /// A handle on the entity store, for the mod API.
@@ -742,6 +866,13 @@ pub struct Shared {
     /// other to send one `u16` would be a cycle bought for nothing. The tick
     /// drains this where it can see both.
     selections: std::sync::Mutex<Vec<(tiamat_core::PlayerUuid, u16)>>,
+    /// Riders a mod's call got off, waiting for `on_dismount` (Life ask 18).
+    ///
+    /// **Done here, heard later.** `game.dismount` and a mount's despawn are
+    /// calls from inside a mod's callback, so the rider is off at once — the
+    /// next state the client is sent says so — but telling the mods would
+    /// re-enter the VM mid-script. The tick delivers these with its own.
+    dismounts: std::sync::Mutex<Vec<tiamat_core::script::DismountEvent>>,
 }
 
 impl Shared {
@@ -758,6 +889,23 @@ impl Shared {
             domains,
             bodies,
             selections: std::sync::Mutex::new(Vec::new()),
+            dismounts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Takes every dismount a mod's call caused since the last tick asked.
+    #[must_use]
+    pub fn take_dismounts(&self) -> Vec<tiamat_core::script::DismountEvent> {
+        self.dismounts
+            .lock()
+            .map(|mut queued| std::mem::take(&mut *queued))
+            .unwrap_or_default()
+    }
+
+    /// Files a dismount for the tick to tell the mods about.
+    fn heard_later(&self, event: tiamat_core::script::DismountEvent) {
+        if let Ok(mut queued) = self.dismounts.lock() {
+            queued.push(event);
         }
     }
 
@@ -794,9 +942,40 @@ impl tiamat_core::ent::Access for Shared {
     }
 
     fn despawn(&self, id: EntityId) -> bool {
-        self.population
-            .write()
-            .is_ok_and(|mut population| population.despawn(id).is_some())
+        let Ok(mut population) = self.population.write() else {
+            return false;
+        };
+        let Some(gone) = population.despawn(id) else {
+            return false;
+        };
+        // **A mount that goes drops its rider on the tick it goes** (Life ask
+        // 18) — here, rather than when the tick next looks, so no state is sent
+        // with a rider sitting on nothing. Where it stood is where they land.
+        // Population before bodies, the order every other path takes them in.
+        if let Ok(mut bodies) = self.bodies.lock() {
+            let riders: Vec<tiamat_core::PlayerUuid> = bodies
+                .iter()
+                .filter(|(_, player)| player.riding.as_ref().is_some_and(|ride| ride.entity == id))
+                .map(|(uuid, _)| *uuid)
+                .collect();
+            for uuid in riders {
+                if let Some(player) = bodies.get_mut(&uuid) {
+                    if let Some(riding) = player.riding.as_mut() {
+                        riding.origin = gone.transform.chunk;
+                        riding.body.position = gone.transform.local;
+                    }
+                    if let Some(event) = crate::mount::alight(
+                        &uuid,
+                        player,
+                        tiamat_core::ent::mount::Dismount::Gone,
+                        crate::mount::Landing::Mount,
+                    ) {
+                        self.heard_later(event);
+                    }
+                }
+            }
+        }
+        true
     }
 
     fn get(&self, id: EntityId) -> Option<Entity> {
@@ -844,6 +1023,19 @@ impl tiamat_core::ent::Access for Shared {
         // their speed arrives at the far end already moving, which reads as
         // the destination throwing them.
         player.body.velocity = [0.0; 3];
+        // **And a rider moved is a rider off** (Life ask 18). Otherwise the
+        // next tick puts them straight back in the saddle and the move does
+        // nothing, silently. Off where the move put them, and heard as a mod
+        // ending the ride — which is what this was.
+        if let Some(event) = crate::mount::alight(
+            &uuid,
+            player,
+            tiamat_core::ent::mount::Dismount::Asked,
+            crate::mount::Landing::Here,
+        ) {
+            drop(bodies);
+            self.heard_later(event);
+        }
         true
     }
 
@@ -909,6 +1101,25 @@ impl tiamat_core::ent::Access for Shared {
         let Some(player) = bodies.get_mut(&uuid) else {
             return false;
         };
+        // **A rider's push lands on what carries them** (Life ask 18): their
+        // own body is put at the seat every tick, so a shove written to it
+        // would vanish. The knockback moves the horse, and the rider with it.
+        if let Some(mount) = player.riding.as_ref().map(|ride| ride.entity) {
+            drop(bodies);
+            let Ok(mut population) = self.population.write() else {
+                return false;
+            };
+            let Some(entity) = population.get_mut(mount) else {
+                return false;
+            };
+            for (velocity, push) in entity.velocity.0.iter_mut().zip(impulse) {
+                *velocity += push;
+            }
+            if impulse[1] > 0.0 {
+                entity.on_ground = false;
+            }
+            return true;
+        }
         for (velocity, push) in player.body.velocity.iter_mut().zip(impulse) {
             *velocity += push;
         }
@@ -943,6 +1154,59 @@ impl tiamat_core::ent::Access for Shared {
             player.abilities_sent = false;
         }
         true
+    }
+
+    fn mount(
+        &self,
+        uuid: [u8; 32],
+        id: EntityId,
+        seat: tiamat_core::ent::mount::Seat,
+    ) -> Result<(), tiamat_core::ent::mount::Refusal> {
+        use tiamat_core::ent::mount::Refusal;
+        // Population before bodies, the order every other path takes them in.
+        // A poisoned lock is a simulation thread that panicked: there is no
+        // world to ride in, and nobody is connected to one.
+        let population = self.population.read().map_err(|_| Refusal::NotConnected)?;
+        let mut bodies = self.bodies.lock().map_err(|_| Refusal::NotConnected)?;
+        crate::mount::board(
+            &population,
+            &mut bodies,
+            &tiamat_core::PlayerUuid::from_bytes(uuid),
+            id,
+            seat,
+        )
+    }
+
+    fn dismount(&self, uuid: [u8; 32]) -> bool {
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return false;
+        };
+        let Some(player) = bodies.get_mut(&uuid) else {
+            return false;
+        };
+        let Some(event) = crate::mount::alight(
+            &uuid,
+            player,
+            tiamat_core::ent::mount::Dismount::Asked,
+            crate::mount::Landing::Mount,
+        ) else {
+            return false;
+        };
+        drop(bodies);
+        self.heard_later(event);
+        true
+    }
+
+    fn mounted(&self, uuid: [u8; 32]) -> Option<EntityId> {
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
+        self.bodies
+            .lock()
+            .ok()?
+            .get(&uuid)?
+            .riding
+            .as_ref()
+            .map(|ride| ride.entity)
     }
 
     fn within(&self, centre: [f64; 3], radius: f64, source: Option<&str>) -> Vec<EntityId> {

@@ -241,6 +241,50 @@ pub trait Access: Send + Sync {
         let _ = (uuid, abilities);
         false
     }
+
+    /// Seats a connected player on an entity, so their keys drive it (Life
+    /// ask 18).
+    ///
+    /// **The player's body is the thing that changes.** From the next tick
+    /// their walk, jump and sprint step the ENTITY — its own pace, its own box,
+    /// the step every entity takes — and their body is placed at the seat every
+    /// tick, turning with the mount. See [`super::mount`] for the rules both
+    /// ends of the wire share.
+    ///
+    /// Asking again for the entity already ridden moves the seat and keeps the
+    /// ride. Everything else that cannot be done is refused with a
+    /// [`super::mount::Refusal`] rather than an error, because every one of
+    /// them can happen to a mod that did nothing wrong — see its documentation.
+    ///
+    /// # Errors
+    ///
+    /// The [`super::mount::Refusal`] that says why. Defaulted to
+    /// `NotConnected`, because a VM with no server behind it has no players.
+    fn mount(
+        &self,
+        uuid: [u8; 32],
+        id: EntityId,
+        seat: super::mount::Seat,
+    ) -> Result<(), super::mount::Refusal> {
+        let _ = (uuid, id, seat);
+        Err(super::mount::Refusal::NotConnected)
+    }
+
+    /// Gets a player off whatever they are riding, where the mount stands.
+    ///
+    /// Returns whether they were riding. The mods hear it through
+    /// `on_dismount` with the reason `"dismount"`, a little later in the same
+    /// tick — never from inside this call, which is already inside a mod.
+    fn dismount(&self, uuid: [u8; 32]) -> bool {
+        let _ = uuid;
+        false
+    }
+
+    /// The entity a connected player is riding, if any.
+    fn mounted(&self, uuid: [u8; 32]) -> Option<EntityId> {
+        let _ = uuid;
+        None
+    }
 }
 
 #[cfg(test)]

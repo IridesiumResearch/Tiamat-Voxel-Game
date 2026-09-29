@@ -362,6 +362,17 @@ impl Generator {
         }
     }
 
+    /// Tells the mods a rider came off their mount (Life ask 18).
+    pub fn player_dismounted(
+        &mut self,
+        event: &tiamat_core::script::DismountEvent,
+    ) -> tiamat_core::script::HookOutcome {
+        match self {
+            Self::Mods(generator) => generator.host_mut().vm_mut().dismounted(event),
+            Self::Air(_) => tiamat_core::script::HookOutcome::allow(),
+        }
+    }
+
     /// Asks whether a body may leave a domain.
     pub fn domain_exited(
         &mut self,

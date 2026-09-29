@@ -1061,6 +1061,34 @@ pub struct MoveEvent {
     pub from: Option<BlockPos>,
 }
 
+/// A rider came off their mount (Life ask 18).
+///
+/// **An observation, like [`MoveEvent`]**: they are already off, and the
+/// return value is read for faults and nothing else. `at` is where the engine
+/// put them — the mount's feet, or where they were when they left — and a mod
+/// that wants them somewhere else moves them from inside the hook with
+/// `game.move_player`, which reaches the client in the same tick's state.
+///
+/// Heard once per ride, whichever way it ended, and on the tick it ended: a
+/// sneak or a vanished mount from the tick's own movement, a
+/// `game.dismount` or a despawn from wherever the mod asked, all delivered
+/// after the entities have moved, so a hook sees the mount where it came to
+/// rest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DismountEvent {
+    /// Who came off, canonically.
+    pub player: [u8; 32],
+    /// What they were riding. It may already be gone — that is one of the
+    /// reasons.
+    pub entity: crate::ent::EntityId,
+    /// Why.
+    pub reason: crate::ent::mount::Dismount,
+    /// The space they are in.
+    pub domain: String,
+    /// Where the engine put them, in world blocks.
+    pub at: [f64; 3],
+}
+
 /// One block the engine chose to offer a mod this tick.
 ///
 /// **The mechanism behind everything that happens on its own**: a crop
@@ -1719,6 +1747,12 @@ pub trait ScriptVm: Sized {
 
     /// Runs every `on_player_leave` hook.
     fn player_leave(&mut self, event: &LeaveEvent) -> HookOutcome;
+
+    /// Tells the mods a rider came off their mount (Life ask 18).
+    ///
+    /// An observation, like [`Self::player_move`]: the rider is already off,
+    /// and the outcome carries only the faults.
+    fn dismounted(&mut self, event: &DismountEvent) -> HookOutcome;
 
     /// Asks every `on_domain_exit` whether a body may leave a domain.
     ///

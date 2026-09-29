@@ -617,6 +617,13 @@ pub struct PlayerSim {
     /// order routinely. Without this an older duplicate overwrites a newer
     /// look and heads twitch backwards.
     pub look_tick: u64,
+    /// What this player is riding, if anything (Life ask 18).
+    ///
+    /// **While it is set this body is not stepped from the player's keys** —
+    /// the mount is, and this body is put at the seat. See [`crate::mount`].
+    /// Forgotten when the player leaves, because `PlayerSim` is: leaving
+    /// dismounts, and nothing about a ride is saved.
+    pub riding: Option<crate::mount::Riding>,
 }
 
 impl PlayerSim {
@@ -675,6 +682,7 @@ impl PlayerSim {
             abilities_sent: false,
             look: [0.0; 2],
             look_tick: 0,
+            riding: None,
         }
     }
 }

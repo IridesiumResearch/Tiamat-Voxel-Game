@@ -1498,6 +1498,50 @@ function game.register_on_player_move(callback) end
 ---@field domain string The space they are in.
 ---@field from { x: integer, y: integer, z: integer }? The block they were in, or nil the first time.
 
+---Called when a rider comes off their mount — Life ask 18.
+---
+---**Registration window only.**
+---
+---An observation, like `on_player_move`: they are already off, every mod that
+---registered hears it whatever any returns, and an error disables your mod.
+---Once per ride, on the tick it ended, after the entities have moved — so the
+---mount is where it came to rest. `reason` says how:
+---
+---- `"sneak"` — they pressed sneak, on a seat that lets it get them off;
+---- `"dismount"` — a mod ended it: `game.dismount`, or `game.move_player`
+---  moving the rider (which would otherwise do nothing: a rider is put back at
+---  the seat every tick);
+---- `"gone"` — the mount was despawned (which is how a mod kills one), or it
+---  or the rider was moved into another domain;
+---- `"leave"` — the player left the server while riding. They are gone, so
+---  there is nobody to move; the mount is free.
+---
+---`x`, `y`, `z` are where the engine put them, in world blocks: the mount's
+---feet, or where they were when the ride ended somewhere else. **To land them
+---anywhere else, move them from here** — `game.move_player` reaches their client
+---in the same tick's state:
+---
+---```lua
+---game.register_on_dismount(function(e)
+---    if e.reason ~= "leave" then
+---        game.move_player(e.player, { x = e.x + 1.5, y = e.y, z = e.z })  -- beside the horse
+---    end
+---    riders[e.entity] = nil
+---end)
+---```
+---@param callback fun(event: Tiamat.DismountEvent)
+function game.register_on_dismount(callback) end
+
+---A rider coming off their mount.
+---@class Tiamat.DismountEvent
+---@field player string The rider's UUID in hex.
+---@field entity integer What they were riding. It may already be gone.
+---@field reason "sneak"|"dismount"|"gone"|"leave" How the ride ended.
+---@field domain string The space they are in.
+---@field x number Where the engine put them, in world blocks.
+---@field y number
+---@field z number
+
 ---Called when a player presses or releases one of YOUR registered actions.
 ---
 ---Charter rule 11: you are told WHAT was done, never which key did it. There is
@@ -4298,6 +4342,79 @@ function game.select_slot(player, slot) end
 ---@param impulse { x: number, y: number, z: number }
 ---@return boolean pushed
 function game.push_player(player, impulse) end
+
+---Seats a connected player on an entity, so their keys drive it — Life ask 18.
+---
+---**The player's body is the thing that changes.** From the next tick their
+---walk, jump and sprint step the ENTITY: at its own `speed`, with its own
+---`collider`, through the same physics every entity takes, and predicted by the
+---rider's own client the way their body is — no rubber-banding. Their body sits
+---at the seat and turns with the mount, and their camera is at the seat plus
+---their eye height. **While ridden, the mount faces where its rider looks**; its
+---`drive` is ignored (set it again when they get off) and your `on_step` still
+---runs for it. The rider's own abilities stay theirs: a flying rider's horse
+---does not fly, and a hungry rider's horse still gallops.
+---
+---`seat` is in BLOCKS from the mount's feet, measured as if the mount faced
+---north (`+z` ahead of it), and turns with it; an axis left out is 0, and no
+---`seat` at all is on top of the mount's box. `sneak_dismounts` (default
+---`true`) makes the sneak key get the rider off; with it `false`, sneak drives
+---the mount at a crawl that will not walk off an edge, and getting off is
+---yours to arrange with `game.dismount`.
+---
+---**Answers `true`, or `nil` and a reason** — never an error for any of these,
+---because each can happen to a mod doing nothing wrong (two players using one
+---horse on the same tick):
+---
+---- `"not connected"` — no such player here;
+---- `"no such entity"` — the id names nothing live;
+---- `"a player"` — it is somebody's body, their own included;
+---- `"no collider"` — it has no box to drive, or one wider or taller than 16
+---  blocks;
+---- `"another domain"` — it is not in the player's simulation space;
+---- `"ridden"` — somebody else is on it: one rider to a mount;
+---- `"already riding"` — they are on something else; `game.dismount` first.
+---
+---**Asking again for the entity they already ride keeps the ride and moves the
+---seat.** A mistake in the call itself — a seat that is not numbers or is more
+---than 16 blocks from the feet, an option that does not exist — is an error.
+---
+---Riding is never saved: a player who leaves is off (heard as `"leave"`), a
+---server shutting down is everybody leaving, and the mount is saved where it
+---stands like any entity. See `game.register_on_dismount` for every way off.
+---
+---```lua
+---game.register_on_use_entity(function(e)
+---    if not horses[e.target] then return end          -- not ours: let it pass
+---    local ok, why = game.mount(e.player, e.target, { seat = { y = 1.6, z = -0.3 } })
+---    if not ok then game.chat_to(e.player, "You cannot ride that: " .. why) end
+---    return ""
+---end)
+---```
+---@param player string The player's UUID, in hex.
+---@param entity integer The entity to ride, as `game.spawn_entity` returned it.
+---@param options { seat?: { x?: number, y?: number, z?: number }, sneak_dismounts?: boolean }?
+---@return true|nil ok
+---@return string? reason Why not, when `ok` is nil.
+function game.mount(player, entity, options) end
+
+---Gets a player off whatever they are riding. Returns whether they were riding.
+---
+---They land at the mount's feet — inside its box, which the crowd pass eases
+---them out of over the next second — and `on_dismount` hears it with the
+---reason `"dismount"` later in the same tick, never from inside this call.
+---
+---```lua
+---game.dismount(event.player)
+---```
+---@param player string The player's UUID, in hex.
+---@return boolean was_riding
+function game.dismount(player) end
+
+---The entity a connected player is riding, or `nil`.
+---@param player string The player's UUID, in hex.
+---@return integer|nil entity
+function game.mounted(player) end
 
 ---Every entity within `radius` blocks of a position, nearest first.
 ---
