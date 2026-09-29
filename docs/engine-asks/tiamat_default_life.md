@@ -9,8 +9,8 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-09-26: 18**, below; 16 and 17 landed. New ones go at the top,
-newest first.
+**Open as of 2026-09-29: 18**, below, being built; 16, 17 and 19 landed. New ones go at
+the top, newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
 nothing — the place control at open sky, or at a block past reach — now
@@ -41,6 +41,65 @@ camera-facing row centred over an entity's head that FOLLOWS it, latest-state
 per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
+
+## 19. A creature is lit as if it stood in the open, wherever it is (2026-09-29): LANDED 2026-09-29 (engine 847a908), awaiting the eye
+
+**Seen.** In play, every creature is lit the same everywhere: a bat hanging
+in a pitch-dark cave, a scurrier in a tunnel and a cow in noon sun are
+equally bright, so a cave's animals seem to glow against the dark rock round
+them, and a mob under a canopy or in a torchlit room is no darker or warmer
+than one in a field.
+
+**Why the mod cannot fix it.** How a model is shaded is the client's alone.
+`crates/client/src/render/skinned.rs` says it outright: figures are "lit by
+the sun, the ambient and the fog and nothing else", and `skinned.wgsl`
+shades `albedo * (sun + sky)` from the frame's globals. The light the world
+has PROPAGATED to the block the figure stands in (the sky light that is 0
+at the bottom of a cave, and the block light a lamp or lava gives), which
+every voxel face beside it is lit by, never reaches the figure. A mod has
+no hand in the shader, and no knob on an entity for brightness.
+
+**Smallest change.** Light each figure by the light where it stands: when
+the client builds a `Figure`, sample the propagated light at the block its
+body's centre is in (the same sky and block channels the mesher lights a
+face with there), put it on the instance, and in `skinned.wgsl` scale the
+sun and sky terms by the sky channel and add the block channel's colour in
+place of the flat ambient, the way a voxel face is lit. A figure in the
+open looks exactly as it does now; one in a cave goes dark, and one by lava
+glows orange. The same would serve the engine's own humanoid (other
+players), which has the same flat lighting.
+
+**From the engine, 2026-09-29 (engine 847a908).** Landed as asked, and
+for the engine's own rig too: other players, and the player's own body in
+third person. Nothing for the mod to do and nothing on the wire: the
+light was already sent, and the client now reads it where each figure
+stands.
+
+- **Where it is read.** At the feet, the middle and the head, from the
+  entity's collider, and the brightest of the three a channel: light is
+  stored a block and a body is rarely in one. Never above the head, so a
+  scurrier in a tunnel a block high is not lit by the sky over the floor
+  above it. A creature registered with no collider is read at its feet.
+- **How it is lit.** The sun and the sky reach a figure as far as the
+  sky reaches where it stands. A lamp or lava lights it in its own
+  colour, with the falloff a wall beside it has. Where neither reaches,
+  it has the floor the rock round it has: dark as the cave is dark, and
+  never black.
+- **In the open it is exactly as it was**, by day and by night.
+- **What it does not do.** A figure is one light over its whole body: a
+  cow half in a doorway is lit as its brighter half. And a dropped item
+  or a block held in a hand is a prop, drawn by another pass, and is
+  still lit as before, so a dark figure in a cave holds a bright block.
+  That pass is being rewritten for the cut of several materials (UI 18)
+  and gets the same light when that has landed.
+
+Tests: `a_figure_is_lit_by_the_light_where_it_stands`, the pixels a
+figure covers in the open, in the dark, half shaded and beside a warm
+lamp, in all three lighting modes; and
+`a_body_is_lit_by_the_brightest_of_the_blocks_it_stands_in`, the
+sampling. What it looks like is the designer's ([H]): a bat in a dark
+cave against the rock, a cow at noon, and a creature beside lava or a
+torch.
 
 ## 18. Riding: a player seated on an entity, driving it (2026-09-23): OPEN
 
