@@ -913,6 +913,129 @@ fn a_chunks_entities_survive_a_freeze_and_a_thaw() {
 }
 
 #[test]
+fn an_item_on_the_ground_is_the_same_material_under_another_mod_set() {
+    // **Charter rule 8, for the one material an entity holds.** A stack on the
+    // ground is an entity, and an entity went to disk as `postcard` made it:
+    // under the number the SESSION had given the material. Reopened with a mod
+    // loading in front, the brick somebody dropped came back as whatever that
+    // number meant now.
+    use tiamat_core::ent::{Entity, Transform};
+    use tiamat_core::inventory::{Shape, Stack};
+
+    let path = scratch("entity-item-ids");
+    let home = ChunkPos::new(0, 0, 0);
+    let slab = Shape::new(0b1_1111_1111).expect("a slab");
+
+    // The world is made with the brick third in line.
+    let world_id = {
+        let mut registry = registry_with(&["a:stone", "a:dirt", "b:brick"]);
+        let brick = registry.id_of("b:brick").expect("registered");
+        let mut db = WorldDb::open(&path, &mut registry).expect("open");
+        let world_id = db.materials().to_world(brick).expect("a world id");
+
+        let lying = |stack| Entity {
+            item: Some(stack),
+            ..Entity::at(Transform::at(home, [1.0, 2.0, 3.0]), "b")
+        };
+        let mut cut = Stack::shaped(brick, slab, 4).expect("four slabs");
+        cut.detail = Some("fired twice".to_owned());
+        // Both doors an entity is written through.
+        db.save_chunk_entities(home, &[lying(cut)]).expect("save");
+        let other = ChunkPos::new(1, 0, 0);
+        let loose = [lying(Stack::new(brick, 40).expect("forty units"))];
+        db.save_chunk_entities_batch_in("overworld", [(other, &loose[..])])
+            .expect("save a batch");
+        db.close().expect("close");
+        world_id
+    };
+
+    // And reopened with another mod's block in front and the rest in another
+    // order: every session number has moved, the brick's from 4 to 3.
+    let mut registry = registry_with(&["z:first", "b:brick", "a:dirt", "a:stone"]);
+    let brick = registry.id_of("b:brick").expect("registered");
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(
+        db.materials().to_world(brick).expect("a world id"),
+        world_id,
+        "the world numbers the brick as it always did"
+    );
+    assert_ne!(
+        brick.get(),
+        world_id,
+        "the fixture no longer moves the brick's session number, so this test says nothing"
+    );
+
+    let thawed = db.load_chunk_entities(home).expect("load");
+    let item = thawed[0].item.as_ref().expect("still an item");
+    assert_eq!(
+        item.material, brick,
+        "the cut slabs are some other material"
+    );
+    assert_eq!(item.units, 36);
+    assert_eq!(item.shape, Some(slab));
+    assert_eq!(item.detail.as_deref(), Some("fired twice"));
+
+    let thawed = db
+        .load_chunk_entities_in("overworld", ChunkPos::new(1, 0, 0))
+        .expect("load");
+    let item = thawed[0].item.as_ref().expect("still an item");
+    assert_eq!(
+        item.material, brick,
+        "the loose brick is some other material"
+    );
+    assert_eq!(item.units, 40);
+}
+
+#[test]
+fn an_item_written_before_its_material_was_translated_is_read_as_the_worlds_id() {
+    // Format 2 wrote the session's number. On a world whose mod set never
+    // changed that IS the world's number, and nothing in the blob says
+    // otherwise, so that is how it is read: a world nobody has reopened under
+    // other mods loses nothing, and its rows are rewritten as 3 at the next
+    // save.
+    use tiamat_core::ent::{Entity, Transform};
+    use tiamat_core::inventory::Stack;
+
+    let path = scratch("entity-item-v2");
+    let home = ChunkPos::new(0, 0, 0);
+    let mut registry = registry_with(&["a:stone", "b:brick"]);
+    let brick = registry.id_of("b:brick").expect("registered");
+    {
+        let db = WorldDb::open(&path, &mut registry).expect("open");
+        assert_eq!(
+            db.materials().to_world(brick).expect("a world id"),
+            brick.get(),
+            "a fresh world numbers a material as the session that made it does"
+        );
+        db.close().expect("close");
+    }
+    // A row exactly as format 2 wrote it: the entity through `postcard`, as it
+    // stood in memory.
+    let as_v2 = Entity {
+        item: Some(Stack::new(brick, 27).expect("a block")),
+        ..Entity::at(Transform::at(home, [1.0, 2.0, 3.0]), "b")
+    };
+    let conn = rusqlite::Connection::open(&path).expect("raw connection");
+    conn.execute(
+        "INSERT INTO entities (domain, chunk_x, chunk_y, chunk_z, version, data)
+         VALUES ('overworld', 0, 0, 0, 2, ?1)",
+        [postcard::to_allocvec(&as_v2).expect("encode")],
+    )
+    .expect("insert");
+    drop(conn);
+
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    let thawed = db.load_chunk_entities(home).expect("load");
+    assert_eq!(
+        thawed[0]
+            .item
+            .as_ref()
+            .map(|item| (item.material, item.units)),
+        Some((brick, 27))
+    );
+}
+
+#[test]
 fn saving_a_chunks_entities_replaces_them_rather_than_adding_to_them() {
     // **The bug this is here to prevent**: a mob wanders from chunk A into
     // chunk B, both are saved, and the copy in A is never removed — so the

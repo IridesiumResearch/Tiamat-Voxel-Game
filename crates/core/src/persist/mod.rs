@@ -143,7 +143,11 @@ pub mod meta_keys {
 ///
 /// So: any change to [`crate::ent::Entity`]'s persisted fields bumps this and
 /// adds a step to [`migrate::migrate_entity`].
-pub const ENTITY_FORMAT_VERSION: u8 = 2;
+///
+/// 3: the stack an entity is names its material by the WORLD's id (charter
+/// rule 8). The bytes are laid out as 2's were; what changed is which number
+/// is in them, and a number whose meaning changed is a format change.
+pub const ENTITY_FORMAT_VERSION: u8 = 3;
 
 /// Anything that can go wrong talking to a world database.
 #[derive(Debug, thiserror::Error)]
@@ -1032,9 +1036,77 @@ impl WorldDb {
                     });
                 }
             };
-            entities.push(entity);
+            entities.push(self.thawed(entity, domain, pos)?);
         }
         Ok(entities)
+    }
+
+    /// An entity as it is WRITTEN: the stack it is, named by the world's id.
+    ///
+    /// **Charter rule 8, for the one material an entity holds.** A stack in
+    /// memory names its material by this session's number, and an entity went
+    /// to disk as `postcard` made it, so an item lying on the ground was saved
+    /// under whatever the session had numbered it. On a world reopened under a
+    /// changed mod set it came back as some other material. An inventory and a
+    /// chest have always been translated; this is the same translation.
+    ///
+    /// Borrowed when there is nothing to translate, which is every entity that
+    /// is not an item.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::Entity`] if the material has no world id. Registries
+    /// freeze before a world is opened (charter rule 9), so that is a material
+    /// registered too late, and writing its session number would be writing a
+    /// different material.
+    fn stored<'a>(
+        &self,
+        entity: &'a crate::ent::Entity,
+        domain: &str,
+        pos: ChunkPos,
+    ) -> Result<std::borrow::Cow<'a, crate::ent::Entity>, WorldError> {
+        let Some(item) = &entity.item else {
+            return Ok(std::borrow::Cow::Borrowed(entity));
+        };
+        let world =
+            self.materials
+                .to_world(item.material)
+                .map_err(|source| WorldError::Entity {
+                    pos,
+                    domain: domain.to_owned(),
+                    reason: format!("the stack it is cannot be named on disk: {source}"),
+                })?;
+        let mut stored = entity.clone();
+        if let Some(item) = &mut stored.item {
+            item.material = crate::MaterialId(world);
+        }
+        Ok(std::borrow::Cow::Owned(stored))
+    }
+
+    /// The other half of [`Self::stored`]: what was read, in this session's
+    /// ids.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::Entity`] if the blob names a material the world's own
+    /// table does not hold: a corrupt or foreign row.
+    fn thawed(
+        &self,
+        mut entity: crate::ent::Entity,
+        domain: &str,
+        pos: ChunkPos,
+    ) -> Result<crate::ent::Entity, WorldError> {
+        if let Some(item) = &mut entity.item {
+            item.material = self
+                .materials
+                .to_runtime(item.material.get())
+                .map_err(|source| WorldError::Entity {
+                    pos,
+                    domain: domain.to_owned(),
+                    reason: format!("the stack it is names no material of this world: {source}"),
+                })?;
+        }
+        Ok(entity)
     }
 
     /// Replaces the entities anchored to a chunk.
@@ -1087,11 +1159,13 @@ impl WorldDb {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for entity in entities {
-                let blob = postcard::to_allocvec(entity).map_err(|source| WorldError::Entity {
-                    pos,
-                    domain: domain.to_owned(),
-                    reason: source.to_string(),
-                })?;
+                let entity = self.stored(entity, domain, pos)?;
+                let blob =
+                    postcard::to_allocvec(&*entity).map_err(|source| WorldError::Entity {
+                        pos,
+                        domain: domain.to_owned(),
+                        reason: source.to_string(),
+                    })?;
                 insert.execute(params![
                     domain,
                     pos.x,
@@ -1141,7 +1215,8 @@ impl WorldDb {
                 let blobs = entities
                     .iter()
                     .map(|entity| {
-                        postcard::to_allocvec(entity).map_err(|source| WorldError::Entity {
+                        let entity = self.stored(entity, domain, pos)?;
+                        postcard::to_allocvec(&*entity).map_err(|source| WorldError::Entity {
                             pos,
                             domain: domain.to_owned(),
                             reason: source.to_string(),

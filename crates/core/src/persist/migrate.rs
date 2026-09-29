@@ -130,6 +130,15 @@ pub fn migrate_entity(
                 .map_err(|source| MigrationError::Decode { version: 1, source })?;
             Ok(v1_to_v2(v1))
         }
+        // v2 → v3: the same bytes, read as what v3 means by them.
+        //
+        // A v2 item named its material by the number the session that wrote
+        // it had given it, and nothing in the blob says which session that
+        // was. On a world whose mod set never changed that number IS the
+        // world's, which is every world this defect had not already reached,
+        // so it is read as one. The caller translates it like any v3 blob.
+        2 => postcard::from_bytes(serialised)
+            .map_err(|source| MigrationError::Decode { version: 2, source }),
         other => Err(MigrationError::NoStep { from: other }),
     }
 }
