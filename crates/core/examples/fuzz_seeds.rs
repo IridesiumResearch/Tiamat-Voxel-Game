@@ -22,9 +22,9 @@
 use std::path::PathBuf;
 
 use tiamat_core::proto::{
-    ActionDef, ChunkFog, Click, ClientMessage, DialogEvent, DisconnectReason, Edit, EntityDef,
-    EntityDelta, FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION, Riding,
-    ServerMessage, SkyFrame, SkyGrade, SoundDef, WireSignature, encode,
+    AbilitiesDef, ActionDef, ChunkFog, Click, ClientMessage, DialogEvent, DisconnectReason, Edit,
+    EntityDef, EntityDelta, FluidDef, HudScriptDef, MaterialDef, ModEntry, PROTOCOL_VERSION,
+    Riding, ServerMessage, SkyFrame, SkyGrade, SoundDef, WireSignature, encode,
 };
 use tiamat_core::{BlockPos, ChunkPos, SubNodePos};
 
@@ -1098,6 +1098,27 @@ fn server_messages() -> Vec<Vec<u8>> {
                     reserve: tiamat_core::hud::MAX_RESERVE,
                 },
             ],
+        },
+        // Protocol v83: what a mod lets one player do, now with a gravity. An
+        // ordinary light player, and one whose numbers
+        // `validate_server_message` refuses.
+        ServerMessage::Abilities {
+            abilities: AbilitiesDef {
+                fly: false,
+                speed: 1.0,
+                sprint: true,
+                wind_sky: true,
+                gravity: 0.17,
+            },
+        },
+        ServerMessage::Abilities {
+            abilities: AbilitiesDef {
+                fly: true,
+                speed: f32::NAN,
+                sprint: false,
+                wind_sky: false,
+                gravity: f32::INFINITY,
+            },
         },
     ];
     messages.iter().filter_map(|m| encode(m).ok()).collect()
