@@ -392,8 +392,11 @@ pub struct Config {
     /// back out again to package it. Pointing this somewhere else is the
     /// difference between a mods folder and a source tree.
     ///
-    /// Relative paths resolve against the working directory, so the default
-    /// keeps behaving exactly as it did.
+    /// A relative path is looked for beside the executable first and in the
+    /// working directory second ([`install_relative`]), so an installed game
+    /// finds its mods however it was started and a `cargo run` from the
+    /// repository root behaves as it always did. Read it through
+    /// [`Config::mods_dir`].
     #[serde(default = "Config::default_mods_path")]
     pub mods_path: PathBuf,
 
@@ -705,6 +708,16 @@ impl Config {
         )
     }
 
+    /// Where mods are read from: [`Config::mods_path`], found beside the
+    /// executable when it is relative (see [`install_relative`]).
+    ///
+    /// Not stored back into the config, so a saved `client.toml` keeps what
+    /// the player wrote.
+    #[must_use]
+    pub fn mods_dir(&self) -> PathBuf {
+        resolve_install_path(&self.mods_path)
+    }
+
     /// The directory holding the identity key and the content cache.
     #[must_use]
     pub fn data_dir(&self) -> PathBuf {
@@ -737,6 +750,51 @@ impl Default for Config {
             fly_speed: Self::default_fly_speed(),
             data_path: None,
         }
+    }
+}
+
+/// Where an install-relative file or directory is, given where this program is.
+///
+/// **The install's own files sit next to the executable**, and a launch from
+/// the Dock, a shortcut or a terminal somewhere else has a working directory
+/// that is not that place (on macOS, often `/`). So `rel` is looked for beside
+/// the executable first; when it is not there — a developer's `cargo run` from
+/// the repository root, where `target/debug/game` does not exist — it is
+/// `cwd/rel`, exactly as before.
+///
+/// An absolute `rel` is returned as it is: a path somebody wrote down is not
+/// second-guessed. `exists` is how the filesystem is asked, so the choice is a
+/// pure function of (exe dir, cwd, what exists).
+#[must_use]
+pub fn install_relative(
+    rel: &Path,
+    exe_dir: Option<&Path>,
+    cwd: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if rel.is_absolute() {
+        return rel.to_path_buf();
+    }
+    if let Some(dir) = exe_dir {
+        let beside = dir.join(rel);
+        if exists(&beside) {
+            return beside;
+        }
+    }
+    cwd.join(rel)
+}
+
+/// [`install_relative`] asked of this process and this filesystem.
+///
+/// If the executable's or the working directory cannot be read, `rel` comes
+/// back unchanged, which is what the client did before this existed.
+#[must_use]
+pub fn resolve_install_path(rel: &Path) -> PathBuf {
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(Path::parent);
+    match std::env::current_dir() {
+        Ok(cwd) => install_relative(rel, exe_dir, &cwd, Path::exists),
+        Err(_) => rel.to_path_buf(),
     }
 }
 
@@ -821,6 +879,44 @@ pub fn adopt_former_data_dir(data: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn a_relative_path_is_found_beside_the_executable_first() {
+        let exe = Path::new("/install/current");
+        let got = install_relative(Path::new("game"), Some(exe), Path::new("/"), |p| {
+            p == Path::new("/install/current/game")
+        });
+        assert_eq!(got, Path::new("/install/current/game"));
+    }
+
+    #[test]
+    fn a_development_run_falls_back_to_the_working_directory() {
+        let exe = Path::new("/repo/target/debug");
+        let got = install_relative(Path::new("game"), Some(exe), Path::new("/repo"), |_| false);
+        assert_eq!(got, Path::new("/repo/game"));
+        // Even when the working directory has it and the executable's does not.
+        let got = install_relative(Path::new("game"), Some(exe), Path::new("/repo"), |p| {
+            p == Path::new("/repo/game")
+        });
+        assert_eq!(got, Path::new("/repo/game"));
+    }
+
+    #[test]
+    fn no_executable_directory_means_the_working_directory() {
+        let got = install_relative(Path::new("game"), None, Path::new("/here"), |_| true);
+        assert_eq!(got, Path::new("/here/game"));
+    }
+
+    #[test]
+    fn an_absolute_path_is_left_alone() {
+        let got = install_relative(
+            Path::new("/mods"),
+            Some(Path::new("/i")),
+            Path::new("/"),
+            |_| true,
+        );
+        assert_eq!(got, Path::new("/mods"));
+    }
 
     fn temp_config(name: &str, text: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("tiamat-client-test-{name}.toml"));

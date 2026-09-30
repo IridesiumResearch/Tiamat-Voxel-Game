@@ -82,6 +82,17 @@ const LAN_PORT: u16 = 47811;
 /// also holds hand-edited server details would lose their comments.
 const BINDINGS_FILE: &str = "bindings.toml";
 
+/// `client.toml`, beside the executable when it is there, else in the working
+/// directory (see [`client::config::install_relative`]).
+fn config_file() -> std::path::PathBuf {
+    client::config::resolve_install_path(std::path::Path::new(CONFIG_FILE))
+}
+
+/// `bindings.toml`, found the same way as [`config_file`].
+fn bindings_file() -> std::path::PathBuf {
+    client::config::resolve_install_path(std::path::Path::new(BINDINGS_FILE))
+}
+
 /// Starting window size.
 const DEFAULT_SIZE: (u32, u32) = (1280, 720);
 
@@ -111,8 +122,8 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_or_default(std::path::Path::new(CONFIG_FILE))?;
-    let bindings = Bindings::load_or_default(std::path::Path::new(BINDINGS_FILE))?;
+    let config = Config::load_or_default(&config_file())?;
+    let bindings = Bindings::load_or_default(&bindings_file())?;
     let data = config.data_dir();
     // Carried across once, for a player who last ran this when it was called
     // Tiamot: their identity key, worlds and trust store live in there.
@@ -135,7 +146,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("{err}");
             client::launcher::Library::default()
         });
-    let catalogue = client::launcher::Catalogue::scan(&config.mods_path, &data.join("mods.toml"));
+    let catalogue = client::launcher::Catalogue::scan(&config.mods_dir(), &data.join("mods.toml"));
 
     // **The world somebody already had, before there was a list to put it in.**
     // Without this the first run after the front screen landed would show an
@@ -183,7 +194,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let handle = start_local_world(
                     &WorldPaths {
                         world: &config.world_path,
-                        mods: &config.mods_path,
+                        mods: &config.mods_dir(),
                         identity: &data,
                     },
                     config.view(),
@@ -1353,7 +1364,7 @@ impl Client {
                 let handle = start_local_world(
                     &WorldPaths {
                         world: &self.data.join(path),
-                        mods: &self.config.mods_path,
+                        mods: &self.config.mods_dir(),
                         identity: &self.data,
                     },
                     self.config.view(),
@@ -2496,7 +2507,7 @@ fn draw_front(
     // "close" on a front screen — a player presses Play, and a setting that
     // only reached the file on the way out would be lost by the one route
     // everybody takes.
-    if dirty && let Err(err) = config.save(std::path::Path::new(CONFIG_FILE)) {
+    if dirty && let Err(err) = config.save(&config_file()) {
         tracing::warn!(%err, "could not save the settings");
     }
     surface
@@ -2661,7 +2672,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
     if app.take_volumes_dirty() {
         let mut config = app.config().clone();
         config.volumes = app.mixer_mut().volumes().clone();
-        if let Err(err) = config.save(std::path::Path::new(CONFIG_FILE)) {
+        if let Err(err) = config.save(&config_file()) {
             tracing::warn!(%err, "could not save the volume settings");
         }
     }
@@ -2672,7 +2683,7 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
     // failed write is reported rather than retried because the likeliest cause
     // is a read-only directory that will not fix itself.
     if app.take_bindings_dirty()
-        && let Err(err) = app.bindings().save(std::path::Path::new(BINDINGS_FILE))
+        && let Err(err) = app.bindings().save(&bindings_file())
     {
         tracing::warn!(%err, "could not save the key bindings");
     }
