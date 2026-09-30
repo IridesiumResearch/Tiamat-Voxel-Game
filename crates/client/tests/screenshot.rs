@@ -5643,6 +5643,7 @@ fn a_hand_is_on_screen_in_first_person_and_holds_what_is_selected() {
             shape: 0,
             item: false,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         },
     ));
@@ -9666,6 +9667,135 @@ fn a_dialog_draws_dirt_as_dirt(gpu: Gpu) {
                  its shade is {want:?}: the atlas is not reaching the interface as the colour it \
                  is (a texel shown as its own linear value is what a view with an sRGB decode \
                  does to egui)"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cut_of_several_materials_is_drawn_cell_by_cell_in_a_slot_and_in_the_editor() {
+    // **Sub-Node Contract §9.1 on a GPU.** A cut of dirt with one blue corner,
+    // in a slot and in a shape editor of several materials, drawn the way the
+    // window draws them and read back: two cells, two colours. Every stack
+    // used to be drawn in ONE material, and a cut of several in its lowest
+    // alone is a block of dirt — the thing the player did not make.
+    //
+    // The faces checked are ones nothing can cover: the near corner, drawn
+    // last, and three outer faces of dirt, one on each side the cube shows.
+    // Whatever device this is, as it is configured; the two ways the atlas
+    // reaches the interface are `a_shape_editor_is_drawn_in_its_materials_colour`'s.
+    use tiamat_core::ui::{Align, Build, Direction, Node, Widget};
+
+    const DIRT: [u8; 4] = [98, 78, 58, 255];
+    const BLUE: [u8; 4] = [40, 90, 200, 255];
+    let Some(gpu) = gpu() else { return };
+    let atlas = Atlas::build(&[
+        None,
+        None,
+        Some(Image::solid(16, 16, DIRT)),
+        Some(Image::solid(16, 16, BLUE)),
+    ]);
+
+    // Dirt, but for the near corner `(2, 2, 2)`, cell 26.
+    let mut cells = vec![2u16; 27];
+    cells[26] = 3;
+
+    let mut slot = Node::new(Widget::ItemSlot {
+        view: "player:main".to_owned(),
+        index: 0,
+    });
+    slot.size = Some(96);
+    let mut editor = Node::new(Widget::ShapeEditor {
+        shape: tiamat_core::block::OCCUPANCY_FULL,
+        material: 2,
+        cells: cells.clone(),
+    });
+    editor.name = "cut".to_owned();
+    editor.grow = 1;
+    editor.style.background = Some([0, 0, 0, 0]);
+    let tree = Build::of(
+        Node::new(Widget::Container {
+            direction: Direction::Row,
+            gap: 8,
+            padding: 8,
+            align: Align::Stretch,
+        }),
+        vec![Build::of(slot, Vec::new()), Build::of(editor, Vec::new())],
+    )
+    .flatten();
+    let mut views = std::collections::BTreeMap::new();
+    views.insert(
+        "player:main".to_owned(),
+        client::dialog::ViewContents {
+            // What the server sends for a cut filling the block: no `Shape`,
+            // so `0` — loose material's spelling — and the cells beside it.
+            slots: vec![Some(tiamat_core::proto::StackDef {
+                material: 2,
+                units: 27,
+                shape: 0,
+                detail: None,
+                cells,
+            })],
+            held: None,
+        },
+    );
+
+    let (frame, faces) = draw_dialog(gpu, &atlas, tree, &views);
+    if let Some(dir) = std::env::var_os("TIAMAT_DIALOG_PICTURES") {
+        let dir = std::path::PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        write_png(&dir.join("shape-editor-several.png"), &frame);
+    }
+    // Twenty-seven cells of three faces each, in the slot and in the editor:
+    // a full cut of several materials is cells, never a three-face cube.
+    assert_eq!(
+        faces.len(),
+        2 * 27 * 3,
+        "a cut of several materials was not drawn cell by cell in both places"
+    );
+
+    // Where each cell's faces are in the list: cells in draw order, three
+    // faces each, Front then Right then Top.
+    let order = client::shape_view::draw_order(tiamat_core::block::OCCUPANCY_FULL);
+    let face_of = |cell: (i32, i32, i32), face: usize| {
+        order
+            .iter()
+            .position(|drawn| *drawn == cell)
+            .expect("every cell of a full block is drawn")
+            * 3
+            + face
+    };
+    let (front, right, top) = (0, 1, 2);
+    let checks = [
+        ("the corner's front", face_of((2, 2, 2), front), BLUE),
+        ("the corner's side", face_of((2, 2, 2), right), BLUE),
+        ("the corner's top", face_of((2, 2, 2), top), BLUE),
+        ("a top of dirt", face_of((0, 2, 2), top), DIRT),
+        ("a side of dirt", face_of((2, 2, 0), right), DIRT),
+        ("a front of dirt", face_of((2, 0, 2), front), DIRT),
+    ];
+    for (who, drawn) in [("slot", &faces[..81]), ("editor", &faces[81..])] {
+        for (which, index, colour) in checks {
+            let face = &drawn[index];
+            let middle = face
+                .vertices
+                .iter()
+                .fold(egui::Vec2::ZERO, |sum, vertex| sum + vertex.pos.to_vec2())
+                / face.vertices.len() as f32;
+            let (x, y) = (middle.x as u32, middle.y as u32);
+            let got = average(&frame, x - 1, y - 1, x + 2, y + 2).map(|c| c * 255.0);
+            let shade = f32::from(face.vertices[0].color.r()) / 255.0;
+            let want = [colour[0], colour[1], colour[2]].map(|c| f32::from(c) * shade);
+            let off = got
+                .iter()
+                .zip(want)
+                .map(|(got, want)| (got - want).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                off <= 8.0,
+                "the {who}'s {which} at ({x}, {y}) is {got:?} where its own material shaded \
+                 {shade:.2} is {want:?}: a cut of several materials is not being drawn cell by \
+                 cell in each cell's own material"
             );
         }
     }

@@ -131,13 +131,27 @@ impl<'a> Icons<'a> {
     /// The cells are the same projection the shape editor uses — see
     /// [`crate::shape_view`] — so a cut looks the same wherever it is shown:
     /// in the editor that made it, in a slot, and on the hotbar.
+    ///
+    /// # A cut of several materials
+    ///
+    /// `cells` is the wire's run of per-cell materials (Sub-Node Contract
+    /// §9.1): empty for anything else, 27 world ids for a cut of several. With
+    /// them every cell is drawn in its own material, and ALWAYS as cells — even
+    /// a cut that fills the block, whose `shape` is `0` like loose material's.
+    /// Drawn as one cube it would be a block of its lowest material, which is
+    /// the one thing it is not.
     pub fn paint_stack(
         &self,
         painter: &egui::Painter,
         rect: egui::Rect,
         material: u16,
         shape: u32,
+        cells: &[u16],
     ) {
+        if let Some(cells) = crate::cut::cells_of(cells) {
+            self.paint_mixed(painter, rect, &cells);
+            return;
+        }
         // **An item is a picture, not a solid.** A sword drawn as a cube is a
         // sword wrapped around three faces at three angles, which is what a
         // player sees and cannot unsee. Flat, filling the slot, the way every
@@ -199,8 +213,37 @@ impl<'a> Icons<'a> {
     /// the thing being chiselled. A whole block in a SLOT is loose material and
     /// draws as its tile.
     pub fn paint_cells(&self, painter: &egui::Painter, rect: egui::Rect, material: u16, mask: u32) {
+        self.paint_each(painter, rect, mask, |_| material);
+    }
+
+    /// Draws a cut of several materials, every cell in its own.
+    ///
+    /// The same cells in the same order as [`Icons::paint_cells`], so a cut of
+    /// stone and oak and a cut of stone alone differ only in which tile each
+    /// face samples — the drawing cannot drift apart between the two modes.
+    pub fn paint_mixed(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        cells: &crate::cut::Cells,
+    ) {
+        self.paint_each(painter, rect, crate::cut::occupancy(cells), |index| {
+            cells[index]
+        });
+    }
+
+    /// Every filled cell of `mask`, back to front, each face in the material
+    /// `material_at` names for that cell's index (`x + 3*y + 9*z`).
+    fn paint_each(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        mask: u32,
+        material_at: impl Fn(usize) -> u16,
+    ) {
         let area = square(rect);
         for (x, y, z) in crate::shape_view::draw_order(mask) {
+            let material = material_at(crate::shape_view::index(x, y, z));
             for face in [
                 crate::shape_view::Face::Front,
                 crate::shape_view::Face::Right,
@@ -306,6 +349,11 @@ mod tests {
 
     /// Everything one call to [`Icons::paint_stack`] put on the screen.
     fn painted_stack(icons: Icons<'_>, shape: u32) -> Vec<egui::epaint::Primitive> {
+        painted_cut(icons, shape, &[])
+    }
+
+    /// The same, for a stack that may carry cells.
+    fn painted_cut(icons: Icons<'_>, shape: u32, cells: &[u16]) -> Vec<egui::epaint::Primitive> {
         let ctx = egui::Context::default();
         let output = ctx.run_ui(egui::RawInput::default(), |root| {
             let painter = root.ctx().layer_painter(egui::LayerId::background());
@@ -314,12 +362,88 @@ mod tests {
                 egui::Rect::from_min_size(egui::pos2(4.0, 4.0), egui::vec2(32.0, 32.0)),
                 1,
                 shape,
+                cells,
             );
         });
         ctx.tessellate(output.shapes, 1.0)
             .into_iter()
             .map(|clipped| clipped.primitive)
             .collect()
+    }
+
+    #[test]
+    fn a_cut_of_several_materials_draws_each_cell_from_its_own_tile() {
+        // Sub-Node Contract §9.1 in a slot: stone and oak, and the slot must
+        // show both — a stack drawn in its lowest material alone told a player
+        // they had made a block of stone.
+        let tiles = atlas().tiles_only();
+        let id = egui::TextureId::User(5);
+        let icons = Icons::new(Some(id), Some(&tiles));
+        let mut cells = [0u16; 27];
+        // The bottom layer in 2, the middle cell in 3: ten cells.
+        for z in 0..3 {
+            for x in 0..3 {
+                cells[crate::shape_view::index(x, 0, z)] = 2;
+            }
+        }
+        cells[13] = 3;
+        let drawn = painted_cut(icons, 0, &cells);
+        let meshes: Vec<&egui::Mesh> = drawn
+            .iter()
+            .filter_map(|primitive| match primitive {
+                egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == id => Some(mesh),
+                _ => None,
+            })
+            .collect();
+        // Tessellation may merge the faces into one mesh, so count corners:
+        // four per face, three faces a cell.
+        let corners: usize = meshes.iter().map(|mesh| mesh.vertices.len()).sum();
+        assert!(
+            corners >= 10 * 3 * 4,
+            "ten cells drew {corners} textured corners"
+        );
+        let mut sampled = std::collections::BTreeSet::new();
+        for mesh in &meshes {
+            for vertex in &mesh.vertices {
+                for material in [2u16, 3] {
+                    let (u0, v0, u1, v1) = tiles.uv_of(material).expect("the atlas is up");
+                    if (u0..=u1).contains(&vertex.uv.x) && (v0..=v1).contains(&vertex.uv.y) {
+                        sampled.insert(material);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            sampled.into_iter().collect::<Vec<_>>(),
+            vec![2, 3],
+            "a cut of two materials must sample both tiles"
+        );
+    }
+
+    #[test]
+    fn a_full_cut_of_several_materials_is_cells_and_not_a_cube() {
+        // Its wire shape is `0`, the spelling of loose material, and a cube is
+        // what loose material draws as. Counted in vertices, as the cube test
+        // above is: three faces against twenty-seven cells of three.
+        let tiles = atlas().tiles_only();
+        let icons = Icons::new(Some(egui::TextureId::User(3)), Some(&tiles));
+        let corners = |drawn: Vec<egui::epaint::Primitive>| {
+            drawn
+                .iter()
+                .map(|primitive| match primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum::<usize>()
+        };
+        let mut cells = [2u16; 27];
+        cells[26] = 3;
+        let block = corners(painted_stack(icons, 0));
+        let mixed = corners(painted_cut(icons, 0, &cells));
+        assert!(
+            mixed > block * 9,
+            "a full cut of two materials drew {mixed} vertices and a block {block}"
+        );
     }
 
     #[test]

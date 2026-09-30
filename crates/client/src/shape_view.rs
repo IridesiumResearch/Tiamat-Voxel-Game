@@ -187,6 +187,17 @@ pub const fn bit(x: i32, y: i32, z: i32) -> u32 {
     1 << (x + SIDE * y + SIDE * SIDE * z)
 }
 
+/// The index of a cell in a cells array: the position of its [`bit`].
+///
+/// # Panics
+///
+/// Never for a cell inside the block, which is the only kind this module
+/// produces: `0..3` on each axis is `0..27`.
+#[must_use]
+pub const fn index(x: i32, y: i32, z: i32) -> usize {
+    bit(x, y, z).trailing_zeros() as usize
+}
+
 /// Whether a cell is filled.
 #[must_use]
 pub const fn filled(mask: u32, x: i32, y: i32, z: i32) -> bool {
@@ -368,6 +379,76 @@ pub fn restore_seen(mask: u32, turn: Turn, cell: (i32, i32, i32), face: Face) ->
 #[must_use]
 pub const fn seed() -> u32 {
     bit(1, 1, 1)
+}
+
+// # A cut of several materials
+//
+// An editor given 27 cells (Sub-Node Contract §9.1) keeps each cell's own
+// material. Everything about WHERE a click lands — the turn, the face, the
+// neighbour — is the mask functions above and is not written again here: each
+// cells function asks its mask function which cells the gesture leaves filled
+// and only says what those cells are made of. Two copies of the geometry would
+// be two chances for a click to take out one cell and repaint another.
+
+/// [`as_seen`] for cells: every cell's material moves with the cell.
+///
+/// Core's [`tiamat_core::inventory::turned_cells`], which shares its
+/// permutation with the [`tiamat_core::inventory::turned`] that `as_seen`
+/// is, so the cube drawn and the cube clicked cannot be turned two ways.
+#[must_use]
+pub fn cells_seen(cells: &crate::cut::Cells, turn: Turn) -> crate::cut::Cells {
+    tiamat_core::inventory::turned_cells(&crate::cut::as_materials(cells), turn)
+        .map(|material| material.0)
+}
+
+/// What a left click on a turned cube does to a cut of several materials: the
+/// cell that was clicked goes, whatever it is made of, and nothing else moves.
+#[must_use]
+pub fn chisel_seen_cells(
+    cells: &crate::cut::Cells,
+    turn: Turn,
+    cell: (i32, i32, i32),
+) -> crate::cut::Cells {
+    let filled = chisel_seen(crate::cut::occupancy(cells), turn, cell);
+    repainted(cells, filled, 0)
+}
+
+/// What a right click on a turned cube does to a cut of several materials: a
+/// cell of the BRUSH against the face that was clicked.
+///
+/// A cell that is already filled is never repainted — a right click adds, as
+/// placing does in the world, and changing what a cell is made of is taking it
+/// out and putting another back.
+#[must_use]
+pub fn restore_seen_cells(
+    cells: &crate::cut::Cells,
+    turn: Turn,
+    cell: (i32, i32, i32),
+    face: Face,
+    brush: u16,
+) -> crate::cut::Cells {
+    let filled = restore_seen(crate::cut::occupancy(cells), turn, cell, face);
+    repainted(cells, filled, brush)
+}
+
+/// [`seed`] for a cut of several materials: the middle cell, of the brush.
+#[must_use]
+pub fn seed_cells(brush: u16) -> crate::cut::Cells {
+    repainted(&[0; 27], seed(), brush)
+}
+
+/// The cells once the ones they fill have become `filled`: a cell that left is
+/// empty, a cell that arrived is `brush`, and every other keeps its material.
+fn repainted(cells: &crate::cut::Cells, filled: u32, brush: u16) -> crate::cut::Cells {
+    let mut out = *cells;
+    for (index, material) in out.iter_mut().enumerate() {
+        if filled & (1 << index) == 0 {
+            *material = 0;
+        } else if *material == 0 {
+            *material = brush;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -619,6 +700,111 @@ mod tests {
             FULL.count_ones(),
             "the count of removed cells does not match what left the mask"
         );
+    }
+
+    /// Stone along the bottom-front row and oak in the middle, as world ids.
+    fn stone_and_oak() -> crate::cut::Cells {
+        let mut cells = [0; 27];
+        for cell in cells.iter_mut().take(3) {
+            *cell = 5;
+        }
+        cells[13] = 2;
+        cells
+    }
+
+    #[test]
+    fn a_turned_cube_of_several_materials_is_the_turned_mask_in_its_materials() {
+        // **The drawn cube and the clicked cube are the same cube.** The
+        // editor picks a cell from `as_seen(mask)` and paints from
+        // `cells_seen(cells)`; if those ever turned differently, a click would
+        // land on one cell while the player looked at another's material.
+        let cells = stone_and_oak();
+        for turn in 0..4 {
+            let seen = cells_seen(&cells, turn);
+            assert_eq!(
+                crate::cut::occupancy(&seen),
+                as_seen(crate::cut::occupancy(&cells), turn),
+                "turn {turn} moved the materials somewhere their mask did not go"
+            );
+            assert_eq!(
+                cells_seen(&seen, (4 - turn % 4) % 4),
+                cells,
+                "turn {turn} did not come back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chisel_takes_the_clicked_cell_whatever_it_is_made_of() {
+        let cells = stone_and_oak();
+        for turn in 0..4 {
+            // The oak cell sits at the middle, which no turn moves.
+            let after = chisel_seen_cells(&cells, turn, (1, 1, 1));
+            assert_eq!(after[13], 0, "at turn {turn} the oak cell is still there");
+            let mut expected = cells;
+            expected[13] = 0;
+            assert_eq!(after, expected, "at turn {turn} something else changed");
+
+            // And a stone one, clicked where the turn has put it.
+            let seen = cells_seen(&cells, turn);
+            let index = seen
+                .iter()
+                .position(|material| *material == 5)
+                .expect("the stone is somewhere in every turn");
+            let index = i32::try_from(index).expect("a cell index");
+            let clicked = (index % 3, index / 3 % 3, index / 9);
+            let after = chisel_seen_cells(&cells, turn, clicked);
+            let after_seen = cells_seen(&after, turn);
+            assert_eq!(
+                after_seen[subnode(clicked.0, clicked.1, clicked.2)],
+                0,
+                "at turn {turn} the stone cell that was clicked is still there"
+            );
+            assert_eq!(
+                after.iter().filter(|material| **material == 5).count(),
+                2,
+                "at turn {turn} a stone chisel took other than one stone cell"
+            );
+            assert_eq!(after[13], 2, "at turn {turn} a stone chisel took the oak");
+        }
+    }
+
+    #[test]
+    fn a_restore_adds_the_brush_and_never_repaints_a_filled_cell() {
+        let cells = stone_and_oak();
+        for turn in 0..4 {
+            // On top of the oak in the middle, in a third material.
+            let after = restore_seen_cells(&cells, turn, (1, 1, 1), Face::Top, 9);
+            assert_eq!(
+                after[subnode(1, 2, 1)],
+                9,
+                "at turn {turn} the new cell is not the brush's, on top"
+            );
+            assert_eq!(after[13], 2, "at turn {turn} the oak was repainted");
+            for index in [0, 1, 2] {
+                assert_eq!(after[index], 5, "at turn {turn} the stone was repainted");
+            }
+        }
+        // A face whose neighbour is already filled adds nothing and paints
+        // nothing: the neighbour of the middle's front is empty, so fill it,
+        // then click the middle's front again.
+        let filled = restore_seen_cells(&cells, 0, (1, 1, 1), Face::Front, 9);
+        assert_eq!(
+            restore_seen_cells(&filled, 0, (1, 1, 1), Face::Front, 7),
+            filled,
+            "a filled cell took a second brush"
+        );
+    }
+
+    #[test]
+    fn an_empty_cut_of_several_materials_seeds_the_middle_in_the_brush() {
+        let seeded = seed_cells(4);
+        assert_eq!(crate::cut::occupancy(&seeded), seed());
+        assert_eq!(seeded[13], 4);
+    }
+
+    fn subnode(x: i32, y: i32, z: i32) -> usize {
+        usize::try_from(x + 3 * y + 9 * z).expect("a cell index")
     }
 
     #[test]

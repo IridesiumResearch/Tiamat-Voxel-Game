@@ -1916,12 +1916,15 @@ fn paint_hud_command(
             size,
             material,
             shape,
-            cells: _,
+            cells,
         } => {
             let min = place(*anchor, *x, *y);
             let extent = egui::vec2(f32::from(*size) * scale, f32::from(*size) * scale);
             let rect = egui::Rect::from_min_size(min, extent);
-            icons.paint_stack(painter, rect, material.0, *shape);
+            // A cut of several materials, cell by cell (Sub-Node Contract
+            // §9.1), exactly as a slot draws it — the hotbar and the inventory
+            // must not disagree about what a player is holding.
+            icons.paint_stack(painter, rect, material.0, *shape, cells);
             painter.rect_stroke(
                 rect,
                 2.0,

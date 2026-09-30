@@ -83,14 +83,26 @@ struct Local {
     /// carving is a run of clicks rather than one. The mod is told after every
     /// change and its next tree wins — see [`Local::adopted`].
     shape: BTreeMap<String, u32>,
-    /// Which shape the server last SAID each editor holds.
+    /// What each cell of an editor of several materials is made of, by widget
+    /// name (Sub-Node Contract §9.1). Absent for an editor of one material.
+    ///
+    /// Held locally for the reason `shape` is, and it is the authority on the
+    /// mask while it is here: `shape` is kept equal to its occupancy.
+    cells: BTreeMap<String, crate::cut::Cells>,
+    /// Which cut the server last SAID each editor holds: its mask and its
+    /// cells, empty for an editor of one material.
     ///
     /// Without this the local mask would never let go: a mod that reset an
     /// editor, or opened it on a different block, would send a tree the client
     /// quietly ignored because it already had an opinion. Comparing against
     /// what the server said last is how "the mod changed it" is told apart
     /// from "the mod is repeating itself".
-    adopted: BTreeMap<String, u32>,
+    ///
+    /// **Not the material.** In an editor of several materials the material is
+    /// the brush, and a mod that changes only the brush sends the same cells
+    /// it sent before — which the player has since carved. Adopting on a brush
+    /// change would put back every cell they took off since the last redraw.
+    adopted: BTreeMap<String, (u32, Vec<u16>)>,
     /// Which way round each shape editor's cube is being looked at.
     ///
     /// **A view and not a value.** The cut is always held in authored
@@ -126,6 +138,34 @@ impl Local {
         }
         *offset = offset.clamp(0.0, room);
         *offset
+    }
+
+    /// Takes the server's cut for a shape editor, when the server has changed
+    /// its mind about it.
+    ///
+    /// **About the cut, and never merely about the brush**: `sent` and
+    /// `sent_cells` are compared with what the server said last, and the
+    /// material is not looked at — see [`Local::adopted`]. A tree that repeats
+    /// itself leaves whatever the player has carved since in place.
+    fn adopt_editor(&mut self, name: &str, sent: u32, sent_cells: &[u16]) {
+        let repeated = self
+            .adopted
+            .get(name)
+            .is_some_and(|(shape, cells)| *shape == sent && cells.as_slice() == sent_cells);
+        if repeated {
+            return;
+        }
+        self.adopted
+            .insert(name.to_owned(), (sent, sent_cells.to_vec()));
+        self.shape.insert(name.to_owned(), sent);
+        match crate::cut::cells_of(sent_cells) {
+            Some(cells) => {
+                self.cells.insert(name.to_owned(), cells);
+            }
+            None => {
+                self.cells.remove(name);
+            }
+        }
     }
 }
 
@@ -369,7 +409,7 @@ fn paint_cursor_stack(
     // stays visible past its edges rather than being buried by it.
     let side = (SLOT as f32) * 0.8;
     let box_ = egui::Rect::from_center_size(at, egui::vec2(side, side));
-    icons.paint_stack(&painter, box_, stack.material, stack.shape);
+    icons.paint_stack(&painter, box_, stack.material, stack.shape, &stack.cells);
     painter.text(
         box_.right_bottom(),
         egui::Align2::RIGHT_BOTTOM,
@@ -450,6 +490,24 @@ pub fn stack_label(units: u32, shape: u32) -> String {
     } else {
         format!("{blocks}+{nodes}")
     }
+}
+
+/// What a slot's hover text calls a stack, once the name table has arrived.
+///
+/// A cut of several materials is every material in it, ascending by id and
+/// joined with `+`: its `material` is only the lowest (Sub-Node Contract
+/// §9.1), and naming that alone told a player their stone-and-oak cut was
+/// stone. `None` until every material in it has a name, for the reason a
+/// plain stack's is — a tooltip reading `#7` looks like a name.
+fn stack_name(icons: Icons<'_>, stack: &tiamat_core::proto::StackDef) -> Option<String> {
+    let Some(cells) = crate::cut::cells_of(&stack.cells) else {
+        return icons.name_of(stack.material).map(str::to_owned);
+    };
+    let names = crate::cut::materials(&cells)
+        .into_iter()
+        .map(|material| icons.name_of(material))
+        .collect::<Option<Vec<&str>>>()?;
+    Some(names.join(" + "))
 }
 
 /// Lays a tree out into `size` and paints it at the cursor.
@@ -916,9 +974,19 @@ fn paint_widget(
             raised,
         ),
         Widget::ShapeEditor {
-            shape, material, ..
+            shape,
+            material,
+            cells,
         } => {
-            paint_shape_editor(ui, rect, node, (*shape, *material), &paint, local, raised);
+            paint_shape_editor(
+                ui,
+                rect,
+                node,
+                (*shape, *material, cells),
+                &paint,
+                local,
+                raised,
+            );
             false
         }
         // **A picture, if its bytes have arrived.** Nothing until they do,
@@ -955,22 +1023,30 @@ fn paint_widget(
 /// puts one back against the face that was clicked, which is what digging and
 /// placing already do in the world. Removal never needs to reach a cell it
 /// cannot see, because taking the visible one reveals the next.
+///
+/// # Several materials
+///
+/// An editor the server gave 27 `cells` (Sub-Node Contract §9.1) draws every
+/// cell in its own material, and its `material` is the BRUSH: a right-click
+/// adds a cell of it, a left-click takes the nearest cell whatever it is made
+/// of. Every change reports the mask and all 27 cells. Without cells it is the
+/// one-material editor, and every filled cell is drawn as `material`.
 fn paint_shape_editor(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     node: &Node,
-    state: (u32, u16),
+    state: (u32, u16, &[u16]),
     paint: &Paint,
     local: &mut Local,
     raised: &mut Vec<Raised>,
 ) {
-    let (sent, material) = state;
-    // The mod's word, when the mod has changed its mind.
-    if local.adopted.get(&node.name) != Some(&sent) {
-        local.adopted.insert(node.name.clone(), sent);
-        local.shape.insert(node.name.clone(), sent);
-    }
-    let mut mask = local.shape.get(&node.name).copied().unwrap_or(sent);
+    let (sent, material, sent_cells) = state;
+    local.adopt_editor(&node.name, sent, sent_cells);
+    let several = local.cells.get(&node.name).copied();
+    let mut mask = several.as_ref().map_or_else(
+        || local.shape.get(&node.name).copied().unwrap_or(sent),
+        crate::cut::occupancy,
+    );
     let mut turn = local.turn.get(&node.name).copied().unwrap_or(0);
 
     // Square, and centred: the projection fits a six-by-six box and stretching
@@ -982,7 +1058,15 @@ fn paint_shape_editor(
     // Cells, not a stack: the editor's whole block is twenty-seven cells to
     // chisel at, where a whole block in a slot is loose material.
     let seen = crate::shape_view::as_seen(mask, turn);
-    paint.icons.paint_cells(ui.painter(), area, material, seen);
+    match &several {
+        // Turned with the one permutation `seen` is, so the material drawn
+        // on a cell is the material of the cell a click there reaches.
+        Some(cells) => {
+            let cells = crate::shape_view::cells_seen(cells, turn);
+            paint.icons.paint_mixed(ui.painter(), area, &cells);
+        }
+        None => paint.icons.paint_cells(ui.painter(), area, material, seen),
+    }
     paint_face_labels(ui, area, seen, turn);
 
     let clicked = if response.clicked() {
@@ -1019,6 +1103,34 @@ fn paint_shape_editor(
     }
 
     if let Some(adding) = clicked
+        && let Some(at) = response.interact_pointer_pos()
+        && let Some(cells) = several
+    {
+        // The same gesture, cell by cell. Which cell a click reaches is the
+        // mask's decision (`shape_view`'s cells functions ask the mask ones);
+        // what it is made of is the brush's or the cell's own.
+        let after = match crate::shape_view::pick(area, seen, at) {
+            Some((cell, face)) if adding => {
+                crate::shape_view::restore_seen_cells(&cells, turn, cell, face, material)
+            }
+            Some((cell, _)) => crate::shape_view::chisel_seen_cells(&cells, turn, cell),
+            None if adding && mask == 0 => crate::shape_view::seed_cells(material),
+            None => cells,
+        };
+        if after != cells {
+            let shape = crate::cut::occupancy(&after);
+            local.cells.insert(node.name.clone(), after);
+            local.shape.insert(node.name.clone(), shape);
+            paint.raise(
+                raised,
+                DialogEvent::Chiselled {
+                    name: node.name.clone(),
+                    shape,
+                    cells: after.to_vec(),
+                },
+            );
+        }
+    } else if let Some(adding) = clicked
         && let Some(at) = response.interact_pointer_pos()
     {
         // **Picked in the turned cube and applied to the authored one.** The
@@ -1633,9 +1745,13 @@ fn paint_slot(
         .and_then(|contents| contents.slots.get(usize::from(index)).cloned().flatten())
     {
         let (material, units) = (stack.material, stack.units);
-        paint
-            .icons
-            .paint_stack(ui.painter(), inner.shrink(6.0), material, stack.shape);
+        paint.icons.paint_stack(
+            ui.painter(),
+            inner.shrink(6.0),
+            material,
+            stack.shape,
+            &stack.cells,
+        );
         let label = stack_label(units, stack.shape);
         ui.painter().text(
             inner.right_bottom() - egui::vec2(2.0, 2.0),
@@ -1651,7 +1767,7 @@ fn paint_slot(
         //
         // Only when the name table has arrived: a tooltip reading `#7` is worse
         // than no tooltip at all, because it looks like the name.
-        if let Some(name) = paint.icons.name_of(material) {
+        if let Some(name) = stack_name(paint.icons, &stack) {
             let (blocks, spares) = tiamat_core::inventory::display(units);
             response = response.on_hover_text(format!("{name}\n{blocks} blocks + {spares} nodes"));
             showed_own_hover = true;
@@ -2159,29 +2275,38 @@ mod tests {
         dialogs: Dialogs,
         open: BTreeMap<String, Screen>,
         views: BTreeMap<String, ViewContents>,
+        /// The atlas layout, for a test that has to find the cube by the
+        /// faces it samples from it. `None` draws the no-atlas fallback.
+        tiles: Option<crate::texture::TileMap>,
     }
+
+    /// The texture id an [`Editor`] with an atlas hands egui.
+    const EDITOR_ATLAS: egui::TextureId = egui::TextureId::User(9);
 
     impl Editor {
         fn new() -> Self {
+            Self::of(
+                Widget::ShapeEditor {
+                    shape: 0x7FF_FFFF,
+                    material: 1,
+                    cells: Vec::new(),
+                },
+                None,
+            )
+        }
+
+        /// One editor, named `cut`, as `widget` describes it.
+        fn of(widget: Widget, tiles: Option<crate::texture::TileMap>) -> Self {
             let ctx = egui::Context::default();
             crate::app::install_fonts(&ctx);
-            let mut node = Node::new(Widget::ShapeEditor {
-                shape: 0x7FF_FFFF,
-                material: 1,
-                cells: Vec::new(),
-            });
-            node.name = "cut".to_owned();
-            let mut open = BTreeMap::new();
-            open.insert(
-                "mod:screen".to_owned(),
-                Screen::new(Tree { nodes: vec![node] }, false),
-            );
             let mut editor = Self {
                 ctx,
                 dialogs: Dialogs::default(),
-                open,
+                open: BTreeMap::new(),
                 views: BTreeMap::new(),
+                tiles,
             };
+            editor.show(widget);
             // Twice: the first pass has no fonts laid out, so nothing is where
             // a player would find it.
             editor.frame(Vec::new());
@@ -2189,7 +2314,22 @@ mod tests {
             editor
         }
 
+        /// What the mod's next tree says the editor is.
+        fn show(&mut self, widget: Widget) {
+            let mut node = Node::new(widget);
+            node.name = "cut".to_owned();
+            self.open.insert(
+                "mod:screen".to_owned(),
+                Screen::new(Tree { nodes: vec![node] }, false),
+            );
+        }
+
         fn frame(&mut self, events: Vec<egui::Event>) -> Vec<Raised> {
+            self.run(events).0
+        }
+
+        /// One frame, and every face it drew from the atlas.
+        fn run(&mut self, events: Vec<egui::Event>) -> (Vec<Raised>, Vec<egui::Mesh>) {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -2202,13 +2342,16 @@ mod tests {
             let dialogs = &mut self.dialogs;
             let open = &self.open;
             let views = &self.views;
-            let _ = self.ctx.run_ui(raw, |root| {
+            let icons = self.tiles.as_ref().map_or_else(Icons::default, |tiles| {
+                Icons::new(Some(EDITOR_ATLAS), Some(tiles))
+            });
+            let output = self.ctx.run_ui(raw, |root| {
                 let ctx = root.ctx().clone();
                 raised = dialogs.draw(
                     &ctx,
                     open,
                     views,
-                    Icons::default(),
+                    icons,
                     &BTreeMap::new(),
                     &crate::fonts::Fonts::new(),
                     (1280.0, 720.0),
@@ -2216,13 +2359,44 @@ mod tests {
                     crate::theme::Dressing::default(),
                 );
             });
-            raised
+            let faces = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == EDITOR_ATLAS => {
+                        Some((**mesh).clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            (raised, faces)
+        }
+
+        /// The middle of the cube on screen, from the faces it drew — which is
+        /// on the view axis, so a click there reaches the nearest corner cell.
+        fn centre(&mut self) -> egui::Pos2 {
+            let (_, faces) = self.run(Vec::new());
+            let mut bounds = egui::Rect::NOTHING;
+            for face in &faces {
+                for vertex in &face.vertices {
+                    bounds.extend_with(vertex.pos);
+                }
+            }
+            assert!(
+                bounds.is_positive(),
+                "the editor drew no faces from the atlas"
+            );
+            bounds.center()
         }
 
         fn click(&mut self, at: egui::Pos2) -> Vec<Raised> {
+            self.click_with(at, egui::PointerButton::Primary)
+        }
+
+        fn click_with(&mut self, at: egui::Pos2, which: egui::PointerButton) -> Vec<Raised> {
             let button = |pressed| egui::Event::PointerButton {
                 pos: at,
-                button: egui::PointerButton::Primary,
+                button: which,
                 pressed,
                 modifiers: egui::Modifiers::default(),
             };
@@ -2231,6 +2405,16 @@ mod tests {
             let raised = self.frame(vec![button(false)]);
             self.frame(Vec::new());
             raised
+        }
+
+        /// What the editor holds locally: its mask and, for several
+        /// materials, its cells.
+        fn local(&self) -> (Option<u32>, Option<crate::cut::Cells>) {
+            let local = self.dialogs.forms.get("mod:screen");
+            (
+                local.and_then(|local| local.shape.get("cut").copied()),
+                local.and_then(|local| local.cells.get("cut").copied()),
+            )
         }
 
         fn turn(&self) -> crate::shape_view::Turn {
@@ -2271,6 +2455,175 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.event, DialogEvent::Chiselled { .. })),
             "the arrow at {at:?} also chiselled: {raised:?}"
+        );
+    }
+
+    /// Material 2 everywhere but the near corner, `(2, 2, 2)`, which is 3.
+    fn two_with_a_corner_of_three() -> Vec<u16> {
+        let mut cells = vec![2u16; 27];
+        cells[26] = 3;
+        cells
+    }
+
+    /// An editor of several materials, painting with `brush`.
+    fn several(cells: Vec<u16>, brush: u16) -> Widget {
+        let shape = cells
+            .iter()
+            .enumerate()
+            .filter(|(_, material)| **material != 0)
+            .fold(0, |mask, (index, _)| mask | (1 << index));
+        Widget::ShapeEditor {
+            shape,
+            material: brush,
+            cells,
+        }
+    }
+
+    fn four_tiles() -> crate::texture::TileMap {
+        crate::texture::Atlas::build(&[None, None, None, None]).tiles_only()
+    }
+
+    /// Every chisel a click raised, as its mask and its cells.
+    fn chisels(raised: &[Raised]) -> Vec<(u32, Vec<u16>)> {
+        raised
+            .iter()
+            .filter_map(|raised| match &raised.event {
+                DialogEvent::Chiselled { shape, cells, .. } => Some((*shape, cells.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_editor_of_several_materials_takes_any_cell_and_adds_the_brush() {
+        // Sub-Node Contract §9.1's editor: a left click takes the nearest cell
+        // WHATEVER it is made of — here the corner of 3 while the brush is 2 —
+        // and a right click puts back a cell of the brush. Both report the
+        // mask and all twenty-seven cells, in the ids the tree gave.
+        let mut editor = Editor::of(several(two_with_a_corner_of_three(), 2), Some(four_tiles()));
+        let centre = editor.centre();
+        let full = tiamat_core::block::OCCUPANCY_FULL;
+
+        let mut expected = two_with_a_corner_of_three();
+        expected[26] = 0;
+        assert_eq!(
+            chisels(&editor.click(centre)),
+            vec![(full & !(1 << 26), expected.clone())],
+            "a left click did not take the near corner, of the other material"
+        );
+
+        expected[26] = 2;
+        assert_eq!(
+            chisels(&editor.click_with(centre, egui::PointerButton::Secondary)),
+            vec![(full, expected.clone())],
+            "a right click did not put back a cell of the brush"
+        );
+        assert_eq!(
+            editor.local().1.map(|cells| cells.to_vec()),
+            Some(expected),
+            "the click did not land locally at once"
+        );
+    }
+
+    #[test]
+    fn an_editor_of_one_material_reports_no_cells() {
+        let mut editor = Editor::of(
+            Widget::ShapeEditor {
+                shape: tiamat_core::block::OCCUPANCY_FULL,
+                material: 2,
+                cells: Vec::new(),
+            },
+            Some(four_tiles()),
+        );
+        let centre = editor.centre();
+        assert_eq!(
+            chisels(&editor.click(centre)),
+            vec![(tiamat_core::block::OCCUPANCY_FULL & !(1 << 26), Vec::new())],
+            "an editor of one material is exactly what it always was"
+        );
+        assert_eq!(
+            editor.local().1,
+            None,
+            "an editor of one material has no cells"
+        );
+    }
+
+    #[test]
+    fn a_new_brush_keeps_what_the_player_carved_and_a_new_cut_replaces_it() {
+        // **The rule for the brush.** A mod changing the brush sends the same
+        // cells it sent before — which the player has since carved — and
+        // adopting them would put back everything taken off since. Only a
+        // tree whose CUT differs from the server's last one is the mod
+        // changing its mind.
+        let sent = two_with_a_corner_of_three();
+        let mut editor = Editor::of(several(sent.clone(), 2), Some(four_tiles()));
+        let centre = editor.centre();
+        editor.click(centre);
+        let carved = editor.local().1.expect("an editor of several materials");
+        assert_eq!(carved[26], 0, "the click did not carve");
+
+        editor.show(several(sent, 3));
+        editor.frame(Vec::new());
+        assert_eq!(
+            editor.local().1,
+            Some(carved),
+            "changing only the brush undid the player's carving"
+        );
+
+        let mut reset = vec![3u16; 27];
+        reset[0] = 2;
+        editor.show(several(reset.clone(), 3));
+        editor.frame(Vec::new());
+        assert_eq!(
+            editor.local().1.map(|cells| cells.to_vec()),
+            Some(reset),
+            "a different cut from the mod was not adopted"
+        );
+
+        // And back to one material: no cells left behind to draw from.
+        editor.show(Widget::ShapeEditor {
+            shape: 0b111,
+            material: 2,
+            cells: Vec::new(),
+        });
+        editor.frame(Vec::new());
+        assert_eq!(editor.local(), (Some(0b111), None));
+    }
+
+    #[test]
+    fn a_shape_editor_of_several_materials_draws_each_cell_from_its_own_tile() {
+        // The CPU half of `a_cut_of_several_materials_is_drawn_cell_by_cell`
+        // in the screenshot tests: which tile each face samples.
+        let tiles = four_tiles();
+        let tile_of = |material: u16| tiles.uv_of(material).expect("the atlas is up");
+        let mut editor = Editor::of(several(two_with_a_corner_of_three(), 2), Some(four_tiles()));
+        let (_, faces) = editor.run(Vec::new());
+        assert_eq!(
+            faces.len(),
+            27 * 3,
+            "a full block drew {} faces",
+            faces.len()
+        );
+        let sampling = |material: u16| {
+            let (u0, v0, u1, v1) = tile_of(material);
+            faces
+                .iter()
+                .filter(|face| {
+                    face.vertices.iter().all(|vertex| {
+                        (u0..=u1).contains(&vertex.uv.x) && (v0..=v1).contains(&vertex.uv.y)
+                    })
+                })
+                .count()
+        };
+        assert_eq!(
+            sampling(3),
+            3,
+            "the corner's three faces are not its own tile"
+        );
+        assert_eq!(
+            sampling(2),
+            26 * 3,
+            "the rest are not the other material's tile"
         );
     }
 

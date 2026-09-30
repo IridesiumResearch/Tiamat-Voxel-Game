@@ -3495,7 +3495,7 @@ const HELD_GRIP: [f32; 3] = [0.0, -0.55, 0.35];
 /// [`crate::texture::TileMap::opacity_of`]); passed through to [`boxes_of`],
 /// which is the one place a held item and a dropped item both become boxes,
 /// so third-person and the floor cannot draw a different shape for the same
-/// sword.
+/// sword. So is `cell_uvs`, a tile per cell for a cut of several materials.
 #[must_use]
 pub fn held_boxes(
     figure: &skinned::Figure,
@@ -3504,6 +3504,7 @@ pub fn held_boxes(
     uv: [f32; 4],
     item: bool,
     texels: Option<[u16; 16]>,
+    cell_uvs: Option<&[[f32; 4]; 27]>,
 ) -> Vec<Prop> {
     use glam::Mat4;
 
@@ -3515,7 +3516,7 @@ pub fn held_boxes(
         * Mat4::from_cols_array(joint)
         * Mat4::from_translation(glam::Vec3::from(HELD_GRIP));
 
-    boxes_of(&placed, HELD_HALF, shape, uv, item, texels)
+    boxes_of(&placed, HELD_HALF, shape, uv, item, texels, cell_uvs)
 }
 
 /// One box of an item's extruded sprite, `texel` already in the sprite's own
@@ -3550,6 +3551,11 @@ fn item_texel_prop(
 ///
 /// `half` is the half-extent of the WHOLE block; a cut's cells are a third of
 /// that each, so three of them fill exactly the block one box would have.
+///
+/// `cell_uvs` is each cell's atlas rectangle for a cut of several materials
+/// (Sub-Node Contract §9.1), `None` for anything else. With it the stack is
+/// always its cells, each sampling its own tile — even when `shape` fills the
+/// block, because one box has one tile and the cut is not one material.
 fn boxes_of(
     placed: &glam::Mat4,
     half: f32,
@@ -3557,8 +3563,13 @@ fn boxes_of(
     uv: [f32; 4],
     item: bool,
     texels: Option<[u16; 16]>,
+    cell_uvs: Option<&[[f32; 4]; 27]>,
 ) -> Vec<Prop> {
     use glam::Mat4;
+
+    if let Some(uvs) = cell_uvs {
+        return cell_boxes(placed, half, shape, |index| uvs[index]);
+    }
 
     // **An item is a picture with a thickness, not a solid.** A sword is not a
     // cube and drawing it as one wraps the same picture round three faces —
@@ -3596,13 +3607,26 @@ fn boxes_of(
             flags: [0.0; 4],
         }];
     }
+    cell_boxes(placed, half, shape, |_| uv)
+}
+
+/// One box per filled cell of `shape`, each sampling the rectangle `uv_at`
+/// gives for its index (`x + 3*y + 9*z`).
+fn cell_boxes(
+    placed: &glam::Mat4,
+    half: f32,
+    shape: u32,
+    uv_at: impl Fn(usize) -> [f32; 4],
+) -> Vec<Prop> {
+    use glam::Mat4;
 
     let cell = half / 3.0;
     let mut boxes = Vec::new();
     for z in 0..3 {
         for y in 0..3 {
             for x in 0..3 {
-                if shape & (1 << (x + y * 3 + z * 9)) == 0 {
+                let index = x + y * 3 + z * 9;
+                if shape & (1 << index) == 0 {
                     continue;
                 }
                 #[expect(
@@ -3614,7 +3638,7 @@ fn boxes_of(
                     * Mat4::from_scale(glam::Vec3::splat(cell));
                 boxes.push(Prop {
                     model: (*placed * placement).to_cols_array(),
-                    uv,
+                    uv: uv_at(usize::try_from(index).unwrap_or_default()),
                     flags: [0.0; 4],
                 });
             }
@@ -3683,12 +3707,13 @@ pub fn dropped_boxes(
     uv: [f32; 4],
     item: bool,
     texels: Option<[u16; 16]>,
+    cell_uvs: Option<&[[f32; 4]; 27]>,
 ) -> Vec<Prop> {
     use glam::Mat4;
 
     let placed = Mat4::from_translation(glam::vec3(at[0], at[1] + DROP_LIFT, at[2]))
         * Mat4::from_rotation_y(yaw);
-    boxes_of(&placed, DROP_HALF, shape, uv, item, texels)
+    boxes_of(&placed, DROP_HALF, shape, uv, item, texels, cell_uvs)
 }
 
 /// One sub-node column under a blob shadow, before it is placed in the world.
@@ -5418,7 +5443,15 @@ mod tests {
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
         };
-        let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false, None);
+        let boxes = held_boxes(
+            &figure,
+            &joint([3.0, 0.0, 0.0]),
+            0,
+            [0.0; 4],
+            false,
+            None,
+            None,
+        );
         assert_eq!(boxes.len(), 1, "a whole block is one box");
 
         // At yaw zero the figure's axes are the world's, so the hand is its
@@ -5447,7 +5480,15 @@ mod tests {
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
         };
-        let boxes = held_boxes(&figure, &joint([3.0, 0.0, 0.0]), 0, [0.0; 4], false, None);
+        let boxes = held_boxes(
+            &figure,
+            &joint([3.0, 0.0, 0.0]),
+            0,
+            [0.0; 4],
+            false,
+            None,
+            None,
+        );
         let at = placement(&boxes[0]);
 
         // The hand's own displacement from the body, which is what turned.
@@ -5477,8 +5518,8 @@ mod tests {
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
         };
-        let block = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None);
-        let item = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], true, None);
+        let block = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None, None);
+        let item = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], true, None, None);
         assert_eq!(block.len(), 1);
         assert_eq!(item.len(), 1);
 
@@ -5516,7 +5557,7 @@ mod tests {
             light: skinned::OPEN_SKY,
         };
         let mask = 0b111 << 12;
-        let cut = held_boxes(&figure, &joint([0.0; 3]), mask, [0.0; 4], false, None);
+        let cut = held_boxes(&figure, &joint([0.0; 3]), mask, [0.0; 4], false, None, None);
         assert_eq!(cut.len(), mask.count_ones() as usize);
 
         // Three cells across is exactly the block one box would have been, in
@@ -5534,7 +5575,7 @@ mod tests {
             }
             (low, high)
         };
-        let whole = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None);
+        let whole = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None, None);
         let (cut_low, cut_high) = extent(&cut);
         let (whole_low, whole_high) = extent(&whole);
         assert!(
@@ -5551,6 +5592,7 @@ mod tests {
             tiamat_core::inventory::Shape::ALL,
             [0.0; 4],
             false,
+            None,
             None,
         );
         assert_eq!(all.len(), 1);
@@ -5580,8 +5622,8 @@ mod tests {
             light: skinned::OPEN_SKY,
         };
         let uv = [0.2, 0.2, 0.6, 0.6];
-        let held = held_boxes(&figure, &joint([0.0; 3]), 0, uv, true, Some(mask));
-        let dropped = dropped_boxes([0.0; 3], 0.0, 0, uv, true, Some(mask));
+        let held = held_boxes(&figure, &joint([0.0; 3]), 0, uv, true, Some(mask), None);
+        let dropped = dropped_boxes([0.0; 3], 0.0, 0, uv, true, Some(mask), None);
         assert_eq!(held.len(), 3, "one box per opaque texel");
         assert_eq!(
             dropped.len(),
@@ -5657,6 +5699,7 @@ mod tests {
             [0.0; 4],
             false,
             Some([0xFFFFu16; 16]),
+            None,
         );
         assert_eq!(boxes.len(), 1, "a block is one cube regardless of texels");
         let half = [boxes[0].model[0], boxes[0].model[5], boxes[0].model[10]];
@@ -5672,14 +5715,64 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_of_several_materials_on_the_ground_and_in_a_hand_is_its_cells_in_their_tiles() {
+        // Sub-Node Contract §9.1 on the floor and in someone else's hand. A
+        // cut that fills the block is one box when it is one material; stone
+        // with an oak corner is twenty-seven, the corner sampling oak.
+        let stone = [0.0, 0.0, 0.25, 0.25];
+        let oak = [0.5, 0.5, 0.75, 0.75];
+        let mut uvs = [stone; 27];
+        uvs[0] = oak;
+        let full = tiamat_core::inventory::Shape::ALL;
+        let dropped = dropped_boxes([0.0; 3], 0.0, full, stone, false, None, Some(&uvs));
+        let figure = skinned::Figure {
+            offset: [0.0; 3],
+            yaw: 0.0,
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+        };
+        let held = held_boxes(
+            &figure,
+            &joint([0.0; 3]),
+            full,
+            stone,
+            false,
+            None,
+            Some(&uvs),
+        );
+        for (who, boxes) in [("dropped", dropped), ("held", held)] {
+            assert_eq!(boxes.len(), 27, "a {who} cut of two materials is its cells");
+            // By bits: the rectangles are copied, never computed, so they
+            // arrive exactly as they were given.
+            let sampling = |tile: [f32; 4]| {
+                boxes
+                    .iter()
+                    .filter(|prop| prop.uv.map(f32::to_bits) == tile.map(f32::to_bits))
+                    .count()
+            };
+            assert_eq!(
+                sampling(oak),
+                1,
+                "the {who} cut's oak corner is not in oak's tile"
+            );
+            assert_eq!(
+                sampling(stone),
+                26,
+                "the {who} cut's stone is not in stone's tile"
+            );
+        }
+    }
+
+    #[test]
     fn a_fully_opaque_mask_fills_the_same_envelope_the_old_slab_did() {
         // Every texel opaque is what a fully-covering picture (or the
         // missing-texture checker) draws: 256 boxes tiling the same face the
         // single slab used to cover.
         let placed = glam::Mat4::IDENTITY;
-        let full = boxes_of(&placed, 1.0, 0, [0.0; 4], true, Some([0xFFFFu16; 16]));
+        let full = boxes_of(&placed, 1.0, 0, [0.0; 4], true, Some([0xFFFFu16; 16]), None);
         assert_eq!(full.len(), 256);
-        let slab = boxes_of(&placed, 1.0, 0, [0.0; 4], true, None);
+        let slab = boxes_of(&placed, 1.0, 0, [0.0; 4], true, None, None);
         assert_eq!(slab.len(), 1);
 
         let envelope = |boxes: &[Prop], axis: usize| {

@@ -40,6 +40,7 @@ pub mod audio;
 pub mod cache;
 pub mod camera;
 pub mod config;
+pub mod cut;
 pub mod dialog;
 pub mod discovery;
 pub mod entities;

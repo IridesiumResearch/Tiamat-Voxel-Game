@@ -3045,6 +3045,7 @@ impl App {
                         shape: 0,
                         item: false,
                         texels: None,
+                        cell_tiles: None,
                         swing,
                     };
                 };
@@ -3052,17 +3053,23 @@ impl App {
                     .tiles
                     .uv_of(stack.material)
                     .unwrap_or((0.0, 0.0, 1.0, 1.0));
+                let cell_tiles = self.cell_tiles(&stack);
                 crate::render::viewmodel::Held {
                     tile: Some([u0, v0, u1, v1]),
-                    shape: stack.shape,
+                    // A cut of several materials by its cells' occupancy,
+                    // which is the full mask where the wire says `0`.
+                    shape: crate::cut::drawn_shape(&stack),
                     // The same set the slots and the props read, so one sword
                     // is one shape in every view (`f7f20e1` missed this one).
-                    item: self.items.contains(&stack.material),
+                    // A cut of several materials is never a picture.
+                    item: cell_tiles.is_none() && self.items.contains(&stack.material),
                     // The opacity mask an item is extruded from — see
                     // `viewmodel::cells`. `None` for a block, which ignores
                     // it anyway, and for a material the atlas has no tile
                     // for yet.
                     texels: self.tiles.opacity_of(stack.material),
+                    // Each cell in its own tile (Sub-Node Contract §9.1).
+                    cell_tiles,
                     swing,
                 }
             };
@@ -3167,13 +3174,15 @@ impl App {
             let Some(joint) = self.renderer.attachment(figure, joint) else {
                 continue;
             };
+            let cell_tiles = self.cell_tiles(stack);
             props.extend(crate::render::held_boxes(
                 figure,
                 &joint,
-                stack.shape,
+                crate::cut::drawn_shape(stack),
                 self.tile_of(stack.material),
-                self.items.contains(&stack.material),
+                cell_tiles.is_none() && self.items.contains(&stack.material),
                 self.tiles.opacity_of(stack.material),
+                cell_tiles.as_ref(),
             ));
         }
         props
@@ -3183,6 +3192,17 @@ impl App {
     fn tile_of(&self, material: u16) -> [f32; 4] {
         let (u0, v0, u1, v1) = self.tiles.uv_of(material).unwrap_or((0.0, 0.0, 1.0, 1.0));
         [u0, v0, u1, v1]
+    }
+
+    /// Each cell's atlas rectangle, for a cut of several materials; `None`
+    /// for any other stack.
+    ///
+    /// Every drawing of a held or dropped stack asks this, so a cut of stone
+    /// and oak is stone and oak in the hand, on the floor and in someone
+    /// else's hand alike (Sub-Node Contract §9.1). An empty cell's rectangle
+    /// is whatever `0` maps to; nothing draws an empty cell.
+    fn cell_tiles(&self, stack: &tiamat_core::proto::StackDef) -> Option<[[f32; 4]; 27]> {
+        crate::cut::cells_of(&stack.cells).map(|cells| cells.map(|cell| self.tile_of(cell)))
     }
 
     /// Every item lying in view, as boxes.
@@ -3209,13 +3229,15 @@ impl App {
                 f64::from(corner.y) + f64::from(pose.local[1]) / cells,
                 f64::from(corner.z) + f64::from(pose.local[2]) / cells,
             ]);
+            let cell_tiles = self.cell_tiles(stack);
             props.extend(crate::render::dropped_boxes(
                 at,
                 crate::render::spin(now.as_secs_f32(), id),
-                stack.shape,
+                crate::cut::drawn_shape(stack),
                 self.tile_of(stack.material),
-                self.items.contains(&stack.material),
+                cell_tiles.is_none() && self.items.contains(&stack.material),
                 self.tiles.opacity_of(stack.material),
+                cell_tiles.as_ref(),
             ));
         }
         props

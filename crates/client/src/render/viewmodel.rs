@@ -136,6 +136,14 @@ pub struct Held {
     /// draws its cells (`crate::icons::Icons::paint_stack`). Reported from the
     /// window.
     pub shape: u32,
+    /// The atlas rectangle of each cell, for a cut of several materials
+    /// (Sub-Node Contract §9.1); `None` for anything else, whose cells all
+    /// take `tile`.
+    ///
+    /// **With these the held thing is always its cells**, even when `shape`
+    /// is the full mask: one box would be one tile, and a block of stone and
+    /// oak is not a block of either.
+    pub cell_tiles: Option<[[f32; 4]; 27]>,
     /// How far through a swing, `0.0..=1.0`.
     pub swing: f32,
 }
@@ -181,7 +189,17 @@ pub fn pieces(hand: Hand, held: Held) -> Vec<Piece> {
         // Less than the arm's roll, so a held block leans with the swing
         // without spinning in the hand.
         let lean = roll * 0.4;
-        for cell in cells(held.shape, held.item, held.texels) {
+        for cell in cells(
+            held.shape,
+            held.item,
+            held.texels,
+            held.cell_tiles.is_some(),
+        ) {
+            // Each cell of a cut of several materials in its own tile.
+            let tile = match (held.cell_tiles, cell.at) {
+                (Some(tiles), Some(at)) => tiles[at],
+                _ => tile,
+            };
             pieces.push(cell.piece(centre, lean, tile));
         }
     }
@@ -208,6 +226,9 @@ struct Cell {
     /// texel's own sixteenth for one box of an extruded item (see
     /// [`texel_cells`]).
     uv: [f32; 4],
+    /// Which of the block's 27 cells this box is, `x + 3*y + 9*z`, when the
+    /// held thing is drawn cell by cell; `None` for a whole block or an item.
+    at: Option<usize>,
 }
 
 /// The whole tile, unsubdivided: what a block cell and the fallback item
@@ -262,6 +283,7 @@ fn texel_cells(mask: [u16; 16]) -> Vec<Cell> {
                 shape::BLOCK * super::ITEM_THICKNESS,
             ],
             uv: texel.uv,
+            at: None,
         })
         .collect()
 }
@@ -271,7 +293,14 @@ fn texel_cells(mask: [u16; 16]) -> Vec<Cell> {
 /// A whole block — loose material, or a mask with every cell — is ONE box, not
 /// twenty-seven: it is the common case by far, it looks identical, and a cut is
 /// the only thing that needs the cells drawn separately.
-fn cells(mask: u32, item: bool, texels: Option<[u16; 16]>) -> Vec<Cell> {
+///
+/// `several` is a cut of several materials (Sub-Node Contract §9.1), which is
+/// always its cells: it is never an item picture and never one box, because
+/// each cell takes its own tile.
+fn cells(mask: u32, item: bool, texels: Option<[u16; 16]>, several: bool) -> Vec<Cell> {
+    if several {
+        return cut_cells(mask);
+    }
     // **An item is a picture with a thickness, not a solid.** A sword is not a
     // cube, and drawing it as one wraps the same picture round three faces —
     // reported from the window as a sword "rendered on a block". Extruded from
@@ -294,6 +323,7 @@ fn cells(mask: u32, item: bool, texels: Option<[u16; 16]>) -> Vec<Cell> {
                 shape::BLOCK * super::ITEM_THICKNESS,
             ],
             uv: WHOLE_TILE,
+            at: None,
         }];
     }
     if mask == 0 || mask == tiamat_core::inventory::Shape::ALL {
@@ -301,8 +331,14 @@ fn cells(mask: u32, item: bool, texels: Option<[u16; 16]>) -> Vec<Cell> {
             offset: [0.0; 3],
             half: [shape::BLOCK; 3],
             uv: WHOLE_TILE,
+            at: None,
         }];
     }
+    cut_cells(mask)
+}
+
+/// One box per filled cell of `mask`, each knowing which cell it is.
+fn cut_cells(mask: u32) -> Vec<Cell> {
     let half = shape::BLOCK / 3.0;
     let mut cells = Vec::new();
     for z in 0..3 {
@@ -320,6 +356,7 @@ fn cells(mask: u32, item: bool, texels: Option<[u16; 16]>) -> Vec<Cell> {
                     offset: [along(x), along(y), along(z)],
                     half: [half; 3],
                     uv: WHOLE_TILE,
+                    at: usize::try_from(bit).ok(),
                 });
             }
         }
@@ -581,12 +618,56 @@ mod tests {
     }
 
     #[test]
+    fn a_held_cut_of_several_materials_takes_each_cells_own_tile() {
+        // Sub-Node Contract §9.1 in the hand: a cut filling the block, stone
+        // with an oak corner. Its mask is the full mask, which for one material
+        // is ONE box; with a tile per cell it has to be twenty-seven, or the
+        // player is holding a block of stone.
+        let stone = [0.1, 0.1, 0.2, 0.2];
+        let oak = [0.5, 0.5, 0.6, 0.6];
+        let mut tiles = [stone; 27];
+        tiles[26] = oak;
+        let held = Held {
+            tile: Some(stone),
+            shape: tiamat_core::inventory::Shape::ALL,
+            item: false,
+            texels: None,
+            cell_tiles: Some(tiles),
+            swing: 0.0,
+        };
+        let drawn = pieces(Hand::Main, held);
+        assert_eq!(drawn.len(), 1 + 27, "an arm and one box per cell");
+        let near = |uv: [f32; 4], tile: [f32; 4]| {
+            uv.iter()
+                .zip(tile)
+                .all(|(got, want)| (got - want).abs() < 1e-4)
+        };
+        assert_eq!(
+            drawn[1..]
+                .iter()
+                .filter(|piece| near(piece.uv, oak))
+                .count(),
+            1,
+            "the oak corner is not in oak's tile"
+        );
+        assert_eq!(
+            drawn[1..]
+                .iter()
+                .filter(|piece| near(piece.uv, stone))
+                .count(),
+            26,
+            "the stone cells are not in stone's tile"
+        );
+    }
+
+    #[test]
     fn a_held_block_is_a_second_box_at_the_end_of_the_arm() {
         let held = Held {
             tile: Some([0.1, 0.1, 0.2, 0.2]),
             shape: 0,
             item: false,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         };
         let main = pieces(Hand::Main, held);
@@ -632,6 +713,7 @@ mod tests {
                 shape: 0,
                 item: false,
                 texels: None,
+                cell_tiles: None,
                 swing: 0.0,
             },
         );
@@ -647,6 +729,7 @@ mod tests {
                 shape: mask,
                 item: false,
                 texels: None,
+                cell_tiles: None,
                 swing: 0.0,
             },
         );
@@ -666,7 +749,7 @@ mod tests {
         let envelope = |mask: u32| {
             let mut low = f32::MAX;
             let mut high = f32::MIN;
-            for cell in cells(mask, false, None) {
+            for cell in cells(mask, false, None, false) {
                 low = low.min(cell.offset[0] - cell.half[0]);
                 high = high.max(cell.offset[0] + cell.half[0]);
             }
@@ -687,6 +770,7 @@ mod tests {
                 shape: tiamat_core::inventory::Shape::ALL,
                 item: false,
                 texels: None,
+                cell_tiles: None,
                 swing: 0.0,
             },
         );
@@ -707,6 +791,7 @@ mod tests {
             shape: 0,
             item: false,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         };
         let item = Held {
@@ -745,6 +830,7 @@ mod tests {
             shape: 0b101,
             item: true,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         };
         assert_eq!(pieces(Hand::Main, held).len(), 2);
@@ -772,6 +858,7 @@ mod tests {
             shape: (1 << 12) | (1 << 14),
             item: false,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         };
         for swing in [0.0_f32, 0.25, 0.5, 1.0] {
@@ -798,6 +885,7 @@ mod tests {
             shape: 0,
             item: false,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         };
         let rest = pieces(Hand::Main, held)[0].placement;
@@ -831,6 +919,7 @@ mod tests {
                 shape: 0,
                 item: false,
                 texels: None,
+                cell_tiles: None,
                 swing: 7.5,
             },
         )[0]
@@ -842,6 +931,7 @@ mod tests {
                 shape: 0,
                 item: false,
                 texels: None,
+                cell_tiles: None,
                 swing: 1.0,
             },
         )[0]
@@ -865,6 +955,7 @@ mod tests {
             shape: 0,
             item: true,
             texels: Some(mask),
+            cell_tiles: None,
             swing: 0.0,
         };
         let drawn = pieces(Hand::Main, held);
@@ -903,6 +994,7 @@ mod tests {
             shape: 0,
             item: true,
             texels: None,
+            cell_tiles: None,
             swing: 0.0,
         };
         let drawn = pieces(Hand::Main, held);
@@ -928,6 +1020,7 @@ mod tests {
             shape: 0,
             item: true,
             texels: Some([0u16; 16]),
+            cell_tiles: None,
             swing: 0.0,
         };
         assert_eq!(pieces(Hand::Main, held).len(), 2);
@@ -938,7 +1031,7 @@ mod tests {
         // `texels` is read only when `item` is true — a block's mask (were
         // one ever set on it, which nothing does today) must not turn a
         // block into an extruded sprite.
-        let boxes = cells(0, false, Some([0xFFFFu16; 16]));
+        let boxes = cells(0, false, Some([0xFFFFu16; 16]), false);
         assert_eq!(boxes.len(), 1, "a block is one cube regardless of texels");
         assert!(
             (boxes[0].half[0] - boxes[0].half[2]).abs() < f32::EPSILON,
@@ -952,7 +1045,7 @@ mod tests {
         // Every texel opaque is the shape a fully-covering picture (or the
         // missing-texture checker) draws: 256 boxes tiling exactly the same
         // face the single slab used to cover, not a smaller or larger one.
-        let full = cells(0, true, Some([0xFFFFu16; 16]));
+        let full = cells(0, true, Some([0xFFFFu16; 16]), false);
         assert_eq!(full.len(), 256);
 
         let envelope = |cells: &[Cell], axis: usize| {
@@ -964,7 +1057,7 @@ mod tests {
             }
             (low, high)
         };
-        let slab = cells(0, true, None);
+        let slab = cells(0, true, None, false);
         for axis in 0..2 {
             let (slab_low, slab_high) = envelope(&slab, axis);
             let (full_low, full_high) = envelope(&full, axis);
