@@ -1502,3 +1502,86 @@ fn a_mod_writes_the_space_it_names() {
         "the overworld lost its ground to a write meant for another space"
     );
 }
+
+#[test]
+fn two_instances_of_one_template_generate_differently_on_the_server_workers() {
+    // **The instance reaches the generation workers, not only the main VM.**
+    // The server fills chunks on worker threads with their own Lua states, so a
+    // `pos.domain` set on one VM only would pass a unit test and fail here. The
+    // template's generator digs deeper for `hull/b` than for `hull/a`, and the
+    // chunks the server wrote under each id say which it was told.
+    let world = scratch("instance-generator-world");
+    let mods = write_mod(
+        "instancegen",
+        "local plate = game.register_block{ id = 'plate' }\n\
+         game.register_domain{ id = 'hull', instanced = true,\n\
+         \x20   generator = function(buf, pos)\n\
+         \x20       local depth = pos.domain == 'places:hull/a' and -4 or -10\n\
+         \x20       buf:fill_below_heightmap(game.flat_heightmap(depth), plate)\n\
+         \x20   end }\n\
+         game.register_on_chat(function(event)\n\
+         \x20   local body = game.player_entity(event.player)\n\
+         \x20   local id = game.create_domain('places:hull', event.text)\n\
+         \x20   game.transfer_entity(body, id, { x = 8, y = 4, z = 8 })\n\
+         \x20   return false\n\
+         end)",
+    );
+    let server = restart_at(world.clone(), mods);
+    block_on(async {
+        let mut bot = join(&server, "Hullwright").await;
+        settle_for(&mut bot, 40).await;
+        for key in ["a", "b"] {
+            bot.chat(key).await.expect("chat");
+            let want = format!("places:hull/{key}");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while switched_to(&bot).as_deref() != Some(want.as_str()) {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "never reached {want}"
+                );
+                let _ = tokio::time::timeout(Duration::from_millis(60), bot.recv()).await;
+            }
+            settle_for(&mut bot, 80).await;
+        }
+        bot.disconnect().await;
+    });
+    assert!(server.stop(), "the world should close cleanly");
+
+    let mut registry = tiamat_core::Registry::new();
+    let db = tiamat_core::persist::WorldDb::open(
+        world.join(tiamat_server::handle::WORLD_FILE),
+        &mut registry,
+    )
+    .expect("reopen");
+    let at = tiamat_core::ChunkPos::new(0, -1, 0);
+    let filled = |id: &str| {
+        let chunk = db
+            .load_chunk_in(id, at)
+            .expect("read")
+            .unwrap_or_else(|| panic!("{id} was never written"));
+        let corner = tiamat_core::BlockPos::from_chunk_corner(at);
+        (0..16)
+            .flat_map(|x| (0..16).map(move |y| (x, y)))
+            .filter(|&(x, y)| {
+                chunk
+                    .get_block(tiamat_core::BlockPos::new(
+                        corner.x + x,
+                        corner.y + y,
+                        corner.z,
+                    ))
+                    .is_some_and(|view| view.filled_cells() > 0)
+            })
+            .count()
+    };
+    // Column z = 0 of the chunk: a 16 x 16 slice of it, solid below the ground.
+    assert_eq!(
+        filled("places:hull/a"),
+        16 * 12,
+        "hull/a was not told it was hull/a"
+    );
+    assert_eq!(
+        filled("places:hull/b"),
+        16 * 6,
+        "hull/b was not told it was hull/b"
+    );
+}

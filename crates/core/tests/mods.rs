@@ -2354,3 +2354,93 @@ end)
         "a map came back under the wrong mod"
     );
 }
+
+#[test]
+fn a_generator_is_told_which_domain_it_is_filling_so_instances_can_differ() {
+    // **Two instances of one template used to generate the same world**, since
+    // a generator was told `{ x, y, z, seed }` and nothing else. `pos.domain`
+    // is the id of the domain whose chunk this is: `overworld`, a registered
+    // domain's id, or `template/key` for an instance. The fixture encodes it
+    // in how deep the ground goes, so the answer is readable off the chunk.
+    let root = scratch("domain_in_generator");
+    write_mod(
+        &root,
+        "dom",
+        "",
+        r#"
+local stone = game.register_block{ id = "stone" }
+
+local function depth_of(domain)
+    if domain == "overworld" then return -2 end
+    if domain == "dom:room" then return -4 end
+    if domain == "dom:ship/a" then return -6 end
+    if domain == "dom:ship/b" then return -8 end
+    return -12
+end
+
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(depth_of(pos.domain)), stone)
+end)
+game.register_domain{ id = "room", generator = function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(depth_of(pos.domain)), stone)
+end }
+game.register_domain{ id = "ship", instanced = true, generator = function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(depth_of(pos.domain)), stone)
+end }
+"#,
+    );
+    let mut host = host_for(&root);
+    assert!(host.failed().is_empty(), "{:?}", host.failed());
+    host.freeze().expect("freeze");
+
+    let pos = ChunkPos::new(0, -1, 0);
+    let mut solid = |domain: &str| {
+        let chunk = host
+            .generate_chunk(domain, 9, pos, MaterialId::AIR)
+            .expect("generate");
+        let corner = tiamat_core::BlockPos::from_chunk_corner(pos);
+        let mut count = 0;
+        for x in 0..16 {
+            for y in 0..16 {
+                for z in 0..16 {
+                    let at = tiamat_core::BlockPos::new(corner.x + x, corner.y + y, corner.z + z);
+                    if chunk.get_block(at).is_some_and(|v| v.filled_cells() > 0) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        (count, chunk)
+    };
+
+    let (overworld, _) = solid("overworld");
+    let (room, _) = solid("dom:room");
+    let (a, a_chunk) = solid("dom:ship/a");
+    let (b, _) = solid("dom:ship/b");
+    let (other, _) = solid("dom:ship/zzz");
+    let (again, again_chunk) = solid("dom:ship/a");
+
+    // A column of 16 x 16 blocks per layer below the ground's height: each
+    // domain's answer is distinct, which is the domain having reached Lua.
+    assert_eq!(overworld, 16 * 16 * 14, "the overworld saw another domain");
+    assert_eq!(room, 16 * 16 * 12, "a registered domain saw another id");
+    assert_eq!(a, 16 * 16 * 10, "instance a saw another id");
+    assert_eq!(b, 16 * 16 * 8, "instance b saw another id");
+    assert_eq!(
+        other,
+        16 * 16 * 4,
+        "an unknown instance id reached Lua wrong"
+    );
+    assert_ne!(
+        a, b,
+        "two instances of one template generated the same world"
+    );
+
+    // Same seed, domain and chunk: the same bytes.
+    assert_eq!(a, again);
+    assert_eq!(
+        format!("{a_chunk:?}"),
+        format!("{again_chunk:?}"),
+        "regenerating one instance changed it"
+    );
+}

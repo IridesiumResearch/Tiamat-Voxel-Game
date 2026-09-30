@@ -3432,6 +3432,12 @@ impl ScriptVm for MluaVm {
             position
                 .set("seed", seed_to_lua(world_seed))
                 .map_err(|err| self.vm_error(&err))?;
+            // **The domain whose chunk this is**, so two instances of one
+            // template can generate differently: the id of the overworld, of a
+            // registered domain, or `template/key` of an instance.
+            position
+                .set("domain", domain)
+                .map_err(|err| self.vm_error(&err))?;
 
             self.arm_budget(self.limits.instructions_per_call)?;
             let result = callback.call::<()>((handle.clone(), position));

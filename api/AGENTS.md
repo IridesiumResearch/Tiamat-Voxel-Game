@@ -1332,6 +1332,10 @@ game.register_domain{ id = "quarry", generator = function(buf, pos)
     buf:fill_below_heightmap(heights, stone)
 end }
 
+-- `pos.domain` is the domain being filled: "overworld", "my_mod:quarry", or
+-- "my_mod:ship/17" for an instance of a template. A template's generator is
+-- shared by all its instances, so this is how they come out different.
+
 game.register_on_chat(function(event)
     if event.text ~= "quarry" then
         return

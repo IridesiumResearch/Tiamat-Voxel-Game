@@ -42,6 +42,7 @@
 ---@field y integer Chunk y, in chunks.
 ---@field z integer Chunk z, in chunks.
 ---@field seed integer The world seed, exact: its 64 bits as a Lua integer, which reads as a negative number for a seed with its top bit set. Hand it back unchanged to `density:bounds`, `density:at`, `game.rng_stream` and `game.noise_heightmap`; they take the bits, not the sign.
+---@field domain string? In a generator (`register_on_generate`, a domain's `generator`), the id of the domain whose chunk is being filled: `"overworld"` for the overworld's generators, the domain's id for a registered domain (`"my_mod:attic"`), `"template/key"` for an instance (`"my_mod:ship/17"`). A template's generator is one function shared by every instance, so this is how two instances of it differ: derive what they differ in from it (a hash of the string, a lookup in your own table), never from anything that changes between calls. Same seed, domain and chunk give the same chunk, which is all determinism needs. Set in every generation worker's VM as in the main one.
 
 ---A per-column height field. Produced and consumed natively; you cannot read
 ---the individual heights, by design.
