@@ -49,6 +49,10 @@ local open = {}
 local tab = {}
 local cut = {}
 local chosen = {}
+-- Several-material mode (Sub-Node Contract §9.1): whether it is on, and the
+-- material of each of the cut's 27 cells while it is.
+local several = {}
+local mixed = {}
 
 --- Every material a player is carrying loose, as `{ id, material, units }`.
 ---
@@ -78,6 +82,52 @@ local function cells(mask)
         end
     end
     return count
+end
+
+--- A mask's cells, every filled one made of `material`: where several-material
+--- mode starts, from whatever was being carved in one.
+local function filled_with(mask, material)
+    local list = {}
+    for bit = 0, 26 do
+        list[bit + 1] = (mask & (1 << bit) ~= 0) and material or 0
+    end
+    return list
+end
+
+--- What one item of a cut of several materials costs: `{ material, units }`
+--- per material in it, ascending by id.
+---
+--- **One unit per cell, of that cell's own material** (charter rule 5, and
+--- Sub-Node Contract §9.1). That the recipe is exactly the cells is this mod's
+--- decision, as it is for one material; the engine only moves the units.
+local function bill(list)
+    local per = {}
+    for _, id in ipairs(list) do
+        if id ~= 0 then
+            per[id] = (per[id] or 0) + 1
+        end
+    end
+    local out = {}
+    for id, units in pairs(per) do
+        out[#out + 1] = { material = id, units = units }
+    end
+    -- Ascending id, so the order the units are taken in is the same on every
+    -- server; `pairs` promises no order at all.
+    table.sort(out, function(a, b) return a.material < b.material end)
+    return out
+end
+
+--- What a player is told one item of a cut of several materials costs.
+local function bill_line(list)
+    local parts = {}
+    for index, entry in ipairs(bill(list)) do
+        parts[index] = entry.units .. " units of "
+            .. (game.block_of(entry.material) or ("material " .. entry.material))
+    end
+    if #parts == 0 then
+        return "Chiselled away to nothing — right-click to start again."
+    end
+    return "One of these costs " .. table.concat(parts, " and ") .. "."
 end
 
 --- The two tabs, as a row of buttons.
@@ -160,15 +210,30 @@ local function shapes_tab(player)
     children[#children + 1] = {
         type = "dropdown", name = "material", options = names, selected = pick,
     }
+    -- **Several materials: the dropdown is the brush.** The editor keeps each
+    -- cell's own material, and choosing another only changes what a
+    -- right-click adds — so one shape can be built of everything carried.
     children[#children + 1] = {
-        type = "shape_editor", name = "cut", shape = mask, material = material,
+        type = "checkbox", name = "several", text = "Several materials",
+        checked = several[player] == true,
     }
-    children[#children + 1] = {
-        type = "label",
-        text = cost == 0
-            and "Chiselled away to nothing — right-click to start again."
-            or ("One of these costs " .. cost .. " units."),
-    }
+    if several[player] then
+        mixed[player] = mixed[player] or filled_with(mask, material)
+        children[#children + 1] = {
+            type = "shape_editor", name = "cut", cells = mixed[player], material = material,
+        }
+        children[#children + 1] = { type = "label", text = bill_line(mixed[player]) }
+    else
+        children[#children + 1] = {
+            type = "shape_editor", name = "cut", shape = mask, material = material,
+        }
+        children[#children + 1] = {
+            type = "label",
+            text = cost == 0
+                and "Chiselled away to nothing — right-click to start again."
+                or ("One of these costs " .. cost .. " units."),
+        }
+    end
     children[#children + 1] = {
         type = "container", direction = "row", gap = 6,
         children = {
@@ -219,6 +284,61 @@ game.register_on_action(function(event)
     end
 end)
 
+--- Makes as many of the cut of several materials as asked for, or as many as
+--- are paid for.
+---
+--- **The engine does not craft** (Sub-Node Contract §9.1): this takes each
+--- material's units for the whole batch, and only when every one was paid in
+--- full gives the cut, by its cells. Short of any one, every unit taken is put
+--- back exactly, for the reason the one-material recipe does.
+local function make_several(player, stack)
+    local list = mixed[player]
+    if not list then
+        return
+    end
+    local costs = bill(list)
+    -- Nothing, or one material filling the block: that is not a cut of
+    -- several materials, and one material filling the block is what loose
+    -- material already is.
+    if #costs == 0 or (#costs == 1 and costs[1].units == 27) then
+        return
+    end
+
+    local want = 1
+    if stack then
+        local held = {}
+        for _, entry in ipairs(stock(player)) do
+            held[entry.material] = entry.units
+        end
+        want = game.ITEMS_PER_STACK
+        for _, cost in ipairs(costs) do
+            want = math.min(want, math.floor((held[cost.material] or 0) / cost.units))
+        end
+        if want < 1 then
+            return
+        end
+    end
+
+    local taken, short = {}, false
+    for index, cost in ipairs(costs) do
+        local price = cost.units * want
+        taken[index] = game.take(player, { material = cost.material, units = price })
+        if taken[index] < price then
+            short = true
+            break
+        end
+    end
+    if short then
+        for index, units in ipairs(taken) do
+            if units > 0 then
+                game.give(player, { material = costs[index].material, units = units })
+            end
+        end
+        return
+    end
+    game.give(player, { cells = list, count = want })
+end
+
 game.register_on_dialog_event(function(event)
     if event.form ~= "core_ui:inventory" then
         return
@@ -238,6 +358,19 @@ game.register_on_dialog_event(function(event)
         -- need redrawing is the cost line, and that can wait for the next
         -- press rather than arriving mid-carve.
         cut[event.player] = event.shape
+        -- An editor of several materials says what each cell is made of.
+        if event.cells then
+            mixed[event.player] = event.cells
+        end
+        return
+    end
+
+    if event.kind == "toggled" and event.name == "several" then
+        -- Into several materials from whatever was being carved, in the
+        -- material that was chosen; out of it with the shape kept.
+        several[event.player] = event.checked or nil
+        mixed[event.player] = nil
+        redraw(event.player)
         return
     end
 
@@ -256,6 +389,10 @@ game.register_on_dialog_event(function(event)
         redraw(event.player)
     elseif event.name == "reset" then
         cut[event.player] = 0x7FFFFFF
+        mixed[event.player] = nil
+        redraw(event.player)
+    elseif (event.name == "make" or event.name == "make_stack") and several[event.player] then
+        make_several(event.player, event.name == "make_stack")
         redraw(event.player)
     elseif event.name == "make" or event.name == "make_stack" then
         local list = stock(event.player)

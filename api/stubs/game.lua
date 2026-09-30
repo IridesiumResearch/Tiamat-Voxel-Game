@@ -1949,11 +1949,14 @@ function game.close_dialog(spec) end
 ---material. `material` is then the BRUSH: a right-click puts a cell of it back,
 ---and a left-click takes the nearest cell off whatever it is made of. Change
 ---the brush with `game.update_dialog` and the cells the player has made stay as
----they are; the client adopts your `cells` only when they differ from what it
----last reported, as it does `shape`. Each change reports `"chiselled"` with
----`shape` AND `cells`, in the ids `game.get_block_id` gives, and `{ cells =
----event.cells, count = n }` is the spec that gives the cut. Without `cells` an
----editor is one material, exactly as before.
+---they are; the client adopts your `cells` only when they differ from the ones
+---you sent last, as it does `shape`, and never because only the brush changed.
+---Each change reports `"chiselled"` with `shape` AND `cells`, in the ids
+---`game.get_block_id` gives, and `{ cells = event.cells, count = n }` is the
+---spec that gives the cut. Without `cells` an editor is one material, exactly
+---as before. `game/core_ui`'s shape crafter is the reference: its "Several
+---materials" box turns this on, its material list becomes the brush, and Make
+---takes each material's units before giving the cut.
 ---
 ---Called when a player does something in one of YOUR dialogs.
 ---
@@ -1972,7 +1975,7 @@ function game.close_dialog(spec) end
 ---  - `"chose"` — `name`, `index` (one-based)
 ---  - `"clicked"` — `view`, `index` (one-based), `click` ("left", "right", "shift_left")
 ---  - `"chiselled"` — `name`, `shape` (the whole 27-bit mask), and `cells` (27
-    numeric ids, `0` for empty) from an editor of several materials
+---    numeric ids, `0` for empty) from an editor of several materials
 ---  - `"closed"` — nothing else
 ---
 ---**Every one is a REQUEST, never a result.** A slot click says what the player

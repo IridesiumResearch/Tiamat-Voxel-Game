@@ -2311,6 +2311,115 @@ impl Bot {
         .await
     }
 
+    /// Places a stack exactly as the inventory holds it: its material, its
+    /// cut, its detail and — for a cut of several materials — its cells.
+    ///
+    /// **What a client sends for whatever is in the hand**, so a stack the
+    /// server described is named back to it whole. A cut of several
+    /// materials (Sub-Node Contract §9.1) is found in the inventory by its
+    /// cells, and naming only its lowest material and its shape names a
+    /// different stack the bot does not hold.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Frame`] if the write fails.
+    pub async fn place_stack_against(
+        &mut self,
+        target: tiamat_core::SubNodePos,
+        stack: &tiamat_core::proto::StackDef,
+        face: [i8; 3],
+    ) -> Result<(), BotError> {
+        self.send(&tiamat_core::proto::ClientMessage::Place {
+            target,
+            material: stack.material,
+            shape: stack.shape,
+            face,
+            detail: stack.detail.clone(),
+            cells: stack.cells.clone(),
+        })
+        .await
+    }
+
+    /// What this bot has been told a block holds: every cell's material, in
+    /// the world ids the wire carries.
+    ///
+    /// The block as the last chunk the server sent had it, with every edit to
+    /// it that arrived after that chunk applied in order — which is what a
+    /// client draws. There is no message to ASK what a block holds (see
+    /// [`Bot::expect_block`] for why), so this is the whole of what a client
+    /// can know.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Unexpected`] if the block's chunk never arrived, or does
+    /// not decode.
+    pub fn block_as_told(
+        &self,
+        pos: tiamat_core::BlockPos,
+    ) -> Result<tiamat_core::block::Cells, BotError> {
+        let history = self.received();
+        let chunk_pos = pos.chunk();
+        let arrived = history
+            .iter()
+            .rposition(|message| {
+                matches!(message, ServerMessage::ChunkData { pos: got, .. } if *got == chunk_pos)
+            })
+            .ok_or_else(|| BotError::Unexpected {
+                expected: "the chunk a block is in",
+                got: format!("no chunk at {chunk_pos:?}"),
+            })?;
+        // World ids in, world ids out: the wire's numbers are the question.
+        let mut chunk = self.decode_chunk(
+            chunk_pos,
+            &tiamat_core::persist::idmap::MaterialMap::passthrough(),
+        )?;
+        for message in &history[arrived + 1..] {
+            let ServerMessage::BlockDelta { edit, .. } = message else {
+                continue;
+            };
+            let (at, value) = match edit {
+                tiamat_core::proto::Edit::Block { pos, material } => (
+                    *pos,
+                    tiamat_core::block::BlockValue::Uniform(tiamat_core::MaterialId(*material)),
+                ),
+                tiamat_core::proto::Edit::Partial {
+                    pos,
+                    material,
+                    occupancy,
+                } => (
+                    *pos,
+                    tiamat_core::block::BlockValue::Partial {
+                        material: tiamat_core::MaterialId(*material),
+                        occupancy: *occupancy,
+                    }
+                    .canonical(),
+                ),
+                tiamat_core::proto::Edit::SubNode { pos, material } => {
+                    if pos.block().chunk() == chunk_pos {
+                        let _ = chunk.set_subnode(*pos, tiamat_core::MaterialId(*material));
+                    }
+                    continue;
+                }
+            };
+            if at.chunk() == chunk_pos {
+                let _ = chunk.set_block(at, value);
+            }
+        }
+        let mut cells = tiamat_core::block::EMPTY_CELLS;
+        for (index, cell) in cells.iter_mut().enumerate() {
+            let (x, y, z) = tiamat_core::block::subnode_offset(index);
+            let at = tiamat_core::SubNodePos::new(
+                pos.x * 3 + i32::try_from(x).unwrap_or_default(),
+                pos.y * 3 + i32::try_from(y).unwrap_or_default(),
+                pos.z * 3 + i32::try_from(z).unwrap_or_default(),
+            );
+            *cell = chunk
+                .get_subnode(at)
+                .unwrap_or(tiamat_core::MaterialId::AIR);
+        }
+        Ok(cells)
+    }
+
     /// Waits until the server confirms a partially-filled block at `pos`.
     ///
     /// `cells` is how many sub-nodes are expected to be filled, which is what

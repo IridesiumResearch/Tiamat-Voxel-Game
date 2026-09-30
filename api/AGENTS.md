@@ -144,6 +144,8 @@ every material `m` first, then give the cut. Take it back with the same
 `cells`: a take naming only a material never touches a cut of several, and one
 moves in whole items. A `shape_editor` given `cells` edits one, and its
 `"chiselled"` event reports `cells` — pass them straight to `game.give`.
+`game/core_ui/init.lua` is the worked example: its shape crafter's "Several
+materials" box, with the material list as the brush.
 
 ```lua
 local need = {}                                  -- cells of each material, per item
