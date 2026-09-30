@@ -9,8 +9,8 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-09-29: 18**, below, being built; 16, 17 and 19 landed. New ones go at
-the top, newest first.
+**Open as of 2026-09-30: none.** 16 to 19 landed; 18 and 19 await the eye. New ones
+go at the top, newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
 nothing — the place control at open sky, or at a block past reach — now
@@ -101,7 +101,7 @@ sampling. What it looks like is the designer's ([H]): a bat in a dark
 cave against the rock, a cow at noon, and a creature beside lava or a
 torch.
 
-## 18. Riding: a player seated on an entity, driving it (2026-09-23): OPEN
+## 18. Riding: a player seated on an entity, driving it (2026-09-23): LANDED 2026-09-30 (engine 7974abc), awaiting the eye
 
 **Wanted.** Right-click a horse and you are on it: sat on its back, the
 camera up where a rider's eyes are, your movement keys driving the horse at
@@ -152,6 +152,69 @@ like `on_player_move`) says where they land, and a despawned mount drops
 its rider on the tick it goes. Order of work: server seat and drive with
 a bot test (a bot mounts a scarecrow, walks, the scarecrow moves and the
 bot rides), then the wire and the client's prediction, then the camera.
+
+**From the engine, 2026-09-30 (engine 7974abc, protocol 80).** Landed, as
+asked and as planned above, with the differences written out below.
+
+```lua
+game.mount(player, entity, { seat = { x = 0, y = 1.6, z = -0.3 }, sneak_dismounts = true })
+    --> true, or nil and a reason
+game.dismount(player)      --> whether they were riding
+game.mounted(player)       --> the entity's id, or nil
+game.register_on_dismount(function(e)
+    -- e.player, e.entity, e.reason, e.domain, e.x, e.y, e.z (where they were put)
+    -- e.reason is "sneak", "dismount", "gone" or "leave"
+end)
+```
+
+- **The seat** is in blocks from the mount's feet, measured as if the
+  mount faced north, and it turns with the mount. An axis left out is 0.
+  With no seat at all the rider is put on top of the mount's collider.
+- **The keys drive the mount**, at the mount's `speed` and with its
+  collider, through the same step every creature takes, and the client
+  predicts it: five seconds at a gallop came back with no correction at
+  all. The mount faces where the rider looks, so the keys work with no
+  code in the mod; the mount's own `drive` and any yaw the mod writes are
+  ignored while it is ridden.
+- **Refusals are `nil` and a reason, never an error**, because each can
+  happen to a mod doing nothing wrong: `"not connected"`, `"no such
+  entity"`, `"a player"`, `"no collider"` (or one over 16 blocks),
+  `"another domain"`, `"ridden"` (one rider to a mount) and `"already
+  riding"` (one mount to a rider; asking again for the mount already
+  ridden moves the seat and keeps the ride). A mistake in the call itself
+  is an error: a seat that is not numbers, an option nobody knows.
+- **Ways off.** Sneak, unless the seat was given `sneak_dismounts =
+  false`, when sneak walks the mount at a crawl instead. `game.dismount`.
+  The mount despawned, which drops the rider in the same call, or gone
+  any other way. The player leaving. Each is one `on_dismount`, after the
+  creatures have moved, and the rider is put at the mount's feet.
+- **Where they land is yours**, by calling `game.move_player` inside
+  `on_dismount`: it reaches the client with the same tick's state. The
+  hook stays an observation and returns nothing.
+- **`game.move_player` on a rider ends the ride** where it put them, and
+  `game.push_player` on a rider pushes the mount. Otherwise both would
+  have done nothing.
+- **A rider's abilities stay theirs.** A player who may not sprint still
+  gallops: the pace is the horse's. Only flight is taken from a rider.
+- **Nothing about a ride is saved.** Leaving gets off, a shutdown is
+  everybody leaving, the mount is saved as the creature it always was,
+  and a player comes back on foot.
+
+What it costs: fifty riders on fifty creatures are 0.02 to 0.04 ms a
+tick, 0.04% to 0.07% of the 50 ms budget, which is less than the same
+hundred bodies walking apart, because a ridden pair takes one step.
+
+Not there: a sitting pose. The rider's figure stands on the seat in the
+idle clip until a model has a clip for it. And two things the work
+turned up in the engine that are not riding's and are not fixed: a
+creature creeping less than a twelfth of a cell a tick is never sent
+again to a client that already has it, and a bot script that walks
+after it has slept files its inputs under ticks the server has passed.
+
+For the eye ([H]): right-click a creature whose mod mounts it, walk,
+sprint and jump, look round so the mount turns and the seat swings with
+it, V for third person, sneak to get off, and have the mod despawn the
+creature under you. Another player should see you on it.
 
 ## 17. Using an entity: right-click on a mob (2026-09-23): LANDED 2026-09-26 (engine 50462b7)
 
