@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! <install>/
-//!   tiamat            this launcher
+//!   tiamat            this launcher (macOS: Tiamat.app/Contents/MacOS/tiamat)
 //!   current/          the game
 //!   staged/           an update the client downloaded and verified
 //!   previous/         what `current` was, kept for one rollback
@@ -308,19 +308,33 @@ impl Install {
         attempt.failed_starts = attempt.failed_starts.saturating_add(1);
         self.write_state(&attempt)?;
 
-        let status = std::process::Command::new(&client)
+        let mut command = std::process::Command::new(&client);
+        command
             // The game's own working directory is where its mods are.
             .current_dir(self.current())
             // Tells the client it was started here, so it does not hand
             // itself back to the launcher, and that it should clear the
             // failure count itself once it is up.
             .env(LAUNCHED_ENV, "1")
-            .args(args)
-            .status()
-            .map_err(|source| InstallError::Io {
+            .args(args);
+
+        // **On macOS the launcher becomes the game** rather than starting it:
+        // a child process gets a Dock tile of its own, and then "Keep in Dock"
+        // pins the bare client. With no process left to wait, the failure
+        // count is cleared by the client once it is up (`client::handover`),
+        // not here. Everywhere else the launcher waits, as it always did.
+        if REPLACES_PROCESS {
+            let source = replace_process(&mut command);
+            return Err(InstallError::Io {
                 what: format!("start {}", client.display()),
                 source,
-            })?;
+            });
+        }
+
+        let status = command.status().map_err(|source| InstallError::Io {
+            what: format!("start {}", client.display()),
+            source,
+        })?;
 
         if status.success() {
             let mut cleared = self.state.clone();
@@ -377,6 +391,23 @@ impl Install {
 /// `handover::LAUNCHED` is the same name, spelled twice because the client may
 /// not depend on this crate (charter rule 3).
 pub const LAUNCHED_ENV: &str = "TIAMAT_LAUNCHED";
+
+/// Whether [`Install::launch`] replaces this process with the game instead of
+/// starting it as a child. True on macOS only.
+const REPLACES_PROCESS: bool = cfg!(target_os = "macos");
+
+/// Replaces this process with `command`. Only returns, with why, on failure.
+#[cfg(unix)]
+fn replace_process(command: &mut std::process::Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    command.exec()
+}
+
+/// There is no `exec` here; [`REPLACES_PROCESS`] is false wherever this is built.
+#[cfg(not(unix))]
+fn replace_process(_: &mut std::process::Command) -> std::io::Error {
+    std::io::Error::other("this platform cannot replace a process")
+}
 
 /// Whether this build carries a release key, for `--status`.
 const RELEASE_KEY_PRESENT: bool = option_env!("TIAMAT_RELEASE_KEY").is_some();

@@ -55,7 +55,54 @@ need() { if [ -e "$root/$1" ]; then ok "$1"; else fail "$1 is missing"; fi; }
 
 suffix=""
 [ -e "$root/tiamat.exe" ] && suffix=".exe"
-need "tiamat${suffix}"
+if [ -d "$root/Tiamat.app" ]; then
+    # macOS: the launcher is inside the bundle, and only there; `current/`
+    # stays at the top, beside it, because an older install's client finds it
+    # there to stage updates (docs/distribution.md §5).
+    app="$root/Tiamat.app/Contents"
+    need "Tiamat.app/Contents/Info.plist"
+    if [ -f "$app/Info.plist" ]; then
+        # Well-formed enough, and names an executable and an icon that are
+        # really there. Read with awk rather than a plist library, so this
+        # runs the same on every runner.
+        plist_string() {
+            awk -v k="$1" '
+                $0 ~ "<key>" k "</key>" { want = 1; next }
+                want && match($0, /<string>[^<]*<\/string>/) {
+                    print substr($0, RSTART + 8, RLENGTH - 17); exit
+                }
+                want { want = 0 }
+            ' "$app/Info.plist"
+        }
+        if grep -q '<plist' "$app/Info.plist" && grep -q '</plist>' "$app/Info.plist" && grep -q '</dict>' "$app/Info.plist"; then
+            bundle_exe="$(plist_string CFBundleExecutable)"
+            bundle_icon="$(plist_string CFBundleIconFile)"
+            missing_keys=""
+            for key in CFBundleIdentifier CFBundleShortVersionString CFBundleVersion; do
+                [ -n "$(plist_string "$key")" ] || missing_keys="$missing_keys $key"
+            done
+            [ "$(grep -c 'CFBundlePackageType' "$app/Info.plist")" -ge 1 ] || missing_keys="$missing_keys CFBundlePackageType"
+            if [ -z "$bundle_exe" ] || [ -z "$bundle_icon" ] || [ -n "$missing_keys" ]; then
+                fail "Info.plist lacks CFBundleExecutable/CFBundleIconFile or:${missing_keys}"
+            fi
+            ok "Info.plist names $bundle_exe and $bundle_icon"
+            if [ -n "$bundle_exe" ] && [ -f "$app/MacOS/$bundle_exe" ] && [ -x "$app/MacOS/$bundle_exe" ]; then
+                ok "Tiamat.app/Contents/MacOS/$bundle_exe is there and executable"
+            else
+                fail "Tiamat.app/Contents/MacOS/${bundle_exe:-?} (CFBundleExecutable) is missing or not executable"
+            fi
+            icon_file="$bundle_icon"
+            case "$icon_file" in *.icns) ;; *) icon_file="$icon_file.icns" ;; esac
+            [ -f "$app/Resources/$icon_file" ] && ok "Tiamat.app/Contents/Resources/$icon_file is there" || fail "Tiamat.app/Contents/Resources/$icon_file (CFBundleIconFile) is missing"
+        else
+            fail "Info.plist is not a property list"
+        fi
+    fi
+    [ ! -e "$root/tiamat" ] || fail "a macOS archive carries the launcher only inside Tiamat.app, but tiamat is at the top too"
+    [ -d "$root/current" ] && ok "current/ is at the top, beside Tiamat.app" || fail "current/ is missing from the top of the archive"
+else
+    need "tiamat${suffix}"
+fi
 need "current/client${suffix}"
 need "current/server${suffix}"
 need "current/LICENSE"

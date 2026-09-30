@@ -38,6 +38,8 @@ fi
 
 # shellcheck source=scripts/lib/bundle.sh
 source scripts/lib/bundle.sh
+# shellcheck source=scripts/lib/macos-app.sh
+source scripts/lib/macos-app.sh
 
 version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
 commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
@@ -78,9 +80,19 @@ for binary in client server; do
 done
 # The launcher's binary is called `tiamat` — it is what the player clicks.
 if [ -f "${built}/tiamat${suffix}" ]; then
-    # The launcher sits ABOVE `current/`, because it is the one thing an update
-    # does not replace — see `docs/distribution.md` §1.
-    cp "${built}/tiamat${suffix}" "${stage}/tiamat${suffix}"
+    case "$target" in
+        *apple-darwin*)
+            # On macOS the launcher lives inside `Tiamat.app`, BESIDE `current/`
+            # and the only copy of it: the game must run as that app's process
+            # for the Dock tile to be the app's (docs/distribution.md §5).
+            make_app_bundle "$stage" "${built}/tiamat" assets/icon/tiamat.icns "$version"
+            ;;
+        *)
+            # The launcher sits ABOVE `current/`, because it is the one thing an
+            # update does not replace — see `docs/distribution.md` §1.
+            cp "${built}/tiamat${suffix}" "${stage}/tiamat${suffix}"
+            ;;
+    esac
 fi
 
 # --- mods ------------------------------------------------------------------
@@ -215,6 +227,10 @@ echo "==> release record"
 } > "$stage/current/RELEASE.md"
 
 # --- how to run it ---------------------------------------------------------
+case "$target" in
+    *apple-darwin*) launcher_line="Tiamat.app        the launcher: it applies updates and starts the game" ;;
+    *) launcher_line="tiamat${suffix}    the launcher: it applies updates and starts the game" ;;
+esac
 cat > "$stage/README.txt" <<EOF
 Tiamat ${version} (${channel}${commit:+, ${commit:0:7}})
 
@@ -223,8 +239,11 @@ This is a test build. It is not signed, so your operating system will say so.
 macOS
   The first time only, clear the quarantine flag:
       xattr -dr com.apple.quarantine .
-  then run ./tiamat${suffix} (or double-click it).
+  then open Tiamat.app (drag it to the Dock to keep it there).
   Without that, macOS refuses to open it and says it is damaged. It is not.
+  Keep Tiamat.app and the current folder together, and move the whole folder
+  (to Applications or your home folder) before you open the app: macOS runs an
+  app straight out of Downloads from a read-only copy that cannot see current/.
 
 Windows
   SmartScreen will warn about an unrecognised app. More info -> Run anyway.
@@ -233,7 +252,7 @@ Linux
   ./tiamat${suffix}
 
 What is in here
-  tiamat${suffix}    the launcher: it applies updates and starts the game
+  ${launcher_line}
   current/           the game itself
   current/game/      the mods it loads in singleplayer
 
