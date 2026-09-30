@@ -25,6 +25,9 @@ jobs:
   build:
     name: build / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A green leg takes about forty-five minutes at most (Windows). Without a
+    # ceiling a hung test holds the runner for GitHub's six hours.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -73,8 +76,22 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # --no-fail-fast so one red run names every failing binary, not the
+      # first. The log is kept for the step below.
       - name: Test
-        run: cargo test --workspace
+        id: test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+
+      # The job log needs a token to read; a check run's annotations do not.
+      # One per failing test, with its name and what it printed, so a red leg
+      # on a runner nobody can log into is diagnosable from the public API.
+      - name: Failing tests as annotations
+        if: failure() && steps.test.outcome == 'failure'
+        shell: bash
+        run: python3 scripts/ci-test-annotations.py test.log
 
       # Smoke mode only: `--test` runs each benchmark once to prove it still
       # compiles and executes, and records no timings. There is deliberately no
