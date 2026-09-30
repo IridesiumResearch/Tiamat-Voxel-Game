@@ -29,7 +29,43 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-## 18. A cut of several materials (2026-09-29, from the designer): BEING BUILT, protocol 81
+## 19. A dialog cannot be built from another mod's exported widgets (2026-09-30): LANDED 2026-09-30 (engine 71bf067)
+
+Relayed by the designer from this mod's work on Magic's U-M2: "the
+underlying U-M2 problem is that `game.show_dialog` can't read read-only
+tables that came from another mod. I documented a workaround rather than
+fixing it. The real fix would be the engine reading those tables properly."
+The workaround is `docs/exports.md`'s rule that a tree shown with
+`game.show_dialog` must be plain tables, and `util.plain` in callers.
+
+**What was wrong.** A table crossing between mods is a read-only view: an
+empty table whose contents are served through `__index`, `__len` and
+`__pairs`. The engine read a dialog tree raw, as `lua_next` and
+`lua_rawgeti` do, so a view's own entries were all it saw — none. Fields
+read by name came through, which is why it half worked; every list the
+exporting mod had built itself (a page's `children`, a dropdown's
+`options`) came out empty. An exported page arrived as one bare column.
+
+**From the engine, 2026-09-30 (engine 71bf067, no protocol change).**
+`game.show_dialog` and `game.update_dialog` now read what each view stands
+for, wherever it sits in the tree: as the root, as a child of a plain
+table, inside a list the other mod made, views of views. Nothing is
+written, and nothing a mod could not already read through the view is
+read. A tree with no view in it is read exactly as before, the same table,
+not a copy. So:
+
+```lua
+local ui = game.exports("tiamat_default_ui")
+game.show_dialog{ player = uuid, form = "book", tree = ui.page("Mutus Liber") }
+```
+
+works as written. `util.plain` and the plain-tables rule in
+`docs/exports.md` can go; nothing breaks if they stay.
+`crates/core/tests/mods.rs`,
+`a_dialog_built_from_another_mods_exported_widgets_is_shown_whole`, is the
+proof: without the change that page came out as one node, with it three.
+
+## 18. A cut of several materials (2026-09-29, from the designer): LANDED 2026-09-30 (engine ca0f919..03d968d, protocol 81), awaiting the eye
 
 Asked by the designer of the engine session, not by this mod: "in the
 shape crafter it is important that there is a way to build a shape out
@@ -76,6 +112,32 @@ this mod's to decide.
 all of it or none, and only into air. Breaking what it made pays out
 loose material, one stack a material. Identical cuts stack and nothing
 else does.
+
+**From the engine, 2026-09-30 (engine ca0f919..03d968d, protocol 81).**
+Landed in the shape above, with nothing changed from it. The contract
+went first (Sub-Node Contract §9.1, and §7.1/§7.2 for placing), then the
+item, saving (player, container and dropped-item formats each gained a
+migration step, all in world ids), the wire, placing, Lua, and drawing.
+
+- **Everywhere a stack is drawn, its cells are:** a slot, the cursor, a
+  HUD icon, the hand in first person, another player's hand, and an item
+  on the ground. A slot's hover names every material in it.
+- **The editor keeps its own copy**, so a click lands at once, and takes
+  the server's cells only when they differ from what it last sent;
+  changing the brush never resets the carving.
+- **`game.take` with `cells` takes that exact cut**, and a take that
+  names a material and no cells never takes from a cut of several, even
+  one that fills the block.
+- **The reference crafter (`game/core_ui`) does it end to end** through
+  the public API: a "Several materials" checkbox, the dropdown as the
+  brush, a cost line naming each material's units, and Make taking them
+  and giving the cut, putting back what it took if any material is
+  short. Read it for the calls; this mod's crafter is this mod's.
+
+For the eye ([H]): in the reference crafter, tick "Several materials",
+paint with two materials chosen in turn, Make, then look at it in a
+slot, in the hand, placed, and dropped with Q. Placed and broken, it
+must pay out each material's cells.
 
 ## 17. Which click pressed a button (2026-09-29): LANDED 2026-09-29 (engine c444967)
 
