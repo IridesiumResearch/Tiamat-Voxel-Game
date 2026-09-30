@@ -203,9 +203,15 @@ variables prevent a loop: the launcher sets `TIAMAT_LAUNCHED` on the client, and
 the client sets `TIAMAT_HANDED_OVER` on the launcher; a client that sees either
 carries on. If the launcher is missing or cannot be started the client carries on
 as before and logs why. A working copy (`cargo run`) never hands over. The
-client also looks for its `game/` mods, `client.toml` and `bindings.toml` beside
-its executable before the working directory, so it finds them however it was
-started.
+client also looks for its `game/` mods beside its executable before the working
+directory, so it finds them however it was started.
+
+**Settings live with the player, not the install.** An installed game keeps
+`client.toml` and `bindings.toml` in the per-user data directory, beside the
+saves; they used to be written into `current/`, so every update reset them. The
+first run copies an old one across from `current/` or, after the update that
+brought this, from `previous/`. A working copy keeps them beside the executable
+or in the working directory, as before.
 
 **Applying an update is a rename, not a copy**: `current` → `previous`,
 `staged` → `current`, on the same filesystem, so a power cut leaves one of the

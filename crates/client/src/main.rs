@@ -32,7 +32,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-/// The config file, relative to the working directory.
+/// The config file's name; where it lives is [`config_file`]'s to say.
 const CONFIG_FILE: &str = "client.toml";
 
 /// The address to dial a server this process just started.
@@ -82,15 +82,16 @@ const LAN_PORT: u16 = 47811;
 /// also holds hand-edited server details would lose their comments.
 const BINDINGS_FILE: &str = "bindings.toml";
 
-/// `client.toml`, beside the executable when it is there, else in the working
-/// directory (see [`client::config::install_relative`]).
+/// `client.toml`: in the per-user data directory for an installed game, so an
+/// update does not reset it; beside the executable or in the working directory
+/// for a working copy (see [`client::config::settings_file`]).
 fn config_file() -> std::path::PathBuf {
-    client::config::resolve_install_path(std::path::Path::new(CONFIG_FILE))
+    client::config::settings_file(CONFIG_FILE)
 }
 
-/// `bindings.toml`, found the same way as [`config_file`].
+/// `bindings.toml`, kept the same way as [`config_file`].
 fn bindings_file() -> std::path::PathBuf {
-    client::config::resolve_install_path(std::path::Path::new(BINDINGS_FILE))
+    client::config::settings_file(BINDINGS_FILE)
 }
 
 /// Starting window size.

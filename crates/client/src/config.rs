@@ -784,6 +784,65 @@ pub fn install_relative(
     cwd.join(rel)
 }
 
+/// Where an INSTALLED game keeps one of its settings files, and where to
+/// recover it from the first time: `(home, recover_from)`.
+///
+/// **Settings belong to the player, not to the install.** An update replaces
+/// `current/` wholesale — `current` becomes `previous`, `staged` becomes
+/// `current` — and `client.toml` and `bindings.toml` used to be written there,
+/// so every update reset a player's settings and key bindings to the defaults.
+/// They live in the per-user data directory now, beside the saves an update
+/// never touches.
+///
+/// The first time, the old file is found where it was: in `current/`, or in
+/// `previous/`, which is where the very update that brought this moved it.
+/// `exists` is how the filesystem is asked, so this is a pure function.
+#[must_use]
+pub fn installed_settings(
+    name: &Path,
+    install: &Path,
+    data: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> (PathBuf, Option<PathBuf>) {
+    let home = data.join(name);
+    if exists(&home) {
+        return (home, None);
+    }
+    let from = [install.join("current"), install.join("previous")]
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|old| exists(old));
+    (home, from)
+}
+
+/// A settings file (`client.toml`, `bindings.toml`) for this process.
+///
+/// An installed game: the per-user data directory, copied there once from the
+/// install if it was only there (see [`installed_settings`]). A working copy
+/// (`cargo run`): beside the executable, else the working directory, as
+/// before (see [`install_relative`]).
+#[must_use]
+pub fn settings_file(name: &str) -> PathBuf {
+    let Some(install) = crate::update::install_root() else {
+        return resolve_install_path(Path::new(name));
+    };
+    let (home, from) = installed_settings(Path::new(name), &install, &data_dir(), Path::exists);
+    if let Some(from) = from {
+        if let Some(dir) = home.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Copied rather than moved: the old one is in a directory the next
+        // update removes anyway, and a failed copy leaves it where it was.
+        match std::fs::copy(&from, &home) {
+            Ok(_) => tracing::info!(from = %from.display(), to = %home.display(),
+                "settings moved out of the install, where an update would reset them"),
+            Err(err) => tracing::warn!(from = %from.display(), to = %home.display(), %err,
+                "could not move settings out of the install; starting from the defaults"),
+        }
+    }
+    home
+}
+
 /// [`install_relative`] asked of this process and this filesystem.
 ///
 /// If the executable's or the working directory cannot be read, `rel` comes
@@ -879,6 +938,37 @@ pub fn adopt_former_data_dir(data: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn an_installed_games_settings_live_with_the_player_and_are_recovered_once() {
+        // **Every update reset them.** `client.toml` and `bindings.toml` were
+        // written into `current/`, which an update replaces whole; they live in
+        // the data directory now, and the first run finds the old one.
+        let (install, data) = (
+            Path::new("/tiamat"),
+            Path::new("/home/p/.local/share/tiamat"),
+        );
+        let name = Path::new("client.toml");
+        let home = Path::new("/home/p/.local/share/tiamat/client.toml");
+
+        // Already moved: nothing to recover.
+        let (got, from) = installed_settings(name, install, data, |p| p == home);
+        assert_eq!((got.as_path(), from), (home, None));
+
+        // Still in the install, never updated since: from `current`.
+        let old = Path::new("/tiamat/current/client.toml");
+        let (got, from) = installed_settings(name, install, data, |p| p == old);
+        assert_eq!((got.as_path(), from.as_deref()), (home, Some(old)));
+
+        // The update that brought this moved it to `previous`: from there.
+        let moved = Path::new("/tiamat/previous/client.toml");
+        let (got, from) = installed_settings(name, install, data, |p| p == moved);
+        assert_eq!((got.as_path(), from.as_deref()), (home, Some(moved)));
+
+        // A new player: the data directory, and the defaults.
+        let (got, from) = installed_settings(name, install, data, |_| false);
+        assert_eq!((got.as_path(), from), (home, None));
+    }
 
     #[test]
     fn a_relative_path_is_found_beside_the_executable_first() {
