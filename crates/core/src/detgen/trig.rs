@@ -683,6 +683,13 @@ pub fn sin(angle: f32) -> f32 {
     )]
     let whole = steps as usize;
     let fraction = steps - whole as f32;
+    // **A whole turn is step zero.** `rem_euclid` of a tiny negative angle
+    // rounds to TAU itself — the f32 below TAU is further from it than the
+    // angle is — so `steps` came out at 4 * QUARTER, which the match below
+    // read as the start of the fourth quarter: sin(-1e-7) was -1. A player
+    // looking a hair west of north cast their use at 45 degrees and missed a
+    // scarecrow straight ahead (Windows CI, bc1abb8).
+    let whole = whole % (4 * QUARTER);
 
     // Which quarter, and where in it. The second and fourth run backwards, and
     // the third and fourth are negative — the ordinary symmetry of a sine, done
@@ -739,6 +746,38 @@ mod tests {
                 (want - got).abs() < TOLERANCE,
                 "cos({angle}) is {want} and the table says {got}"
             );
+        }
+    }
+
+    #[test]
+    fn a_hair_either_side_of_a_whole_turn_is_a_hair_either_side_of_zero() {
+        // **The fold's edge.** `rem_euclid` of a tiny negative angle rounds to
+        // TAU itself, and the table read that as the start of a fourth
+        // quarter: sin(-1.8e-7) came out -1, and a player looking a hair west
+        // of north cast every use at 45 degrees. Both sides of every whole
+        // turn, at the sizes that round and the ones that do not.
+        for turns in -3..=3 {
+            #[expect(clippy::cast_precision_loss, reason = "a small whole number of turns")]
+            let whole = turns as f32 * TAU;
+            for hair in [1e-9_f32, 1e-8, 1.788e-7, 2e-7, 1e-6, 1e-5] {
+                for angle in [whole - hair, whole + hair] {
+                    assert!(
+                        sin(angle).abs() < 1e-4,
+                        "sin({angle}) is {}, not about 0",
+                        sin(angle)
+                    );
+                    assert!(
+                        (cos(angle) - 1.0).abs() < 1e-4,
+                        "cos({angle}) is {}, not about 1",
+                        cos(angle)
+                    );
+                }
+            }
+        }
+        // And the quarter turns, whose cosines fold through the same edge.
+        for hair in [1e-8_f32, 1.788e-7, 1e-6] {
+            assert!((sin(-TAU / 4.0 - hair) + 1.0).abs() < 1e-4);
+            assert!((cos(-TAU / 4.0 - hair)).abs() < 1e-4);
         }
     }
 
