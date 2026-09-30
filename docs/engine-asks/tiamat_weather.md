@@ -12,11 +12,11 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W30, filed 2026-09-30. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: none. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
-## W30. A rainbow (2026-09-30)
+## W30. A rainbow (2026-09-30): LANDED 2026-09-30 (engine 143ed0f..a446330, protocol 82), awaiting the eye
 
 **Seen.** The designer asked for rainbows after rain. Weather knows when one
 is owed: the rain over a square has just stopped, it is day, and the player
@@ -48,6 +48,41 @@ at 45 degrees and at night, and hidden behind a hill in front of it.
 **What weather does once it lands.** Nothing new: `fx.lua` already calls
 `game.set_rainbow` when it exists, eased over `EASE_TICKS`, and `/weather
 clouds` reports the strength it would send.
+
+**From the engine, 2026-09-30 (engine 143ed0f..a446330, protocol 82).**
+Landed as asked, and `fx.lua`'s call works as written:
+
+```lua
+game.set_rainbow(uuid, { intensity = strength, ease_ticks = config.EASE_TICKS })
+game.set_rainbow(uuid, nil)   -- fades it out over the last ease
+--> true, or false for a player who is not here
+```
+
+- **Standing and per player**, like `set_precipitation`: sent once per
+  change, told again to a player who leaves and comes back.
+- **`intensity` is required**, clamped to 0..1 (NaN is 0); `ease_ticks`
+  defaults to 0 and is clamped to 0..2400. An unknown field is an error
+  naming `set_rainbow`, as `set_clouds` does, so a misspelt `ease_ticks`
+  is not a silent snap. The ask did not say; that is the one difference.
+- **Drawn as asked**: the primary 42 degrees out from the antisolar
+  point, red outside; a faint reversed secondary at 51; at the sky's
+  depth, so terrain and the cloud deck stand in front; additive and low;
+  fading as the sun climbs past about 32 degrees and gone by 42, at
+  night and with the sun down; only the half over the horizon. In all
+  three lighting modes.
+
+The gate, as screenshot tests on the software rasteriser: an arc centred
+opposite the sun at 15 degrees up, above the horizon only, red peaking
+above blue; none toward the sun, none at 45 degrees, none at night; half
+intensity is less light; a wall across the view hides it and it still
+shows beside the wall.
+
+For the eye ([H]): a daytime world with this mod, `/weather set rain 1`
+then `/weather clear`, standing in the open with the sun 10 to 30
+degrees up, facing away from it (one rain in `RAINBOW_ODDS` leaves one;
+`/weather clouds` says the strength). Judge the bow's width, brightness
+and colours, the secondary, and that hills and cloud stand in front.
+Then watch it fade as the sun climbs.
 
 ## W29. A cave's fog is the sky's colour (2026-09-28): LANDED 2026-09-28 (engine 0fdbca8), awaiting the eye
 
