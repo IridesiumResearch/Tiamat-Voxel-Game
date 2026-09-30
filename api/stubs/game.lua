@@ -3628,7 +3628,9 @@ function game.register_on_fluid_flow(callback) end
 ---Registers a named input action.
 ---
 ---Mods register actions; the engine owns key bindings and mods never read keys.
----Stored now, inert until Task 13.
+---A press and a release of whatever key the player bound reach
+---`game.register_on_action` as `pressed = true` and `false`; `default_key`
+---is only the suggestion the settings screen starts from.
 ---
 ---**Registration window only.**
 ---@param spec Tiamat.ActionSpec
