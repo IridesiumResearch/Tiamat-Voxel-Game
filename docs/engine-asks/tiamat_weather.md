@@ -12,9 +12,42 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: none. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W30, filed 2026-09-30. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
+
+## W30. A rainbow (2026-09-30)
+
+**Seen.** The designer asked for rainbows after rain. Weather knows when one
+is owed: the rain over a square has just stopped, it is day, and the player
+is out under the sky. It works that out now (`fx.lua`, `rainbow_of`: one rain
+in `RAINBOW_ODDS`, rising over ten seconds and fading over two minutes) and
+has nothing to draw it with.
+
+**Why the mod cannot draw it.** A rainbow is an arc fixed to the sun, not to
+the world: centred on the point opposite the sun, 42 degrees out, so it
+moves with the camera and stands wherever the sun puts it. Particles are
+placed in the world, lit by it, dropped first under load, and a continuous
+arc of seven bands at a few hundred blocks is thousands of them. A sky
+modifier tints the whole sky. Nothing else paints on the sky.
+
+**Ask.** `game.set_rainbow(player, { intensity, ease_ticks? } | nil)`, a
+standing per-player setting like `set_precipitation`: sent on change, eased
+by the client, `nil` fading it out. The client draws the primary bow as a
+ring 42 degrees from the antisolar point (red outside, violet inside, a few
+degrees wide, soft-edged), and a faint secondary at 51 degrees with the
+colours reversed, at the sky's depth so terrain and the cloud deck stand in
+front of it; additive and low, so it never hides the sky behind it; faded
+out as the sun climbs towards 42 degrees (where the bow sinks under the
+horizon) and hidden at night and with the sun down. `intensity` 0..1 scales
+it; wrong numbers clamped. Only the half over the horizon is ever seen, as
+in life. Gate: a rainbow at intensity 1 with the sun 15 degrees up, from
+open ground: an arc opposite the sun, red outermost, gone when the sun is
+at 45 degrees and at night, and hidden behind a hill in front of it.
+
+**What weather does once it lands.** Nothing new: `fx.lua` already calls
+`game.set_rainbow` when it exists, eased over `EASE_TICKS`, and `/weather
+clouds` reports the strength it would send.
 
 ## W29. A cave's fog is the sky's colour (2026-09-28): LANDED 2026-09-28 (engine 0fdbca8), awaiting the eye
 
