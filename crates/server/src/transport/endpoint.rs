@@ -1790,12 +1790,41 @@ impl Shared {
     /// the world's.
     #[must_use]
     pub fn sky_table_for(&self, domain: &str) -> ServerMessage {
-        let observer = self
-            .domains
-            .get()
-            .and_then(|registry| registry.read().ok()?.position_of(domain))
+        let registry = self.domains.get().and_then(|registry| registry.read().ok());
+        let observer = registry
+            .as_ref()
+            .and_then(|registry| registry.position_of(domain))
             .unwrap_or_else(|| self.world_position());
-        self.skies.table_for(domain, observer)
+        // A sky a mod set on this domain at run time is the one it has;
+        // otherwise the rule in [`crate::skies`].
+        let table = self.skies.table_for_with(
+            domain,
+            observer,
+            registry
+                .as_ref()
+                .and_then(|registry| registry.sky_of(domain)),
+        );
+        drop(registry);
+        table
+    }
+
+    /// Counts every change to a run-time domain sky. A connection that sent a
+    /// sky at one number sends it again when this has moved.
+    #[must_use]
+    pub fn sky_revision(&self) -> u64 {
+        self.domains
+            .get()
+            .and_then(|registry| Some(registry.read().ok()?.sky_revision()))
+            .unwrap_or(0)
+    }
+
+    /// Whether a domain has a sky set at run time.
+    #[must_use]
+    pub fn has_runtime_sky(&self, domain: &str) -> bool {
+        self.domains
+            .get()
+            .and_then(|registry| Some(registry.read().ok()?.sky_of(domain).is_some()))
+            .unwrap_or(false)
     }
 
     #[must_use]
@@ -3327,6 +3356,9 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
     // view-distance answer can be sent after the join flow rather than inside
     // it.
     let mut just_joined = false;
+    // The run-time sky revision this connection last sent a sky at: when the
+    // registry's moves, the sky of the domain the player is in is sent again.
+    let mut sky_seen: u64 = 0;
 
     // The streaming beat is an `interval`, NOT a `sleep` inside the select.
     //
@@ -3397,7 +3429,18 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     // and their positions mean different chunks in the one it
                     // is entering — so it is told once to throw the world away
                     // rather than a thousand times to drop a position.
-                    if streamer.domain() != domain {
+                    // Read before any table is built, so a change that lands
+                    // in between is sent again next beat rather than missed.
+                    let sky_revision = shared.sky_revision();
+                    let moved = streamer.domain() != domain;
+                    if !moved && sky_revision != sky_seen {
+                        // A mod set or cleared this domain's sky: everyone in
+                        // it is told now, and a player arriving later is told
+                        // on arrival by the branch below.
+                        frame::write(&mut send, &shared.sky_table_for(&domain)).await?;
+                    }
+                    sky_seen = sky_revision;
+                    if moved {
                         let dropped = streamer.switch_to(&domain, chunk);
                         debug!(
                             player = session.display_name().unwrap_or("<unnamed>"),
@@ -3674,6 +3717,16 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
         // Unprompted, so a client that never asks still knows the radius it is
         // being sent and draws its fog there rather than at a number of its own.
         if std::mem::take(&mut just_joined) {
+            // The join carried the overworld's registered sky; one set on it
+            // at run time is sent over it.
+            sky_seen = shared.sky_revision();
+            if shared.has_runtime_sky(tiamat_core::domain::OVERWORLD) {
+                frame::write(
+                    &mut send,
+                    &shared.sky_table_for(tiamat_core::domain::OVERWORLD),
+                )
+                .await?;
+            }
             frame::write(
                 &mut send,
                 &ServerMessage::ViewDistance {

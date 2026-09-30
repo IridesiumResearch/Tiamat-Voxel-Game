@@ -673,6 +673,29 @@ pub struct SkyKeyframe {
     pub stars: f32,
 }
 
+impl From<&SkyKeyframe> for crate::proto::SkyFrame {
+    /// A mod's keyframe as peers agree on it: the script type is what Lua
+    /// produces and this is the wire's, and the conversion is the one place
+    /// they meet.
+    fn from(frame: &SkyKeyframe) -> Self {
+        Self {
+            time: frame.time,
+            sky: frame.sky,
+            sun: frame.sun,
+            intensity: frame.intensity,
+            grade: crate::proto::SkyGrade {
+                exposure: frame.grade.exposure,
+                tint: frame.grade.tint,
+                offset: frame.grade.offset,
+                contrast: frame.grade.contrast,
+                saturation: frame.grade.saturation,
+                gamma: frame.grade.gamma,
+            },
+            stars: frame.stars,
+        }
+    }
+}
+
 /// The sky a mod registered.
 ///
 /// **Charter rule 1 in its purest form.** The engine has no opinion about how

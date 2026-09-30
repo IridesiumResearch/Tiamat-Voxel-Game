@@ -97,6 +97,22 @@ impl Access for Shared {
         self.registry.read().ok()?.position_of(id)
     }
 
+    fn set_sky(&self, id: &str, sky: Option<tiamat_core::domain::DomainSky>) -> bool {
+        // Immediate like a creation: a registry entry and nothing in storage.
+        // The tick writes the list, told by `changed`; the connections see the
+        // registry's sky revision move and resend.
+        let Ok(mut registry) = self.registry.write() else {
+            return false;
+        };
+        let known = registry.set_sky(id, sky);
+        drop(registry);
+        if known {
+            self.changed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        known
+    }
+
     fn destroy(&self, id: &str) -> bool {
         // Only the answers that are knowable here. Whether anybody is inside is
         // the tick's to say, so this reports whether the request was worth

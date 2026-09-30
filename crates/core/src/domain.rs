@@ -181,6 +181,20 @@ pub enum DomainError {
     },
 }
 
+/// A sky set at run time on one domain, in the form it is sent and stored.
+///
+/// `game.set_domain_sky` takes what `game.register_sky` takes and keeps what
+/// can differ between domains: the colour keyframes and the cave fog. The
+/// day's length and its starting hour are the world's, one clock for every
+/// domain (see `server::skies`), so a runtime sky has no figure for either.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DomainSky {
+    /// Colour keyframes, sorted by time and never empty.
+    pub keyframes: Vec<crate::proto::SkyFrame>,
+    /// The fog's colour where no sky reaches, each channel `0.0..=1.0`.
+    pub cave_fog: [f32; 3],
+}
+
 /// Every domain this world has, and every template it can make more from.
 ///
 /// Registration happens during the registration window and then freezes
@@ -202,6 +216,13 @@ pub struct Registry {
     /// keeps the two lists apart, so a world written before positions existed
     /// reads back with every instance and no positions.
     positions: BTreeMap<String, crate::sky::UniversalPos>,
+    /// Skies set at run time, by domain id: an instance's, or any live
+    /// domain's. Beside `positions` for the same reason, and kept with the
+    /// instance the same way. See [`Registry::set_sky`].
+    skies: BTreeMap<String, DomainSky>,
+    /// Counts every change to `skies`, so a connection can tell cheaply that
+    /// the sky it last sent may be stale without comparing tables each tick.
+    sky_revision: u64,
     /// Domains found in the world that nothing currently registers.
     ///
     /// Kept so their chunks are never dropped and re-registering a mod gives
@@ -233,6 +254,8 @@ impl Registry {
             specs,
             instances: BTreeMap::new(),
             positions: BTreeMap::new(),
+            skies: BTreeMap::new(),
+            sky_revision: 0,
             unknown: BTreeSet::new(),
             frozen: false,
         }
@@ -413,6 +436,64 @@ impl Registry {
         }
     }
 
+    /// Sets the sky of one live domain, or with `None` returns it to the sky
+    /// its registration gives it.
+    ///
+    /// Returns whether the domain exists to have one: a registered domain, an
+    /// instance, or the overworld. A template has no domain of its own and an
+    /// id nobody made has nothing to draw it in, so both answer `false` and
+    /// change nothing.
+    pub fn set_sky(&mut self, id: &str, sky: Option<DomainSky>) -> bool {
+        if !self.live().contains(&id) {
+            return false;
+        }
+        let changed = match sky {
+            Some(sky) => self.skies.insert(id.to_owned(), sky.clone()) != Some(sky),
+            None => self.skies.remove(id).is_some(),
+        };
+        if changed {
+            self.sky_revision += 1;
+        }
+        true
+    }
+
+    /// The sky set on a domain at run time, if one was.
+    #[must_use]
+    pub fn sky_of(&self, id: &str) -> Option<&DomainSky> {
+        self.skies.get(id)
+    }
+
+    /// Bumped by every change to a run-time sky. A connection remembers the
+    /// number it last sent a sky at and resends when this has moved.
+    #[must_use]
+    pub const fn sky_revision(&self) -> u64 {
+        self.sky_revision
+    }
+
+    /// Every run-time sky, as `(domain, sky)`, sorted for the world file.
+    #[must_use]
+    pub fn sky_overrides(&self) -> Vec<(&str, &DomainSky)> {
+        self.skies
+            .iter()
+            .map(|(id, sky)| (id.as_str(), sky))
+            .collect()
+    }
+
+    /// Restores run-time skies read from the world file.
+    ///
+    /// Only for domains that are live: the sky of an instance whose template
+    /// is gone is dropped with it, as its position is.
+    pub fn restore_skies(&mut self, skies: Vec<(String, DomainSky)>) {
+        for (id, sky) in skies {
+            let held = self.instances.contains_key(&id)
+                || self.specs.get(&id).is_some_and(|spec| !spec.instanced);
+            if held {
+                self.skies.insert(id, sky);
+            }
+        }
+        self.sky_revision += 1;
+    }
+
     /// Forgets an instance, given nothing is inside it.
     ///
     /// The caller says how many entities and players the domain holds; this
@@ -440,6 +521,9 @@ impl Registry {
         }
         self.instances.remove(id);
         self.positions.remove(id);
+        if self.skies.remove(id).is_some() {
+            self.sky_revision += 1;
+        }
         Ok(())
     }
 
@@ -521,6 +605,14 @@ pub trait Access: Send + Sync {
     fn position_of(&self, id: &str) -> Option<crate::sky::UniversalPos> {
         let _ = id;
         None
+    }
+
+    /// Sets, or with `None` clears, the sky of one domain at run time. See
+    /// [`Registry::set_sky`]. Defaulted to refusing, for a store that has not
+    /// learned about skies.
+    fn set_sky(&self, id: &str, sky: Option<DomainSky>) -> bool {
+        let _ = (id, sky);
+        false
     }
 
     /// Removes an instance and everything stored under it.
@@ -841,6 +933,96 @@ mod tests {
         // And destroying it forgets where it was.
         registry.destroy("mod:body/17", 0).expect("destroy");
         assert!(registry.instance_positions().is_empty());
+    }
+
+    fn a_sky(stars: f32) -> DomainSky {
+        DomainSky {
+            keyframes: vec![crate::proto::SkyFrame {
+                time: 0.0,
+                sky: [0.1, 0.2, 0.3],
+                sun: [1.0; 3],
+                intensity: 1.0,
+                grade: crate::proto::SkyGrade {
+                    exposure: 1.0,
+                    tint: [1.0; 3],
+                    offset: [0.0; 3],
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    gamma: 1.0,
+                },
+                stars,
+            }],
+            cave_fog: [0.0, 0.1, 0.2],
+        }
+    }
+
+    #[test]
+    fn a_runtime_sky_is_set_on_a_live_domain_cleared_and_removed_with_the_instance() {
+        let mut registry = Registry::new();
+        registry.register("mod:ship", template()).expect("register");
+        let id = registry.create("mod:ship", "17").expect("create");
+
+        assert!(
+            !registry.set_sky("mod:ship", Some(a_sky(1.0))),
+            "a template is no domain"
+        );
+        assert!(
+            !registry.set_sky("mod:ship/99", Some(a_sky(1.0))),
+            "nobody made it"
+        );
+        assert_eq!(registry.sky_revision(), 0, "a refusal changed something");
+
+        assert!(registry.set_sky(&id, Some(a_sky(1.0))));
+        assert_eq!(registry.sky_of(&id), Some(&a_sky(1.0)));
+        assert_eq!(registry.sky_revision(), 1);
+        assert!(registry.set_sky(&id, Some(a_sky(1.0))));
+        assert_eq!(
+            registry.sky_revision(),
+            1,
+            "the same sky again is no change"
+        );
+        assert!(
+            registry.set_sky(OVERWORLD, Some(a_sky(0.5))),
+            "any live domain"
+        );
+
+        assert!(registry.set_sky(&id, None));
+        assert_eq!(registry.sky_of(&id), None);
+
+        assert!(registry.set_sky(&id, Some(a_sky(0.25))));
+        let before = registry.sky_revision();
+        registry.destroy(&id, 0).expect("destroy");
+        assert_eq!(registry.sky_of(&id), None, "destroying kept the sky");
+        assert!(registry.sky_revision() > before);
+    }
+
+    #[test]
+    fn runtime_skies_are_restored_for_domains_that_exist_and_orphans_lose_theirs() {
+        let mut registry = Registry::new();
+        registry.register("mod:ship", template()).expect("register");
+        let id = registry.create("mod:ship", "17").expect("create");
+        assert!(registry.set_sky(&id, Some(a_sky(1.0))));
+        let instances: Vec<(String, String)> = registry
+            .instances()
+            .into_iter()
+            .map(|(id, template)| (id.to_owned(), template.to_owned()))
+            .collect();
+        let skies: Vec<(String, DomainSky)> = registry
+            .sky_overrides()
+            .into_iter()
+            .map(|(id, sky)| (id.to_owned(), sky.clone()))
+            .collect();
+
+        let mut reopened = Registry::new();
+        reopened.register("mod:ship", template()).expect("register");
+        reopened.restore(instances.clone());
+        reopened.restore_skies(skies.clone());
+        assert_eq!(reopened.sky_of(&id), Some(&a_sky(1.0)));
+
+        let mut orphaned = Registry::new();
+        orphaned.restore(instances);
+        orphaned.restore_skies(skies);
+        assert_eq!(orphaned.sky_of(&id), None);
     }
 
     #[test]

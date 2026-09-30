@@ -2888,6 +2888,10 @@ impl ServerHandle {
                             Ok(positions) => registry.restore_positions(positions),
                             Err(err) => error!(%err, "could not read where the world's instances sit"),
                         }
+                        match world.db().domain_skies() {
+                            Ok(skies) => registry.restore_skies(skies),
+                            Err(err) => error!(%err, "could not read the world's domain skies"),
+                        }
                         registry.freeze();
                         registry
                     }));
@@ -5073,9 +5077,15 @@ impl ServerHandle {
                                     .into_iter()
                                     .map(|(id, at)| (id.to_owned(), at))
                                     .collect();
+                            let skies: Vec<(String, tiamat_core::domain::DomainSky)> = registry
+                                .sky_overrides()
+                                .into_iter()
+                                .map(|(id, sky)| (id.to_owned(), sky.clone()))
+                                .collect();
                             if let Err(err) = world.timed("domain instances", |db| {
                                 db.set_domain_instances(&instances)
                                     .and_then(|()| db.set_domain_positions(&positions))
+                                    .and_then(|()| db.set_domain_skies(&skies))
                             }) {
                                 error!("could not write the world's domain instances: {err}");
                             }

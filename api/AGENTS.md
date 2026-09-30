@@ -1540,7 +1540,11 @@ star a player sees is the star `game.star_in_view(uuid)` names. A domain
 registered with a `position`, or an instance made with
 `game.create_domain(template, key, { position = ... })`, sees the sky from
 there; `register_sky{ domain = ... }` gives it colours of its own, sent to the
-client when a player arrives. Travel is yours: which star has a surface, what
+client when a player arrives. `game.set_domain_sky(id, spec)` (or
+`create_domain`'s `options.sky`) sets one at run time, for an instance or any live
+domain: everyone in it has it now, a later arrival on arrival, it is kept across
+restarts and leaves with `destroy_domain`, and `nil` gives the registered sky
+back. The day's length is still the world's one clock. Travel is yours: which star has a surface, what
 takes you there and what brings you back is a mod's rule, and `game/core_space`
 is the smallest one that works.
 

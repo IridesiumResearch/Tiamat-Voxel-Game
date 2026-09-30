@@ -117,6 +117,14 @@ pub mod meta_keys {
     /// written before positions existed reads back with every instance and
     /// no positions, and a body's sky is drawn from wherever its template is.
     pub const DOMAIN_POSITIONS: &str = "domain_positions";
+    /// Skies mods set on domains at run time, as a postcard list of
+    /// `(domain, sky)`.
+    ///
+    /// Binary rather than the text the lists beside it use, because a sky is
+    /// a dozen keyframes of floats that must come back bit for bit. A list of
+    /// its own for the reason positions are: a world written before it reads
+    /// back with every domain on its registered sky.
+    pub const DOMAIN_SKIES: &str = "domain_skies";
     /// Which rule built the cached summaries, as [`crate::lod::SUMMARY_RULE`].
     pub const SUMMARY_RULE: &str = "summary_rule";
     /// The hour, as the sky clock's tick count, so a world resumes where it was left.
@@ -2196,6 +2204,37 @@ impl WorldDb {
             .collect::<Vec<_>>()
             .join("\n");
         self.set_meta(meta_keys::DOMAIN_POSITIONS, text.as_bytes())
+    }
+
+    /// Reads the skies mods set on domains at run time, as `(domain, sky)`.
+    ///
+    /// On the terms of [`Self::domain_positions`]: bytes that do not decode
+    /// read as none, so a world opens on its registered skies rather than
+    /// refusing to open over a side table.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn domain_skies(&self) -> Result<Vec<(String, crate::domain::DomainSky)>, WorldError> {
+        let Some(bytes) = self.meta(meta_keys::DOMAIN_SKIES)? else {
+            return Ok(Vec::new());
+        };
+        Ok(postcard::from_bytes(&bytes).unwrap_or_default())
+    }
+
+    /// Writes the skies mods set on domains at run time.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure.
+    pub fn set_domain_skies(
+        &self,
+        skies: &[(String, crate::domain::DomainSky)],
+    ) -> Result<(), WorldError> {
+        // Serialising plain data into a `Vec` does not fail; an empty write
+        // is the same as none, which is what a failure would have meant.
+        let bytes = postcard::to_allocvec(skies).unwrap_or_default();
+        self.set_meta(meta_keys::DOMAIN_SKIES, &bytes)
     }
 
     /// Removes everything stored under one domain.

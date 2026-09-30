@@ -531,6 +531,14 @@ function Stream:next_bool() end
 ---@field start_time number? Where a fresh world's clock starts, 0..1. Defaults to mid-morning: a counter left at zero opens every world at midnight, which is the one hour with no sun in it. Required, and not empty. Need not be sorted — the engine sorts them, because an out-of-order list would make the sky walk backwards partway through the day.
 ---@field cave_fog number[]? `{r, g, b}` (or `{ r =, g =, b = }`), each 0 to 1: the colour distance fog takes where no sky reaches. Defaults to a dark neutral, `{0.05, 0.05, 0.06}`. **One colour for every hour**, not a keyframe's: each fragment's fog is blended by the sky light at it, from the keyframe's `sky` at full sky light to this at none, so the fog down a tunnel is the cave's at noon and at midnight while the daylit ground seen out of its mouth is fogged in the day's colour, in the same frame. Whatever leans the sky's colour — the clock, `set_sky_modifier`, a `flash` — leans only the sky-lit share, so none of them reaches a cave. The last stretch before the fog is total is the sky's whatever the sky light, so the edge of the loaded world is still hidden. Per sky, so a domain's sky has caves of its own colour. A missing channel or one that is not a number is an error; a number out of range is clamped.
 
+---Fields accepted by `game.set_domain_sky` and `game.create_domain`'s `sky`: a
+---`Tiamat.SkySpec` for one domain. See `game.set_domain_sky`.
+---@class Tiamat.DomainSkySpec
+---@field keyframes Tiamat.SkyKeyframe[] Required, not empty.
+---@field cave_fog number[]? As `Tiamat.SkySpec.cave_fog`.
+---@field day_length_ticks integer? Accepted and ignored: the world has one clock.
+---@field start_time number? Accepted and ignored.
+
 ---One moment in your day.
 ---
 ---The client interpolates between keyframes, so a handful describes a whole
@@ -3161,9 +3169,52 @@ function game.register_domain(spec) end
 ---```
 ---@param template string
 ---@param key string
----@param options { position: { x: number, y: number, z: number }? }?
+---`options.sky` is a sky for the new instance, what `game.set_domain_sky` takes,
+---set on the same terms as `position`: when the instance is new, and kept with
+---it. Making it again changes nothing. A mistake in it is an error and nothing
+---is made.
+---@param options { position: { x: number, y: number, z: number }?, sky: Tiamat.DomainSkySpec? }?
 ---@return string? id
 function game.create_domain(template, key, options) end
+
+---The sky a domain has, set while the world runs: a woven world's own dawn
+---without a per-player overlay.
+---
+---`spec` is the table `game.register_sky` takes, less what cannot differ
+---between domains: `keyframes` (required, not empty) and `cave_fog` are the
+---domain's own. `day_length_ticks` and `start_time` are accepted and ignored,
+---so a sky written for `register_sky` can be handed here unedited, because the
+---world has ONE clock (the one a registered sky declared) and every domain's
+---keyframes are read against it. `domain` is refused; the domain is the first
+---argument. **The world's day comes from `register_sky`**: a world that
+---registered no sky has no clock, and a sky set here is then held, not
+---cycled.
+---
+---`nil` returns the domain to the sky its registration gives it: its own
+---`register_sky{ domain }`, else (for an instance) its template's, else the sky
+---for every domain not named.
+---
+---**Every player in the domain has it now**, and one who arrives later is sent
+---it on arrival. It is kept with the world and comes back after a restart, and
+---`game.destroy_domain` removes it with the instance. Any live domain takes
+---one: an instance, a registered domain, `"overworld"`.
+---
+---Returns `true` when the domain exists and the sky was set (or cleared), and
+---`false` for an id nobody made and for a template, which is not a domain. A
+---malformed `spec` is an error naming `set_domain_sky`.
+---
+---```lua
+---local id = game.create_domain("my_mod:world", "17")
+---game.set_domain_sky(id, { keyframes = {
+---    { time = 0.0, sky = {0.2, 0.0, 0.1}, sun = {0.6, 0.2, 0.2}, intensity = 0.3 },
+---    { time = 0.5, sky = {0.9, 0.5, 0.3}, sun = {1, 0.8, 0.6}, intensity = 1.0 },
+---}, cave_fog = {0.1, 0.0, 0.05} })
+---game.set_domain_sky(id, nil) -- and back to the template's
+---```
+---@param id string
+---@param spec Tiamat.DomainSkySpec?
+---@return boolean
+function game.set_domain_sky(id, spec) end
 
 ---Removes an instance and everything stored in it. Permanent.
 ---

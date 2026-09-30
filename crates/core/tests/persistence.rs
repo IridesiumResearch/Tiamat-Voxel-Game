@@ -1343,6 +1343,48 @@ fn the_domain_instances_round_trip() {
 }
 
 #[test]
+fn a_runtime_domain_sky_round_trips_exactly_and_garbage_reads_as_none() {
+    // A sky is floats that must come back bit for bit, and a side table that
+    // will not decode must cost the skies, not the world.
+    let path = scratch("domain-skies");
+    let frame = tiamat_core::proto::SkyFrame {
+        time: 0.25,
+        sky: [0.1, 0.2, 0.3],
+        sun: [1.0, 0.9, 0.8],
+        intensity: 0.7,
+        grade: tiamat_core::proto::SkyGrade {
+            exposure: 1.1,
+            tint: [1.0; 3],
+            offset: [0.0; 3],
+            contrast: 1.0,
+            saturation: 0.9,
+            gamma: 1.0,
+        },
+        stars: 0.5,
+    };
+    let saved = vec![(
+        "mod:ship/17".to_owned(),
+        tiamat_core::domain::DomainSky {
+            keyframes: vec![frame],
+            cave_fog: [0.05, 0.0, 0.1],
+        },
+    )];
+    {
+        let mut registry = registry_with(&[]);
+        let db = WorldDb::open(&path, &mut registry).expect("open");
+        assert_eq!(db.domain_skies().expect("read"), Vec::new());
+        db.set_domain_skies(&saved).expect("set");
+        db.close().expect("close");
+    }
+    let mut registry = registry_with(&[]);
+    let db = WorldDb::open(&path, &mut registry).expect("reopen");
+    assert_eq!(db.domain_skies().expect("read"), saved);
+    db.set_meta("domain_skies", b"\xff\xfe not a sky")
+        .expect("set");
+    assert_eq!(db.domain_skies().expect("read"), Vec::new());
+}
+
+#[test]
 fn where_instances_sit_round_trips_and_a_bad_line_costs_only_itself() {
     // A body made at a star is at that star next morning, or the sky drawn
     // from it is another sky. And a world from before positions existed has

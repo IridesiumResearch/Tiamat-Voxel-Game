@@ -7615,7 +7615,7 @@ impl MluaVm {
         let create = self
             .lua
             .create_function(
-                move |_, (template, key, options): (String, String, Option<Table>)| {
+                move |lua, (template, key, options): (String, String, Option<Table>)| {
                     // Where the instance sits in the universe, if the mod
                     // says: a body made for a star is made AT the star, so
                     // the sky drawn from it is that star's.
@@ -7623,13 +7623,37 @@ impl MluaVm {
                         Some(options) => universal_position(options, "create_domain")?,
                         None => None,
                     };
+                    // And its own sky, set like its position: when the
+                    // instance is new, and read before anything is made so a
+                    // mistake in it makes nothing.
+                    let sky = match options
+                        .as_ref()
+                        .map(|options| options.get::<Option<Table>>("sky"))
+                        .transpose()
+                        .map_err(|_| {
+                            mlua::Error::external("create_domain: `sky` must be a sky table")
+                        })?
+                        .flatten()
+                    {
+                        Some(table) => Some(domain_sky_of(lua, &table, "create_domain")?),
+                        None => None,
+                    };
                     // The instance's id, or nil. A mod uses the id to transfer
                     // things in, so handing back a boolean would mean it had to
                     // rebuild `template/key` itself — and that spelling is the
                     // engine's, not something a mod should have to know.
                     Ok(slot.lock().ok().and_then(|slot| {
-                        slot.as_ref()
-                            .and_then(|store| store.create_at(&template, &key, position))
+                        slot.as_ref().and_then(|store| {
+                            let existed = store.exists(&format!(
+                                "{template}{}{key}",
+                                crate::domain::INSTANCE_SEPARATOR
+                            ));
+                            let id = store.create_at(&template, &key, position)?;
+                            if !existed && let Some(sky) = sky {
+                                store.set_sky(&id, Some(sky));
+                            }
+                            Some(id)
+                        })
                     }))
                 },
             )
@@ -7649,6 +7673,26 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("destroy_domain", destroy)
+            .map_err(|err| self.vm_error(&err))?;
+
+        // `game.set_domain_sky(id, spec | nil)`: the sky of one live domain,
+        // at run time. True when the domain exists to have one.
+        let slot = std::sync::Arc::clone(&self.domains);
+        let set_sky = self
+            .lua
+            .create_function(move |lua, (id, spec): (String, Option<Table>)| {
+                let sky = match spec {
+                    Some(table) => Some(domain_sky_of(lua, &table, "set_domain_sky")?),
+                    None => None,
+                };
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|store| store.set_sky(&id, sky)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_domain_sky", set_sky)
             .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
@@ -10625,6 +10669,70 @@ fn register_sky(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Reads the sky a mod hands `game.set_domain_sky` or `create_domain`'s
+/// `options.sky`: the table `register_sky` takes, less what cannot differ
+/// between domains.
+///
+/// The keyframes and the cave fog are the domain's own. `day_length_ticks`
+/// and `start_time` are accepted and ignored, because the world has one clock
+/// and a sky written for `register_sky` should be usable here unedited; and
+/// `domain` is refused, since the domain is the call's first argument and a
+/// second, different answer in the table would be a mistake to report.
+/// `func` names the calling function in every error, so a mistake is found in
+/// the line that made it.
+fn domain_sky_of(lua: &Lua, spec: &Table, func: &str) -> mlua::Result<crate::domain::DomainSky> {
+    let rename =
+        |err: mlua::Error| mlua::Error::external(err.to_string().replace("register_sky", func));
+    for pair in spec.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        if let Value::String(name) = key {
+            let name = name.to_string_lossy();
+            if name == "domain" {
+                return Err(mlua::Error::external(format!(
+                    "{func}: a sky table here has no `domain`; the domain is the call's own argument"
+                )));
+            }
+            if !SKY_FIELDS.contains(&name.as_ref()) {
+                return Err(mlua::Error::external(format!(
+                    "{func}: unknown field `{name}`"
+                )));
+            }
+        }
+    }
+    let keyframes: Table = spec.get("keyframes").map_err(|_| {
+        mlua::Error::external(format!("{func}: missing required field `keyframes`"))
+    })?;
+    let mut count = 0;
+    for frame in keyframes.sequence_values::<Table>() {
+        validate_keyframe(&frame.map_err(|_| {
+            mlua::Error::external(format!("{func}: `keyframes` is a list of keyframe tables"))
+        })?)
+        .map_err(rename)?;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(mlua::Error::external(format!(
+            "{func}: `keyframes` is empty; a sky with no colours has nothing to draw"
+        )));
+    }
+    let entry = lua.create_table()?;
+    entry.set("keyframes", keyframes)?;
+    entry.set("day_length_ticks", 1_u32)?;
+    if let Some(cave_fog) = cave_fog_of(spec).map_err(rename)? {
+        entry.set("cave_fog", cave_fog.to_vec())?;
+    }
+    let sky = sky_from_entry(&entry, String::new(), None)
+        .ok_or_else(|| mlua::Error::external(format!("{func}: the sky could not be read")))?;
+    Ok(crate::domain::DomainSky {
+        keyframes: sky
+            .keyframes
+            .iter()
+            .map(crate::proto::SkyFrame::from)
+            .collect(),
+        cave_fog: sky.cave_fog,
+    })
+}
+
 /// A sky's `cave_fog`, or `None` where the mod named none — weather ask W29.
 ///
 /// `{r, g, b}` or `{ r =, g =, b = }`, as `set_sky_modifier`'s `sky` takes
@@ -12187,73 +12295,77 @@ impl MluaVm {
         entries.sort_by_key(|(id, _)| (self.reference_mods.contains(id), id.clone()));
         let (mod_id, entry) = entries.into_iter().next()?;
 
-        let frames: Table = entry.get("keyframes").ok()?;
-        let mut keyframes: Vec<SkyKeyframe> = frames
-            .sequence_values::<Table>()
-            .filter_map(Result::ok)
-            .filter_map(|frame| {
-                let colour = |key: &str| -> Option<[f32; 3]> {
-                    let table: Table = frame.get(key).ok()?;
-                    Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?])
-                };
-                Some(SkyKeyframe {
-                    time: frame.get("time").ok()?,
-                    sky: colour("sky")?,
-                    sun: colour("sun")?,
-                    intensity: frame.get("intensity").ok()?,
-                    // Validated in `register_sky`; absent means no grading, which
-                    // is a keyframe saying nothing rather than an error.
-                    grade: frame
-                        .get::<Option<Table>>("grade")
-                        .ok()
-                        .flatten()
-                        .as_ref()
-                        .map_or(SkyGrade::NONE, read_grade),
-                    // Absent is none: a sky written before stars existed
-                    // draws none, and whether a world has them is content.
-                    stars: frame
-                        .get::<Option<f32>>("stars")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0.0)
-                        .clamp(0.0, 1.0),
-                })
-            })
-            .collect();
-        if keyframes.is_empty() {
-            return None;
-        }
-        // Sorted here rather than trusted from the mod: the client walks these
-        // in order to interpolate, and an out-of-order list would make the sky
-        // jump backwards partway through the day.
-        keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
-
-        Some(Sky {
-            mod_id,
-            domain: domain.map(str::to_owned),
-            day_length_ticks: entry.get("day_length_ticks").ok()?,
-            keyframes,
-            // Morning unless the mod says otherwise. A counter left at zero
-            // opens every new world at midnight, which is the one hour with
-            // nothing in it to look at.
-            start_time: entry
-                .get::<Option<f32>>("start_time")
-                .ok()
-                .flatten()
-                .unwrap_or(DEFAULT_START_TIME)
-                .rem_euclid(1.0),
-            // Clamped when it was registered; absent is the default, never
-            // the sky's own colour, which is exactly what W29 took away.
-            cave_fog: entry
-                .get::<Option<Table>>("cave_fog")
-                .ok()
-                .flatten()
-                .and_then(|table| {
-                    Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?])
-                })
-                .unwrap_or(Sky::DEFAULT_CAVE_FOG),
-        })
+        sky_from_entry(&entry, mod_id, domain)
     }
+}
+
+/// A sky as the registry holds it, read out of the entry `register_sky` (or
+/// `set_domain_sky`) wrote, which has already been validated.
+fn sky_from_entry(entry: &Table, mod_id: String, domain: Option<&str>) -> Option<Sky> {
+    let frames: Table = entry.get("keyframes").ok()?;
+    let mut keyframes: Vec<SkyKeyframe> = frames
+        .sequence_values::<Table>()
+        .filter_map(Result::ok)
+        .filter_map(|frame| {
+            let colour = |key: &str| -> Option<[f32; 3]> {
+                let table: Table = frame.get(key).ok()?;
+                Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?])
+            };
+            Some(SkyKeyframe {
+                time: frame.get("time").ok()?,
+                sky: colour("sky")?,
+                sun: colour("sun")?,
+                intensity: frame.get("intensity").ok()?,
+                // Validated in `register_sky`; absent means no grading, which
+                // is a keyframe saying nothing rather than an error.
+                grade: frame
+                    .get::<Option<Table>>("grade")
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    .map_or(SkyGrade::NONE, read_grade),
+                // Absent is none: a sky written before stars existed
+                // draws none, and whether a world has them is content.
+                stars: frame
+                    .get::<Option<f32>>("stars")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0),
+            })
+        })
+        .collect();
+    if keyframes.is_empty() {
+        return None;
+    }
+    // Sorted here rather than trusted from the mod: the client walks these
+    // in order to interpolate, and an out-of-order list would make the sky
+    // jump backwards partway through the day.
+    keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+    Some(Sky {
+        mod_id,
+        domain: domain.map(str::to_owned),
+        day_length_ticks: entry.get("day_length_ticks").ok()?,
+        keyframes,
+        // Morning unless the mod says otherwise. A counter left at zero
+        // opens every new world at midnight, which is the one hour with
+        // nothing in it to look at.
+        start_time: entry
+            .get::<Option<f32>>("start_time")
+            .ok()
+            .flatten()
+            .unwrap_or(DEFAULT_START_TIME)
+            .rem_euclid(1.0),
+        // Clamped when it was registered; absent is the default, never
+        // the sky's own colour, which is exactly what W29 took away.
+        cave_fog: entry
+            .get::<Option<Table>>("cave_fog")
+            .ok()
+            .flatten()
+            .and_then(|table| Some([table.get(1).ok()?, table.get(2).ok()?, table.get(3).ok()?]))
+            .unwrap_or(Sky::DEFAULT_CAVE_FOG),
+    })
 }
 
 #[cfg(test)]
@@ -20038,6 +20150,7 @@ mod space_tests {
     struct Places {
         made: std::sync::Mutex<Vec<(String, String, Option<crate::sky::UniversalPos>)>>,
         positions: std::sync::Mutex<std::collections::BTreeMap<String, crate::sky::UniversalPos>>,
+        skies: std::sync::Mutex<Vec<(String, Option<crate::domain::DomainSky>)>>,
     }
 
     impl crate::domain::Access for Places {
@@ -20071,6 +20184,108 @@ mod space_tests {
 
         fn position_of(&self, id: &str) -> Option<crate::sky::UniversalPos> {
             self.positions.lock().ok()?.get(id).copied()
+        }
+
+        fn set_sky(&self, id: &str, sky: Option<crate::domain::DomainSky>) -> bool {
+            // Only `space:` ids are domains in this fixture: what the real
+            // store answers for an id nobody made.
+            let known = id.starts_with("space:");
+            if known && let Ok(mut skies) = self.skies.lock() {
+                skies.push((id.to_owned(), sky));
+            }
+            known
+        }
+    }
+
+    #[test]
+    fn a_domain_sky_is_set_from_lua_cleared_with_nil_and_false_for_nobody() {
+        let mut vm = vm();
+        let places = std::sync::Arc::new(Places::default());
+        vm.set_domain_access(places.clone());
+        load(
+            &mut vm,
+            "space",
+            r"
+            local frames = {
+                { time = 0.5, sky = {0.9, 0.5, 0.3}, sun = {1, 1, 1}, intensity = 1.0 },
+                { time = 0.0, sky = {0.1, 0.0, 0.2}, sun = {0, 0, 0}, intensity = 0.2, stars = 0.75 },
+            }
+            game.register_on_tick(function()
+                set = game.set_domain_sky('space:body/17',
+                    { day_length_ticks = 10, start_time = 0.3, keyframes = frames, cave_fog = {2, 0.5, -1} })
+                nobody = game.set_domain_sky('nowhere', { keyframes = frames })
+                cleared = game.set_domain_sky('space:body/17', nil)
+            end)
+            ",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        vm.tick(1).expect("tick");
+
+        let env = vm.environment("space").expect("env");
+        assert!(env.get::<bool>("set").expect("set"));
+        assert!(!env.get::<bool>("nobody").expect("nobody"));
+        assert!(env.get::<bool>("cleared").expect("cleared"));
+
+        let skies = places.skies.lock().expect("lock").clone();
+        assert_eq!(skies.len(), 2, "an unknown domain reached the store as set");
+        let sky = skies[0].1.as_ref().expect("a sky");
+        assert_eq!(skies[0].0, "space:body/17");
+        // Sorted like a registered sky's, and the cave fog clamped.
+        assert!((sky.keyframes[0].time - 0.0).abs() < f32::EPSILON);
+        assert!((sky.keyframes[0].stars - 0.75).abs() < f32::EPSILON);
+        assert!((sky.keyframes[1].time - 0.5).abs() < f32::EPSILON);
+        for (got, want) in sky.cave_fog.iter().zip([1.0_f32, 0.5, 0.0]) {
+            assert!(
+                (got - want).abs() < f32::EPSILON,
+                "cave fog not clamped: {:?}",
+                sky.cave_fog
+            );
+        }
+        assert_eq!(skies[1].1, None, "nil clears");
+    }
+
+    #[test]
+    fn a_domain_sky_that_is_malformed_is_an_error_naming_the_function() {
+        for (spec, wanted) in [
+            ("{ keyframes = {} }", "set_domain_sky"),
+            ("{}", "keyframes"),
+            (
+                "{ keyframes = { { time = 2, sky = {0,0,0}, sun = {0,0,0}, intensity = 0 } } }",
+                "set_domain_sky",
+            ),
+            (
+                "{ keyframes = { { time = 0, sky = {0,0}, sun = {0,0,0}, intensity = 0 } } }",
+                "set_domain_sky",
+            ),
+            (
+                "{ domain = 'x', keyframes = { { time = 0, sky = {0,0,0}, sun = {0,0,0}, intensity = 0 } } }",
+                "domain",
+            ),
+            ("{ keyframs = 1 }", "keyframs"),
+            (
+                "{ cave_fog = {0, 0}, keyframes = { { time = 0, sky = {0,0,0}, sun = {0,0,0}, intensity = 0 } } }",
+                "cave_fog",
+            ),
+        ] {
+            let mut vm = vm();
+            vm.set_domain_access(std::sync::Arc::new(Places::default()));
+            load(
+                &mut vm,
+                "space",
+                &format!("game.register_on_tick(function() game.set_domain_sky('space:body/1', {spec}) end)"),
+            )
+            .expect("load");
+            vm.freeze().expect("freeze");
+            let err = format!("{:?}", vm.tick(1));
+            assert!(
+                err.contains("set_domain_sky"),
+                "`{spec}` did not name the function: {err}"
+            );
+            assert!(
+                err.contains(wanted),
+                "`{spec}` did not name `{wanted}`: {err}"
+            );
         }
     }
 

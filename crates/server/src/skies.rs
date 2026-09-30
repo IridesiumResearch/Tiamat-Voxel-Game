@@ -19,7 +19,8 @@
 
 use std::collections::BTreeMap;
 
-use tiamat_core::proto::{ServerMessage, SkyFrame, SkyGrade};
+use tiamat_core::domain::DomainSky;
+use tiamat_core::proto::{ServerMessage, SkyFrame};
 use tiamat_core::script::Sky;
 use tiamat_core::sky::UniversalPos;
 
@@ -53,7 +54,7 @@ impl SkyBook {
         let mut book = Self::default();
         for sky in skies {
             let wire = SkyWire {
-                keyframes: sky.keyframes.iter().map(frame_on_the_wire).collect(),
+                keyframes: sky.keyframes.iter().map(SkyFrame::from).collect(),
                 start_time: sky.start_time,
                 cave_fog: sky.cave_fog,
             };
@@ -128,32 +129,32 @@ impl SkyBook {
     /// The table to send for a domain seen from `observer`.
     #[must_use]
     pub fn table_for(&self, domain: &str, observer: UniversalPos) -> ServerMessage {
-        let (day_length_ticks, keyframes) = self.frames_for(domain);
+        self.table_for_with(domain, observer, None)
+    }
+
+    /// The same, with the sky a mod set on the domain at run time, which is
+    /// the domain's sky when there is one. The day is the world's either way:
+    /// one clock.
+    #[must_use]
+    pub fn table_for_with(
+        &self,
+        domain: &str,
+        observer: UniversalPos,
+        runtime: Option<&DomainSky>,
+    ) -> ServerMessage {
+        let (day_length_ticks, keyframes, cave_fog) = match runtime {
+            Some(sky) => (self.day_length_ticks, sky.keyframes.clone(), sky.cave_fog),
+            None => {
+                let (day, frames) = self.frames_for(domain);
+                (day, frames.to_vec(), self.cave_fog_for(domain))
+            }
+        };
         ServerMessage::SkyTable {
             day_length_ticks,
-            keyframes: keyframes.to_vec(),
+            keyframes,
             observer: [observer.x, observer.y, observer.z],
-            cave_fog: self.cave_fog_for(domain),
+            cave_fog,
         }
-    }
-}
-
-/// A mod's keyframe as peers agree on it.
-fn frame_on_the_wire(frame: &tiamat_core::script::SkyKeyframe) -> SkyFrame {
-    SkyFrame {
-        time: frame.time,
-        sky: frame.sky,
-        sun: frame.sun,
-        intensity: frame.intensity,
-        grade: SkyGrade {
-            exposure: frame.grade.exposure,
-            tint: frame.grade.tint,
-            offset: frame.grade.offset,
-            contrast: frame.grade.contrast,
-            saturation: frame.grade.saturation,
-            gamma: frame.grade.gamma,
-        },
-        stars: frame.stars,
     }
 }
 
@@ -178,6 +179,39 @@ mod tests {
             start_time: 0.4,
             cave_fog: [stars, 0.0, 0.0],
         }
+    }
+
+    #[test]
+    fn a_runtime_sky_is_the_domains_and_the_world_keeps_one_day() {
+        let book = SkyBook::from_registered(vec![sky(None, 24_000, 0.0)]);
+        let own = DomainSky {
+            keyframes: vec![SkyFrame::from(&tiamat_core::script::SkyKeyframe {
+                time: 0.0,
+                sky: [0.3; 3],
+                sun: [1.0; 3],
+                intensity: 1.0,
+                grade: tiamat_core::script::SkyGrade::NONE,
+                stars: 0.9,
+            })],
+            cave_fog: [0.0, 0.5, 0.0],
+        };
+        let ServerMessage::SkyTable {
+            day_length_ticks,
+            keyframes,
+            cave_fog,
+            ..
+        } = book.table_for_with("space:body/1", UniversalPos::CENTRE, Some(&own))
+        else {
+            panic!("not a sky table");
+        };
+        assert_eq!(day_length_ticks, 24_000, "one clock, the world's");
+        assert!((keyframes[0].stars - 0.9).abs() < f32::EPSILON);
+        assert!((cave_fog[1] - 0.5).abs() < f32::EPSILON);
+        // And without one, the rule is the registered one.
+        assert_eq!(
+            book.table_for_with("space:body/1", UniversalPos::CENTRE, None),
+            book.table_for("space:body/1", UniversalPos::CENTRE)
+        );
     }
 
     #[test]
