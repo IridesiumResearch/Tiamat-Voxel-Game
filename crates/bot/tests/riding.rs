@@ -281,6 +281,22 @@ async fn settle(bot: &mut Bot) -> [f64; 3] {
     blocks(&bot.walk([0.0; 3], 0, 6).await.expect("stand"))
 }
 
+/// The level look, in turns, that points a player standing at `here` at
+/// `there`.
+///
+/// The server casts a use along `[-sin yaw, sin pitch, cos yaw]`
+/// (`lease::look_direction`), so this is that turned back into a yaw; the
+/// engine's own `atan2` because the workspace bans the platform's.
+fn toward(here: [f64; 3], there: [f64; 3]) -> [f32; 2] {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a few blocks between two bodies, far inside f32"
+    )]
+    let (dx, dz) = ((there[0] - here[0]) as f32, (there[2] - here[2]) as f32);
+    let yaw = tiamat_core::detgen::trig::atan2(-dx, dz);
+    [yaw / std::f32::consts::TAU, 0.0]
+}
+
 fn assert_near(what: &str, got: [f64; 3], want: [f64; 3], within: f64) {
     let off = [got[0] - want[0], got[1] - want[1], got[2] - want[2]];
     assert!(
@@ -320,14 +336,37 @@ fn a_rider_drives_the_mount_at_its_pace_and_sits_on_it_until_they_get_off() {
         let walked = settle(&mut bot).await;
         let on_foot = walked[0] - home[0];
         bot.walk(west, 0, 30).await.expect("walk back");
-        let _ = settle(&mut bot).await;
+        let mut back = settle(&mut bot).await;
         assert!(on_foot > 2.0, "the bot never walked: {on_foot} blocks");
 
-        // Using it is getting on it.
+        // Using it is getting on it — from in front of it, AIMED at it. The
+        // walk back is not an exact return: on a slow runner some of its keys
+        // are filed under ticks the server has already passed (the bot-script
+        // gap noted on the Life sheet), and the scarecrow is 2.4 CELLS wide,
+        // so a bot left half a block east of where it started looks straight
+        // north past it. That was macOS CI, three pushes running, with
+        // "nothing selected to build with": the use missed and fell through to
+        // placing. Step until within a block of in front of it, re-measuring
+        // each time, then face it; reach is 4.5 blocks and it is 2 away.
+        let standing = entity_at(&mut bot, mount).await.expect("the scarecrow");
+        for _ in 0..12 {
+            let off = standing[0] - back[0];
+            if off.abs() < 1.0 {
+                break;
+            }
+            let toward_it = if off > 0.0 { east } else { west };
+            bot.walk(toward_it, 0, 4).await.expect("step back");
+            back = settle(&mut bot).await;
+        }
+        bot.look_at(toward(back, standing));
+        bot.walk([0.0; 3], 0, 2).await.expect("turn to it");
         let seen = bot.notices().len();
         bot.use_at_nothing().await.expect("send");
         let answer = notice_after(&mut bot, seen, "mount ").await;
         assert_eq!(answer, "true nil", "the mount was refused");
+        // North again, so the ride below is the one measured before this aim
+        // existed: the mount turns to where its rider looks.
+        bot.look_at([0.0, 0.0]);
         assert_eq!(ask(&mut bot, "which", "riding ").await, mount.to_string());
         let sat = settle(&mut bot).await;
         let under = entity_at(&mut bot, mount).await.expect("the scarecrow");
