@@ -1750,6 +1750,124 @@ end)
     );
 }
 
+/// Keeps what reaches the dialog host, for a test to read back.
+#[derive(Default)]
+struct Screen {
+    shown: std::sync::Mutex<Vec<tiamat_core::ui::host::ShowRequest>>,
+}
+
+impl tiamat_core::ui::host::Access for Screen {
+    fn show(&self, request: &tiamat_core::ui::host::ShowRequest) -> bool {
+        if let Ok(mut shown) = self.shown.lock() {
+            shown.push(request.clone());
+        }
+        true
+    }
+
+    fn close(&self, _player: &str, _form: &str) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_dialog_built_from_another_mods_exported_widgets_is_shown_whole() {
+    // **UI ask 19, from Magic's U-M2.** The UI mod exports widget builders;
+    // what they return reaches Magic as read-only proxies, whose own entries
+    // are empty. The engine read the tree raw, so every list the UI mod had
+    // built itself — a page's children, a dropdown's options — came out as
+    // nothing, and the UI mod had to tell its callers to copy every widget
+    // into plain tables first. The engine now reads what a proxy stands for.
+    let root = scratch("exports-dialog");
+    write_mod(
+        &root,
+        "ui",
+        "",
+        r#"
+local ui = {}
+-- A page the UI mod builds whole, children and all.
+function ui.page(title)
+    return { type = "container", direction = "column", children = {
+        { type = "label", text = title },
+        { type = "button", name = "ok", text = "OK" },
+    } }
+end
+function ui.choice(name)
+    return { type = "dropdown", name = name, options = { "salt", "sulfur", "mercury" }, selected = 2 }
+end
+-- A row around children the CALLER made.
+function ui.row(children)
+    return { type = "container", direction = "row", children = children }
+end
+game.export(ui)
+"#,
+    );
+    write_mod(
+        &root,
+        "magic",
+        "depends = [\"ui\"]",
+        r#"
+local ui = game.exports("ui")
+game.register_on_tick(function()
+    -- The builder's tree as it came back: a proxy, holding the UI mod's lists.
+    game.show_dialog{ player = "abc", form = "page", tree = ui.page("Mutus Liber") }
+    -- A plain tree of Magic's own, with proxies inside it at two depths.
+    game.show_dialog{ player = "abc", form = "mixed", tree = {
+        type = "container", direction = "column", children = {
+            ui.choice("principle"),
+            ui.row{ { type = "label", text = "mine" }, ui.page("inner") },
+        },
+    } }
+end)
+"#,
+    );
+    let mut host = host_for(&root);
+    assert!(host.failed().is_empty(), "{:?}", host.failed());
+    host.freeze().expect("freeze");
+    let screen = std::sync::Arc::new(Screen::default());
+    host.vm_mut().set_dialog_access(
+        std::sync::Arc::clone(&screen) as std::sync::Arc<dyn tiamat_core::ui::host::Access>
+    );
+    let faults = host.vm_mut().tick(1).expect("tick");
+    assert!(faults.is_empty(), "showing the dialogs faulted: {faults:?}");
+    let shown = screen.shown.lock().expect("lock").clone();
+    assert_eq!(shown.len(), 2, "both dialogs should reach the host");
+
+    let names = |tree: &tiamat_core::ui::Tree| -> Vec<String> {
+        tree.nodes.iter().map(|node| node.name.clone()).collect()
+    };
+    let page = &shown[0].tree;
+    assert_eq!(
+        page.nodes.len(),
+        3,
+        "the exported page is a column, its label and its button; got {:?}",
+        names(page)
+    );
+    assert!(names(page).contains(&"ok".to_owned()));
+
+    let mixed = &shown[1].tree;
+    // Root, the choice, the row, the row's label, and the inner page's three.
+    assert_eq!(
+        mixed.nodes.len(),
+        7,
+        "a plain tree lost what its exported parts held; got {:?}",
+        names(mixed)
+    );
+    let choice = mixed
+        .nodes
+        .iter()
+        .find(|node| node.name == "principle")
+        .expect("the dropdown");
+    let tiamat_core::ui::Widget::Dropdown { options, selected } = &choice.widget else {
+        panic!("the choice is not a dropdown: {:?}", choice.widget);
+    };
+    assert_eq!(
+        options,
+        &["salt", "sulfur", "mercury"],
+        "the options the UI mod built"
+    );
+    assert_eq!(*selected, 1, "one-based on the way in, as for any dropdown");
+}
+
 #[test]
 fn a_structure_crosses_a_chunk_edge_and_does_not_care_which_chunk_was_made_first() {
     // **The order-independent shape, which is the only correct one.** The

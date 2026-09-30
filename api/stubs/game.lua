@@ -1907,6 +1907,12 @@ function game.register_on_chat(callback) end
 ---small. Pass it on `update_dialog` too: it travels with the tree, so a redraw
 ---cannot change the shape of the window a player is already reading.
 ---
+---**Widgets from another mod's exports go straight in.** What a builder in
+---`game.exports(id)` returns is a read-only view, and the tree may hold such
+---views anywhere — as the root, as a child, inside a list the other mod made —
+---with no copying into plain tables first. The engine reads what each view
+---stands for and changes nothing.
+---
 ---Returns whether the player was there to show it to, which is NOT a promise it
 ---rendered.
 ---@param spec Tiamat.DialogSpec

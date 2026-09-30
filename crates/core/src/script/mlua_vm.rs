@@ -2447,6 +2447,96 @@ fn remember_crossing(lua: &Lua, proxy: &Value, raw: &Value, owner: &str) -> mlua
     map.set(proxy.clone(), entry)
 }
 
+/// A table as the engine reads it: every export proxy in it, at any depth,
+/// replaced by what it stands for.
+///
+/// **The engine's readers walk tables raw** — `pairs` is `lua_next` and
+/// `sequence_values` is `lua_rawgeti` — and a proxy's own entries are empty,
+/// its contents living behind `__index`, `__len` and `__pairs` (see
+/// `cross_table`). So a dialog built with another mod's exported widget
+/// builders reached `game.show_dialog` as nodes whose `children` were nothing
+/// (UI ask 19, from Magic's U-M2), and the UI mod's answer was to tell every
+/// caller to copy its widgets into plain tables first. Reading what a proxy
+/// stands for tells the engine nothing a guest could not already read through
+/// it, and nothing here writes.
+///
+/// A table with no proxy in it is handed back as it came, so every tree that
+/// worked before takes exactly the path it took before. One that holds a proxy
+/// is copied, each table once however often it recurs, keeping the metatables
+/// of the tables it copies (a mod that fills a widget's defaults through
+/// `__index` still does), down to `depth` tables; below that the reader's own
+/// depth limit is what answers.
+fn opened(lua: &Lua, table: Table, depth: usize) -> mlua::Result<Table> {
+    if !holds_proxy(lua, &table, depth, &mut BTreeSet::new())? {
+        return Ok(table);
+    }
+    match opened_value(lua, Value::Table(table), depth, &mut BTreeMap::new())? {
+        Value::Table(table) => Ok(table),
+        other => Err(mlua::Error::external(format!(
+            "an export stood for a {}, not a table",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Whether `table`, or any table under it within `depth`, is an export proxy.
+fn holds_proxy(
+    lua: &Lua,
+    table: &Table,
+    depth: usize,
+    seen: &mut BTreeSet<usize>,
+) -> mlua::Result<bool> {
+    if depth == 0 || !seen.insert(table.to_pointer().addr()) {
+        return Ok(false);
+    }
+    if uncross(lua, &Value::Table(table.clone()))?.is_some() {
+        return Ok(true);
+    }
+    for pair in table.pairs::<Value, Value>() {
+        if let (_, Value::Table(inner)) = pair?
+            && holds_proxy(lua, &inner, depth - 1, seen)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `value` with its proxies opened; see `opened`. `copies` maps each table
+/// already copied to its copy, so a table met twice is one table, and a cycle
+/// is a cycle rather than a walk that never ends.
+fn opened_value(
+    lua: &Lua,
+    value: Value,
+    depth: usize,
+    copies: &mut BTreeMap<usize, Table>,
+) -> mlua::Result<Value> {
+    let Value::Table(table) = value else {
+        return Ok(value);
+    };
+    // A proxy's raw value is never itself a proxy: `crossing` unwraps one
+    // before it wraps. What it holds may be, and is opened below.
+    let table = match uncross(lua, &Value::Table(table.clone()))? {
+        Some((Value::Table(raw), _)) => raw,
+        _ => table,
+    };
+    if depth == 0 {
+        return Ok(Value::Table(table));
+    }
+    let key = table.to_pointer().addr();
+    if let Some(copy) = copies.get(&key) {
+        return Ok(Value::Table(copy.clone()));
+    }
+    let copy = lua.create_table()?;
+    copies.insert(key, copy.clone());
+    for pair in table.pairs::<Value, Value>() {
+        let (field, inner) = pair?;
+        copy.raw_set(field, opened_value(lua, inner, depth - 1, copies)?)?;
+    }
+    copy.set_metatable(table.metatable())?;
+    Ok(Value::Table(copy))
+}
+
 /// A value crossing from `owner`'s sandbox into `guest`'s.
 ///
 /// See `MluaVm::install_exports`. Tables become read-only proxies that wrap
@@ -5196,11 +5286,16 @@ impl MluaVm {
         let slot = std::sync::Arc::clone(&self.dialogs);
         {
             self.lua
-                .create_function(move |_, spec: Table| {
+                .create_function(move |lua, spec: Table| {
                     let player: String = spec.get("player")?;
                     let form: String = spec.get("form")?;
                     let form = qualify_id(&owner, &form).map_err(mlua::Error::external)?;
                     let tree: Table = spec.get("tree")?;
+                    // Widgets from another mod's exported builders arrive as
+                    // read-only proxies, which the reader's raw walk cannot see
+                    // into (UI ask 19). A widget is two tables deep, itself and
+                    // its `children`, and its own fields a few more.
+                    let tree = opened(lua, tree, crate::ui::Limits::default().depth * 2 + 8)?;
                     let tree = widget_tree(&tree)?;
                     // **Checked before it leaves the mod's call stack.** The
                     // client checks it again on arrival — it does not trust
@@ -12029,6 +12124,69 @@ mod tests {
         {
             panic!("api/stubs/game.lua does not compile: {err}");
         }
+    }
+
+    #[test]
+    fn a_tree_with_no_export_in_it_is_read_as_it_came() {
+        // Every dialog that worked before `opened` existed must take the path
+        // it took before: the same table, not a copy of it.
+        let lua = Lua::new();
+        let tree: Table = lua
+            .load(r#"return { type = "container", children = { { type = "label" } } }"#)
+            .eval()
+            .expect("tree");
+        let read = opened(&lua, tree.clone(), 72).expect("opened");
+        assert_eq!(
+            read.to_pointer(),
+            tree.to_pointer(),
+            "a plain tree was copied"
+        );
+    }
+
+    #[test]
+    fn an_opened_tree_keeps_its_metatables_and_its_cycles() {
+        let lua = Lua::new();
+        let faulted = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+        let raw: Table = lua
+            .load(r#"return { type = "list", items = { "a", "b" } }"#)
+            .eval()
+            .expect("raw");
+        let proxy = cross_table(&lua, raw, "ui", "magic", &faulted).expect("proxy");
+        // A mod's own table that fills `type` through `__index`, holds the
+        // proxy, and holds itself.
+        let tree: Table = lua
+            .load(
+                r#"local tree = setmetatable({}, { __index = { type = "container" } })
+                   tree.self = tree
+                   return tree"#,
+            )
+            .eval()
+            .expect("tree");
+        tree.set("child", proxy).expect("set");
+
+        let read = opened(&lua, tree, 72).expect("opened");
+        assert_eq!(
+            read.get::<String>("type").expect("type"),
+            "container",
+            "the copy lost the mod's own `__index`"
+        );
+        let itself: Table = read.get("self").expect("self");
+        assert_eq!(
+            itself.to_pointer(),
+            read.to_pointer(),
+            "a cycle was not kept"
+        );
+        let child: Table = read.get("child").expect("child");
+        let items: Table = child.get("items").expect("items");
+        let raw_items: Vec<String> = items
+            .sequence_values()
+            .collect::<mlua::Result<_>>()
+            .expect("items");
+        assert_eq!(
+            raw_items,
+            ["a", "b"],
+            "the proxy's list is still unreadable raw"
+        );
     }
 
     #[test]

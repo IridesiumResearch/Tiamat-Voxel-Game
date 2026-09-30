@@ -937,6 +937,10 @@ What to design around:
   value, or as an argument to your callback — you get the very table you gave,
   mutable and iterable, not a view of a view. A third mod that receives it
   gets a read-only view of YOUR table, however many hands it passed through.
+- **Views go straight into a dialog.** A widget another mod's exported
+  builder returned is a read-only view, and `game.show_dialog` /
+  `update_dialog` read views wherever they sit in the tree. Do not copy them
+  into plain tables first.
 - **A disabled mod's functions stop answering, even ones you are holding.** A
   function you took from `exports` yesterday answers `nil` the moment its owner
   is disabled, and its code does not run. If it matters whether the other mod
