@@ -36,6 +36,7 @@ pub mod lightning;
 pub mod offscreen;
 pub mod particle;
 pub mod place_fog;
+pub mod rainbow;
 pub mod shadow;
 pub mod skinned;
 pub mod viewmodel;
@@ -1043,6 +1044,10 @@ pub struct Renderer {
     /// How much of the star catalog shows now, `0.0..=1.0`, and how far the
     /// stars have wheeled, as `(cos, sin)` of the day's turn.
     stars: (f32, (f32, f32)),
+    /// How strong a mod's rainbow is now, `0.0..=1.0`, already eased —
+    /// weather ask W30. Where it stands and how much of it the sun allows is
+    /// worked out each frame from [`Self::sun_direction`]; see [`rainbow`].
+    rainbow: f32,
     /// The sky's colour now, which fog fades towards.
     sky_colour: [f32; 3],
     /// What fog fades towards where no sky reaches — weather ask W29. The
@@ -1251,6 +1256,7 @@ impl Renderer {
             sun_colour: [1.0, 1.0, 1.0, 1.0],
             sun_direction: NOON,
             stars: (0.0, (1.0, 0.0)),
+            rainbow: 0.0,
             sky_colour: sky_colour(),
             cave_fog: tiamat_core::script::Sky::DEFAULT_CAVE_FOG,
             // Ungraded until a sky says otherwise, which keeps a world with no
@@ -1304,6 +1310,24 @@ impl Renderer {
     /// [`Renderer::set_star_catalog`] has said which catalog.
     pub fn set_stars(&mut self, visibility: f32, turn: (f32, f32)) {
         self.stars = (visibility.clamp(0.0, 1.0), turn);
+    }
+
+    /// Sets how strong the rainbow is, `0.0..=1.0` — weather ask W30.
+    ///
+    /// A strength and no more: the bow is drawn round the point opposite the
+    /// sun [`Self::set_sun`] last gave, and as much of it as that sun allows
+    /// — none with the sun down or past 42 degrees up. See [`rainbow`].
+    pub fn set_rainbow(&mut self, intensity: f32) {
+        self.rainbow = if intensity.is_finite() {
+            intensity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// The rainbow this frame draws, from the strength and the sun.
+    fn rainbow_uniform(&self) -> rainbow::Uniform {
+        rainbow::Uniform::new(self.rainbow, self.sun_direction)
     }
 
     /// Gives the sky the star catalog for a world's seed.
@@ -1918,6 +1942,7 @@ impl Renderer {
             sun_direction: self.sun_direction,
             stars: self.stars.0,
             star_turn: self.stars.1,
+            rainbow: self.rainbow_uniform(),
             // **Times the intensity, as the terrain is** (`world.wgsl`:
             // `input.sun * globals.sun_intensity`). The deck was lit with the
             // keyframe's colour alone, so at night — Core Sky's `{0.35,
@@ -2710,6 +2735,7 @@ impl Renderer {
                 grade: self.grade,
                 place_fog: self.fog_here,
                 cave_fog: self.cave_fog,
+                rainbow: self.rainbow_uniform(),
             },
             self.place_fog.buffer(),
         );

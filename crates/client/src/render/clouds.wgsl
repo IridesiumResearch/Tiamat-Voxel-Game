@@ -101,6 +101,15 @@ struct Clouds {
     // `occupancy_side` makes a level's side of the last two. Last, so no
     // field before it moved.
     occupancy: vec4<f32>,
+    // The rainbow — weather ask W30, `rainbow.rs`'s `Uniform`: the antisolar
+    // point (xyz) and the primary bow's strength (w), zero for none; the
+    // primary's radius and half-width and the secondary's, in radians; and
+    // the secondary's strength (x) and how far over the horizon the bow
+    // takes to fade in, as a sine (y). After the occupancy, so nothing
+    // before it moved.
+    rainbow: vec4<f32>,
+    rainbow_bands: vec4<f32>,
+    rainbow_light: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> clouds: Clouds;
@@ -215,6 +224,44 @@ fn stars_along(direction: vec3<f32>, pixel: f32) -> vec3<f32> {
         light = light + colour * bw.x * (point + 0.12 * halo * halo);
     }
     return light * visibility;
+}
+
+// `max(0, 1 - x^2)`: a smooth hump one wide either side of zero, which is
+// each channel of the rainbow's spectrum. `rainbow.rs::bump`.
+fn rainbow_bump(x: f32) -> f32 {
+    return max(0.0, 1.0 - x * x);
+}
+
+// One bow's colour at `s` across it, 0 at its inner edge and 1 at its outer:
+// violet through blue, green, yellow and orange to red, faded at both edges
+// so the bow has no rim. `rainbow.rs::band`, and `post.wgsl`'s the same.
+fn rainbow_band(s: f32) -> vec3<f32> {
+    if (s <= 0.0 || s >= 1.0) {
+        return vec3<f32>(0.0);
+    }
+    let red = rainbow_bump((s - 0.82) / 0.32) + 0.3 * rainbow_bump(s / 0.18);
+    let green = rainbow_bump((s - 0.5) / 0.3);
+    let blue = rainbow_bump((s - 0.18) / 0.3);
+    let edge = smoothstep(0.0, 0.2, s) * (1.0 - smoothstep(0.8, 1.0, s));
+    return vec3<f32>(red, green, blue) * edge;
+}
+
+// What the rainbow adds to the sky along a view direction — weather ask
+// W30: the primary ring round the antisolar point, red outside, and the
+// faint secondary beyond it, red inside, over the horizon only. Additive, so
+// the sky shows through it. `rainbow.rs::light_along`, and `post.wgsl`'s
+// `rainbow_along` word for word, which draws it in mode 3.
+fn rainbow_along(direction: vec3<f32>) -> vec3<f32> {
+    let strength = clouds.rainbow.w;
+    if (strength <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let angle = acos(clamp(dot(direction, clouds.rainbow.xyz), -1.0, 1.0));
+    let bands = clouds.rainbow_bands;
+    let inner = rainbow_band((angle - (bands.x - bands.y)) / (2.0 * bands.y));
+    let outer = rainbow_band(1.0 - (angle - (bands.z - bands.w)) / (2.0 * bands.w));
+    let above = smoothstep(0.0, clouds.rainbow_light.y, direction.y);
+    return (inner * strength + outer * clouds.rainbow_light.x) * above;
 }
 
 // The weather over one place: the five shares — cumulus `cover`, darkness,
@@ -1550,6 +1597,13 @@ fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     // a star stays a point rather than a block of pixels.
     if (clouds.stars.w > 0.5) {
         colour = colour + stars_along(direction, clouds.view.y) * headroom;
+        // The rainbow with them, and for their reason: a band a few degrees
+        // across lifted a block of pixels at a time is a staircase. Modes 1
+        // and 2 only — mode 3's fog paints over a painted sky, so its post
+        // chain adds the bow after the fog (weather ask W30).
+        if (clouds.quality.w < 2.0) {
+            colour = colour + rainbow_along(direction);
+        }
     }
     return colour;
 }
@@ -1912,10 +1966,12 @@ fn resolve_main(in: Varyings) -> Resolved {
         let far = clouds.inverse_view_projection * vec4<f32>(in.ndc, 1.0, 1.0);
         let direction = normalize(far.xyz / far.w - near.xyz / near.w);
         let headroom = select(1.0, 2.6, clouds.quality.w >= 2.0);
-        out.colour = vec4<f32>(
-            out.colour.xyz + stars_along(direction, clouds.view.y) * headroom,
-            out.colour.a,
-        );
+        var added = stars_along(direction, clouds.view.y) * headroom;
+        // And the rainbow, as `sky_along` adds it at full resolution.
+        if (clouds.quality.w < 2.0) {
+            added = added + rainbow_along(direction);
+        }
+        out.colour = vec4<f32>(out.colour.xyz + added, out.colour.a);
     }
     return out;
 }

@@ -6528,6 +6528,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         sun_direction: [-0.2, -0.15, 0.96],
         stars: 0.0,
         star_turn: (1.0, 0.0),
+        rainbow: client::render::rainbow::Uniform::NONE,
         sun: [1.0, 0.86, 0.62],
         sky: [0.42, 0.58, 0.85],
         fog_end: 3000.0,
@@ -9798,5 +9799,296 @@ fn a_cut_of_several_materials_is_drawn_cell_by_cell_in_a_slot_and_in_the_editor(
                  cell in each cell's own material"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------- rainbow
+
+/// Sunlight from a sun `elevation` degrees up, behind a camera that faces +z:
+/// the light travels away from the sun, forward and down, so the point
+/// opposite the sun is dead ahead and `elevation` degrees under the horizon.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test of presentation code, which charter rule 4 exempts"
+)]
+fn sun_behind(elevation: f32) -> [f32; 3] {
+    let radians = elevation.to_radians();
+    [0.0, -radians.sin(), radians.cos()]
+}
+
+/// The fixed scene with a wall of stone across the middle of the frame: a
+/// hill standing between the camera at z 2 and the sky ahead, thirty degrees
+/// either side of dead ahead and higher than the frame.
+fn scene_with_hill() -> Vec<Chunk> {
+    let mut chunks = scene();
+    for y in [0, 1] {
+        let pos = ChunkPos::new(1, y, 1);
+        let corner = BlockPos::from_chunk_corner(pos);
+        let mut chunk = Chunk::new(pos, MaterialId::AIR);
+        for x in 0..16 {
+            for z in 0..2 {
+                // The scene's own floor is eight blocks; the wall stands on it.
+                for dy in (if y == 0 { 8 } else { 0 })..16 {
+                    chunk
+                        .set_block(
+                            BlockPos::new(corner.x + x, corner.y + dy, corner.z + z),
+                            BlockValue::Uniform(STONE),
+                        )
+                        .expect("in chunk");
+                }
+            }
+        }
+        // The scene's own chunk at this place is replaced, not doubled.
+        chunks.retain(|existing| existing.pos() != pos);
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+/// What a rainbow adds to a frame: the frame with one minus the frame with
+/// none, channel by channel, signed.
+struct Bow {
+    width: u32,
+    added: Vec<[i16; 3]>,
+}
+
+impl Bow {
+    fn between(with: &Image, without: &Image) -> Self {
+        let added = with
+            .rgba
+            .chunks_exact(4)
+            .zip(without.rgba.chunks_exact(4))
+            .map(|(a, b)| {
+                [
+                    i16::from(a[0]) - i16::from(b[0]),
+                    i16::from(a[1]) - i16::from(b[1]),
+                    i16::from(a[2]) - i16::from(b[2]),
+                ]
+            })
+            .collect();
+        Self {
+            width: with.width,
+            added,
+        }
+    }
+
+    /// Pixels where something was added, at least `floor` in some channel.
+    fn lit(&self, floor: i16) -> Vec<(u32, u32)> {
+        self.added
+            .iter()
+            .enumerate()
+            .filter(|(_, rgb)| rgb.iter().any(|&c| c >= floor))
+            .map(|(i, _)| (i as u32 % self.width, i as u32 / self.width))
+            .collect()
+    }
+
+    fn at(&self, x: u32, y: u32) -> [i16; 3] {
+        self.added[(y * self.width + x) as usize]
+    }
+
+    /// The row, among those of columns `from..to`, that channel `c` peaks on
+    /// when summed across the columns, and what it sums to there.
+    fn peak_row(&self, channel: usize, from: u32, to: u32) -> (u32, i32) {
+        let mut best = (0, i32::MIN);
+        for y in 0..HEIGHT {
+            let sum: i32 = (from..to)
+                .map(|x| i32::from(self.at(x, y)[channel].max(0)))
+                .sum();
+            if sum > best.1 {
+                best = (y, sum);
+            }
+        }
+        best
+    }
+}
+
+/// The frame with the rainbow at `intensity` and then at none, same camera.
+fn bow_of(renderer: &mut Renderer, target: &Offscreen, camera: &Camera, intensity: f32) -> Bow {
+    renderer.set_rainbow(0.0);
+    let without = target.capture(renderer, camera).expect("capture");
+    renderer.set_rainbow(intensity);
+    let with = target.capture(renderer, camera).expect("capture");
+    renderer.set_rainbow(0.0);
+    Bow::between(&with, &without)
+}
+
+/// Looks straight ahead and up, as a person scanning for a bow does.
+fn rainbow_camera(yaw: f32) -> Camera {
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 9.6, 2.0),
+        ..Camera::default()
+    };
+    camera.look(yaw, 0.4);
+    camera
+}
+
+/// Which way the renderer draws the sky, for the variants the bow must show
+/// in: each lighting mode, and mode 1 under a clear deck marched smaller than
+/// the frame, whose resolve is what draws the bow there.
+fn rainbow_variants() -> Vec<(
+    String,
+    LightingMode,
+    Option<client::render::clouds::Quality>,
+)> {
+    let mut variants: Vec<_> = MODES
+        .into_iter()
+        .map(|mode| (format!("{mode:?}"), mode, None))
+        .collect();
+    variants.push((
+        "Simple with a clear deck at Medium".to_owned(),
+        LightingMode::Simple,
+        Some(client::render::clouds::Quality::Medium),
+    ));
+    variants
+}
+
+fn clear_deck(quality: client::render::clouds::Quality) -> client::render::clouds::Deck {
+    client::render::clouds::Deck {
+        layer: Some(tuned_deck()),
+        clouds: Some(tiamat_core::atmosphere::Clouds {
+            cover: 0.0,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
+        }),
+        quality,
+        seed: 1,
+    }
+}
+
+#[test]
+fn a_rainbow_is_an_arc_opposite_the_sun_red_outside_and_gone_when_the_sun_is_high_or_down() {
+    // **Weather ask W30's gate.** Intensity 1, the sun 15 degrees up, from
+    // open ground: an arc opposite the sun, red outermost; gone with the sun
+    // at 45 degrees and at night.
+    //
+    // Structural, as the header says: the bow is found as what it ADDS to the
+    // frame (the same frame with and without), so the assertions are about
+    // where and in what order, never about a colour to the last bit. Margins
+    // are far below the bow's size, because CI's adapters are not lavapipe.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    for (label, mode, deck) in rainbow_variants() {
+        renderer.set_lighting_mode(mode);
+        upload(&mut renderer, &chunks);
+        if let Some(quality) = deck {
+            renderer.set_clouds(clear_deck(quality));
+        }
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], sun_behind(15.0));
+
+        // Facing away from the sun: the bow is ahead.
+        let bow = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        let lit = bow.lit(6);
+        println!("{label}: {} lit pixels", lit.len());
+        assert!(
+            lit.len() >= 150,
+            "{label}: {} pixels added by a rainbow at intensity 1, sun 15 degrees up",
+            lit.len()
+        );
+        // An arc over the horizon, and only over it: the horizon is at about
+        // row 193 with the camera pitched up as it is.
+        assert!(
+            lit.iter().all(|&(_, y)| y < 200),
+            "{label}: a rainbow drawn under the horizon"
+        );
+        // Opposite the sun: centred on the camera's own heading, the
+        // antisolar azimuth, left and right alike.
+        let mean_x = lit.iter().map(|&(x, _)| x as f32).sum::<f32>() / lit.len() as f32;
+        assert!(
+            (mean_x - WIDTH as f32 / 2.0).abs() < 20.0,
+            "{label}: the bow is centred at x {mean_x}, not on the antisolar point"
+        );
+        assert!(
+            lit.iter().any(|&(x, _)| x < WIDTH / 4) && lit.iter().any(|&(x, _)| x > WIDTH * 3 / 4),
+            "{label}: not an arc across the frame"
+        );
+        // Red outermost: at the top of the arc, in the middle of the frame,
+        // the red peaks higher up the screen than the blue.
+        let middle = WIDTH / 2 - 12..WIDTH / 2 + 12;
+        let (red_row, red) = bow.peak_row(0, middle.start, middle.end);
+        let (blue_row, blue) = bow.peak_row(2, middle.start, middle.end);
+        assert!(red > 0 && blue > 0, "{label}: no red or no blue at the top");
+        assert!(
+            red_row + 3 <= blue_row,
+            "{label}: red peaks at row {red_row} and blue at {blue_row}: violet is not inside"
+        );
+        // The secondary is fainter, and above the primary.
+        let top = lit.iter().map(|&(_, y)| y).min().expect("a pixel");
+        assert!(top < red_row, "{label}: nothing outside the primary");
+
+        // Facing the sun, there is no bow in the frame.
+        let behind = bow_of(
+            &mut renderer,
+            &target,
+            &rainbow_camera(std::f32::consts::PI),
+            1.0,
+        );
+        assert_eq!(behind.lit(1).len(), 0, "{label}: a bow on the sun's side");
+
+        // Half the strength is about half the light.
+        let half = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 0.5);
+        let full_peak = bow.at(WIDTH / 2, red_row)[0].max(1);
+        let half_peak = half.at(WIDTH / 2, red_row)[0];
+        assert!(
+            half_peak > 0 && half_peak < full_peak,
+            "{label}: half intensity {half_peak} against full {full_peak}"
+        );
+
+        // The sun at 45 degrees, where the bow has sunk under the horizon,
+        // and at night: nothing.
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], sun_behind(45.0));
+        let high = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        assert_eq!(high.lit(1).len(), 0, "{label}: a bow with the sun at 45");
+        night(&mut renderer);
+        let dark = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        assert_eq!(dark.lit(1).len(), 0, "{label}: a bow at night");
+        renderer.set_sky(client::render::sky_colour(), 3000.0);
+    }
+}
+
+#[test]
+fn a_hill_in_front_of_the_rainbow_hides_it() {
+    // Weather ask W30's last gate clause: drawn at the sky's depth, so what
+    // stands in front of the sky stands in front of the bow. A wall thirty
+    // degrees either side of dead ahead and higher than the frame: nothing
+    // is added where the wall is, and the bow still shows to either side.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene_with_hill();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    for (label, mode, deck) in rainbow_variants() {
+        renderer.set_lighting_mode(mode);
+        upload(&mut renderer, &chunks);
+        if let Some(quality) = deck {
+            renderer.set_clouds(clear_deck(quality));
+        }
+        renderer.set_sun(1.0, [1.0, 1.0, 1.0], sun_behind(15.0));
+        let bow = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        // The wall covers thirty degrees either side, which is columns 62 to
+        // 258 of the frame; well inside that, nothing is added anywhere.
+        let behind_wall = bow
+            .lit(1)
+            .into_iter()
+            .filter(|&(x, _)| (80..240).contains(&x))
+            .count();
+        assert_eq!(
+            behind_wall, 0,
+            "{label}: {behind_wall} pixels of rainbow drawn over the hill"
+        );
+        let beside = bow
+            .lit(6)
+            .into_iter()
+            .filter(|&(x, _)| !(62..258).contains(&x))
+            .count();
+        println!("{label}: {beside} lit pixels beside the hill");
+        assert!(
+            beside >= 8,
+            "{label}: the bow is gone beside the hill too: {beside}"
+        );
     }
 }

@@ -101,6 +101,9 @@ struct Uniforms {
     /// What the fog fades towards where no sky reaches, in `xyz` — weather
     /// ask W29; `w` unused. **Appended**, for `place_fog`'s reason.
     cave_fog: [f32; 4],
+    /// The rainbow the composite adds after its fog — weather ask W30.
+    /// **Appended**, for `place_fog`'s reason.
+    rainbow: super::rainbow::Uniform,
 }
 
 /// What the frame's sky is doing, as the composite needs it.
@@ -135,6 +138,9 @@ pub struct Frame {
     /// into the scene's alpha; see `SKY_MARK` and `CAVE_MARK` in
     /// `post.wgsl`.
     pub cave_fog: [f32; 3],
+    /// The rainbow painted on the sky — weather ask W30. Mode 3 adds it in
+    /// the composite, after the fog that would otherwise paint it over.
+    pub rainbow: super::rainbow::Uniform,
 }
 
 /// How much of the sun's colour the haze takes on where the view points at it.
@@ -782,6 +788,7 @@ impl Post {
                 fog_up: frame.fog_up,
                 place_fog: frame.place_fog,
                 cave_fog: [frame.cave_fog[0], frame.cave_fog[1], frame.cave_fog[2], 0.0],
+                rainbow: frame.rainbow,
             }),
         );
     }

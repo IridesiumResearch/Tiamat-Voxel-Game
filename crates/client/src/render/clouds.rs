@@ -238,6 +238,13 @@ struct Uniforms {
     /// and the side the walk of a grid needs. Last, as it is in the shader,
     /// so nothing before it moved.
     occupancy: [f32; 4],
+    /// The rainbow — weather ask W30: the antisolar point and the primary's
+    /// strength, the four band radii and widths, and the secondary's
+    /// strength and the horizon's edge. [`super::rainbow::Uniform`], field
+    /// for field; after the occupancy, so nothing before it moved.
+    rainbow: [f32; 4],
+    rainbow_bands: [f32; 4],
+    rainbow_light: [f32; 4],
 }
 
 /// Texels a side of the cover map's textures: the biggest map a mod may
@@ -416,6 +423,9 @@ pub struct Frame {
     pub stars: f32,
     /// How far the stars have wheeled, as `(cos, sin)` of the day's turn.
     pub star_turn: (f32, f32),
+    /// The rainbow painted on the sky this frame — weather ask W30. Drawn
+    /// here in modes 1 and 2 alone; mode 3 draws it after its fog.
+    pub rainbow: super::rainbow::Uniform,
     /// The sun's colour.
     pub sun: [f32; 3],
     /// The sky's colour.
@@ -733,6 +743,9 @@ impl Pass {
             ],
             shadow: [shadow_origin[0], shadow_origin[1], SHADOW_EXTENT, 0.0],
             occupancy,
+            rainbow: frame.rainbow.antisolar,
+            rainbow_bands: frame.rainbow.bands,
+            rainbow_light: frame.rainbow.light,
             quality: [
                 quality.reach(),
                 quality.detail_reach(),
@@ -1830,7 +1843,10 @@ mod tests {
             shadow,
             map,
             stars,
-            occupancy
+            occupancy,
+            rainbow,
+            rainbow_bands,
+            rainbow_light
         );
         assert_eq!(fields.len(), rust.len(), "{fields:?}");
         let mut at = 0;

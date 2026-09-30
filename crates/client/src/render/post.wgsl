@@ -52,6 +52,13 @@ struct Post {
     // What fog fades towards where no sky reaches, in xyz — weather ask W29;
     // w unused. See `world.wgsl`'s `fog_colour`.
     cave_fog: vec4<f32>,
+    // The rainbow — weather ask W30, `rainbow.rs`'s `Uniform`, as
+    // `clouds.wgsl` reads it: the antisolar point and the primary's strength,
+    // the bands' radii and half-widths in radians, and the secondary's
+    // strength and the horizon's edge. Appended, for `fog_here`'s reason.
+    rainbow: vec4<f32>,
+    rainbow_bands: vec4<f32>,
+    rainbow_light: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> post: Post;
@@ -309,6 +316,46 @@ fn scene_distance(pixel: vec2<i32>, uv: vec2<f32>) -> f32 {
     return length(view.xyz / view.w);
 }
 
+// The view ray for a pixel, from the same reconstruction the distance uses,
+// at the far plane.
+fn view_ray(uv: vec2<f32>) -> vec3<f32> {
+    let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
+    let far = post.inverse_view_projection * clip;
+    return normalize(far.xyz / far.w);
+}
+
+// `clouds.wgsl`'s `rainbow_bump`, `rainbow_band` and `rainbow_along`, word
+// for word but for the uniform they read — weather ask W30. Mode 3 draws the
+// rainbow here rather than in the cloud pass, because the fog below paints a
+// painted sky over with its own colour: see `composite_main`.
+fn rainbow_bump(x: f32) -> f32 {
+    return max(0.0, 1.0 - x * x);
+}
+
+fn rainbow_band(s: f32) -> vec3<f32> {
+    if (s <= 0.0 || s >= 1.0) {
+        return vec3<f32>(0.0);
+    }
+    let red = rainbow_bump((s - 0.82) / 0.32) + 0.3 * rainbow_bump(s / 0.18);
+    let green = rainbow_bump((s - 0.5) / 0.3);
+    let blue = rainbow_bump((s - 0.18) / 0.3);
+    let edge = smoothstep(0.0, 0.2, s) * (1.0 - smoothstep(0.8, 1.0, s));
+    return vec3<f32>(red, green, blue) * edge;
+}
+
+fn rainbow_along(direction: vec3<f32>) -> vec3<f32> {
+    let strength = post.rainbow.w;
+    if (strength <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let angle = acos(clamp(dot(direction, post.rainbow.xyz), -1.0, 1.0));
+    let bands = post.rainbow_bands;
+    let inner = rainbow_band((angle - (bands.x - bands.y)) / (2.0 * bands.y));
+    let outer = rainbow_band(1.0 - (angle - (bands.z - bands.w)) / (2.0 * bands.w));
+    let above = smoothstep(0.0, post.rainbow_light.y, direction.y);
+    return (inner * strength + outer * post.rainbow_light.x) * above;
+}
+
 // Sunlight scattered toward the eye by the air between it and the surface.
 //
 // A cheap approximation of what makes a hazy afternoon glow around the sun:
@@ -317,11 +364,7 @@ fn scene_distance(pixel: vec2<i32>, uv: vec2<f32>) -> f32 {
 // for stylised — but it has the property that matters, which is that fog is not
 // one flat colour across the whole sky.
 fn scattered_fog(uv: vec2<f32>) -> vec3<f32> {
-    // The view ray for this pixel, from the same reconstruction the distance
-    // uses, at the far plane.
-    let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
-    let far = post.inverse_view_projection * clip;
-    let ray = normalize(far.xyz / far.w);
+    let ray = view_ray(uv);
 
     // Sunlight travels along `sun_direction`, so looking INTO the sun means
     // looking along its negation.
@@ -408,6 +451,15 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     let open = max(sky_light, smoothstep(CAVE_FOG_EDGE, 1.0, reach));
     let fog = mix(post.cave_fog.rgb, scattered_fog(input.uv), open);
     let fogged = mix(mix(misted, fog, haze), misted, is_cloud);
+    // **The rainbow, at the sky's depth** (weather ask W30): on the pixels
+    // nothing was drawn in front of and the deck did not mark as cloud, so
+    // terrain and cloud stand in front of it as they do in modes 1 and 2.
+    // After the fog, because the fog has just painted the sky over with its
+    // own colour, and the bow painted with it would be gone; exposed as the
+    // scene is, and additive, so the sky shows through it.
+    let at_sky_depth = textureLoad(scene_depth, vec2<i32>(input.clip.xy), 0) >= 1.0;
+    let open_sky = select(0.0, 1.0 - is_cloud, at_sky_depth);
+    let bowed = fogged + rainbow_along(view_ray(input.uv)) * post.exposure * open_sky;
 
     // Graded last, on the display-referred result. The table's domain is 0..1
     // and this is where the frame first lives in it: grading before the tonemap
@@ -417,6 +469,6 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // an `if`: the condition is uniform so a branch would be legal, but a select
     // needs no argument about that and costs one fetch in the pass that runs
     // once per pixel per frame.
-    let display = tonemap(fogged);
+    let display = tonemap(bowed);
     return vec4<f32>(select(display, graded(display), post.graded > 0.5), 1.0);
 }
