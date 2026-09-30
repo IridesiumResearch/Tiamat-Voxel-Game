@@ -5034,17 +5034,19 @@ impl ServerHandle {
                             .map(|access| access.take_doomed())
                             .unwrap_or_default()
                         {
-                            let inside = population
+                            let bodies = population
                                 .read()
-                                .map_or(0, |mobs| mobs.occupants(&id))
-                                + shared.players_in(&id);
+                                .map_or(0, |mobs| mobs.occupants(&id));
+                            let players = shared.players_in(&id);
+                            let inside = bodies + players;
                             let removed = domains
                                 .write()
                                 .is_ok_and(|mut registry| registry.destroy(&id, inside).is_ok());
                             if !removed {
                                 warn!(
                                     domain = %id,
-                                    inside,
+                                    bodies,
+                                    players,
                                     "a domain was not destroyed; something is still in it"
                                 );
                                 continue;

@@ -124,10 +124,18 @@ async fn join(server: &ServerHandle, name: &str) -> Bot {
     bot
 }
 
+/// Lets `ticks` of the SERVER's ticks go by, pumping what arrives.
+///
+/// Counted by the server — `Bot::walk` standing still returns once it has
+/// stepped that many of this player's inputs — and not by reads: a read
+/// returns the moment any message lands, a server sends several a tick, so
+/// twenty reads could be one tick on a loaded machine. That was two flakes on
+/// slow runners: a destroy and a re-entry arriving in the same tick, and a
+/// world closed before the tick that ran the chat line that made its mob.
 async fn settle_for(bot: &mut Bot, ticks: u64) {
-    for _ in 0..ticks {
-        let _ = tokio::time::timeout(Duration::from_millis(60), bot.recv()).await;
-    }
+    bot.walk([0.0; 3], 0, ticks)
+        .await
+        .expect("the server stopped ticking");
 }
 
 /// The domain the bot was last moved to, and the sky table that followed it.
