@@ -2004,6 +2004,94 @@ fn cloud_state_of(spec: &Table) -> mlua::Result<crate::atmosphere::Clouds> {
     ))
 }
 
+/// What `game.set_rainbow` takes in its table — weather ask W30.
+const RAINBOW_FIELDS: [&str; 2] = ["intensity", "ease_ticks"];
+
+/// A rainbow from a mod's `{ intensity, ease_ticks? }`, or `None` for `nil`.
+///
+/// **Wrong types are errors and wrong numbers are clamped**, as every other
+/// weather call has it: `intensity` into 0..1, where one that is not a number
+/// is none, and `ease_ticks` into 0..2400. `intensity` is required, since a
+/// rainbow of no stated strength is a mod that meant something else, and a
+/// field the call does not know is refused, as `set_clouds` refuses one — a
+/// misspelt `ease_ticks` would otherwise be a rainbow that snaps. Each error
+/// names the call, so a mod's log says which line to look at.
+fn rainbow_of(spec: &Value) -> mlua::Result<Option<crate::atmosphere::Rainbow>> {
+    let spec = match spec {
+        Value::Nil => return Ok(None),
+        Value::Table(spec) => spec,
+        other => {
+            return Err(mlua::Error::external(format!(
+                "set_rainbow takes {{ intensity, ease_ticks? }}, or nil for none, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    for pair in spec.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::String(name) = key else {
+            return Err(mlua::Error::external(
+                "set_rainbow takes named fields, `{ intensity = 0.8 }`, not a list",
+            ));
+        };
+        let name = name.to_string_lossy();
+        if !RAINBOW_FIELDS.contains(&name.as_ref()) {
+            return Err(mlua::Error::external(format!(
+                "set_rainbow: unknown field `{name}`. The fields are {RAINBOW_FIELDS:?}."
+            )));
+        }
+    }
+    let number = |field: &str| -> mlua::Result<Option<f64>> {
+        match spec.get::<Value>(field)? {
+            Value::Nil => Ok(None),
+            Value::Integer(value) => {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "clamped into a strength or an ease straight after"
+                )]
+                let value = value as f64;
+                Ok(Some(value))
+            }
+            Value::Number(value) => Ok(Some(value)),
+            other => Err(mlua::Error::external(format!(
+                "set_rainbow: `{field}` must be a number, not {}",
+                other.type_name()
+            ))),
+        }
+    };
+    let intensity = number("intensity")?.ok_or_else(|| {
+        mlua::Error::external(
+            "set_rainbow needs `intensity`, a number from 0 to 1 (nil for no rainbow)",
+        )
+    })?;
+    // Clamped wide here, because the wire's `u32` would turn `-5` or `1e12`
+    // into a conversion error rather than the clamp every wrong number gets.
+    let ease = number("ease_ticks")?.unwrap_or(0.0);
+    let ease_ticks = if ease.is_nan() {
+        0
+    } else {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped into 0..=MAX_EASE_TICKS on the line itself"
+        )]
+        {
+            ease.clamp(0.0, f64::from(crate::atmosphere::MAX_EASE_TICKS)) as u32
+        }
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a strength, clamped into 0..1 by the sanitiser"
+    )]
+    let intensity = intensity as f32;
+    Ok(Some(crate::atmosphere::sanitise_rainbow(
+        crate::atmosphere::Rainbow {
+            intensity,
+            ease_ticks,
+        },
+    )))
+}
+
 fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier> {
     let number = |name: &str, fallback: f32| -> mlua::Result<f32> {
         Ok(spec.get::<Option<f32>>(name)?.unwrap_or(fallback))
@@ -8034,6 +8122,42 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("lightning", lightning)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_rainbow(game)
+    }
+
+    /// Puts `game.set_rainbow` on the `game` table — weather ask W30.
+    ///
+    /// Shaped like `game.set_precipitation`: a player and a table or `nil`,
+    /// answering whether the player is here, and `false` with no server
+    /// behind the VM. Its own function for `install_lightning`'s reason.
+    fn install_rainbow(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.atmosphere);
+        let set = self
+            .lua
+            .create_function(move |_, (uuid, spec): (Value, Value)| {
+                // Read by hand rather than as a `String`, so that a player
+                // who is not a string is an error that names this call.
+                let Value::String(uuid) = uuid else {
+                    return Err(mlua::Error::external(format!(
+                        "set_rainbow takes a player UUID in hex, as a hook event reports one, \
+                         not {}",
+                        uuid.type_name()
+                    )));
+                };
+                let player = crate::identity::PlayerUuid::from_bytes(player_of(
+                    &uuid.to_string_lossy(),
+                    "set_rainbow",
+                )?);
+                let rainbow = rainbow_of(&spec)?;
+                let told = slot.lock().ok().and_then(|slot| {
+                    slot.as_ref()
+                        .map(|access| access.set_rainbow(player, rainbow))
+                });
+                Ok(told.unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_rainbow", set)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -13280,6 +13404,7 @@ mod tests {
         struck: std::sync::Mutex<Vec<crate::lightning::LightningRequest>>,
         rained: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Precipitation>)>>,
         clouded: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Clouds>)>>,
+        bowed: std::sync::Mutex<Vec<(String, Option<crate::atmosphere::Rainbow>)>>,
     }
 
     impl crate::atmosphere::Access for Weather {
@@ -13320,6 +13445,18 @@ mod tests {
                 .lock()
                 .expect("weather lock")
                 .push((player.to_hex(), precipitation));
+            true
+        }
+
+        fn set_rainbow(
+            &self,
+            player: crate::identity::PlayerUuid,
+            rainbow: Option<crate::atmosphere::Rainbow>,
+        ) -> bool {
+            self.bowed
+                .lock()
+                .expect("weather lock")
+                .push((player.to_hex(), rainbow));
             true
         }
 
@@ -13387,6 +13524,108 @@ mod tests {
         );
         assert_eq!(bare.burst.area, [16.0, 3.0, 16.0], "in a wide low box");
         assert_eq!(rained[2].1, None, "nil stops it");
+    }
+
+    #[test]
+    fn a_mod_sets_a_rainbow_clamps_its_numbers_and_a_wrong_type_names_the_call() {
+        // **Weather ask W30.** Weather's own call reaches the seam as it
+        // spells it (`fx.lua`, `rainbow_for`); wrong numbers are clamped;
+        // nil fades it out; and every wrong type is an error that says
+        // `set_rainbow`, so the mod's log points at the line.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([0xB0; 32]).to_hex();
+        load(
+            &mut host,
+            "weather",
+            &format!(
+                "local uuid = '{uuid}'\n\
+                 told = game.set_rainbow(uuid, {{ intensity = 0.45, ease_ticks = 200 }})\n\
+                 game.set_rainbow(uuid, {{ intensity = 1 }})\n\
+                 game.set_rainbow(uuid, {{ intensity = 3, ease_ticks = 1e9 }})\n\
+                 game.set_rainbow(uuid, {{ intensity = -1, ease_ticks = -5 }})\n\
+                 game.set_rainbow(uuid, {{ intensity = 0/0, ease_ticks = 2.7 }})\n\
+                 game.set_rainbow(uuid, nil)\n\
+                 errors = {{}}\n\
+                 for _, call in ipairs({{\n\
+                 \x20   function() game.set_rainbow(uuid, 5) end,\n\
+                 \x20   function() game.set_rainbow(uuid, {{ intensity = 'bright' }}) end,\n\
+                 \x20   function() game.set_rainbow(uuid, {{ ease_ticks = 200 }}) end,\n\
+                 \x20   function() game.set_rainbow(uuid, {{ intensity = 0.5, ease_tick = 200 }}) end,\n\
+                 \x20   function() game.set_rainbow(uuid, {{ 0.5 }}) end,\n\
+                 \x20   function() game.set_rainbow(uuid, {{ intensity = 0.5, ease_ticks = 'slow' }}) end,\n\
+                 \x20   function() game.set_rainbow(nil, {{ intensity = 0.5 }}) end,\n\
+                 \x20   function() game.set_rainbow('nobody', {{ intensity = 0.5 }}) end,\n\
+                 }}) do\n\
+                 \x20   local ok, err = pcall(call)\n\
+                 \x20   errors[#errors + 1] = ok and 'no error' or tostring(err)\n\
+                 end"
+            ),
+        )
+        .expect("load");
+        let env = host.environment("weather").expect("env");
+        assert!(env.get::<bool>("told").expect("told"));
+
+        let bowed = weather.bowed.lock().expect("lock").clone();
+        let strengths: Vec<Option<(f32, u32)>> = bowed
+            .iter()
+            .map(|(who, rainbow)| {
+                assert_eq!(who, &uuid);
+                rainbow.map(|rainbow| (rainbow.intensity, rainbow.ease_ticks))
+            })
+            .collect();
+        assert_eq!(
+            strengths,
+            vec![
+                Some((0.45, 200)),
+                // No ease named is at once.
+                Some((1.0, 0)),
+                // Past one is one, and an ease past two minutes is two.
+                Some((1.0, crate::atmosphere::MAX_EASE_TICKS)),
+                // Under nothing is nothing, both of them.
+                Some((0.0, 0)),
+                // Not a number is none, and a fraction of a tick is dropped.
+                Some((0.0, 2)),
+                // nil fades it out.
+                None,
+            ],
+            "only the calls that were not errors reached the seam"
+        );
+
+        let errors: Vec<String> = env.get("errors").expect("errors");
+        assert_eq!(errors.len(), 8);
+        for (message, names) in errors.iter().zip([
+            "nil for none",
+            "`intensity` must be a number",
+            "needs `intensity`",
+            "unknown field `ease_tick`",
+            "named fields",
+            "`ease_ticks` must be a number",
+            "player UUID",
+            "player UUID",
+        ]) {
+            assert!(
+                message.contains("set_rainbow") && message.contains(names),
+                "an error that does not say what went wrong in which call: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_rainbow_with_no_server_behind_the_vm_tells_nobody() {
+        // Registered whatever is behind it, so a mod can call it at load; and
+        // with nothing behind it there is nobody to tell.
+        let mut host = vm();
+        let uuid = crate::identity::PlayerUuid::from_bytes([0xB1; 32]).to_hex();
+        load(
+            &mut host,
+            "weather",
+            &format!("told = game.set_rainbow('{uuid}', {{ intensity = 0.5 }})"),
+        )
+        .expect("load");
+        let env = host.environment("weather").expect("env");
+        assert!(!env.get::<bool>("told").expect("told"));
     }
 
     #[test]

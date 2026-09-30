@@ -255,6 +255,50 @@ pub fn sanitise_precipitation(mut precipitation: Precipitation) -> Precipitation
     precipitation
 }
 
+/// A rainbow in one player's sky — weather ask W30.
+///
+/// **A strength, not a place.** A rainbow is fixed to the sun, not to the
+/// world: a ring 42 degrees round the point opposite the sun, which moves
+/// with the camera and stands wherever the sun puts it. So a mod says only
+/// whether there is one and how strongly — Weather knows when one is owed,
+/// after rain, by day, under open sky — and the client draws it from the sun
+/// it already has, hiding it while the sun is too high for one or down.
+/// Particles could not draw it: they are placed in the world, lit by it and
+/// dropped first under load, and a continuous arc of seven bands a few
+/// hundred blocks off is thousands of them.
+///
+/// A standing per-player setting, as [`Precipitation`] is: one message when
+/// it changes, eased by the client over `ease_ticks`, and `None` fading it
+/// out over the last ease.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Rainbow {
+    /// How strong, `0.0..=1.0`. 1 is the brightest the client draws one.
+    pub intensity: f32,
+    /// How long the client takes to get there, in ticks; 0 is at once.
+    pub ease_ticks: u32,
+}
+
+impl Rainbow {
+    /// Whether every number is finite and in range (charter rule 14).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        (0.0..=1.0).contains(&self.intensity) && self.ease_ticks <= MAX_EASE_TICKS
+    }
+}
+
+/// Clamps a rainbow's numbers into range: an intensity that is not a number
+/// is none. Wrong types are the binding's errors.
+#[must_use]
+pub fn sanitise_rainbow(mut rainbow: Rainbow) -> Rainbow {
+    rainbow.intensity = if rainbow.intensity.is_finite() {
+        rainbow.intensity.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    rainbow.ease_ticks = rainbow.ease_ticks.min(MAX_EASE_TICKS);
+    rainbow
+}
+
 /// A cloud deck, as a mod declares it once at load.
 ///
 /// # Shape, not geometry
@@ -604,6 +648,14 @@ pub trait Access: Send + Sync {
     /// Returns whether the player was there to tell.
     fn set_precipitation(&self, player: PlayerUuid, precipitation: Option<Precipitation>) -> bool;
 
+    /// Replaces one player's rainbow, or fades it out with `None` — weather
+    /// ask W30.
+    ///
+    /// Returns whether the player was there to tell. Required, as
+    /// [`Self::set_precipitation`] is, rather than defaulted: a host that
+    /// forgot it would draw no rainbow with nothing to say why.
+    fn set_rainbow(&self, player: PlayerUuid, rainbow: Option<Rainbow>) -> bool;
+
     /// Replaces one player's cloud state, or clears it with `None`.
     ///
     /// Returns whether the player was there to tell.
@@ -826,6 +878,39 @@ mod tests {
         );
         assert!(tame.above.abs() < f32::EPSILON);
         assert!(tame.burst.velocity[1] >= -crate::particle::MAX_SPEED);
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set or clamped, not computed"
+    )]
+    fn a_rainbow_is_clamped_into_the_same_ranges_it_is_checked_against() {
+        // Weather ask W30: wrong numbers are clamped, and what comes back is
+        // what a client will accept.
+        for (wild, intensity) in [
+            (2.5, 1.0),
+            (-0.5, 0.0),
+            (f32::NAN, 0.0),
+            (f32::INFINITY, 0.0),
+        ] {
+            let rainbow = Rainbow {
+                intensity: wild,
+                ease_ticks: u32::MAX,
+            };
+            assert!(!rainbow.is_valid(), "{rainbow:?}");
+            let tame = sanitise_rainbow(rainbow);
+            assert!(tame.is_valid(), "{tame:?}");
+            assert_eq!(tame.intensity, intensity, "{wild}");
+            assert_eq!(tame.ease_ticks, MAX_EASE_TICKS);
+        }
+        // And a rainbow already in range comes back as it went.
+        let fine = Rainbow {
+            intensity: 0.35,
+            ease_ticks: 200,
+        };
+        assert!(fine.is_valid());
+        assert_eq!(sanitise_rainbow(fine), fine);
     }
 
     #[test]

@@ -746,6 +746,33 @@ function game.lightning(spec) end
 ---@return boolean here
 function game.set_precipitation(player, precipitation) end
 
+---Puts a rainbow in one player's sky, or fades it out with `nil`.
+---
+---**A strength, not a place.** A rainbow is fixed to the sun, not to the world:
+---the client draws a ring 42 degrees round the point opposite its own sun (red
+---outside, violet inside), with a faint secondary at 51 degrees and the colours
+---reversed, at the sky's depth so terrain and the cloud deck stand in front of
+---it. It fades out as the sun climbs towards 42 degrees and is hidden at night
+---and with the sun down; only the half over the horizon is seen. So you say
+---whether there is one and how strongly, and the engine puts it where the sun
+---says.
+---
+---```lua
+---game.set_rainbow(uuid, { intensity = 0.8, ease_ticks = 200 })
+---game.set_rainbow(uuid, nil)
+---```
+---
+---A standing setting, like `game.set_precipitation`: set it as often as you
+---like, it is sent when it changes, and a player who rejoins is told again when
+---you next set it. `intensity` is required, 0 to 1; `ease_ticks` (default 0, at
+---once; up to 2400) is how long the client takes to get there, and `nil` fades
+---out over the last one's. Wrong types and unknown fields are errors naming
+---`set_rainbow`; wrong numbers are clamped.
+---@param player string A player's UUID in hex.
+---@param rainbow { intensity: number, ease_ticks?: integer }|nil
+---@return boolean here
+function game.set_rainbow(player, rainbow) end
+
 ---Registers a tool.
 ---
 ---**Registration window only**, like `game.register_block`.

@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 81;
+pub const PROTOCOL_VERSION: u32 = 82;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,12 @@ pub const PROTOCOL_VERSION: u32 = 81;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v82 (weather W30): appended `ServerMessage::Rainbow`, the rainbow in one
+// player's sky: a strength and an ease, or `None` to fade it out — a standing
+// setting like `Precipitation`, sent when it changes. No place travels: the
+// client draws the bow round the point opposite its own sun, and hides it
+// while the sun is too high for one or down. Refused on decode when the
+// strength is outside 0..=1 or not a number, or the ease is past two minutes.
 // v81 (a cut of several materials, Sub-Node Contract §9.1): a stack may carry
 // the material of each of its 27 cells, so `StackDef` gains `cells` — empty,
 // or exactly 27 world ids with 0 for air — and so do the two messages that
@@ -2454,6 +2460,17 @@ pub enum ServerMessage {
         /// The bolt.
         lightning: crate::lightning::Lightning,
     },
+    /// The rainbow in this player's sky, latest state — weather ask W30.
+    ///
+    /// **Appended at the end** (protocol v82). A standing setting, as
+    /// [`ServerMessage::Precipitation`] is: one message when it changes,
+    /// eased client-side, and `None` fading it out. A strength and no place:
+    /// the client draws the bow round the point opposite its own sun. See
+    /// [`crate::atmosphere::Rainbow`].
+    Rainbow {
+        /// The rainbow, or `None` for none.
+        rainbow: Option<crate::atmosphere::Rainbow>,
+    },
 }
 
 /// [`phys::Abilities`](crate::phys::Abilities) as it travels.
@@ -3037,6 +3054,12 @@ fn check_atmosphere(message: &ServerMessage) -> Result<(), ProtocolError> {
         ServerMessage::Precipitation { precipitation } => precipitation
             .as_ref()
             .is_none_or(crate::atmosphere::Precipitation::is_valid),
+        // **A strength reaches every sky pixel**: a `NaN` there is a frame
+        // whose sky is one flat colour, and a server's word for it is not a
+        // mod's (weather ask W30).
+        ServerMessage::Rainbow { rainbow } => rainbow
+            .as_ref()
+            .is_none_or(crate::atmosphere::Rainbow::is_valid),
         // A deck out of range would make a march step for ever or fill the
         // sky with one cloud; a server's word for it is not a mod's.
         ServerMessage::CloudLayer { layer } => layer
@@ -3651,6 +3674,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         | ServerMessage::Flash { .. }
         | ServerMessage::Lightning { .. }
         | ServerMessage::Precipitation { .. }
+        | ServerMessage::Rainbow { .. }
         | ServerMessage::CloudLayer { .. }
         | ServerMessage::CloudMap { .. }
         | ServerMessage::Clouds { .. } => check_atmosphere(message)?,
@@ -5529,6 +5553,83 @@ mod tests {
         ] {
             assert!(
                 validate_server_message(&ServerMessage::Lightning { lightning: poison }).is_err(),
+                "{poison:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rainbow_round_trips_at_the_end_and_one_out_of_range_is_refused() {
+        // Weather ask W30, protocol v82. Appended last, which the ordinal
+        // pins: one place after `Lightning`, the v77 tail.
+        let rainbow = crate::atmosphere::Rainbow {
+            intensity: 0.65,
+            ease_ticks: crate::atmosphere::MAX_EASE_TICKS,
+        };
+        let bolt = encode(&ServerMessage::Lightning {
+            lightning: crate::lightning::Lightning {
+                from: [0.0, 300.0, 0.0],
+                to: [0.0; 3],
+                seed: 1,
+                colour: crate::lightning::DEFAULT_COLOUR,
+                width: crate::lightning::DEFAULT_WIDTH,
+                branches: 0,
+                ticks: 1,
+            },
+        })
+        .expect("encode");
+        for message in [
+            ServerMessage::Rainbow {
+                rainbow: Some(rainbow),
+            },
+            ServerMessage::Rainbow { rainbow: None },
+        ] {
+            assert!(validate_server_message(&message).is_ok());
+            let bytes = encode(&message).expect("encode");
+            assert_eq!(
+                bytes[0],
+                bolt[0] + 1,
+                "a rainbow is the variant after the bolt"
+            );
+            let decoded: ServerMessage = decode(&bytes).expect("decode");
+            assert_eq!(decoded, message);
+        }
+        // The whole of it, pinned: the ordinal, `Some`, the strength's four
+        // bytes and the ease's varint.
+        let bytes = encode(&ServerMessage::Rainbow {
+            rainbow: Some(crate::atmosphere::Rainbow {
+                intensity: 1.0,
+                ease_ticks: 200,
+            }),
+        })
+        .expect("encode");
+        assert_eq!(bytes, [bolt[0] + 1, 1, 0, 0, 0x80, 0x3F, 0xC8, 0x01]);
+
+        // A strength past one, under nothing or not a number, and an ease
+        // past two minutes: each is a server not to be trusted.
+        for poison in [
+            crate::atmosphere::Rainbow {
+                intensity: 1.5,
+                ..rainbow
+            },
+            crate::atmosphere::Rainbow {
+                intensity: -0.25,
+                ..rainbow
+            },
+            crate::atmosphere::Rainbow {
+                intensity: f32::NAN,
+                ..rainbow
+            },
+            crate::atmosphere::Rainbow {
+                ease_ticks: crate::atmosphere::MAX_EASE_TICKS + 1,
+                ..rainbow
+            },
+        ] {
+            assert!(
+                validate_server_message(&ServerMessage::Rainbow {
+                    rainbow: Some(poison)
+                })
+                .is_err(),
                 "{poison:?}"
             );
         }

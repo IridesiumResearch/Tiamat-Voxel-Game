@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use tiamat_core::atmosphere::{Clouds, Precipitation, SkyModifier};
+use tiamat_core::atmosphere::{Clouds, Precipitation, Rainbow, SkyModifier};
 use tiamat_core::identity::PlayerUuid;
 
 /// The atmosphere seam over the connection state, as [`crate::hud::Shared`].
@@ -116,6 +116,14 @@ impl tiamat_core::atmosphere::Access for Shared {
             return false;
         }
         self.endpoint.set_precipitation(&player, precipitation);
+        true
+    }
+
+    fn set_rainbow(&self, player: PlayerUuid, rainbow: Option<Rainbow>) -> bool {
+        if !self.endpoint.is_online(&player) {
+            return false;
+        }
+        self.endpoint.set_rainbow(&player, rainbow);
         true
     }
 

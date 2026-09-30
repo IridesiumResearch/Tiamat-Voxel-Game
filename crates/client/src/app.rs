@@ -4049,6 +4049,9 @@ impl App {
             // Built from its seed here, once; drawn by `place_lightning`.
             crate::net::Event::Lightning(bolt) => self.weather.bolts.strike(*bolt),
             crate::net::Event::Precipitation(rain) => self.weather.rain.set(*rain),
+            // Eased here on frame time; where it stands and whether the sun
+            // allows one is the renderer's, every frame — weather ask W30.
+            crate::net::Event::Rainbow(rainbow) => self.weather.rainbow.set(*rainbow),
             crate::net::Event::CloudLayer(layer) => self.cloud_layer = *layer,
             // Eased on the client over the ticks the message names, as it
             // promises — weather ask W18. The map eases over the deck's own
@@ -4858,6 +4861,7 @@ impl App {
             | Event::Flash(_)
             | Event::Lightning(_)
             | Event::Precipitation(_)
+            | Event::Rainbow(_)
             | Event::CloudLayer(_)
             | Event::CloudMap(_)
             | Event::Clouds(_) => self.adopt_weather(&event),
@@ -5229,10 +5233,14 @@ impl App {
         self.weather.bolts.advance(dt);
         self.weather.deck.advance(dt);
         self.weather.map.advance(dt);
+        self.weather.rainbow.advance(dt);
         let moment = crate::sky::flashed(moment, &self.weather.flashes);
         self.renderer
             .set_sun(moment.intensity, moment.sun, moment.sun_direction);
         self.renderer.set_stars(moment.stars, self.sky.turn());
+        // Only a strength: the renderer puts the bow opposite the sun it was
+        // just handed, and hides it while that sun is too high or down.
+        self.renderer.set_rainbow(self.weather.rainbow.current());
         // The deck drifts and evolves on frame time for the same reason the
         // clock above does: it is presentation, and charter rule 4 exempts it.
         self.renderer.advance_clouds(dt);

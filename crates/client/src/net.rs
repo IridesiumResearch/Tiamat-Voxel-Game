@@ -531,6 +531,9 @@ pub enum Event {
     /// The rain around this player, or none.
     Precipitation(Option<tiamat_core::atmosphere::Precipitation>),
 
+    /// The rainbow in this player's sky, or none — weather ask W30.
+    Rainbow(Option<tiamat_core::atmosphere::Rainbow>),
+
     /// Where the server's clock stands in the day, `0.0..1.0`.
     TimeOfDay(f32),
 
@@ -1682,6 +1685,9 @@ async fn session(
             }
             ServerMessage::Precipitation { precipitation } => {
                 let _ = events.send(Event::Precipitation(precipitation));
+            }
+            ServerMessage::Rainbow { rainbow } => {
+                let _ = events.send(Event::Rainbow(rainbow));
             }
             ServerMessage::FontTable { fonts } => {
                 // The same pipeline as a sound: by hash, after the join, and a

@@ -1560,6 +1560,12 @@ all: `game.set_precipitation(uuid, { rate, size, colour, velocity, area, above,
 ease_ticks })` sends the shape once and the player's client spawns it around
 its own camera until you send `nil`.
 
+**A rainbow is a strength, not a place.** `game.set_rainbow(uuid, { intensity,
+ease_ticks? })` (or `nil`) says whether and how strongly; the client draws the
+bow 42 degrees round the point opposite the sun, at the sky's depth, fading out
+as the sun climbs and hidden at night. Deciding when one is owed, after rain, by
+day, under open sky, is yours.
+
 **A mod reaches another mod only through what it exports.** Each mod gets a
 fresh sandbox and `game.storage` is private; `game.export` / `game.exports`
 (below, under "Sharing with other mods") is the channel, and `depends` is what

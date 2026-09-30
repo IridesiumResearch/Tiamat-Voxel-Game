@@ -381,6 +381,9 @@ pub struct Shared {
     pub sky_modifiers: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, SkySlot>>,
     /// Each player's precipitation, and whether they have been told it.
     pub precipitation: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, PrecipitationSlot>>,
+    /// Each player's rainbow, and whether they have been told it — weather
+    /// ask W30.
+    pub rainbows: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, RainbowSlot>>,
     /// Each player's cloud state, and whether they have been told it.
     pub clouds: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, CloudSlot>>,
     /// Each player's cover map, and whether they have been told it — ask W10.
@@ -482,6 +485,15 @@ pub struct Shared {
 pub struct PrecipitationSlot {
     /// The rain, or none.
     pub precipitation: Option<tiamat_core::atmosphere::Precipitation>,
+    /// Whether the player has been told this version.
+    pub sent: bool,
+}
+
+/// One player's rainbow as a mod last set it, and whether it was sent.
+#[derive(Debug, Clone, Default)]
+pub struct RainbowSlot {
+    /// The rainbow, or none.
+    pub rainbow: Option<tiamat_core::atmosphere::Rainbow>,
     /// Whether the player has been told this version.
     pub sent: bool,
 }
@@ -1530,6 +1542,7 @@ impl Shared {
         self.forget_hud_values(uuid);
         self.forget_sky_modifier(uuid);
         self.forget_precipitation(uuid);
+        self.forget_rainbow(uuid);
         self.forget_clouds(uuid);
     }
 
@@ -2962,6 +2975,45 @@ impl Shared {
         }
     }
 
+    /// Replaces one player's rainbow; unchanged and already sent is a no-op.
+    pub fn set_rainbow(
+        &self,
+        uuid: &PlayerUuid,
+        rainbow: Option<tiamat_core::atmosphere::Rainbow>,
+    ) {
+        let Ok(mut all) = self.rainbows.lock() else {
+            return;
+        };
+        let slot = all.entry(*uuid).or_default();
+        if slot.rainbow == rainbow && slot.sent {
+            return;
+        }
+        slot.rainbow = rainbow;
+        slot.sent = false;
+    }
+
+    /// Takes the rainbow one player has not been told yet.
+    pub fn unsent_rainbow(&self, uuid: &PlayerUuid) -> Option<ServerMessage> {
+        let mut all = self.rainbows.lock().ok()?;
+        let slot = all.get_mut(uuid)?;
+        if slot.sent {
+            return None;
+        }
+        slot.sent = true;
+        Some(ServerMessage::Rainbow {
+            rainbow: slot.rainbow,
+        })
+    }
+
+    /// Forgets a player's rainbow, when they leave, as their rain is
+    /// forgotten: a mod sets it again when they come back, and a slot kept
+    /// as "already sent" would swallow that.
+    pub fn forget_rainbow(&self, uuid: &PlayerUuid) {
+        if let Ok(mut all) = self.rainbows.lock() {
+            all.remove(uuid);
+        }
+    }
+
     pub fn tell(&self, uuid: &PlayerUuid, text: String) {
         if let Ok(mut notices) = self.notices.lock() {
             let queue = notices.entry(*uuid).or_default();
@@ -3409,6 +3461,9 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                         frame::write(&mut send, &message).await?;
                     }
                     if let Some(message) = shared.unsent_precipitation(&uuid) {
+                        frame::write(&mut send, &message).await?;
+                    }
+                    if let Some(message) = shared.unsent_rainbow(&uuid) {
                         frame::write(&mut send, &message).await?;
                     }
                     // **The map before the state**, so a client that adopts
@@ -4306,6 +4361,7 @@ mod tests {
             clouds: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             cloud_maps: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             precipitation: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            rainbows: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             bodies: Arc::default(),
@@ -4668,5 +4724,45 @@ mod tests {
         drop(second);
         assert_eq!(shared.players.load(Ordering::Acquire), 0);
         assert!(shared.online_players().is_empty());
+    }
+
+    #[test]
+    fn a_rainbow_is_sent_once_per_change_and_forgotten_when_its_player_leaves() {
+        // Weather ask W30, the standing-setting shape precipitation has: a
+        // mod that sets the same rainbow every evaluation costs one message,
+        // a change is another, nil is one more, and a player who leaves takes
+        // theirs with them — so the same rainbow set again when they come
+        // back is sent, not swallowed as "already told".
+        let shared = shared();
+        let (uuid, _) = player(3);
+        let bow = |intensity: f32| tiamat_core::atmosphere::Rainbow {
+            intensity,
+            ease_ticks: 200,
+        };
+        let told = |shared: &Shared| match shared.unsent_rainbow(&uuid) {
+            Some(ServerMessage::Rainbow { rainbow }) => Some(rainbow),
+            Some(other) => panic!("not a rainbow: {other:?}"),
+            None => None,
+        };
+
+        shared.set_rainbow(&uuid, Some(bow(0.5)));
+        assert_eq!(told(&shared), Some(Some(bow(0.5))));
+        shared.set_rainbow(&uuid, Some(bow(0.5)));
+        assert_eq!(told(&shared), None, "the same rainbow again is no message");
+        shared.set_rainbow(&uuid, Some(bow(0.75)));
+        assert_eq!(told(&shared), Some(Some(bow(0.75))));
+        shared.set_rainbow(&uuid, None);
+        assert_eq!(told(&shared), Some(None), "nil is a message of its own");
+
+        shared.set_rainbow(&uuid, Some(bow(0.5)));
+        assert_eq!(told(&shared), Some(Some(bow(0.5))));
+        shared.remove_player(&uuid);
+        assert_eq!(told(&shared), None, "a player who left is told nothing");
+        shared.set_rainbow(&uuid, Some(bow(0.5)));
+        assert_eq!(
+            told(&shared),
+            Some(Some(bow(0.5))),
+            "the same rainbow for a player who came back was swallowed"
+        );
     }
 }

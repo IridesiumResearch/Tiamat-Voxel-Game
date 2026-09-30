@@ -465,3 +465,110 @@ fn a_mods_weather_reaches_the_players_sky_once_per_change_and_clears_and_lightni
         });
     assert!(server.stop());
 }
+
+/// A mod that keeps a rainbow over everybody online: set every tick (which
+/// must cost nothing), changed once, and cleared for a player named in its
+/// schedule — weather ask W30.
+const STANDING_RAINBOW: &str = r#"
+local online = {}
+game.register_on_player_join(function(event)
+    online[event.player] = 0
+end)
+game.register_on_player_leave(function(event)
+    online[event.player] = nil
+end)
+game.register_on_tick(function()
+    for player, ticks in pairs(online) do
+        online[player] = ticks + 1
+        if ticks < 10 then
+            game.set_rainbow(player, { intensity = 0.5, ease_ticks = 200 })
+        elseif ticks < 20 then
+            game.set_rainbow(player, { intensity = 9, ease_ticks = 40 })
+        else
+            game.set_rainbow(player, nil)
+        end
+    end
+end)
+"#;
+
+/// A mod whose rainbow never ends, for the player who comes back to it.
+const LASTING_RAINBOW: &str = r#"
+local online = {}
+game.register_on_player_join(function(event) online[event.player] = true end)
+game.register_on_player_leave(function(event) online[event.player] = nil end)
+game.register_on_tick(function()
+    for player in pairs(online) do
+        game.set_rainbow(player, { intensity = 0.6 })
+    end
+end)
+"#;
+
+/// Receives on `bot` until it holds `count` rainbows or ten seconds pass.
+async fn await_rainbows(bot: &mut Bot, count: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && bot.rainbows_received().len() < count {
+        let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+    }
+}
+
+#[test]
+fn a_rainbow_reaches_the_player_once_per_change_and_nil_clears_it() {
+    // Weather ask W30: one message for a rainbow set on every one of ten
+    // ticks, one for its change (a strength past one clamped), one for nil.
+    let mods = write_mod("rainbow-mods", STANDING_RAINBOW);
+    let server = serve(&mods, "rainbow-world");
+    block_on(async {
+        let mut bot = joined(&server, "Watcher").await;
+        await_rainbows(&mut bot, 3).await;
+        // Room for a fourth to arrive, were the standing value re-sent.
+        let _ = tokio::time::timeout(Duration::from_millis(500), bot.recv()).await;
+        let received = bot.rainbows_received();
+        assert_eq!(
+            received.len(),
+            3,
+            "set ten times, changed once, cleared once: {received:?}"
+        );
+        let first = received[0].expect("the rainbow");
+        assert_eq!((first.intensity, first.ease_ticks), (0.5, 200));
+        let second = received[1].expect("the change");
+        assert_eq!((second.intensity, second.ease_ticks), (1.0, 40));
+        assert_eq!(received[2], None, "nil clears it");
+        bot.disconnect().await;
+    });
+    assert!(server.stop());
+}
+
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the values asserted are set, not computed"
+)]
+fn a_player_who_rejoins_is_told_the_standing_rainbow_again() {
+    // Weather ask W30: the slot is forgotten when its player leaves, so the
+    // value the mod keeps setting reaches them again on their return, as
+    // precipitation's does.
+    let mods = write_mod("rainbow-rejoin-mods", LASTING_RAINBOW);
+    let server = serve(&mods, "rainbow-rejoin-world");
+    let seed = [0x5A; 32];
+    block_on(async {
+        for visit in 0..2 {
+            let mut bot = Bot::connect(
+                server.local_addr(),
+                Identity::from_seed(&seed),
+                server.cert_fingerprint(),
+            )
+            .await
+            .expect("connect");
+            bot.join("Returner").await.expect("join");
+            await_rainbows(&mut bot, 1).await;
+            let _ = tokio::time::timeout(Duration::from_millis(300), bot.recv()).await;
+            let received = bot.rainbows_received();
+            assert_eq!(received.len(), 1, "visit {visit}: {received:?}");
+            assert_eq!(received[0].expect("the rainbow").intensity, 0.6);
+            bot.disconnect().await;
+            // Long enough for the server to have seen them go.
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+    });
+    assert!(server.stop());
+}

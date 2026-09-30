@@ -609,6 +609,15 @@ fn server_messages() -> Vec<Vec<u8>> {
                 ticks: tiamat_core::lightning::MAX_LIGHTNING_TICKS,
             },
         },
+        // Protocol v82: a rainbow at the edge of every range it may have, and
+        // the nil that fades one out.
+        ServerMessage::Rainbow {
+            rainbow: Some(tiamat_core::atmosphere::Rainbow {
+                intensity: 1.0,
+                ease_ticks: tiamat_core::atmosphere::MAX_EASE_TICKS,
+            }),
+        },
+        ServerMessage::Rainbow { rainbow: None },
         ServerMessage::BlockDelta {
             edit: Edit::Block {
                 pos: BlockPos::new(2, 3, 4),

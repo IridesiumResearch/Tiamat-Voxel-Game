@@ -690,6 +690,18 @@ impl Bot {
             .collect()
     }
 
+    /// Every rainbow received so far, in arrival order — weather ask W30.
+    #[must_use]
+    pub fn rainbows_received(&self) -> Vec<Option<tiamat_core::atmosphere::Rainbow>> {
+        self.received()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Rainbow { rainbow } => Some(rainbow),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every flash received so far, in arrival order.
     #[must_use]
     pub fn flashes_received(&self) -> Vec<tiamat_core::atmosphere::Flash> {

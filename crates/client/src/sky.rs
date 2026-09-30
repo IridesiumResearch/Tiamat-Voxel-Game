@@ -41,6 +41,74 @@ pub struct Weather {
     pub deck: EasedDeck,
     /// The coarse cover map, easing cell by cell — weather ask W18.
     pub map: EasedMap,
+    /// The rainbow's strength, easing — weather ask W30.
+    pub rainbow: EasedRainbow,
+}
+
+/// A mod's rainbow on its way to the strength the server last sent —
+/// weather ask W30.
+///
+/// The sky modifier's rule, for its reason: the server sends a target and a
+/// time and the client fills the gap on frame time, from wherever the last
+/// ease had got to. `None` fades to nothing over the ticks the last rainbow
+/// had, so one called off fades as it came.
+///
+/// **A strength, and nothing about the sun.** Where the bow stands and
+/// whether the sun is too high or down for one is the renderer's, every
+/// frame, from the sun it already draws — see [`crate::render::rainbow`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EasedRainbow {
+    from: f32,
+    to: f32,
+    /// The ticks the last rainbow eased over, which a clearing takes too.
+    ticks: u32,
+    /// What the server last said, verbatim.
+    target: Option<tiamat_core::atmosphere::Rainbow>,
+    elapsed: f32,
+    duration: f32,
+}
+
+impl EasedRainbow {
+    /// Sets where to go: a rainbow, eased over its `ease_ticks`, or `None`,
+    /// faded out over the last one's.
+    ///
+    /// **Sanitised on the way in.** The wire already refuses a strength out
+    /// of range, but the check and the draw are a module apart, and a `NaN`
+    /// here would be a sky of one colour.
+    pub fn set(&mut self, target: Option<tiamat_core::atmosphere::Rainbow>) {
+        let target = target.map(tiamat_core::atmosphere::sanitise_rainbow);
+        self.from = self.current();
+        if let Some(rainbow) = target {
+            self.to = rainbow.intensity;
+            self.ticks = rainbow.ease_ticks;
+        } else {
+            self.to = 0.0;
+        }
+        self.target = target;
+        self.elapsed = 0.0;
+        self.duration = tiamat_core::tick::TICK_DURATION.as_secs_f32() * self.ticks as f32;
+    }
+
+    /// Advances by a frame.
+    pub fn advance(&mut self, dt: f32) {
+        self.elapsed += dt.max(0.0);
+    }
+
+    /// What the server last sent, for the tests that check it arrived.
+    #[must_use]
+    pub const fn target(&self) -> Option<tiamat_core::atmosphere::Rainbow> {
+        self.target
+    }
+
+    /// The strength now, `0.0..=1.0`: exactly the target once arrived.
+    #[must_use]
+    pub fn current(&self) -> f32 {
+        if self.duration <= 0.0 || self.elapsed >= self.duration {
+            return self.to;
+        }
+        let blend = self.elapsed / self.duration;
+        self.from + (self.to - self.from) * blend
+    }
 }
 
 /// A clear sky over a plain deck: what a world is under until a mod says,
@@ -1474,5 +1542,64 @@ mod tests {
             stepped.darkness[0], 50,
             "a resized grid should step to the new map"
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the values asserted are set, not computed"
+    )]
+    fn a_rainbow_eases_on_frame_time_from_where_it_is_and_nil_fades_it_out() {
+        // **Weather ask W30.** Set at once, it is there; set over a second
+        // (twenty ticks), it is halfway at half a second whatever the frame
+        // rate; called off, it fades over the same second from wherever it
+        // had got to; and it arrives exactly.
+        let bow = |intensity: f32, ease_ticks: u32| tiamat_core::atmosphere::Rainbow {
+            intensity,
+            ease_ticks,
+        };
+        let mut rainbow = EasedRainbow::default();
+        assert_eq!(rainbow.current(), 0.0, "no rainbow until one is sent");
+        rainbow.set(Some(bow(0.6, 0)));
+        assert_eq!(rainbow.current(), 0.6, "no ease is at once");
+
+        // Frame-rate independent: one long frame and sixty short ones land
+        // on the same strength.
+        let mut slow = EasedRainbow::default();
+        let mut fast = EasedRainbow::default();
+        slow.set(Some(bow(0.8, 20)));
+        fast.set(Some(bow(0.8, 20)));
+        assert_eq!(slow.current(), 0.0, "it starts where it was");
+        slow.advance(0.5);
+        for _ in 0..30 {
+            fast.advance(1.0 / 60.0);
+        }
+        assert!((slow.current() - 0.4).abs() < 1e-5, "{}", slow.current());
+        assert!(
+            (fast.current() - slow.current()).abs() < 1e-4,
+            "sixty frames a second eased to {} and two to {}",
+            fast.current(),
+            slow.current()
+        );
+
+        // Called off halfway: from where it was, over the last ease.
+        slow.set(None);
+        assert!(
+            (slow.current() - 0.4).abs() < 1e-5,
+            "called off from where it was"
+        );
+        assert_eq!(slow.target(), None);
+        slow.advance(0.5);
+        assert!((slow.current() - 0.2).abs() < 1e-5, "{}", slow.current());
+        slow.advance(0.5);
+        assert_eq!(slow.current(), 0.0, "and gone, exactly");
+
+        // A peer's number, checked on the wire and again here.
+        let mut poisoned = EasedRainbow::default();
+        poisoned.set(Some(bow(f32::NAN, 0)));
+        assert_eq!(poisoned.current(), 0.0);
+        poisoned.set(Some(bow(7.0, u32::MAX)));
+        poisoned.advance(1.0e6);
+        assert_eq!(poisoned.current(), 1.0);
     }
 }

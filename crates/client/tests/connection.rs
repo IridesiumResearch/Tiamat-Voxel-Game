@@ -238,7 +238,8 @@ impl Seen {
             | Event::SkyModifier(_)
             | Event::Flash(_)
             | Event::Lightning(_)
-            | Event::Precipitation(_) => {}
+            | Event::Precipitation(_)
+            | Event::Rainbow(_) => {}
             Event::HudReserve(reserve) => self.hud_reserve = Some(reserve),
             Event::Theme(theme) => self.theme = theme,
             Event::Model { id, scale, model } => {
