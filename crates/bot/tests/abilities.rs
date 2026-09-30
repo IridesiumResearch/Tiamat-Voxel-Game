@@ -49,6 +49,8 @@ game.register_on_generate(function(buf, pos)
     buf:fill_below_heightmap(game.flat_heightmap(0), ground)
 end)
 
+local flights = {}
+
 -- A world option would be the tidy way; a chat word is the testable one.
 game.register_on_chat(function(event)
     if event.text == "slow" then
@@ -68,6 +70,35 @@ game.register_on_chat(function(event)
     elseif event.text == "normal" then
         game.set_player_abilities(event.player, nil)
         return ""
+    elseif event.text == "measure" then
+        local body = game.entity(game.player_entity(event.player))
+        flights[event.player] = { floor = body.pos.y, top = body.pos.y, air = 0, landed = false }
+        game.chat_to(event.player, "measuring")
+        return ""
+    elseif event.text == "flight" then
+        local f = flights[event.player]
+        game.chat_to(event.player, string.format("flight %s %.6f %d",
+            f.landed and "landed" or "flying", f.top - f.floor, f.air))
+        return ""
+    end
+end)
+
+-- A jump measured by the server, tick by tick. The player states a bot reads
+-- are a view a loaded machine delivers late or supersedes, so a peak sampled
+-- from them can miss the real one by a tick (macOS CI: 4.31 against 4.45 for
+-- the same jump). Frozen at the first landing, so a jump key still queued when
+-- the body lands, and the second hop it makes, are not part of the first.
+game.register_on_tick(function()
+    for uuid, f in pairs(flights) do
+        local body = not f.landed and game.entity(game.player_entity(uuid))
+        if body then
+            if not body.on_ground then
+                f.air = f.air + 1
+                if body.pos.y > f.top then f.top = body.pos.y end
+            elseif f.air > 0 then
+                f.landed = true
+            end
+        end
     end
 end)
 "#,
@@ -207,28 +238,54 @@ fn a_mod_can_grant_flight_to_somebody_who_is_not_an_operator() {
 /// ticks from pressing jump to being back on the floor, as the server reports
 /// them. The key is pressed for one tick and released, because a held one
 /// launches again the moment the body lands.
+/// The newest notice starting `prefix` that arrived after the first `seen`.
+fn notice_after(bot: &Bot, seen: usize, prefix: &str) -> Option<String> {
+    bot.notices()
+        .into_iter()
+        .skip(seen)
+        .rev()
+        .find_map(|text| text.strip_prefix(prefix).map(str::to_owned))
+}
+
+/// One jump from rest, as the SERVER measured it: how high the feet rose, in
+/// blocks, and how many ticks the body was off the ground.
+///
+/// Asked of the test mod rather than sampled from the player states this bot
+/// is sent — see the mod's `register_on_tick`. The physics is deterministic,
+/// so two jumps under the same gravity measure the same to the last digit.
 async fn one_jump(bot: &mut Bot) -> (f32, u64) {
-    let span = tiamat_core::CHUNK_SUBNODES as f32;
-    let height = |chunk_y: i32, local_y: f32| chunk_y as f32 * span + local_y;
-    let p = bot.walk([0.0; 3], 0, 10).await.expect("settle");
-    let floor = height(p.chunk.y, p.local[1]);
-    let mut apex = floor;
-    let mut ticks = 0;
-    let p = bot.walk([0.0; 3], actions::JUMP, 1).await.expect("jump");
-    let mut now = height(p.chunk.y, p.local[1]);
-    loop {
-        ticks += 1;
-        apex = apex.max(now);
-        // The state reported just after the press may not have moved yet:
-        // only a body that has risen can have landed.
-        let risen = apex > floor + 0.01;
-        if (risen && now <= floor + 0.01) || ticks > 600 {
+    bot.walk([0.0; 3], 0, 10).await.expect("settle");
+    let seen = bot.notices().len();
+    bot.chat("measure").await.expect("chat");
+    for _ in 0..100 {
+        if notice_after(bot, seen, "measuring").is_some() {
             break;
         }
-        let p = bot.walk([0.0; 3], 0, 1).await.expect("fall");
-        now = height(p.chunk.y, p.local[1]);
+        bot.walk([0.0; 3], 0, 1).await.expect("wait");
     }
-    (apex - floor, ticks)
+    bot.walk([0.0; 3], actions::JUMP, 1).await.expect("jump");
+    for _ in 0..200 {
+        bot.walk([0.0; 3], 0, 5).await.expect("fall");
+        let seen = bot.notices().len();
+        bot.chat("flight").await.expect("chat");
+        let mut answer = None;
+        for _ in 0..40 {
+            answer = notice_after(bot, seen, "flight ");
+            if answer.is_some() {
+                break;
+            }
+            bot.walk([0.0; 3], 0, 1).await.expect("wait");
+        }
+        let answer = answer.expect("the mod answers `flight`");
+        let words: Vec<&str> = answer.split_whitespace().collect();
+        if words[0] == "landed" {
+            return (
+                words[1].parse().expect("a height"),
+                words[2].parse().expect("a tick count"),
+            );
+        }
+    }
+    panic!("a jump never came down in a thousand ticks");
 }
 
 #[test]
@@ -250,7 +307,7 @@ fn a_mod_can_lighten_a_player_and_they_jump_higher_and_fall_slower() {
         let (apex, airtime) = one_jump(&mut bot).await;
         assert!(
             apex > 1.0 && airtime > 5,
-            "the control jump: {apex}, {airtime}"
+            "the control jump: {apex} blocks, {airtime} ticks"
         );
 
         bot.chat("light").await.expect("chat");
@@ -268,8 +325,10 @@ fn a_mod_can_lighten_a_player_and_they_jump_higher_and_fall_slower() {
         bot.chat("normal").await.expect("chat");
         bot.sleep_ticks(10).await;
         let (back_apex, back_airtime) = one_jump(&mut bot).await;
+        // Exact, now that the server measures it: the same body under the
+        // same gravity steps the same numbers.
         assert!(
-            (back_apex - apex).abs() < 0.05 && back_airtime.abs_diff(airtime) <= 1,
+            (back_apex - apex).abs() < 1e-5 && back_airtime == airtime,
             "cleared, a jump rose {back_apex} in {back_airtime} ticks; it was {apex} in {airtime}"
         );
         bot.disconnect().await;
