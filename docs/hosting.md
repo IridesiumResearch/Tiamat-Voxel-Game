@@ -347,7 +347,9 @@ carry, per release: the four archives (links to the GitHub release are enough),
 the version and the commit, and the note that the build is unsigned by the
 operating system's standards (`distribution.md` §9: macOS asks once about
 quarantine, Windows shows SmartScreen). Install instructions are three lines:
-unpack the archive anywhere, run `tiamat` (the launcher), make a shortcut to it.
+unpack the archive anywhere, run `tiamat` (the launcher; on macOS open `Tiamat.app`,
+after moving the whole folder to Applications or the home folder), make a shortcut
+to it.
 
 And because this is a GPLv3 program being distributed as binaries
 (`distribution.md` §7): a link to the repository, a link to the **exact commit**

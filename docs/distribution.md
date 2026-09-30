@@ -32,7 +32,8 @@ of a second with nothing to report. And nothing ever overwrites a running
 binary: the client stages an update and exits, the launcher swaps the files
 before anything is open.
 
-The player's shortcut points at the launcher. The launcher is what a release
+The player's shortcut points at the launcher (on macOS, at `Tiamat.app`, which
+holds it; §5). The launcher is what a release
 almost never has to replace, which matters because **a launcher that breaks
 cannot fix itself** — it is the one component whose failure needs a human and a
 fresh download.
@@ -128,18 +129,83 @@ instructions works:
 
 ```
 <install>/
-  launcher            the shortcut points here
+  tiamat              the launcher; the shortcut points here (tiamat.exe on Windows)
   current/            the game: client, server, game/ mods, licences
   staged/             an update that has been verified and not yet applied
   previous/           what `current` was, kept for one rollback
   install.json        installed version, channel, and where it came from
 ```
 
-Windows `%LOCALAPPDATA%\Tiamat`, macOS `~/Library/Application Support/Tiamat`
-(inside a `Tiamat.app` bundle for the Finder's sake), Linux
+Windows `%LOCALAPPDATA%\Tiamat`, macOS wherever the player unpacks the folder
+(Applications or their home folder are the places to put it), Linux
 `~/.local/share/tiamat`. Saves, the identity key and the content cache stay
 where they already live and are **never** touched by an update — a player who
 reinstalls keeps their worlds.
+
+### macOS: `Tiamat.app`
+
+The macOS archive has the same shape with one addition, and one difference:
+
+```
+<install>/
+  Tiamat.app/
+    Contents/Info.plist
+    Contents/MacOS/tiamat        the launcher: the only copy, no top-level `tiamat`
+    Contents/Resources/tiamat.icns
+  current/                       exactly as above
+  …
+```
+
+The bundle sits **beside** `current/`, never around it. A 0.2.1 install's
+client stages an update by finding `current/` at most one directory down from
+the unpacked archive (`find_current` in the updater, and the client's staging),
+so `current/` has to stay at the top for those installs to keep updating.
+Updates replace `current/` only; `Tiamat.app` comes from a fresh download, so a
+0.2.1 install keeps updating but does not gain the bundle (and its Dock
+behaviour) until the player downloads a new archive.
+
+**Why a bundle, and why `exec`.** A process the launcher starts as a child gets
+a Dock tile of its own, and "Keep in Dock" on that tile pins the bare
+`current/client`, which reopens with no launcher, no update step and a working
+directory of `/`, so no mods. So inside `Tiamat.app` the launcher `exec`s the
+client instead of spawning it: the running game *is* the `Tiamat.app` process,
+the tile is the app's, and pinning it reopens the launcher. The launcher still
+sets the working directory to `current/` and `TIAMAT_LAUNCHED=1`. Other
+platforms keep the spawn-and-wait.
+
+**The launcher finds its root** as the directory holding the `.app` when its
+own executable is `Contents/MacOS/tiamat` inside one, and otherwise as the
+directory it is in.
+
+**Rollback without a wait.** The launcher counts a start in `install.json`
+(`failed_starts`) before it runs the game. With `exec` there is no "after", so
+the client, started by the launcher from an install, sets `failed_starts` back
+to 0 once its first frame is presented (other fields preserved, written
+atomically, nothing done if the file is unreadable). Two starts that never get
+that far still roll back.
+
+**Translocation.** macOS runs a freshly downloaded, quarantined app from a
+randomised read-only location (`…/AppTranslocation/…`) until the player moves
+it, and from there `current/` is not beside the bundle. The launcher says so in
+an alert (`osascript`, since a Finder launch has no terminal): move the whole
+Tiamat folder, `Tiamat.app` together with `current`, into Applications or the
+home folder, and open it from there. Clearing the quarantine flag (the
+archive's README.txt) before opening avoids it.
+
+### A client started on its own
+
+An installed client (its executable's directory is named `current`) started
+directly and not by the launcher — a pinned tile from an old install, a
+hand-made shortcut — starts the launcher instead with the same arguments
+(`<root>/tiamat`, on macOS `Tiamat.app/Contents/MacOS/tiamat` first) and gets
+out of the way: `exec` on Unix, spawn and exit on Windows. Two environment
+variables prevent a loop: the launcher sets `TIAMAT_LAUNCHED` on the client, and
+the client sets `TIAMAT_HANDED_OVER` on the launcher; a client that sees either
+carries on. If the launcher is missing or cannot be started the client carries on
+as before and logs why. A working copy (`cargo run`) never hands over. The
+client also looks for its `game/` mods, `client.toml` and `bindings.toml` beside
+its executable before the working directory, so it finds them however it was
+started.
 
 **Applying an update is a rename, not a copy**: `current` → `previous`,
 `staged` → `current`, on the same filesystem, so a power cut leaves one of the
