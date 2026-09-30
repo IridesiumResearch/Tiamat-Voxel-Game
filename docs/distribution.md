@@ -284,7 +284,9 @@ download makes real:
 ## 8. Releasing
 
 1. Run `scripts/bundle-lock.sh` and commit `bundle.toml` with the version
-   bump, so the tag records which commit of each default mod it carries. Then
+   bump, so the tag records which commit of each default mod it carries. A
+   mod linked under `game/` for development that is not ready to ship is left
+   out with `--exclude <id>`; the lock lists what it left out. Then
    tag the commit. CI builds all four targets, packages them, checks each
    archive, builds the source archive, and uploads all of it to a **draft**
    GitHub Release.

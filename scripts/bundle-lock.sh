@@ -13,17 +13,24 @@
 # A commit that only exists on somebody's machine is one nobody else can fetch,
 # so an unpushed HEAD is refused unless --allow-unpushed says otherwise.
 #
-# Usage: scripts/bundle-lock.sh [--allow-unpushed] [--out bundle.toml]
+# A mod linked under `game/` for development but not ready to ship is left out
+# with `--exclude <id>` (repeatable); the lock names what it left out, so the
+# record says it was a choice. An id that is not linked is refused, so a typo
+# cannot quietly let the mod through.
+#
+# Usage: scripts/bundle-lock.sh [--allow-unpushed] [--exclude <id>]... [--out bundle.toml]
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 allow_unpushed=0
 out="bundle.toml"
+excluded=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --allow-unpushed) allow_unpushed=1; shift ;;
         --out) out="${2:?--out needs a path}"; shift 2 ;;
+        --exclude) excluded+=("${2:?--exclude needs a mod id}"); shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -32,11 +39,32 @@ done
 # else's until told otherwise.
 g() { git -c safe.directory='*' "$@"; }
 
+is_excluded() {
+    local wanted="$1" id
+    # `"${excluded[@]+"${excluded[@]}"}"`: an empty array is "unbound" under
+    # `set -u` on the bash 3.2 a macOS machine has.
+    for id in "${excluded[@]+"${excluded[@]}"}"; do
+        [ "$id" = "$wanted" ] && return 0
+    done
+    return 1
+}
+
+for id in "${excluded[@]+"${excluded[@]}"}"; do
+    if [ ! -L "game/$id" ]; then
+        echo "error: --exclude $id: no mod of that id is linked under game/" >&2
+        exit 2
+    fi
+done
+
 entries=()
 failed=0
 for link in game/*; do
     [ -L "$link" ] || continue
     id="$(basename "$link")"
+    if is_excluded "$id"; then
+        echo "note: $id is left out of this release (--exclude)" >&2
+        continue
+    fi
     dir="$(readlink -f "$link" 2>/dev/null || true)"
     if [ -z "$dir" ] || [ ! -f "$dir/mod.toml" ]; then
         echo "error: $link points nowhere readable; mount the drive it lives on" >&2
@@ -78,6 +106,11 @@ fi
     echo "# at. Written by scripts/bundle-lock.sh from the repositories beside this"
     echo "# checkout; read by scripts/package.sh, which packages a mod from this commit"
     echo "# and never from a working tree. docs/distribution.md §6 and §7."
+    if [ "${#excluded[@]}" -gt 0 ]; then
+        echo "#"
+        echo "# Linked for development and left out of this release by choice:"
+        printf '%s\n' "${excluded[@]}" | LC_ALL=C sort | sed 's/^/#   /'
+    fi
     printf '%s\n' "${entries[@]}" | LC_ALL=C sort | while IFS=$'\t' read -r id repo path commit; do
         echo
         echo "[[mod]]"
