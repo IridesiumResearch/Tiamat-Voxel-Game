@@ -17,8 +17,8 @@ Started 2026-09-29, scaffolded by the engine session from what the
 designer's two-path design and the sibling mods had already fixed
 (`docs/brief.md` in that repo).
 
-**Open as of 2026-09-30: E-S1 and E-S2**, mirrored from that repo's
-`docs/engine-asks.md` (filed 2026-09-28/29); E-S3 answered below.
+**Open as of 2026-09-30: none.** E-S1 and E-S2 landed 2026-09-30 (gravity
+awaits the feel); E-S3 answered below.
 
 ## E-S3, actions that fire (2026-09-29): ANSWERED 2026-09-30, nothing to build
 
@@ -30,7 +30,7 @@ releases of whatever key the player bound arrive at
 `game.register_on_action` as `{ player, id, pressed }`. The stand-ins can
 stay as second ways in.
 
-## E-S2, the instance in the generator (2026-09-28): OPEN
+## E-S2, the instance in the generator (2026-09-28): LANDED 2026-09-30 (engine 61b4c3e)
 
 *Wanted:* `pos.domain = "template/key"` in a generator's position. *Why:*
 a generator is told `{ x, y, z, seed }` only, so two instances of one
@@ -40,7 +40,27 @@ each body kind's template is a 15 × 15 grid of 8,000-block slots — 225
 bodies a kind, 1,125 a world, the cap. Magic's E-M1; the answer retires
 the slot trick and its cap.
 
-## E-S1, a gravity scale per player (2026-09-28): OPEN
+**From the engine, 2026-09-30 (engine 61b4c3e, no protocol change).** A
+generator's `pos` carries `domain`: `"overworld"`, a registered domain's
+id, or `"template/key"` for an instance, in every VM that generates,
+the generation workers' included. Seed your own streams from it:
+
+```lua
+generator = function(buf, pos)
+    local key = pos.domain:match("/(.+)$")   -- this instance's key
+    -- two instances of one template are now two worlds
+end
+```
+
+The same seed, domain and chunk give the same bytes, as before. The
+slot grid and its cap can go (it was always inside the world, unlike
+Magic's offset trick): valid block coordinates are -60,000 to 59,999 on
+each axis (`WORLD_HALF_EXTENT_BLOCKS`, `crates/core/src/coords.rs`), so
+Inside
+the bounds a position is a chunk and an offset within it, so it is exact
+everywhere the world exists.
+
+## E-S1, a gravity scale per player (2026-09-28): LANDED 2026-09-30 (engine b0996cb, protocol 83), awaiting the feel
 
 *Wanted:* `set_player_abilities{ gravity = 0.17 }`, or a gravity per
 domain, for gravity plating, cavorite soles and low-gravity star bodies.
@@ -48,3 +68,26 @@ domain, for gravity plating, cavorite soles and low-gravity star bodies.
 gravity. `push_player` is "added, not set" and not documented as
 client-predicted, so the mod will try it in a real window for
 rubber-banding before it ships.
+
+**From the engine, 2026-09-30 (engine b0996cb, protocol 83).** The
+per-player form, as asked first:
+
+```lua
+game.set_player_abilities(uuid, { gravity = 0.17 })   -- and speed, fly, ...
+```
+
+- A multiplier on the gravity acting on that player's body, default 1.
+  `0` floats; over 4 is clamped to 4; negative, NaN, infinite or not a
+  number is an error naming the function. Replaced whole on every call
+  like the other fields, forgotten when the player leaves.
+- **Predicted by the client with the same number**, so a light player
+  does not rubber-band: a client test jumping and walking at 0.17 rose
+  7.6 blocks with no correction at all. Drop the `push_player` stand-in.
+- The jump impulse is unchanged, so a light player jumps higher and
+  falls slower; swimming buoyancy scales with it too. Gravity 1 steps
+  bit for bit as before.
+- Riding: the mount's gravity governs the pair, not the rider's.
+  Creatures are untouched.
+
+For the feel ([H]): set 0.17 on join, walk and hold jump; take-off,
+apex and landing should be smooth, with no snap. Try 0 and 4, then `nil`.

@@ -17,8 +17,8 @@ Started 2026-09-29, scaffolded by the engine session from what the
 designer's two-path design and the sibling mods had already fixed
 (`docs/brief.md` in that repo).
 
-**Open as of 2026-09-30: E-M1 and E-M2**, mirrored from that repo's
-`docs/engine-asks.md` (filed 2026-09-28/29); E-M3 answered below.
+**Open as of 2026-09-30: none.** E-M1 and E-M2 landed 2026-09-30 (the
+sky awaits the eye); E-M3 answered below.
 
 ## E-M3, actions that fire (2026-09-29): ANSWERED 2026-09-30, nothing to build
 
@@ -35,14 +35,39 @@ release of whatever key the player bound arrives at
 and `core_ui` use it. The stand-ins (use the book, `magic book` in chat)
 can stay as second ways in.
 
-## E-M2, a sky per instance (2026-09-28): OPEN
+## E-M2, a sky per instance (2026-09-28): LANDED 2026-09-30 (engine 8275173), awaiting the eye
 
 *Wanted:* a domain instance's sky set at run time, so a woven world has
 its own sky without a per-player overlay. *Why:* `register_sky{ domain }`
 is per template and registration-only. *Stands in:* Weather's overlay
 (Wx-M1), per player, on arrival.
 
-## E-M1, the instance in the generator (2026-09-28): OPEN
+**From the engine, 2026-09-30 (engine 8275173, no protocol change).**
+
+```lua
+game.set_domain_sky(id, spec)   --> true for a live domain, false otherwise
+game.set_domain_sky(id, nil)    -- back to its template's sky
+game.create_domain(template, key, { position = p, sky = spec })
+```
+
+- `spec` is `register_sky`'s table: `keyframes` (required) and
+  `cave_fog` are the domain's own. `day_length_ticks` and `start_time`
+  are accepted and ignored, because the world has one clock; `domain` in
+  the table is refused, since the id is the first argument. A bad spec
+  is an error naming the function.
+- Everyone in the domain gets it at once; anyone arriving later gets it
+  on arrival. A sibling instance is untouched.
+- Kept with the instance across restarts and removed by
+  `destroy_domain`, like its position. At creation it applies only when
+  the instance is new, as `position` does.
+- It works on any live domain, a registered one or the overworld too,
+  and is kept for those as well.
+
+For the eye ([H]): weave a world, set a visibly different sky on it
+while standing inside, and see it change at once; have a second player
+arrive after and see the same sky.
+
+## E-M1, the instance in the generator (2026-09-28): LANDED 2026-09-30 (engine 61b4c3e)
 
 *Wanted:* `pos.domain = "template/key"` in a generator's position. *Why:*
 a generator is told `{ x, y, z, seed }` only, so two instances of one
@@ -52,3 +77,23 @@ template's coordinates. Science asks the same (E-S2). The mod asks the
 engine to confirm how far out the client stays exact before it builds on
 the trick: a slot at `(slot × 2 + 1) × 2^20` is a million blocks out, and
 the brief's sky parameter puts players past 2^27.
+
+**From the engine, 2026-09-30 (engine 61b4c3e, no protocol change).** A
+generator's `pos` carries `domain`: `"overworld"`, a registered domain's
+id, or `"template/key"` for an instance, in every VM that generates,
+the generation workers' included. Seed your own streams from it:
+
+```lua
+generator = function(buf, pos)
+    local key = pos.domain:match("/(.+)$")   -- this instance's key
+    -- two instances of one template are now two worlds
+end
+```
+
+The same seed, domain and chunk give the same bytes, as before. The
+offset trick can go: valid block coordinates are -60,000 to 59,999 on
+each axis (`WORLD_HALF_EXTENT_BLOCKS`, `crates/core/src/coords.rs`), so
+a slot at `(slot * 2 + 1) * 2^20` blocks was about seventeen times past
+the world's edge and never inside it; players past 2^27 likewise. Inside
+the bounds a position is a chunk and an offset within it, so it is exact
+everywhere the world exists.
