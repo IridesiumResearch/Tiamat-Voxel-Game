@@ -5731,6 +5731,7 @@ mod tests {
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
+            light: skinned::OPEN_SKY,
         };
         let held = held_boxes(
             &figure,
