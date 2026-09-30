@@ -5,27 +5,43 @@
 # at. Written by scripts/bundle-lock.sh from the repositories beside this
 # checkout; read by scripts/package.sh, which packages a mod from this commit
 # and never from a working tree. docs/distribution.md §6 and §7.
+#
+# Linked for development and left out of this release by choice:
+#   tiamat_default_magic
+#   tiamat_default_science
+
+[[mod]]
+id = "tiamat_default_craft"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_Craft.git"
+path = "mods/tiamat_default_craft"
+commit = "c80d996892b94d7c712f53b79d91a69d7ea1a832"
 
 [[mod]]
 id = "tiamat_default_life"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Life.git"
 path = "mods/tiamat_default_life"
-commit = "e1e9a726d73dba4d85dbbdbe43e0b2214fdb18a0"
+commit = "39cb606178cfeaa18717f1ee74f1300266279322"
+
+[[mod]]
+id = "tiamat_default_progress"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_Progress.git"
+path = "mods/tiamat_default_progress"
+commit = "656d86d68ecee56d267ffc18fa873bc159d4112a"
 
 [[mod]]
 id = "tiamat_default_ui"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_UI.git"
 path = "mods/tiamat_default_ui"
-commit = "e17c272254e6047af4128a0032f0495ff858bdf5"
+commit = "d09b8716536ee5d60033981e24ae89ce1b3d1068"
 
 [[mod]]
 id = "tiamat_default_world"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_World.git"
 path = "mods/tiamat_default_world"
-commit = "fa3b7621388504349488b88bd0da88d12d288f9b"
+commit = "d36be29f7f8ea1150dce2b79261ee68a16484349"
 
 [[mod]]
 id = "tiamat_weather"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Weather.git"
 path = "mods/tiamat_weather"
-commit = "1c3c98c60122a8807cee29e5c5abcbac972fcbd2"
+commit = "5057e7092f997c1b8ec24803bf2c79bd81bd47ee"
