@@ -46,6 +46,7 @@ pub mod discovery;
 pub mod entities;
 pub mod fonts;
 pub mod front;
+pub mod handover;
 pub mod icons;
 pub mod input;
 pub mod launcher;

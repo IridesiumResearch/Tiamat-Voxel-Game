@@ -104,6 +104,10 @@ fn main() -> std::process::ExitCode {
         )
         .init();
 
+    // An installed client started on its own goes through the launcher, so it
+    // gets its update step, its working directory and its mods.
+    client::handover::hand_over_if_installed();
+
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
@@ -1252,6 +1256,7 @@ impl Client {
             Stage::Playing(_) => false,
         };
         frame.present();
+        client::handover::report_started();
 
         match action {
             client::front::Action::None => true,
@@ -1672,6 +1677,7 @@ impl Client {
         let phase = std::time::Instant::now();
         frame.present();
         phases.present = elapsed_ms(phase);
+        client::handover::report_started();
 
         // Taken again because `draw_hud` needs the whole window and the world
         // is one of its fields. Cheap, and the alternative is threading the

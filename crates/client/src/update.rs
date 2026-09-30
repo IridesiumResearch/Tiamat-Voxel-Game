@@ -507,7 +507,8 @@ const TARGET: &str = env!("TIAMAT_TARGET");
 /// the executable. A build that is not in a `current` directory is not an
 /// installed one — a working copy, a `cargo run` — and gets `None`, which is
 /// what stops a developer's build from staging updates into `target/`.
-fn install_root() -> Option<PathBuf> {
+#[must_use]
+pub fn install_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     if dir.file_name()? != "current" {

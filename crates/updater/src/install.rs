@@ -311,6 +311,10 @@ impl Install {
         let status = std::process::Command::new(&client)
             // The game's own working directory is where its mods are.
             .current_dir(self.current())
+            // Tells the client it was started here, so it does not hand
+            // itself back to the launcher, and that it should clear the
+            // failure count itself once it is up.
+            .env(LAUNCHED_ENV, "1")
             .args(args)
             .status()
             .map_err(|source| InstallError::Io {
@@ -368,6 +372,11 @@ impl Install {
         )
     }
 }
+
+/// Set on the client this launcher starts. The client's
+/// `handover::LAUNCHED` is the same name, spelled twice because the client may
+/// not depend on this crate (charter rule 3).
+pub const LAUNCHED_ENV: &str = "TIAMAT_LAUNCHED";
 
 /// Whether this build carries a release key, for `--status`.
 const RELEASE_KEY_PRESENT: bool = option_env!("TIAMAT_RELEASE_KEY").is_some();
