@@ -101,6 +101,29 @@ game.register_on_use_entity(function(event)
     return ""
 end)
 
+-- A use that reached no scarecrow says what the server saw: where it has the
+-- player, which way they face, and what the same ray finds. macOS CI missed
+-- here with nothing to go on but "nothing selected to build with".
+game.register_on_use(function(event)
+    local id = game.player_entity(event.player)
+    local body = id and game.entity(id)
+    local at = game.looking_at(event.player)
+    local seen = "nothing"
+    if at and at.entity then
+        seen = "entity " .. at.entity
+    elseif at then
+        seen = string.format("cell %d %d %d", at.x, at.y, at.z)
+    end
+    if body then
+        game.chat_to(event.player, string.format(
+            "missed from %.4f %.4f %.4f facing %.4f %.4f %.4f yaw %.4f, looking at %s",
+            body.pos.x, body.pos.y, body.pos.z,
+            body.facing.x, body.facing.y, body.facing.z, body.yaw, seen))
+    else
+        game.chat_to(event.player, "missed with no body, looking at " .. seen)
+    end
+end, {{ anywhere = true }})
+
 game.register_on_dismount(function(event)
     game.chat_to(event.player, string.format(
         "dismount %s %d %.4f %.4f %.4f", event.reason, event.entity, event.x, event.y, event.z))
@@ -358,12 +381,21 @@ fn a_rider_drives_the_mount_at_its_pace_and_sits_on_it_until_they_get_off() {
             bot.walk(toward_it, 0, 4).await.expect("step back");
             back = settle(&mut bot).await;
         }
-        bot.look_at(toward(back, standing));
-        bot.walk([0.0; 3], 0, 2).await.expect("turn to it");
+        // Turned for longer than a walk keeps queued: the server keeps the
+        // FIRST input it gets for a tick (`phys::input`), and the settle above
+        // left up to eight of them, facing north, ahead of it.
+        let look = toward(back, standing);
+        bot.look_at(look);
+        bot.walk([0.0; 3], 0, 12).await.expect("turn to it");
+        eprintln!("using from {back:?}, looking {look:?}, at the scarecrow at {standing:?}");
         let seen = bot.notices().len();
         bot.use_at_nothing().await.expect("send");
         let answer = notice_after(&mut bot, seen, "mount ").await;
-        assert_eq!(answer, "true nil", "the mount was refused");
+        assert_eq!(
+            answer, "true nil",
+            "the mount was refused; the bot stood at {back:?} and looked {look:?} \
+             at the scarecrow at {standing:?}"
+        );
         // North again, so the ride below is the one measured before this aim
         // existed: the mount turns to where its rider looks.
         bot.look_at([0.0, 0.0]);
