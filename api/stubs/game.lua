@@ -2846,7 +2846,7 @@ function game.find_path(from, to, options) end
 ---like hurting you or making a sound, is yours and needs no engine support
 ---beyond the hooks that already exist.
 ---
-Fluid is BLOCK resolution, not sub-node: one volume per block, never a
+---Fluid is BLOCK resolution, not sub-node: one volume per block, never a
 ---per-cell mask (Sub-Node Contract §4). What the lattice IS consulted for is how
 ---much fits — a block one third full of stone holds one third less — so you
 ---never have to think about a partially flooded chiselled block, only about how

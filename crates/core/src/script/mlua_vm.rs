@@ -11831,6 +11831,22 @@ impl MluaVm {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_api_stubs_are_lua_that_compiles() {
+        // **The stubs are vendored into every mod repository**, and nothing
+        // ran them: twice a `---` fell off a doc line and the file was prose
+        // to the language server in every mod at once. Compile, never run.
+        let stubs = include_str!("../../../../api/stubs/game.lua");
+        let lua = Lua::new();
+        if let Err(err) = lua
+            .load(stubs)
+            .set_name("api/stubs/game.lua")
+            .into_function()
+        {
+            panic!("api/stubs/game.lua does not compile: {err}");
+        }
+    }
+
+    #[test]
     fn a_slot_number_means_the_same_thing_going_out_as_coming_back() {
         let lua = Lua::new();
         let spec = lua.create_table().expect("table");
