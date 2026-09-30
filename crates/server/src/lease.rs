@@ -488,6 +488,10 @@ pub(crate) fn aim(
         (hit, distance)
     });
 
+    // Traced, candidate by candidate, because "the use went through the cow"
+    // is otherwise unanswerable from outside: Windows and macOS CI once saw a
+    // ray from a player facing a scarecrow two blocks ahead find nothing.
+    tracing::trace!(domain, ?origin, ?feet, ?eye, ?direction, "aim");
     let entity = entities.and_then(|mobs| {
         let viewer = tiamat_core::ent::Transform::at(origin, feet);
         let mut nearest: Option<(
@@ -496,10 +500,18 @@ pub(crate) fn aim(
             Option<tiamat_core::PlayerUuid>,
         )> = None;
         for (id, entity) in mobs.iter() {
+            let owner = entity.owner.map(|owner| owner.0);
+            tracing::trace!(
+                ?id,
+                in_domain = mobs.domain_of(id),
+                owned = owner.is_some(),
+                collider = ?entity.collider,
+                transform = ?entity.transform,
+                "aim candidate"
+            );
             if mobs.domain_of(id) != domain {
                 continue;
             }
-            let owner = entity.owner.map(|owner| owner.0);
             if except.is_some() && owner == except {
                 continue;
             }
@@ -512,7 +524,9 @@ pub(crate) fn aim(
                 feet[1] + offset[1],
                 feet[2] + offset[2],
             ]);
-            let Some(distance) = ray::distance_to_box(eye, direction, &aabb) else {
+            let distance = ray::distance_to_box(eye, direction, &aabb);
+            tracing::trace!(?id, ?aabb, ?distance, "aim candidate's box");
+            let Some(distance) = distance else {
                 continue;
             };
             if distance > ray::REACH {

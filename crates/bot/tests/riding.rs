@@ -166,6 +166,15 @@ end)
 }
 
 fn start(name: &str) -> ServerHandle {
+    // The server's aim, candidate by candidate, into the test's captured
+    // output: shown only when a test fails, which is when it is wanted.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "tiamat_server::lease=trace",
+        ))
+        .with_ansi(false)
+        .with_test_writer()
+        .try_init();
     let root = scratch(name);
     let mods = write_stable(&root);
     ServerHandle::start(&Settings {
