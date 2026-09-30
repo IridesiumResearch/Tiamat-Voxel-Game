@@ -61,6 +61,10 @@ game.register_on_chat(function(event)
     elseif event.text == "fly" then
         game.set_player_abilities(event.player, { fly = true })
         return ""
+    elseif event.text == "light" then
+        assert(not pcall(game.set_player_abilities, event.player, { gravity = -1 }))
+        game.set_player_abilities(event.player, { gravity = 0.17 })
+        return ""
     elseif event.text == "normal" then
         game.set_player_abilities(event.player, nil)
         return ""
@@ -193,6 +197,80 @@ fn a_mod_can_grant_flight_to_somebody_who_is_not_an_operator() {
         assert!(
             risen > 5.0,
             "a body granted flight and holding jump rose {risen} cells in forty ticks"
+        );
+        bot.disconnect().await;
+    });
+    assert!(server.stop());
+}
+
+/// One jump: the height risen above the standing spot at the apex, and the
+/// ticks from pressing jump to being back on the floor, as the server reports
+/// them. The key is pressed for one tick and released, because a held one
+/// launches again the moment the body lands.
+async fn one_jump(bot: &mut Bot) -> (f32, u64) {
+    let span = tiamat_core::CHUNK_SUBNODES as f32;
+    let height = |chunk_y: i32, local_y: f32| chunk_y as f32 * span + local_y;
+    let p = bot.walk([0.0; 3], 0, 10).await.expect("settle");
+    let floor = height(p.chunk.y, p.local[1]);
+    let mut apex = floor;
+    let mut ticks = 0;
+    let p = bot.walk([0.0; 3], actions::JUMP, 1).await.expect("jump");
+    let mut now = height(p.chunk.y, p.local[1]);
+    loop {
+        ticks += 1;
+        apex = apex.max(now);
+        // The state reported just after the press may not have moved yet:
+        // only a body that has risen can have landed.
+        let risen = apex > floor + 0.01;
+        if (risen && now <= floor + 0.01) || ticks > 600 {
+            break;
+        }
+        let p = bot.walk([0.0; 3], 0, 1).await.expect("fall");
+        now = height(p.chunk.y, p.local[1]);
+    }
+    (apex - floor, ticks)
+}
+
+#[test]
+fn a_mod_can_lighten_a_player_and_they_jump_higher_and_fall_slower() {
+    // Science ask E-S1. The jump impulse is untouched, so a light player rises
+    // higher and stays up longer; clearing the grant restores the ordinary jump.
+    let server = start("light");
+    block_on(async {
+        let mut bot = Bot::connect(
+            server.local_addr(),
+            Identity::generate().expect("identity"),
+            server.cert_fingerprint(),
+        )
+        .await
+        .expect("connect");
+        bot.join("Floater").await.expect("join");
+        bot.sleep_ticks(10).await;
+
+        let (apex, airtime) = one_jump(&mut bot).await;
+        assert!(
+            apex > 1.0 && airtime > 5,
+            "the control jump: {apex}, {airtime}"
+        );
+
+        bot.chat("light").await.expect("chat");
+        bot.sleep_ticks(10).await;
+        let (light_apex, light_airtime) = one_jump(&mut bot).await;
+        assert!(
+            light_apex > apex * 2.0,
+            "a light jump rose {light_apex} against {apex}: gravity did not reach the step"
+        );
+        assert!(
+            light_airtime > airtime * 2,
+            "a light fall took {light_airtime} ticks against {airtime}"
+        );
+
+        bot.chat("normal").await.expect("chat");
+        bot.sleep_ticks(10).await;
+        let (back_apex, back_airtime) = one_jump(&mut bot).await;
+        assert!(
+            (back_apex - apex).abs() < 0.05 && back_airtime.abs_diff(airtime) <= 1,
+            "cleared, a jump rose {back_apex} in {back_airtime} ticks; it was {apex} in {airtime}"
         );
         bot.disconnect().await;
     });

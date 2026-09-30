@@ -2360,7 +2360,8 @@ function game.set_hud(player, values) end
 ---@return boolean operator
 function game.is_operator(player) end
 
----Sets what one player may do: fly, how fast they move, whether they may sprint.
+---Sets what one player may do: fly, how fast they move, whether they may sprint,
+---and how heavy gravity is for them.
 ---
 ---**Replaced whole, every call.** A field you leave out goes back to the
 ---engine's default, so a mod that stops saying `speed` means "no longer
@@ -2382,9 +2383,17 @@ function game.is_operator(player) end
 ---  Turn it off in a world that means its nights; unbinding the keys does not
 ---  work, because anybody can bind them again. Returning the sky to the
 ---  server's hour is never refused.
+---- `gravity` (default `1`) — a multiplier on the gravity that acts on this
+---  player's own body. `0` floats; anything over 4 is clamped to 4; negative
+---  or NaN is an error. It scales only the gravity term, so the jump impulse
+---  is unchanged: a light player jumps higher and falls slower, which is what
+---  low gravity is, and fall damage follows from the motion as it always does.
+---  While the player rides a mount the MOUNT's physics govern and this does not
+---  apply to the pair. Mobs and other entities are untouched; it is yours to
+---  say per player (gravity plating, cavorite soles, a low-gravity body).
 ---
----The client is told and predicts with the same numbers, so a slowed player
----does not rubber-band. An unknown field is an error, so a typo is not a
+---The client is told and predicts with the same numbers, so a slowed or light
+---player does not rubber-band. An unknown field is an error, so a typo is not a
 ---setting you think you made. Forgotten when the player leaves.
 ---
 ---Returns `false` for a player who is not here.
@@ -2395,10 +2404,11 @@ function game.is_operator(player) end
 ---    speed = cold and 0.8 or 1,
 ---    sprint = hunger > 0,
 ---    fly = creative,
+---    gravity = on_moon and 0.17 or 1,
 ---})
 ---```
 ---@param player string The player's UUID, in hex.
----@param abilities { fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean? }|nil
+---@param abilities { fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean?, gravity: number? }|nil
 ---@return boolean told
 function game.set_player_abilities(player, abilities) end
 

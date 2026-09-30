@@ -5057,6 +5057,23 @@ impl MluaVm {
                                  {speed}. 1 is unchanged and 0 is rooted."
                             )));
                         }
+                        // Above the ceiling is clamped, like `speed` is on the
+                        // wire; negative and NaN are a mod's typo. `0` floats.
+                        let gravity: f32 = spec
+                            .get::<Option<f32>>("gravity")
+                            .map_err(|err| {
+                                mlua::Error::external(format!(
+                                    "set_player_abilities: `gravity` must be a number: {err}"
+                                ))
+                            })?
+                            .unwrap_or(default.gravity);
+                        if !gravity.is_finite() || gravity < 0.0 {
+                            return Err(mlua::Error::external(format!(
+                                "set_player_abilities: `gravity` is a multiplier of 0 or more, \
+                                 got {gravity}. 1 is unchanged and 0 floats."
+                            )));
+                        }
+                        let gravity = gravity.min(crate::phys::Abilities::MAX_GRAVITY);
                         // **`Option<bool>`, and that is the whole of it.**
                         // mlua reads a MISSING field as `false` for a plain
                         // `bool` — nil is falsy in Lua — so `.get("sprint")`
@@ -5076,6 +5093,7 @@ impl MluaVm {
                             speed,
                             sprint: flag("sprint", default.sprint),
                             wind_sky: flag("wind_sky", default.wind_sky),
+                            gravity,
                         })
                     }
                 };
@@ -10876,7 +10894,7 @@ const CLOUD_STATE_FIELDS: [&str; 8] = [
 /// Checked so a typo is an error rather than a silent default, for the reason
 /// `register_fluid` gives: a misspelled field is a mod that thinks it
 /// configured something.
-const ABILITY_FIELDS: [&str; 4] = ["fly", "speed", "sprint", "wind_sky"];
+const ABILITY_FIELDS: [&str; 5] = ["fly", "speed", "sprint", "wind_sky", "gravity"];
 
 /// Options `game.mount` accepts, checked for the same reason.
 const MOUNT_FIELDS: [&str; 2] = ["seat", "sneak_dismounts"];
@@ -18076,6 +18094,41 @@ mod entity_tests {
         assert_eq!(second.speed.to_bits(), 1.0_f32.to_bits(), "replaced whole");
 
         assert!(granted[2].1.is_none(), "nil should clear the grant");
+    }
+
+    #[test]
+    fn gravity_defaults_to_one_clamps_at_four_allows_zero_and_refuses_nonsense() {
+        // Science ask E-S1. Replaced whole like every other field; above the
+        // ceiling is clamped, negative, NaN and non-numbers are errors that
+        // name the function, and an unknown field still errors.
+        let (mut vm, store) = vm_with_entities();
+        let uuid = "ab".repeat(32);
+        load(
+            &mut vm,
+            "core",
+            &format!(
+                r#"local id = "{uuid}"
+                   game.set_player_abilities(id, {{ speed = 0.5 }})
+                   game.set_player_abilities(id, {{ gravity = 0.17 }})
+                   game.set_player_abilities(id, {{ gravity = 9 }})
+                   game.set_player_abilities(id, {{ gravity = 0 }})
+                   for _, bad in ipairs({{ -1, 0/0, 1/0, "heavy", true, {{}} }}) do
+                     local ok, err = pcall(game.set_player_abilities, id, {{ gravity = bad }})
+                     assert(not ok, "accepted " .. tostring(bad))
+                     assert(tostring(err):find("set_player_abilities", 1, true), tostring(err))
+                   end
+                   local ok = pcall(game.set_player_abilities, id, {{ gravitiy = 1 }})
+                   assert(not ok, "a misspelt field was accepted")"#
+            ),
+        )
+        .expect("load");
+        let granted = store.granted.lock().expect("granted");
+        assert_eq!(granted.len(), 4, "only the four good calls reach the store");
+        let gravity = |n: usize| granted[n].1.expect("a grant").gravity.to_bits();
+        assert_eq!(gravity(0), 1.0_f32.to_bits(), "default is one");
+        assert_eq!(gravity(1), 0.17_f32.to_bits());
+        assert_eq!(gravity(2), 4.0_f32.to_bits(), "clamped to four");
+        assert_eq!(gravity(3), 0.0_f32.to_bits(), "zero floats");
     }
 
     #[test]

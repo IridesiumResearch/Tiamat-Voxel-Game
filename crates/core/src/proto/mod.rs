@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 82;
+pub const PROTOCOL_VERSION: u32 = 83;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 82;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v83 (Science E-S1): `AbilitiesDef` carries `gravity`, a multiplier on the
+// gravity acting on this player's body. The client predicts its own fall and
+// jump, so it must step with the same number the server does or a light
+// player rubber-bands on every landing.
 // v82 (weather W30): appended `ServerMessage::Rainbow`, the rainbow in one
 // player's sky: a strength and an ease, or `None` to fade it out — a standing
 // setting like `Precipitation`, sent when it changes. No place travels: the
@@ -2489,6 +2493,8 @@ pub struct AbilitiesDef {
     pub sprint: bool,
     /// Whether this player may wind their own sky with the engine's keys.
     pub wind_sky: bool,
+    /// Multiplier on the gravity acting on this player's body.
+    pub gravity: f32,
 }
 
 impl From<crate::phys::Abilities> for AbilitiesDef {
@@ -2498,6 +2504,7 @@ impl From<crate::phys::Abilities> for AbilitiesDef {
             speed: abilities.speed,
             sprint: abilities.sprint,
             wind_sky: abilities.wind_sky,
+            gravity: abilities.gravity,
         }
     }
 }
@@ -2513,6 +2520,7 @@ impl From<AbilitiesDef> for crate::phys::Abilities {
             speed: def.speed,
             sprint: def.sprint,
             wind_sky: def.wind_sky,
+            gravity: def.gravity,
         }
         .sanitised()
     }
@@ -3567,6 +3575,11 @@ fn check_abilities(abilities: AbilitiesDef) -> Result<(), ProtocolError> {
     if !abilities.speed.is_finite() {
         return Err(ProtocolError::Unusable {
             what: format!("abilities.speed is {}, not a number", abilities.speed),
+        });
+    }
+    if !abilities.gravity.is_finite() {
+        return Err(ProtocolError::Unusable {
+            what: format!("abilities.gravity is {}, not a number", abilities.gravity),
         });
     }
     Ok(())
@@ -5478,9 +5491,20 @@ mod tests {
                 speed: f32::NAN,
                 sprint: true,
                 wind_sky: true,
+                gravity: 1.0,
             },
         };
         assert!(validate_server_message(&poison).is_err());
+        let poison_gravity = ServerMessage::Abilities {
+            abilities: AbilitiesDef {
+                fly: false,
+                speed: 1.0,
+                sprint: true,
+                wind_sky: true,
+                gravity: f32::NAN,
+            },
+        };
+        assert!(validate_server_message(&poison_gravity).is_err());
         let fine = ServerMessage::Abilities {
             abilities: crate::phys::Abilities::DEFAULT.into(),
         };
@@ -5491,12 +5515,17 @@ mod tests {
             speed: 1.0e9,
             sprint: false,
             wind_sky: false,
+            gravity: 1.0e30,
         };
         let adopted = crate::phys::Abilities::from(wild);
         assert!(adopted.fly && !adopted.sprint && !adopted.wind_sky);
         assert_eq!(
             adopted.speed.to_bits(),
             crate::phys::Abilities::MAX_SPEED.to_bits()
+        );
+        assert_eq!(
+            adopted.gravity.to_bits(),
+            crate::phys::Abilities::MAX_GRAVITY.to_bits()
         );
     }
 

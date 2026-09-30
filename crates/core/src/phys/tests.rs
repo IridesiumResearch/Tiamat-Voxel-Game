@@ -1698,3 +1698,120 @@ fn grip_changes_how_fast_you_get_there_not_where_the_gait_tops_out() {
         tuning.walk_speed
     );
 }
+
+// Science ask E-S1: `Abilities::gravity` scales the gravity term alone.
+
+/// The tuning for a body at `gravity`, every other ability at its default.
+fn at_gravity(gravity: f32) -> Tuning {
+    Abilities {
+        gravity,
+        ..Abilities::DEFAULT
+    }
+    .tuning(&Tuning::DEFAULT)
+}
+
+/// One jump from the floor: the apex reached and the ticks until landing.
+fn one_jump(tuning: &Tuning) -> (f32, usize) {
+    let scene = Scene::new(0);
+    let mut body = Body {
+        position: [0.5, 0.0, 0.5],
+        velocity: [0.0, 0.0, 0.0],
+        on_ground: true,
+        jump_cooldown: 0,
+    };
+    let press = Intent {
+        jump: true,
+        ..Intent::default()
+    };
+    let mut apex: f32 = 0.0;
+    body = step(&scene, body, press, tuning);
+    apex = apex.max(body.position[1]);
+    let mut ticks = 1;
+    while !body.on_ground && ticks < 2000 {
+        body = step(&scene, body, Intent::default(), tuning);
+        apex = apex.max(body.position[1]);
+        ticks += 1;
+    }
+    (apex, ticks)
+}
+
+#[test]
+fn gravity_one_is_the_base_tuning_bit_for_bit_and_steps_identically() {
+    assert_eq!(at_gravity(1.0), Tuning::DEFAULT);
+    let scene = Scene::new(0);
+    let intent = Intent {
+        walk: [0.3, 1.0],
+        jump: true,
+        gait: Gait::Sprint,
+        fly: false,
+    };
+    let (mut a, mut b) = (Body::at([0.5, 4.0, 0.5]), Body::at([0.5, 4.0, 0.5]));
+    for _ in 0..120 {
+        a = step(&scene, a, intent, &Tuning::DEFAULT);
+        b = step(&scene, b, intent, &at_gravity(1.0));
+        assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn a_light_body_jumps_higher_and_falls_slower_and_jump_speed_is_unchanged() {
+    let light = at_gravity(0.17);
+    assert_eq!(
+        light.jump_speed.to_bits(),
+        Tuning::DEFAULT.jump_speed.to_bits()
+    );
+    let (apex_full, ticks_full) = one_jump(&Tuning::DEFAULT);
+    let (apex_light, ticks_light) = one_jump(&light);
+    assert!(
+        apex_light > apex_full * 3.0,
+        "apex {apex_light} at 0.17 against {apex_full} at 1"
+    );
+    assert!(
+        ticks_light > ticks_full * 2,
+        "{ticks_light} against {ticks_full}"
+    );
+
+    // A fall of twelve cells takes longer too.
+    let scene = Scene::new(0);
+    let fall = |tuning: &Tuning| {
+        let mut body = Body::at([0.5, 12.0, 0.5]);
+        let mut ticks = 0;
+        while !body.on_ground && ticks < 2000 {
+            body = step(&scene, body, Intent::default(), tuning);
+            ticks += 1;
+        }
+        ticks
+    };
+    assert!(fall(&light) > fall(&Tuning::DEFAULT) + 10);
+}
+
+#[test]
+fn a_body_at_no_gravity_does_not_fall() {
+    let scene = Scene::new(0);
+    let tuning = at_gravity(0.0);
+    let mut body = Body::at([0.5, 6.0, 0.5]);
+    for _ in 0..200 {
+        body = step(&scene, body, Intent::default(), &tuning);
+    }
+    assert_eq!(body.position[1].to_bits(), 6.0f32.to_bits());
+    assert!(!body.on_ground);
+}
+
+#[test]
+fn gravity_is_bounded_and_a_non_finite_one_reads_as_unsaid() {
+    let sanitised = |gravity| {
+        Abilities {
+            gravity,
+            ..Abilities::DEFAULT
+        }
+        .sanitised()
+        .gravity
+    };
+    assert_eq!(
+        sanitised(1.0e30).to_bits(),
+        Abilities::MAX_GRAVITY.to_bits()
+    );
+    assert_eq!(sanitised(-3.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(sanitised(f32::NAN).to_bits(), 1.0f32.to_bits());
+    assert_eq!(sanitised(f32::INFINITY).to_bits(), 1.0f32.to_bits());
+}

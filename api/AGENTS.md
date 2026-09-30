@@ -1441,10 +1441,13 @@ slower one; this is the multiplier that makes a cow amble rather than march at
 a player's walk. The same number, and the same code, that slows a player.
 
 **A player's movement is yours to limit, and flight yours to grant.**
-`game.set_player_abilities(uuid, { fly, speed, sprint, wind_sky })` — a Creative
+`game.set_player_abilities(uuid, { fly, speed, sprint, wind_sky, gravity })` — a Creative
 world where everybody flies, cold that slows, hunger that stops a sprint, and
 `wind_sky = false` for a world that means its nights (the engine's sky keys
-scrub the client's own clock, which lights a player's night for free). Replaced
+scrub the client's own clock, which lights a player's night for free), and
+`gravity` (a multiplier, `0.17` for a moon, `0` floats, over 4 is clamped; the
+jump impulse is unchanged so a light player jumps higher; a rider is governed
+by the mount's physics instead). Replaced
 whole each call (a field left out is the default again), `fly` is OR-ed with the
 operator list, and the client predicts with the same numbers so nobody
 rubber-bands. Do not try this with `game.set_entity` on a player's body: the

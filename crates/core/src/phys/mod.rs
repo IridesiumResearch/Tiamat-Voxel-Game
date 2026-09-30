@@ -390,6 +390,16 @@ pub struct Abilities {
     /// world that wants them gone says so. Returning the sky to the server's
     /// hour is never refused — that is the opposite of a cheat.
     pub wind_sky: bool,
+    /// Multiplier on the gravity acting on this player's own body (Science
+    /// ask E-S1).
+    ///
+    /// `1.0` is unchanged, `0.0` floats, and `MAX_GRAVITY` is the most a mod
+    /// may ask. It scales only the gravity term of the step — [`Tuning::gravity`],
+    /// which swimming's buoyancy is also taken from — so the jump impulse is
+    /// untouched and a light body jumps higher and falls slower, which is what
+    /// low gravity is. A body being ridden is stepped with the mount's tuning
+    /// and this does not apply to the pair.
+    pub gravity: f32,
 }
 
 impl Abilities {
@@ -399,6 +409,7 @@ impl Abilities {
         speed: 1.0,
         sprint: true,
         wind_sky: true,
+        gravity: 1.0,
     };
 
     /// The most a mod may multiply a speed by.
@@ -408,6 +419,13 @@ impl Abilities {
     /// would have to walk hundreds of cells to find what it hit — the same
     /// reasoning `Tuning::terminal_velocity` is a cap for.
     pub const MAX_SPEED: f32 = 16.0;
+
+    /// The most a mod may multiply gravity by.
+    ///
+    /// Four times is a bound, not a taste: `Tuning::terminal_velocity` caps a
+    /// fall, but a body pulled harder than this reaches it inside a couple of
+    /// ticks and the jump no longer clears a block.
+    pub const MAX_GRAVITY: f32 = 4.0;
 
     /// These abilities with anything a mod got wrong brought into range.
     ///
@@ -424,12 +442,21 @@ impl Abilities {
             } else {
                 1.0
             },
+            gravity: if self.gravity.is_finite() {
+                self.gravity.clamp(0.0, Self::MAX_GRAVITY)
+            } else {
+                1.0
+            },
             ..self
         }
     }
 
     /// The tuning a body with these abilities is stepped with.
     #[must_use]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the default is a sentinel here, not a measurement: see below"
+    )]
     pub fn tuning(self, base: &Tuning) -> Tuning {
         // **Exactly one, and the comparison is deliberate.** This is not an
         // approximation test: `1.0` is the value `DEFAULT` holds and the value
@@ -437,23 +464,21 @@ impl Abilities {
         // it means a world with no mod touching movement steps bit-for-bit what
         // it always did. Anything else — including 0.9999999 — takes the
         // multiply, which is the honest answer for a number somebody chose.
-        #[expect(
-            clippy::float_cmp,
-            reason = "the default is a sentinel here, not a measurement: see above"
-        )]
-        let unchanged = self.speed == 1.0;
-        if unchanged {
-            return *base;
+        // Each field is tested alone, so a slowed player's gravity and a light
+        // player's speed are both the base's own bits.
+        let mut tuning = *base;
+        if self.speed != 1.0 {
+            tuning.walk_speed = base.walk_speed * self.speed;
+            tuning.sprint_speed = base.sprint_speed * self.speed;
+            tuning.sneak_speed = base.sneak_speed * self.speed;
+            tuning.ground_acceleration = base.ground_acceleration * self.speed;
+            tuning.sprint_acceleration = base.sprint_acceleration * self.speed;
+            tuning.air_acceleration = base.air_acceleration * self.speed;
         }
-        Tuning {
-            walk_speed: base.walk_speed * self.speed,
-            sprint_speed: base.sprint_speed * self.speed,
-            sneak_speed: base.sneak_speed * self.speed,
-            ground_acceleration: base.ground_acceleration * self.speed,
-            sprint_acceleration: base.sprint_acceleration * self.speed,
-            air_acceleration: base.air_acceleration * self.speed,
-            ..*base
+        if self.gravity != 1.0 {
+            tuning.gravity = base.gravity * self.gravity;
         }
+        tuning
     }
 
     /// The intent with what this player may not do taken out of it.

@@ -353,6 +353,118 @@ fn a_slowed_player_predicts_the_speed_the_server_applies() {
 }
 
 #[test]
+fn a_light_player_jumping_and_walking_is_predicted_without_rubber_banding() {
+    // Science ask E-S1. The stand-in was an upward push the client does not
+    // predict, which corrects on every tick. Gravity travels in the abilities
+    // and scales the gravity term on both ends, so a body that hops along at
+    // 0.17 is predicted to within the ordinary tolerance.
+    const GRAVITY: f32 = 0.17;
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(gpu) = gpu() else { return };
+    let server = embedded_granting("light", Some(&format!("gravity = {GRAVITY}")));
+    let mut app = client("light", &server, gpu);
+
+    assert!(
+        run_frames(&mut app, Input::default(), 30.0, |app| app.joined()
+            && app.predicting()
+            && app.meshed_chunks() >= 1),
+        "expected to join; warnings: {:?}",
+        app.warnings()
+    );
+    assert!(
+        run_frames(&mut app, Input::default(), 30.0, |app| {
+            missing_ground_around(app, 1).is_empty()
+        }),
+        "the chunks around the spawn never all arrived; lacking {:?}",
+        missing_ground_around(&app, 1)
+    );
+    assert!(
+        run_frames(&mut app, Input::default(), 5.0, |app| app
+            .abilities()
+            .gravity
+            .to_bits()
+            == GRAVITY.to_bits()),
+        "the client never heard the mod's gravity: it has {:?}",
+        app.abilities()
+    );
+    // The spawn drops a block onto the ground; see the slowed test above.
+    run_frames(&mut app, Input::default(), 2.5, |_| false);
+    let hop = Input {
+        forward: 1.0,
+        jump: true,
+        ..Input::default()
+    };
+    let floor = app.camera().position.to_world().1;
+    run_frames(&mut app, hop, 1.5, |_| false);
+
+    let mut highest = floor;
+    let mut worst = 0.0f32;
+    let mut corrected = 0.0f32;
+    let mut unloaded = false;
+    let mut longest = 0.0f32;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut last = Instant::now();
+    while Instant::now() < deadline {
+        assert!(
+            app.pump_network(),
+            "the connection ended: {:?}",
+            app.warnings()
+        );
+        app.remesh();
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f32();
+        last = now;
+        longest = longest.max(dt);
+        app.advance(hop, dt.min(0.1));
+        highest = highest.max(app.camera().position.to_world().1);
+        worst = worst.max(app.pacing().worst_divergence_cells());
+        corrected = corrected.max(app.pacing().worst_correction_cells());
+        unloaded |= app.pacing().predicted_into_unloaded();
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    println!(
+        "gravity {GRAVITY}: rose {:.2} blocks, worst divergence {worst:.3} cells, worst \
+         correction {corrected:.3}, predicted into unloaded chunks: {unloaded}, longest \
+         frame {:.0} ms",
+        highest - floor,
+        longest * 1000.0
+    );
+    // An ordinary jump clears a block and a little (`phys` tests: at least 3
+    // cells, under 6). At 0.17 the same impulse goes several times as high, so
+    // the client is using the gravity and not merely having heard it.
+    assert!(
+        highest - floor > 2.5,
+        "a light player hopped only {:.2} blocks",
+        highest - floor
+    );
+    if longest > LONGEST_HONEST_FRAME {
+        println!(
+            "SKIPPING the correction bound: a frame took {:.0} ms, past the {:.0} ms the \
+             client can catch up from. The gravity was heard and used, asserted above.",
+            longest * 1000.0,
+            LONGEST_HONEST_FRAME * 1000.0
+        );
+        app.shutdown();
+        assert!(server.stop());
+        return;
+    }
+    assert!(
+        corrected < 0.05,
+        "the client was corrected by up to {corrected:.3} cells: it is not predicting the \
+         gravity the server applies (into unloaded chunks: {unloaded})"
+    );
+    assert!(
+        worst < 0.05,
+        "the client disagreed with the server by up to {worst:.3} cells a tick (into \
+         unloaded chunks: {unloaded})"
+    );
+    app.shutdown();
+    assert!(server.stop());
+}
+
+#[test]
 fn a_player_refused_the_sky_keys_cannot_wind_their_own_clock() {
     let _one = ONE_AT_A_TIME
         .lock()
