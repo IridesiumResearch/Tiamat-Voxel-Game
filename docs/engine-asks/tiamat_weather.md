@@ -12,11 +12,11 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W31, filed 2026-10-01. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: none. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
-## W31. No stars in Beautiful (2026-10-01)
+## W31. No stars in Beautiful (2026-10-01): LANDED 2026-10-01 (engine 1235f34), awaiting the eye
 
 **Seen.** The designer, playing 0.3.0: "I am not seeing any stars in
 Beautiful lighting mode." A clear night, with the sky owner's keyframes
@@ -38,6 +38,27 @@ part of the pass; with no modifier sent it is not in the picture at all.
 3's fog the way the bow is, or kept out of it. Gate: a clear night,
 `stars = 1` keyframe, the same view in all three lighting modes shows the
 same stars, and they still sit behind cloud and terrain.
+
+**From the engine, 2026-10-01 (engine 1235f34, no protocol change).**
+Confirmed as you read it, and fixed the way the bow is. Mode 3's fog
+covers a pixel of open sky wholly at a game's view distance, so the stars
+the cloud pass had drawn were painted over: on the old code a night with
+fog at 200 blocks showed 34 star pixels in Beautiful against 1242 in
+Classic, the brightest few poking through. The composite now adds the
+stars after its fog, on the open-sky pixels, and the cloud pass leaves
+them (and the bow) to it in mode 3 so none is counted twice.
+
+The gate as a screenshot test, on the software rasteriser: a clear starry
+night in all three modes shows a starfield; nearly every pixel a star
+lights in Simple and Classic is lit in Beautiful; nothing shows with no
+stars asked for; and the ground still hides them. Beautiful's stars are
+brighter and a little wider than the other modes': the same 2.6 times
+headroom its float target gives everything on the sky, which nobody has
+seen on the stars until now.
+
+For the eye ([H]): a clear night in Beautiful, looking up; the same
+stars as in Classic, behind the cloud deck and behind a hill. Say if
+Beautiful's are too bright.
 
 ## W30. A rainbow (2026-09-30): LANDED 2026-09-30 (engine 143ed0f..a446330, protocol 82), awaiting the eye
 
