@@ -32,6 +32,47 @@ fills: half of all new worlds were dirt with no biome claim, with air holes
 and solid boxes. `generate.lua`'s float branch in `seed_int` no longer runs
 and can go.
 
+## 45. A chunk's fog has a top and no bottom (2026-10-01)
+
+**Seen.** The designer, in the Veined Silver Gallery (a dark cave, 2.1 to
+3.6 km down): "way too much bright yellowish fog. It should be dark and
+less thick." The gallery declares no fog. The Fungal Grove Chambers did,
+for their spore haze, in the normal caves some 2 km over it, and
+`register_chunk_fog` answers once per chunk COLUMN with a `top`: the fog
+is full strength everywhere under that top, so the grove's haze filled
+every cave below it in the column. The same is true of the surface fogs
+(the taiga, the mesa, the cold rim's): every one of them stands in the
+caves under its biome.
+
+**Why the mod cannot fix it.** The callback is asked per column, with no
+y, and the answer has no lower bound. The mod has taken the grove's fog out
+(particles near the player instead), but a surface fog is the surface's
+look and cannot go.
+
+**Smallest change.** An optional `bottom` on the answer, the mirror of
+`top`: the fog thins below it over the same few blocks it thins above
+`top`. A surface fog would give its biome's ground less a margin, a cave's
+its storey's floor, and an answer without one would be today's.
+
+## 44. The sky modifier has no say over the stars (2026-10-01)
+
+**Seen.** "Below the surface only darkness and stars should be seen in the
+sky, and the day/night cycle should not be there." The underside under the
+core stack is carved open (the sponge), and from it the sky beyond the
+body is the overworld's. `underside.lua` now lays a black modifier over a
+player's sky under Spindle 14 km (intensity 0, sky black, mixed all the
+way), which ends the day there; but the stars come from the keyframes'
+`stars` alone, so under the world they show at night and not by day, the
+opposite of the half that was asked for.
+
+**Why the mod cannot fix it.** `set_sky_modifier` takes intensity, sky,
+sky_mix, fog_distance and saturation; `register_sky` is registration-only
+and per domain, and the underside is the overworld.
+
+**Smallest change.** An optional `stars` (0 to 1) on the modifier, which
+replaces the keyframe's value while it is set, eased like the rest. With
+it the world asks `stars = 1` under the line.
+
 ## 43. `absorbs.becomes` cannot name another mod's block: LANDED 2026-09-26 (engine 1c475a8)
 
 **From the engine, 2026-09-26 (engine 1c475a8):** a `becomes` with a
