@@ -75,7 +75,8 @@ struct Globals {
     // camera's fog top in z and the camera's height in w, both relative to the
     // grid's reference height.
     fog_frame: vec4<f32>,
-    // Cells per side in x; whether any place has fog in y; daylight in z.
+    // Cells per side in x; whether any place has fog in y; daylight in z; the
+    // camera's fog bottom in w, relative to the grid's reference height.
     fog_grid: vec4<f32>,
     // The deck's shade map — weather ask W11: its corner relative to the
     // camera in xy, one over its side in z, the deck's floor relative to the
@@ -110,7 +111,7 @@ struct MaterialTint {
 @group(0) @binding(3) var<storage, read> tints: array<MaterialTint>;
 
 // Every place's fog, two vec4s per chunk column round the camera, laid out
-// z * side + x: colour × density and density, then top × density. See
+// z * side + x: colour × density and density, then top × density and bottom × density. See
 // `render::place_fog`, whose `sample` and `amount` are this file's
 // `place_fog_at` and `place_fog` written once more in Rust for the tests.
 @group(0) @binding(4) var<storage, read> fog_cells: array<vec4<f32>>;
@@ -124,7 +125,7 @@ struct MaterialTint {
 // match `place_fog::FALLOFF`.
 const FOG_FALLOFF: f32 = 4.0;
 
-// One grid cell, premultiplied, as colour-and-density then top.
+// One grid cell, premultiplied, as colour-and-density then top-and-bottom.
 fn fog_cell(x: u32, z: u32) -> array<vec4<f32>, 2> {
     let side = u32(globals.fog_grid.x);
     let index = 2u * (z * side + x);
@@ -153,15 +154,18 @@ fn place_fog_at(relative: vec2<f32>) -> array<vec4<f32>, 2> {
     return array<vec4<f32>, 2>(mix(near0, far0, t.y), mix(near1, far1, t.y));
 }
 
-// The antiderivative of the height profile: one under the top, e^-(y-top)/k
-// over it. The two halves meet at zero, which is what makes the mean below
-// exact across the boundary.
-fn fog_height_integral(y: f32, top: f32) -> f32 {
-    let above = y - top;
-    if (above <= 0.0) {
-        return above;
+// The antiderivative of the height profile: one between the bottom and the top,
+// e^-(y-top)/k over the top and e^(y-bottom)/k under the bottom. The three
+// pieces meet, which is what makes the mean below exact across either edge.
+fn fog_height_integral(y: f32, top: f32, bottom_in: f32) -> f32 {
+    let bottom = min(bottom_in, top);
+    if (y > top) {
+        return FOG_FALLOFF * (1.0 - exp(-(y - top) / FOG_FALLOFF));
     }
-    return FOG_FALLOFF * (1.0 - exp(-above / FOG_FALLOFF));
+    if (y >= bottom) {
+        return y - top;
+    }
+    return FOG_FALLOFF * exp((y - bottom) / FOG_FALLOFF) + (bottom - top) - FOG_FALLOFF;
 }
 
 // A place's fog over a lit colour, for a point `relative` to the camera.
@@ -182,13 +186,14 @@ fn place_fog(lit: vec3<f32>, relative: vec3<f32>, distance: f32) -> vec3<f32> {
     }
     let colour = (globals.fog_here.rgb * here_density + there[0].rgb) / total;
     let top = (globals.fog_frame.z * here_density + there[1].x) / total;
+    let bottom = min((globals.fog_grid.w * here_density + there[1].y) / total, top);
     let eye = globals.fog_frame.w;
     let point = eye + relative.y;
     var profile: f32;
     if (abs(point - eye) < 0.01) {
-        profile = exp(-max(eye - top, 0.0) / FOG_FALLOFF);
+        profile = exp(-(max(eye - top, 0.0) + max(bottom - eye, 0.0)) / FOG_FALLOFF);
     } else {
-        profile = (fog_height_integral(point, top) - fog_height_integral(eye, top)) / (point - eye);
+        profile = (fog_height_integral(point, top, bottom) - fog_height_integral(eye, top, bottom)) / (point - eye);
     }
     let depth = 0.5 * total * distance * profile;
     let hidden = 1.0 - exp(-depth);

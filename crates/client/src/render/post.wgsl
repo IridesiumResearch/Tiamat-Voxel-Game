@@ -45,7 +45,7 @@ struct Post {
     fog_up: f32,
     // Every place's fog, as the world shader's globals carry it — see
     // `render::place_fog`. Colour and density at the camera; the grid's corner,
-    // the camera's fog top and height; cells per side, any, daylight.
+    // the camera's fog top and height; cells per side, any, daylight, bottom.
     fog_here: vec4<f32>,
     fog_frame: vec4<f32>,
     fog_grid: vec4<f32>,
@@ -135,12 +135,15 @@ fn place_fog_at(relative: vec2<f32>) -> array<vec4<f32>, 2> {
     return array<vec4<f32>, 2>(mix(near0, far0, t.y), mix(near1, far1, t.y));
 }
 
-fn fog_height_integral(y: f32, top: f32) -> f32 {
-    let above = y - top;
-    if (above <= 0.0) {
-        return above;
+fn fog_height_integral(y: f32, top: f32, bottom_in: f32) -> f32 {
+    let bottom = min(bottom_in, top);
+    if (y > top) {
+        return FOG_FALLOFF * (1.0 - exp(-(y - top) / FOG_FALLOFF));
     }
-    return FOG_FALLOFF * (1.0 - exp(-above / FOG_FALLOFF));
+    if (y >= bottom) {
+        return y - top;
+    }
+    return FOG_FALLOFF * exp((y - bottom) / FOG_FALLOFF) + (bottom - top) - FOG_FALLOFF;
 }
 
 fn place_fog(lit: vec3<f32>, relative: vec3<f32>, distance: f32) -> vec3<f32> {
@@ -155,13 +158,14 @@ fn place_fog(lit: vec3<f32>, relative: vec3<f32>, distance: f32) -> vec3<f32> {
     }
     let colour = (post.fog_here.rgb * here_density + there[0].rgb) / total;
     let top = (post.fog_frame.z * here_density + there[1].x) / total;
+    let bottom = min((post.fog_grid.w * here_density + there[1].y) / total, top);
     let eye = post.fog_frame.w;
     let point = eye + relative.y;
     var profile: f32;
     if (abs(point - eye) < 0.01) {
-        profile = exp(-max(eye - top, 0.0) / FOG_FALLOFF);
+        profile = exp(-(max(eye - top, 0.0) + max(bottom - eye, 0.0)) / FOG_FALLOFF);
     } else {
-        profile = (fog_height_integral(point, top) - fog_height_integral(eye, top)) / (point - eye);
+        profile = (fog_height_integral(point, top, bottom) - fog_height_integral(eye, top, bottom)) / (point - eye);
     }
     let depth = 0.5 * total * distance * profile;
     let hidden = 1.0 - exp(-depth);

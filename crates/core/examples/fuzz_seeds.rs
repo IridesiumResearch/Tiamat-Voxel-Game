@@ -548,6 +548,33 @@ fn server_messages() -> Vec<Vec<u8>> {
                 colour: [0, 0x80, 0xFF],
                 visibility: u16::MAX,
                 top: Some(i32::MIN),
+                bottom: Some(i32::MAX),
+            }),
+        },
+        // Protocol v84: a fog with a bottom and no top, and a sky modifier
+        // naming stars at each end of its range and with none.
+        ServerMessage::ChunkData {
+            pos: ChunkPos::new(2, -9, 4),
+            blob: vec![0x05, 0x00],
+            tint: [0x10, 0x20, 0x30],
+            fog: Some(ChunkFog {
+                colour: [0x40, 0x50, 0x60],
+                visibility: 1,
+                top: None,
+                bottom: Some(-1),
+            }),
+        },
+        ServerMessage::SkyModifier {
+            modifier: Some(tiamat_core::atmosphere::SkyModifier {
+                stars: Some(1.0),
+                ..tiamat_core::atmosphere::SkyModifier::NONE
+            }),
+        },
+        ServerMessage::SkyModifier {
+            modifier: Some(tiamat_core::atmosphere::SkyModifier {
+                stars: Some(0.0),
+                ease_ticks: tiamat_core::atmosphere::MAX_EASE_TICKS,
+                ..tiamat_core::atmosphere::SkyModifier::NONE
             }),
         },
         ServerMessage::ChunkData {

@@ -289,7 +289,9 @@ fn camera_fog(lit: vec3<f32>, distance: f32) -> vec3<f32> {
     if (globals.fog_grid.y < 0.5 || globals.lighting_mode == 2u) {
         return lit;
     }
-    let above = max(globals.fog_frame.w - globals.fog_frame.z, 0.0);
-    let depth = globals.fog_here.w * distance * exp(-above / 4.0);
+    let bottom = min(globals.fog_grid.w, globals.fog_frame.z);
+    let beyond = max(globals.fog_frame.w - globals.fog_frame.z, 0.0)
+        + max(bottom - globals.fog_frame.w, 0.0);
+    let depth = globals.fog_here.w * distance * exp(-beyond / 4.0);
     return mix(lit, globals.fog_here.rgb * globals.fog_grid.z, 1.0 - exp(-depth));
 }

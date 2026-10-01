@@ -636,17 +636,25 @@ function game.register_sky(spec) end
 ---    sky_mix = 0.7,                -- how far toward it; 1 when `sky` is given, else 0
 ---    fog_distance = 0.6,
 ---    grade = { saturation = 0.7 }, -- or `saturation = 0.7` at the top level
+---    stars = 1,                    -- the stars' brightness, REPLACING the keyframes'
 ---    ease_ticks = 400,             -- how long the client takes to get there
 ---})
 ---game.set_sky_modifier(uuid, nil)  -- the plain sky again, eased over the last ease_ticks
 ---```
 ---
+---**`stars` (0 to 1) replaces, where the rest scale.** While the modifier is
+---set, it is how much of the star catalog shows, in place of the keyframes'
+---`stars` — day or night — and it eases like the other fields, from and back to
+---the keyframes' value. Leave it out and the keyframes decide, as they always
+---did; `0` is a say too (no stars). A black sky with `stars = 1` is the sky
+---from under a world.
+---
 ---Set it as often as you like: the server sends one message when it CHANGES.
 ---A player who joins is on the plain sky until you set theirs. Wrong types
 ---are errors; wrong numbers are clamped (intensity 0..2, sky channels 0..2,
----sky_mix 0..1, fog_distance 0.05..4, saturation 0..4, ease_ticks up to 2400).
+---sky_mix 0..1, fog_distance 0.05..4, saturation 0..4, stars 0..1, ease_ticks up to 2400).
 ---@param player string A player's UUID in hex, as a hook event reports one.
----@param modifier { intensity?: number, sky?: number[]|{ r: number, g: number, b: number }, sky_mix?: number, fog_distance?: number, saturation?: number, grade?: { saturation?: number }, ease_ticks?: integer }|nil
+---@param modifier { intensity?: number, sky?: number[]|{ r: number, g: number, b: number }, sky_mix?: number, fog_distance?: number, saturation?: number, grade?: { saturation?: number }, stars?: number, ease_ticks?: integer }|nil
 ---@return boolean here
 function game.set_sky_modifier(player, modifier) end
 
@@ -1089,6 +1097,7 @@ function game.register_chunk_tint(callback) end
 ---        r = 0.55, g = 0.62, b = 0.55,                  -- the mist, in daylight
 ---        visibility = 20,                               -- blocks you see into it
 ---        top = 70,                                      -- lies under y = 70
+---        bottom = 52,                                   -- and over y = 52
 ---    }
 ---end)
 ---```
@@ -1101,6 +1110,11 @@ function game.register_chunk_tint(callback) end
 ---- `top`: the height it lies under. Above it the fog thins by `e` every four
 ---  blocks — thick in the valley, clear on the hill, and a layer seen from
 ---  above. Leave it out for fog at every height.
+---- `bottom`: the height it lies over, the mirror of `top`: below it the fog
+---  thins by `e` every four blocks. A surface fog gives its biome's ground less a
+---  margin, and does not fill the caves under it; a cave's gives its storey's
+---  floor. Leave it out for fog all the way down (the fog is then as it was
+---  before `bottom` existed). A `bottom` above `top` is lowered to it.
 ---
 ---Return `nil` for no fog of your own — no opinion, so the next mod's answer
 ---stands. Every mod with a callback is asked, in load order, and the last that
@@ -1123,7 +1137,7 @@ function game.register_chunk_tint(callback) end
 ---that carry no fog, so a fogged place far away reads as its nearest column's
 ---fog; under water the water's murk replaces it; and a body (a mob, a player)
 ---is fogged by the camera's own column, not its own.
----@param callback fun(pos: table): { r: number?, g: number?, b: number?, visibility: number, top: number? }|nil
+---@param callback fun(pos: table): { r: number?, g: number?, b: number?, visibility: number, top: number?, bottom: number? }|nil
 function game.register_chunk_fog(callback) end
 
 ---Called when somebody leaves. **Registration window only.**

@@ -572,3 +572,73 @@ fn a_player_who_rejoins_is_told_the_standing_rainbow_again() {
     });
     assert!(server.stop());
 }
+
+/// A mod that holds a black sky with `stars` over a player (set on every tick
+/// for ten, which must cost nothing), changes it to a modifier that says
+/// nothing of the stars, then to one that names too many, and clears it — engine
+/// ask World 44.
+const STARRY_UNDERSIDE: &str = r#"
+local online = {}
+game.register_on_player_join(function(event)
+    online[event.player] = 0
+end)
+game.register_on_player_leave(function(event)
+    online[event.player] = nil
+end)
+game.register_on_tick(function()
+    for player, ticks in pairs(online) do
+        online[player] = ticks + 1
+        if ticks < 10 then
+            game.set_sky_modifier(player, { intensity = 0, sky = { 0, 0, 0 }, stars = 1, ease_ticks = 40 })
+        elseif ticks < 20 then
+            game.set_sky_modifier(player, { intensity = 0, sky = { 0, 0, 0 }, ease_ticks = 40 })
+        elseif ticks < 30 then
+            game.set_sky_modifier(player, { stars = 7 })
+        else
+            game.set_sky_modifier(player, nil)
+        end
+    end
+end)
+"#;
+
+#[test]
+fn a_modifiers_stars_reach_the_player_once_per_change_and_clearing_it_leaves_the_keyframes() {
+    let mods = write_mod("stars-mods", STARRY_UNDERSIDE);
+    let server = serve(&mods, "stars-world");
+    block_on(async {
+        let mut bot = joined(&server, "Watcher").await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline && bot.sky_modifiers_received().len() < 4 {
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        // Room for a fifth to arrive, were a standing value re-sent.
+        let _ = tokio::time::timeout(Duration::from_millis(500), bot.recv()).await;
+        let received = bot.sky_modifiers_received();
+        assert_eq!(
+            received.len(),
+            4,
+            "set ten times, changed twice, cleared once: {received:?}"
+        );
+        assert_eq!(
+            received[0].expect("the underside").stars,
+            Some(1.0),
+            "the stars named reach the player"
+        );
+        assert_eq!(
+            received[1].expect("without stars").stars,
+            None,
+            "a modifier with no say leaves the stars to the keyframes"
+        );
+        assert_eq!(
+            received[2].expect("too many stars").stars,
+            Some(1.0),
+            "clamped at the server, so the client never sees past 1"
+        );
+        assert_eq!(
+            received[3], None,
+            "nil clears the modifier, and with it the stars"
+        );
+        bot.disconnect().await;
+    });
+    assert!(server.stop());
+}

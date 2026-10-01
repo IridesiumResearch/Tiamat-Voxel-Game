@@ -376,7 +376,8 @@ fn a_mods_fog_reaches_the_client_by_both_paths() {
     // the tint was lost through.
     //
     // Even columns of x are foggy and odd ones are clear, so a server that
-    // sent one fog for everything, or none, fails on half of them.
+    // sent one fog for everything, or none, fails on half of them. Of the
+    // foggy ones, every second has a `bottom` (World 45) and the rest none.
     let root = world_dir("foggy-mods");
     let dir = root.join("foggy");
     std::fs::create_dir_all(&dir).expect("mod dir");
@@ -390,7 +391,9 @@ fn a_mods_fog_reaches_the_client_by_both_paths() {
         "local stone = game.register_block{ id = \"stone\" }\n\
          game.register_chunk_fog(function(pos)\n\
          \x20   if pos.x % 2 == 0 then\n\
-         \x20       return { r = 0.2, g = 0.4, b = 0.2, visibility = 24, top = pos.y * 16 + 5 }\n\
+         \x20       -- World 45: every second foggy column also has a bottom.\n\
+         \x20       local bottom = pos.x % 4 == 0 and pos.y * 16 - 3 or nil\n\
+         \x20       return { r = 0.2, g = 0.4, b = 0.2, visibility = 24, top = pos.y * 16 + 5, bottom = bottom }\n\
          \x20   end\n\
          end)\n\
          game.register_on_generate(function(buf, pos)\n\
@@ -421,6 +424,7 @@ fn a_mods_fog_reaches_the_client_by_both_paths() {
                 colour: [51, 102, 51],
                 visibility: 24,
                 top: Some(pos.y * 16 + 5),
+                bottom: (pos.x % 4 == 0).then_some(pos.y * 16 - 3),
             });
             assert_eq!(fog, expected, "{who}'s chunk at {pos:?}");
         }

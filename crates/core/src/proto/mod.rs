@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 83;
+pub const PROTOCOL_VERSION: u32 = 84;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,15 @@ pub const PROTOCOL_VERSION: u32 = 83;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v84 (World 44 and 45): two changes under one number. `SkyModifier` gains
+// `stars`, appended after `saturation`: `None`, or a brightness for the star
+// catalog that replaces the keyframes' while the modifier stands, eased like
+// the rest (refused on decode when it is not a number or outside 0..=1). And
+// `ChunkFog` gains `bottom`, appended after `top`: the mirror of it, below
+// which the fog thins over the same few blocks (a block height, so any i32
+// is a number; the client works in f32 and clamps nothing it could not draw).
+// **Fields on existing shapes**, the unsafe kind of change, so the version
+// check is what keeps a v83 peer from reading a length prefix as a field.
 // v83 (Science E-S1): `AbilitiesDef` carries `gravity`, a multiplier on the
 // gravity acting on this player's body. The client predicts its own fall and
 // jump, so it must step with the same number the server does or a light
@@ -2728,6 +2737,12 @@ pub struct ChunkFog {
     /// Above it the fog thins over a few blocks, which is ground fog: thick in
     /// the valley, clear on the hill, and seen from above as a layer.
     pub top: Option<i32>,
+    /// The world height the fog lies over, or `None` for fog all the way down.
+    ///
+    /// The mirror of `top`: below it the fog thins over the same few blocks,
+    /// so a surface fog can stand on its biome's ground without filling the
+    /// caves under it. Engine ask World 45.
+    pub bottom: Option<i32>,
 }
 
 /// One moment in a mod's day, on the wire.
@@ -3940,6 +3955,7 @@ mod tests {
                     colour: [90, 110, 95],
                     visibility: 24,
                     top: Some(-70),
+                    bottom: Some(-90),
                 }),
             },
             ServerMessage::Disconnect {
@@ -5584,6 +5600,100 @@ mod tests {
                 validate_server_message(&ServerMessage::Lightning { lightning: poison }).is_err(),
                 "{poison:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_modifiers_stars_and_a_fogs_bottom_are_pinned_and_a_hostile_star_is_refused() {
+        // Protocol v84: World 44's `stars`, appended after `saturation`, and
+        // World 45's `bottom`, appended after `top`.
+        let modifier = crate::atmosphere::SkyModifier {
+            stars: Some(1.0),
+            ease_ticks: 200,
+            ..crate::atmosphere::SkyModifier::NONE
+        };
+        let sky = encode(&ServerMessage::SkyModifier {
+            modifier: Some(modifier),
+        })
+        .expect("encode");
+        let one = 1.0_f32.to_le_bytes();
+        let mut want = vec![44, 1];
+        want.extend(one); // intensity
+        want.extend([0; 12]); // sky
+        want.extend([0; 4]); // sky_mix
+        want.extend(one); // fog_distance
+        want.extend(one); // saturation
+        want.push(1); // stars: Some
+        want.extend(one);
+        want.extend([0xC8, 0x01]); // ease_ticks
+        assert_eq!(sky, want);
+        let decoded: ServerMessage = decode(&sky).expect("decode");
+        assert_eq!(
+            decoded,
+            ServerMessage::SkyModifier {
+                modifier: Some(modifier)
+            }
+        );
+        // No say over the stars is one byte, a zero, where the value would be.
+        let silent = encode(&ServerMessage::SkyModifier {
+            modifier: Some(crate::atmosphere::SkyModifier {
+                ease_ticks: 200,
+                ..crate::atmosphere::SkyModifier::NONE
+            }),
+        })
+        .expect("encode");
+        assert_eq!(silent.len(), sky.len() - 4);
+        assert_eq!(silent[silent.len() - 3..], [0, 0xC8, 0x01]);
+
+        // A star brightness that is not a number or is out of range is a
+        // server not to be trusted; the ends of the range are not.
+        for poison in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.01,
+            1.01,
+            1e30,
+        ] {
+            let message = ServerMessage::SkyModifier {
+                modifier: Some(crate::atmosphere::SkyModifier {
+                    stars: Some(poison),
+                    ..modifier
+                }),
+            };
+            assert!(validate_server_message(&message).is_err(), "{poison:?}");
+        }
+        for fine in [0.0, 0.5, 1.0] {
+            let message = ServerMessage::SkyModifier {
+                modifier: Some(crate::atmosphere::SkyModifier {
+                    stars: Some(fine),
+                    ..modifier
+                }),
+            };
+            assert!(validate_server_message(&message).is_ok(), "{fine:?}");
+        }
+
+        let chunk = |bottom| ServerMessage::ChunkData {
+            pos: ChunkPos::new(0, 0, 0),
+            blob: Vec::new(),
+            tint: [0; 3],
+            fog: Some(ChunkFog {
+                colour: [1, 2, 3],
+                visibility: 5,
+                top: Some(-1),
+                bottom,
+            }),
+        };
+        let with = encode(&chunk(Some(2))).expect("encode");
+        assert_eq!(with[with.len() - 9..], [1, 1, 2, 3, 5, 1, 1, 1, 4]);
+        let without = encode(&chunk(None)).expect("encode");
+        assert_eq!(without[without.len() - 8..], [1, 1, 2, 3, 5, 1, 1, 0]);
+        for bottom in [Some(i32::MIN), Some(i32::MAX), Some(0), None] {
+            let message = chunk(bottom);
+            assert!(validate_server_message(&message).is_ok());
+            let decoded: ServerMessage =
+                decode(&encode(&message).expect("encode")).expect("decode");
+            assert_eq!(decoded, message);
         }
     }
 

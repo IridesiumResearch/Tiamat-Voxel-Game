@@ -431,8 +431,27 @@ impl Eased {
             sky_mix: scalar(self.from.sky_mix, self.to.sky_mix),
             fog_distance: scalar(self.from.fog_distance, self.to.fog_distance),
             saturation: scalar(self.from.saturation, self.to.saturation),
+            stars: self.to.stars,
             ease_ticks: self.to.ease_ticks,
         }
+    }
+
+    /// The star brightness to draw, given the keyframes' own value.
+    ///
+    /// **Engine ask World 44.** A modifier that names `stars` replaces the
+    /// keyframes' value while it is set, so the ease runs between what each
+    /// end draws: the end with no say counts as the keyframe's value. Both
+    /// ends silent is the keyframe's value exactly, and an arrived modifier
+    /// is exactly what it says.
+    #[must_use]
+    pub fn stars_over(&self, keyframe: f32) -> f32 {
+        let at = |modifier: &SkyModifier| modifier.stars.unwrap_or(keyframe);
+        if self.duration <= 0.0 || self.elapsed >= self.duration {
+            return at(&self.to);
+        }
+        let blend = self.elapsed / self.duration;
+        let (from, to) = (at(&self.from), at(&self.to));
+        from + (to - from) * blend
     }
 }
 
@@ -1300,6 +1319,7 @@ mod tests {
             sky_mix: 1.0,
             fog_distance: 0.5,
             saturation: 0.5,
+            stars: None,
             ease_ticks: 20,
         };
         let mut eased = Eased::none();
@@ -1338,6 +1358,60 @@ mod tests {
         assert_eq!(dim.intensity, 0.5);
         assert_eq!(dim.sky, [0.5, 0.5, 0.5]);
         assert_eq!(dim.grade.saturation, 0.5);
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "arrival and silence are exact")]
+    fn the_stars_a_modifier_names_replace_the_keyframes_and_ease_like_the_rest() {
+        // **World 44.** Silent, the keyframe's value is returned exactly;
+        // named, it replaces it; the ease runs between what each end draws
+        // (a silent end is the keyframe), and calling the modifier off goes
+        // back to the keyframe over the same time.
+        let mut eased = Eased::none();
+        assert_eq!(eased.stars_over(0.3), 0.3, "no modifier, no say");
+        eased.set(Some(SkyModifier {
+            intensity: 0.0,
+            ..SkyModifier::NONE
+        }));
+        assert_eq!(
+            eased.stars_over(0.3),
+            0.3,
+            "a modifier without stars, no say"
+        );
+
+        let under = SkyModifier {
+            stars: Some(1.0),
+            ease_ticks: 20,
+            ..SkyModifier::NONE
+        };
+        let mut eased = Eased::none();
+        eased.set(Some(under));
+        assert_eq!(eased.stars_over(0.0), 0.0, "it starts where it was");
+        eased.advance(0.5);
+        assert!((eased.stars_over(0.0) - 0.5).abs() < 1e-6);
+        assert!(
+            (eased.stars_over(0.5) - 0.75).abs() < 1e-6,
+            "the silent end follows the keyframe"
+        );
+        eased.advance(0.5);
+        assert_eq!(eased.stars_over(0.0), 1.0, "arrived exactly");
+        assert_eq!(eased.stars_over(0.7), 1.0, "by day as by night");
+        eased.set(None);
+        eased.advance(0.5);
+        assert!(
+            (eased.stars_over(0.0) - 0.5).abs() < 1e-6,
+            "back, same time"
+        );
+        eased.advance(0.5);
+        assert_eq!(eased.stars_over(0.2), 0.2, "and the keyframes decide again");
+
+        let dark = SkyModifier {
+            stars: Some(0.0),
+            ..SkyModifier::NONE
+        };
+        let mut eased = Eased::none();
+        eased.set(Some(dark));
+        assert_eq!(eased.stars_over(1.0), 0.0, "zero is a say too");
     }
 
     #[test]

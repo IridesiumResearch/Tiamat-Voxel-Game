@@ -10,7 +10,9 @@
 //! `σ = 3 / visibility` per block — so at `visibility` blocks the fog hides
 //! 95% of what is behind it — full below `top` and thinning exponentially over
 //! [`FALLOFF`] blocks above it, which is ground fog: thick in the valley, clear
-//! on the hill. How much of a surface survives is `exp(-τ)`, with `τ` the
+//! on the hill. A `bottom` is the mirror of that: the fog thins below it over
+//! the same [`FALLOFF`], so a surface fog stands on its ground and does not
+//! fill the caves under it. How much of a surface survives is `exp(-τ)`, with `τ` the
 //! density integrated along the eye's ray.
 //!
 //! # Why the integral is closed-form and not marched
@@ -87,20 +89,38 @@ pub fn density(visibility: u16) -> f32 {
     3.0 / f32::from(visibility.max(1))
 }
 
+/// The `bottom` a fog with no bottom is given: far enough below anything that
+/// the height term is one everywhere a player can stand. [`NO_TOP`]'s mirror.
+pub const NO_BOTTOM: f32 = -8000.0;
+
 /// The antiderivative of the height profile, for [`mean_height_term`].
 ///
-/// The profile is 1 at and below `top` and `exp(-(y - top) / FALLOFF)` above
-/// it, so this is `y - top` below and `FALLOFF · (1 - exp(-(y - top) /
-/// FALLOFF))` above — the two meet at zero, which is what makes the mean across
-/// the boundary exact rather than piecewise-approximate.
+/// The profile is 1 between `bottom` and `top`, `exp(-(y - top) / FALLOFF)`
+/// above `top` and `exp((y - bottom) / FALLOFF)` below `bottom`. This is
+/// `y - top` in the middle, `FALLOFF · (1 - exp(-(y - top) / FALLOFF))` above
+/// and `FALLOFF · exp((y - bottom) / FALLOFF) + (bottom - top) - FALLOFF`
+/// below — the three meet, which is what makes the mean across either
+/// boundary exact rather than piecewise-approximate. `bottom` is taken as no
+/// higher than `top`: a fog cannot be thinner between them than outside.
 #[must_use]
-pub fn height_integral(y: f32, top: f32) -> f32 {
-    let above = y - top;
-    if above <= 0.0 {
-        above
+pub fn height_integral(y: f32, top: f32, bottom: f32) -> f32 {
+    let bottom = bottom.min(top);
+    if y > top {
+        FALLOFF * (1.0 - (-(y - top) / FALLOFF).exp())
+    } else if y >= bottom {
+        y - top
     } else {
-        FALLOFF * (1.0 - (-above / FALLOFF).exp())
+        FALLOFF * ((y - bottom) / FALLOFF).exp() + (bottom - top) - FALLOFF
     }
+}
+
+/// The height profile at one height: 1 between `bottom` and `top`, thinning by
+/// a factor of `e` every [`FALLOFF`] blocks beyond either.
+#[must_use]
+pub fn height_profile(y: f32, top: f32, bottom: f32) -> f32 {
+    let bottom = bottom.min(top);
+    let beyond = (y - top).max(0.0) + (bottom - y).max(0.0);
+    (-beyond / FALLOFF).exp()
 }
 
 /// The mean of the height profile along a ray from height `from` to `to`.
@@ -108,18 +128,18 @@ pub fn height_integral(y: f32, top: f32) -> f32 {
 /// Level rays take the profile at their height, because the difference
 /// quotient below divides by the climb.
 #[must_use]
-pub fn mean_height_term(from: f32, to: f32, top: f32) -> f32 {
+pub fn mean_height_term(from: f32, to: f32, top: f32, bottom: f32) -> f32 {
     let climb = to - from;
     if climb.abs() < 0.01 {
-        let above = (from - top).max(0.0);
-        return (-above / FALLOFF).exp();
+        return height_profile(from, top, bottom);
     }
-    (height_integral(to, top) - height_integral(from, top)) / climb
+    (height_integral(to, top, bottom) - height_integral(from, top, bottom)) / climb
 }
 
 /// A fog as one grid cell holds it: premultiplied, top relative to `reference`.
 ///
-/// `[r·σ, g·σ, b·σ, σ]` and `[top·σ, 0, 0, 0]`; a clear column is all zeros.
+/// `[r·σ, g·σ, b·σ, σ]` and `[top·σ, bottom·σ, 0, 0]`; a clear column is all
+/// zeros.
 #[must_use]
 pub fn cell(fog: Option<&ChunkFog>, reference: i32) -> [[f32; 4]; 2] {
     let Some(fog) = fog else {
@@ -127,9 +147,17 @@ pub fn cell(fog: Option<&ChunkFog>, reference: i32) -> [[f32; 4]; 2] {
     };
     let sigma = density(fog.visibility);
     let colour = fog.colour.map(|channel| f32::from(channel) / 255.0);
-    let top = fog.top.map_or(NO_TOP, |top| {
-        ((top - reference) as f32).clamp(-NO_TOP, NO_TOP)
-    });
+    // In i64, because a height arrives from a peer and `i32::MIN - reference`
+    // must not wrap; clamped, so nothing huge reaches the shaders.
+    let relative = |height: i32| (i64::from(height) - i64::from(reference)) as f32;
+    let top = fog
+        .top
+        .map_or(NO_TOP, |top| relative(top).clamp(-NO_TOP, NO_TOP));
+    // Never above its own top, so a blend of two columns keeps `bottom <= top`.
+    let bottom = fog
+        .bottom
+        .map_or(NO_BOTTOM, |bottom| relative(bottom).clamp(-NO_TOP, NO_TOP))
+        .min(top);
     [
         [
             colour[0] * sigma,
@@ -137,7 +165,7 @@ pub fn cell(fog: Option<&ChunkFog>, reference: i32) -> [[f32; 4]; 2] {
             colour[2] * sigma,
             sigma,
         ],
-        [top * sigma, 0.0, 0.0, 0.0],
+        [top * sigma, bottom * sigma, 0.0, 0.0],
     ]
 }
 
@@ -150,6 +178,8 @@ pub struct Sample {
     pub density: f32,
     /// The height it lies under, relative to the grid's reference height.
     pub top: f32,
+    /// The height it lies over, relative to the same reference.
+    pub bottom: f32,
 }
 
 impl Sample {
@@ -158,6 +188,7 @@ impl Sample {
         colour: [1.0; 3],
         density: 0.0,
         top: NO_TOP,
+        bottom: NO_BOTTOM,
     };
 
     fn from_premultiplied(cell: [[f32; 4]; 2]) -> Self {
@@ -173,6 +204,7 @@ impl Sample {
             ],
             density,
             top: cell[1][0] / density,
+            bottom: cell[1][1] / density,
         }
     }
 }
@@ -197,7 +229,8 @@ pub fn amount(here: Sample, there: Sample, from: f32, to: f32, distance: f32) ->
         weigh(here.colour[2], there.colour[2]),
     ];
     let top = weigh(here.top, there.top);
-    let depth = 0.5 * total * distance * mean_height_term(from, to, top);
+    let bottom = weigh(here.bottom, there.bottom);
+    let depth = 0.5 * total * distance * mean_height_term(from, to, top, bottom);
     (1.0 - (-depth).exp(), colour)
 }
 
@@ -214,7 +247,8 @@ pub struct Uniforms {
     /// Cells per side in `x`; whether any place has fog in `y` (so a world
     /// without any skips it in a uniform branch); how bright daylight fog is in
     /// `z`, which is the sky's light rather than the mod's, since a fog a mod
-    /// described once cannot know what time it is.
+    /// described once cannot know what time it is; the camera's fog bottom, relative
+    /// to the grid's reference height, in `w`.
     pub grid: [f32; 4],
 }
 
@@ -223,7 +257,7 @@ impl Uniforms {
     pub const NONE: Self = Self {
         here: [1.0, 1.0, 1.0, 0.0],
         frame: [0.0, 0.0, NO_TOP, 0.0],
-        grid: [GRID as f32, 0.0, 1.0, 0.0],
+        grid: [GRID as f32, 0.0, 1.0, NO_BOTTOM],
     };
 
     /// Whether the shaders will draw any place fog at all.
@@ -239,6 +273,7 @@ impl Uniforms {
             colour: [self.here[0], self.here[1], self.here[2]],
             density: self.here[3],
             top: self.frame[2],
+            bottom: self.grid[3],
         }
     }
 }
@@ -366,7 +401,7 @@ impl PlaceFog {
         Uniforms {
             here: [here.colour[0], here.colour[1], here.colour[2], here.density],
             frame: [origin_x, origin_z, here.top, height],
-            grid: [GRID as f32, 1.0, daylight, 0.0],
+            grid: [GRID as f32, 1.0, daylight, here.bottom],
         }
     }
 }
@@ -415,6 +450,7 @@ mod tests {
             colour,
             visibility,
             top,
+            bottom: None,
         }
     }
 
@@ -435,6 +471,7 @@ mod tests {
             colour: [0.5; 3],
             density: density(24),
             top: NO_TOP,
+            bottom: NO_BOTTOM,
         };
         let (hidden, _) = amount(thick, thick, 0.0, 0.0, 24.0);
         assert!((hidden - 0.95).abs() < 0.001, "hid {hidden}");
@@ -450,6 +487,7 @@ mod tests {
             colour: [0.6; 3],
             density: density(16),
             top: 10.0,
+            bottom: NO_BOTTOM,
         };
         let (under, _) = amount(mist, mist, 5.0, 5.0, 32.0);
         let (over, _) = amount(mist, mist, 30.0, 30.0, 32.0);
@@ -460,10 +498,10 @@ mod tests {
         // the profile between 0 and 20 with a top at 10 is half the climb in
         // full fog plus the integral above.
         let expected = (10.0 + FALLOFF * (1.0 - (-10.0_f32 / FALLOFF).exp())) / 20.0;
-        let mean = mean_height_term(0.0, 20.0, 10.0);
+        let mean = mean_height_term(0.0, 20.0, 10.0, NO_BOTTOM);
         assert!((mean - expected).abs() < 1e-5, "{mean} against {expected}");
         // And the same ray the other way round.
-        assert!((mean_height_term(20.0, 0.0, 10.0) - expected).abs() < 1e-5);
+        assert!((mean_height_term(20.0, 0.0, 10.0, NO_BOTTOM) - expected).abs() < 1e-5);
     }
 
     #[test]
@@ -490,6 +528,7 @@ mod tests {
             );
         }
         assert!((between.top - 40.0).abs() < 1e-3, "top {}", between.top);
+        assert!(between.bottom < -7000.0, "no bottom stays no bottom");
     }
 
     #[test]
@@ -502,6 +541,7 @@ mod tests {
             colour: [0.4, 0.5, 0.4],
             density: density(30),
             top: NO_TOP,
+            bottom: NO_BOTTOM,
         };
         let (into, colour) = amount(clear, foggy, 0.0, 0.0, 40.0);
         let (out_of, _) = amount(foggy, clear, 0.0, 0.0, 40.0);
@@ -526,9 +566,110 @@ mod tests {
             colour: [0.5; 3],
             density: density(50),
             top: NO_TOP,
+            bottom: NO_BOTTOM,
         };
         let (low, _) = amount(everywhere, everywhere, -300.0, -300.0, 20.0);
         let (high, _) = amount(everywhere, everywhere, 3000.0, 3000.0, 20.0);
         assert!((low - high).abs() < 1e-5, "{low} {high}");
+    }
+
+    fn layer(bottom: f32, top: f32) -> Sample {
+        Sample {
+            colour: [0.5; 3],
+            density: density(16),
+            top,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn a_fog_is_full_between_its_bottom_and_top_and_thins_beyond_both() {
+        // **World 45.** The vertical profile: one in the layer, a factor of e
+        // per FALLOFF blocks past either edge, symmetric.
+        let (bottom, top) = (-20.0, 10.0);
+        for y in [-20.0, -5.0, 0.0, 10.0] {
+            assert!((height_profile(y, top, bottom) - 1.0).abs() < 1e-6, "{y}");
+        }
+        let e = (-1.0_f32).exp();
+        assert!((height_profile(top + FALLOFF, top, bottom) - e).abs() < 1e-6);
+        assert!((height_profile(bottom - FALLOFF, top, bottom) - e).abs() < 1e-6);
+        assert!(height_profile(bottom - 5.0 * FALLOFF, top, bottom) < 0.01);
+        // And a level ray agrees with the profile.
+        let mean = mean_height_term(-40.0, -40.0, top, bottom);
+        assert!((mean - height_profile(-40.0, top, bottom)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_height_integral_is_continuous_and_its_slope_is_the_profile() {
+        let (bottom, top) = (-20.0, 10.0);
+        for edge in [bottom, top] {
+            let below = height_integral(edge - 1e-3, top, bottom);
+            let above = height_integral(edge + 1e-3, top, bottom);
+            assert!((above - below).abs() < 3e-3, "a seam at {edge}");
+        }
+        for y in [-60.0_f32, -22.0, -10.0, 3.0, 12.0, 30.0] {
+            let slope = (height_integral(y + 0.01, top, bottom)
+                - height_integral(y - 0.01, top, bottom))
+                / 0.02;
+            assert!(
+                (slope - height_profile(y, top, bottom)).abs() < 1e-2,
+                "{y}: {slope}"
+            );
+        }
+        // No bottom is the old integral, exactly.
+        for y in [-30.0_f32, 5.0, 25.0] {
+            let old = if y <= top {
+                y - top
+            } else {
+                FALLOFF * (1.0 - (-(y - top) / FALLOFF).exp())
+            };
+            assert!((height_integral(y, top, NO_BOTTOM) - old).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_cave_under_a_fog_with_a_bottom_is_clear_and_without_one_it_is_not() {
+        // The ask's own case: a surface fog over caves. A level ray 30 blocks
+        // under the ground.
+        let ground = 0.0;
+        let with = layer(ground - 4.0, ground + 6.0);
+        let without = layer(NO_BOTTOM, ground + 6.0);
+        let (clear, _) = amount(with, with, -30.0, -30.0, 40.0);
+        let (foggy, _) = amount(without, without, -30.0, -30.0, 40.0);
+        assert!(clear < 0.02, "a cave under a bottom hid {clear}");
+        assert!(foggy > 0.99, "a cave with no bottom hid {foggy}");
+        // The surface itself is as thick as ever.
+        let (surface, _) = amount(with, with, 0.0, 0.0, 40.0);
+        assert!(surface > 0.99, "{surface}");
+    }
+
+    #[test]
+    fn a_cell_carries_its_bottom_premultiplied_and_never_above_its_top() {
+        let mut named = fog([10, 20, 30], 16, Some(40));
+        named.bottom = Some(8);
+        let [_, edges] = cell(Some(&named), 0);
+        let sigma = density(16);
+        assert!((edges[0] - 40.0 * sigma).abs() < 1e-5);
+        assert!((edges[1] - 8.0 * sigma).abs() < 1e-5);
+        let [_, plain] = cell(Some(&fog([10, 20, 30], 16, Some(40))), 0);
+        assert!(plain[1] / sigma < -7000.0, "no bottom is far below");
+        named.bottom = Some(90);
+        let [_, inverted] = cell(Some(&named), 0);
+        assert!(
+            inverted[1] <= inverted[0],
+            "a bottom above the top is lowered"
+        );
+        for height in [i32::MIN, i32::MAX] {
+            let mut wild = fog([1, 2, 3], 16, Some(height));
+            wild.bottom = Some(height);
+            for reference in [i32::MIN, -1, 0, i32::MAX] {
+                let [colour, edges] = cell(Some(&wild), reference);
+                assert!(colour.iter().chain(&edges).all(|v| v.is_finite()));
+                assert!(edges[0].abs() <= NO_TOP * density(16) + 1e-3);
+                assert!(edges[1].abs() <= NO_TOP * density(16) + 1e-3);
+            }
+        }
+        let sampled = sample(&grid_with(&[((5, 5), named)]), [5.5 * 16.0, 5.5 * 16.0]);
+        assert!(sampled.bottom <= sampled.top + 1e-3);
     }
 }

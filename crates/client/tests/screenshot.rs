@@ -443,6 +443,7 @@ fn a_places_fog_hides_the_ground_in_every_mode() {
         colour: [255, 40, 40],
         visibility: 6,
         top: None,
+        bottom: None,
     };
 
     for mode in [
@@ -988,6 +989,7 @@ fn a_ground_fog_lies_under_its_top() {
                 colour: [255, 40, 40],
                 visibility: 6,
                 top: Some(top),
+                bottom: None,
             },
         );
         let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -1007,6 +1009,54 @@ fn a_ground_fog_lies_under_its_top() {
     assert!(
         below < 0.05,
         "a fog forty blocks under the floor still reddened it by {below:.3}"
+    );
+}
+
+#[test]
+fn a_cave_under_a_fogged_column_is_clear_when_the_fog_has_a_bottom_above_it() {
+    // **World 45.** A surface fog answered per column used to fill every cave
+    // under it. The camera stands in the "cave" here: the floor is ten blocks
+    // below it, and a fog layer lies far above both. With no `bottom` the
+    // fog is full at every height under its top, cave included; with a
+    // `bottom` above the camera it thins below it over a few blocks and the
+    // cave is clear; and a `bottom` under the camera is the control that the
+    // fog is the same fog, drawn, when the cave is inside the layer.
+    // Structural bounds with wide margins, as this file's header says.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let redness = |bottom: Option<i32>| {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        fog_everywhere(
+            &mut renderer,
+            tiamat_core::proto::ChunkFog {
+                colour: [255, 40, 40],
+                visibility: 6,
+                top: Some(100),
+                bottom,
+            },
+        );
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let frame = target
+            .capture(&mut renderer, &viewpoint())
+            .expect("capture");
+        let ground = average(&frame, 0, HEIGHT * 3 / 4, WIDTH, HEIGHT);
+        ground[0] - ground[1]
+    };
+    // The floor's surface is at y = 8 and the camera at y = 18.
+    let unbounded = redness(None);
+    let inside = redness(Some(-40));
+    let above = redness(Some(40));
+    assert!(
+        unbounded > 0.35,
+        "with no bottom the fog under its top left the cave at {unbounded:.3}"
+    );
+    assert!(
+        inside > 0.35,
+        "a bottom under the cave changed the fog: {inside:.3}"
+    );
+    assert!(
+        above < 0.05,
+        "a fog whose bottom is twenty blocks over the camera still reddened the cave by {above:.3}"
     );
 }
 

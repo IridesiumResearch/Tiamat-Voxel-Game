@@ -5253,7 +5253,9 @@ impl App {
         // horizon does not tint the view from under the water.
         self.weather.modifier.advance(dt);
         let modifier = self.weather.modifier.current();
-        let moment = crate::sky::modified(self.sky.moment(), &modifier);
+        let mut moment = crate::sky::modified(self.sky.moment(), &modifier);
+        // The modifier's say over the stars, eased (engine ask World 44).
+        moment.stars = self.weather.modifier.stars_over(moment.stars);
         // And lightning over that: a moment's light, no relight.
         self.weather.flashes.advance(dt);
         self.weather.bolts.advance(dt);

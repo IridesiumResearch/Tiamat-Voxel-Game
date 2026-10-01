@@ -36,6 +36,10 @@ pub struct SkyModifier {
     pub fog_distance: f32,
     /// Multiplies the keyframe grade's saturation (mode 3). 1.0 is none.
     pub saturation: f32,
+    /// How much of the star catalog shows, `0..=1`, REPLACING the keyframes'
+    /// `stars` while the modifier is set; `None` leaves the keyframes in
+    /// charge. Engine ask World 44.
+    pub stars: Option<f32>,
     /// How long the client takes to get there, in ticks; 0 is at once.
     pub ease_ticks: u32,
 }
@@ -48,6 +52,7 @@ impl SkyModifier {
         sky_mix: 0.0,
         fog_distance: 1.0,
         saturation: 1.0,
+        stars: None,
         ease_ticks: 0,
     };
 
@@ -60,6 +65,7 @@ impl SkyModifier {
             && (0.0..=1.0).contains(&self.sky_mix)
             && (MIN_FOG_DISTANCE..=MAX_FOG_DISTANCE).contains(&self.fog_distance)
             && (0.0..=MAX_SATURATION).contains(&self.saturation)
+            && self.stars.is_none_or(|stars| (0.0..=1.0).contains(&stars))
             && self.ease_ticks <= MAX_EASE_TICKS
     }
 }
@@ -99,6 +105,11 @@ pub fn sanitise(mut modifier: SkyModifier) -> SkyModifier {
         1.0,
     );
     modifier.saturation = clamp(modifier.saturation, 0.0, MAX_SATURATION, 1.0);
+    // Not a number is no say at all: the keyframes decide.
+    modifier.stars = modifier
+        .stars
+        .filter(|stars| stars.is_finite())
+        .map(|stars| stars.clamp(0.0, 1.0));
     modifier.ease_ticks = modifier.ease_ticks.min(MAX_EASE_TICKS);
     modifier
 }
@@ -834,6 +845,7 @@ mod tests {
             sky_mix: 3.0,
             fog_distance: 0.0,
             saturation: -2.0,
+            stars: Some(f32::NAN),
             ease_ticks: u32::MAX,
         };
         assert!(!wild.is_valid());
@@ -845,6 +857,26 @@ mod tests {
         );
         assert_eq!(tame.sky, [MAX_CHANNEL, 0.0, 0.0]);
         assert_eq!(tame.fog_distance, MIN_FOG_DISTANCE);
+        assert_eq!(
+            tame.stars, None,
+            "not a number leaves the stars to the keyframes"
+        );
+        let loud = |stars| {
+            sanitise(SkyModifier {
+                stars: Some(stars),
+                ..SkyModifier::NONE
+            })
+        };
+        assert_eq!(loud(7.0).stars, Some(1.0));
+        assert_eq!(loud(-1.0).stars, Some(0.0));
+        assert_eq!(loud(0.25).stars, Some(0.25));
+        for bad in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+            let hostile = SkyModifier {
+                stars: Some(bad),
+                ..SkyModifier::NONE
+            };
+            assert!(!hostile.is_valid(), "{bad}");
+        }
         assert!(SkyModifier::NONE.is_valid());
         assert_eq!(sanitise(SkyModifier::NONE), SkyModifier::NONE);
     }

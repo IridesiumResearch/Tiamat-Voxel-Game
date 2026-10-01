@@ -801,7 +801,10 @@ end)
 
 `visibility` is how many blocks a player sees into it (95% hidden there), the
 colour is its colour in daylight — the engine dims it at night — and `top` makes
-it ground fog that thins over a few blocks above that height. The engine blends
+it ground fog that thins over a few blocks above that height. `bottom` is its
+mirror: the fog thins over the same few blocks below it, so a surface fog can
+stand on its biome's ground instead of filling every cave under the column
+(`bottom = ground - margin`); without one the fog goes all the way down. The engine blends
 columns, and a fog is visible from outside as well as inside, so return what the
 PLACE is and let the edges take care of themselves. It runs where the tint does,
 in the generation workers.
@@ -1520,11 +1523,13 @@ again for them from `register_on_player_join`.
 **The sky's keyframes are registration-only; the weather over them is not.**
 `register_sky` takes its keyframes in the registration window and the client
 interpolates them from the clock. `game.set_sky_modifier(uuid, { intensity,
-sky, sky_mix, fog_distance, saturation, ease_ticks })` lays a per-player change
-over them at any time — a storm darkens the sun, closes the horizon in and
-greys the grade, eased on that player's client — and `nil` puts the plain sky
-back. It multiplies and mixes rather than replacing, so it is right at every
-hour. `game.flash{ pos, radius, intensity, colour, attack_ticks, decay_ticks }`
+sky, sky_mix, fog_distance, saturation, stars, ease_ticks })` lays a per-player
+change over them at any time — a storm darkens the sun, closes the horizon in
+and greys the grade, eased on that player's client — and `nil` puts the plain
+sky back. It multiplies and mixes rather than replacing, so it is right at every
+hour; the one field that replaces is `stars` (0 to 1), which stands in for the
+keyframes' star brightness while the modifier is set, so a black sky with
+`stars = 1` is darkness and stars by day as by night. `game.flash{ pos, radius, intensity, colour, attack_ticks, decay_ticks }`
 is lightning: a moment's light on the sun and sky of everyone in reach, with no
 relight. `game.lightning{ from, to, seed, colour, width, branches, ticks,
 radius, player }` draws the bolt itself — a forked line every client builds

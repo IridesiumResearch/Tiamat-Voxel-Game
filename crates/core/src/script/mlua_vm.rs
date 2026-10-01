@@ -1260,7 +1260,7 @@ impl MluaVm {
     ///
     /// `visibility` is required, because a fog with no thickness is not a fog
     /// and guessing one would draw somebody's rainforest as either soup or
-    /// nothing. Colour channels clamp like a tint's; `top` floors to a block.
+    /// nothing. Colour channels clamp like a tint's; `top` and `bottom` floor to a block.
     fn fog_of(table: &Table) -> Result<crate::proto::ChunkFog, String> {
         let number = |name: &str| -> Result<Option<f32>, String> {
             table
@@ -1275,12 +1275,16 @@ impl MluaVm {
         let top = number("top")?
             .filter(|value| !value.is_nan())
             .map(crate::detgen::floor_to_i32);
+        let bottom = number("bottom")?
+            .filter(|value| !value.is_nan())
+            .map(crate::detgen::floor_to_i32);
         Ok(crate::proto::ChunkFog {
             colour,
             // At least one block: a fog nothing can be seen into is a wall
             // drawn in the fog's colour, and a division by zero on the client.
             visibility: visibility.clamp(1.0, f32::from(u16::MAX)) as u16,
             top,
+            bottom,
         })
     }
 
@@ -2120,6 +2124,11 @@ fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier>
             sky_mix: number("sky_mix", if sky.is_some() { 1.0 } else { 0.0 })?,
             fog_distance: number("fog_distance", 1.0)?,
             saturation,
+            stars: spec.get::<Option<f32>>("stars").map_err(|_| {
+                mlua::Error::runtime(
+                    "game.set_sky_modifier: `stars` is a number from 0 to 1, the brightness of the stars",
+                )
+            })?,
             ease_ticks: spec.get::<Option<u32>>("ease_ticks")?.unwrap_or(0),
         },
     ))
@@ -13429,6 +13438,10 @@ mod tests {
         assert_eq!(mist.colour, [102, 255, 76], "channels clamp like a tint's");
         assert_eq!(mist.visibility, 18);
         assert_eq!(mist.top, Some(-4), "a top floors to the block it is in");
+        assert_eq!(
+            mist.bottom, None,
+            "an answer without a bottom is today's fog"
+        );
 
         let thin = host
             .chunk_fog(crate::domain::OVERWORLD, 7, at(1))
@@ -13462,6 +13475,53 @@ mod tests {
                 .expect("asked"),
             None,
             "the faulted mod was asked again"
+        );
+    }
+
+    #[test]
+    fn a_fogs_bottom_floors_like_its_top_and_a_wrong_type_faults_the_mod() {
+        // **World 45.** `bottom` is the mirror of `top`: an optional block
+        // height, floored; absent (or not a number) it is no bottom, and a
+        // value that is not a number at all is the mod's bug.
+        let mut host = vm();
+        load(
+            &mut host,
+            "surface",
+            "game.register_chunk_fog(function(pos)\n\
+             \x20   if pos.x == 0 then\n\
+             \x20       return { visibility = 30, top = 12.5, bottom = -3.5 }\n\
+             \x20   elseif pos.x == 1 then\n\
+             \x20       return { visibility = 30, bottom = 0 / 0 }\n\
+             \x20   elseif pos.x == 2 then\n\
+             \x20       return { visibility = 30, top = 4, bottom = 'low' }\n\
+             \x20   end\n\
+             end)",
+        )
+        .expect("load");
+        host.freeze().expect("freeze");
+        let at = |x| ChunkPos::new(x, 0, 0);
+        let layer = host
+            .chunk_fog(crate::domain::OVERWORLD, 7, at(0))
+            .expect("asked")
+            .expect("a fog");
+        assert_eq!(
+            (layer.top, layer.bottom),
+            (Some(12), Some(-4)),
+            "both floor"
+        );
+        let open = host
+            .chunk_fog(crate::domain::OVERWORLD, 7, at(1))
+            .expect("asked")
+            .expect("a fog");
+        assert_eq!(open.bottom, None, "not a number is no bottom");
+        assert!(!host.is_faulted("surface"));
+        let broken = host
+            .chunk_fog(crate::domain::OVERWORLD, 7, at(2))
+            .expect("asked");
+        assert_eq!(broken, None);
+        assert!(
+            host.is_faulted("surface"),
+            "a bottom that is not a number faults the mod that answered it"
         );
     }
 
@@ -14182,7 +14242,61 @@ mod tests {
             "the grade table's saturation is read"
         );
         assert_eq!(first.ease_ticks, 400);
+        assert_eq!(
+            first.stars, None,
+            "no `stars` leaves the keyframes in charge"
+        );
         assert_eq!(set[1].1, None, "nil is the plain sky");
+    }
+
+    #[test]
+    fn a_modifier_may_name_the_stars_and_a_careless_one_is_clamped_or_refused() {
+        // **World 44.** `stars` is read as given, clamped to 0..=1, a NaN is no
+        // say, and a wrong type is an error that names the function.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([7; 32]).to_hex();
+        load(
+            &mut host,
+            "underside",
+            &format!(
+                "game.set_sky_modifier('{uuid}', {{ intensity = 0, sky = {{ 0, 0, 0 }}, stars = 1 }})\n\
+                 game.set_sky_modifier('{uuid}', {{ stars = 0 }})\n\
+                 game.set_sky_modifier('{uuid}', {{ stars = 9 }})\n\
+                 game.set_sky_modifier('{uuid}', {{ stars = -3 }})\n\
+                 game.set_sky_modifier('{uuid}', {{ stars = 0 / 0 }})\n\
+                 game.set_sky_modifier('{uuid}', {{ intensity = 0.5 }})\n\
+                 ok, err = pcall(game.set_sky_modifier, '{uuid}', {{ stars = 'many' }})\n\
+                 err = tostring(err)\n\
+                 ok2, err2 = pcall(game.set_sky_modifier, '{uuid}', {{ stars = {{}} }})\n\
+                 err2 = tostring(err2)"
+            ),
+        )
+        .expect("load");
+        let set = weather.set.lock().expect("lock").clone();
+        let stars: Vec<Option<f32>> = set
+            .iter()
+            .map(|(_, modifier)| modifier.expect("a modifier").stars)
+            .collect();
+        assert_eq!(
+            stars,
+            [Some(1.0), Some(0.0), Some(1.0), Some(0.0), None, None],
+            "named, zero (a say too), clamped both ways, NaN and omitted are none"
+        );
+        let env = host.environment("underside").expect("env");
+        for (ok, err) in [("ok", "err"), ("ok2", "err2")] {
+            assert!(
+                !env.get::<bool>(ok).expect("ok"),
+                "a wrong type is an error"
+            );
+            let message = env.get::<String>(err).expect("the message");
+            assert!(
+                message.contains("game.set_sky_modifier") && message.contains("`stars`"),
+                "{message}"
+            );
+        }
+        assert_eq!(set.len(), 6, "a refused call set nothing");
     }
 
     /// Records every burst and badge a mod asked for.
