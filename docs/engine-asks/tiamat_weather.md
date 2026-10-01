@@ -12,9 +12,32 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: none. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W31, filed 2026-10-01. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
+
+## W31. No stars in Beautiful (2026-10-01)
+
+**Seen.** The designer, playing 0.3.0: "I am not seeing any stars in
+Beautiful lighting mode." A clear night, with the sky owner's keyframes
+asking for stars (`game/core_sky`), and Weather sending no sky modifier on a
+clear night and a deck of 0.06 cumulus, 0.08 altocumulus.
+
+**What it looks like from here, unconfirmed.** `clouds.wgsl` adds the stars
+in `sky_along` at full resolution, or in `resolve_main` on the pixels the
+deck left as sky — before the post chain. In mode 3 the post chain fogs from
+depth and, per the comment beside W30's bow, "mode 3's fog paints over a
+painted sky, so its post chain adds the bow after the fog". The bow is
+re-added in `post.wgsl`; nothing re-adds the stars, which would leave them
+under mode 3's fog at the far plane. Classic and Simple are not reported.
+
+**Why the mod cannot.** Weather does not own the sky (core_sky does) or any
+part of the pass; with no modifier sent it is not in the picture at all.
+
+**Ask.** Stars visible in Beautiful as in the other modes: added after mode
+3's fog the way the bow is, or kept out of it. Gate: a clear night,
+`stars = 1` keyframe, the same view in all three lighting modes shows the
+same stars, and they still sit behind cloud and terrain.
 
 ## W30. A rainbow (2026-09-30): LANDED 2026-09-30 (engine 143ed0f..a446330, protocol 82), awaiting the eye
 
