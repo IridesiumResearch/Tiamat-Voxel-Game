@@ -5174,7 +5174,33 @@ impl App {
                 if summary.is_empty() || self.store.horizon_is_buried(*pos) {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
                 } else {
-                    let mesh = mesher::mesh_summary(summary, &self.store.fluid_material_ids());
+                    let fluids = self.store.fluid_material_ids();
+                    let width = summary.width() as usize;
+                    let over = ChunkPos::new(pos.x, pos.y + 1, pos.z);
+                    let above_summary = self.store.summary(over);
+                    // Whether a far sea goes on past this summary's top edge,
+                    // so its top there is not the surface (Sub-Node Contract
+                    // §8): in the summary above, or in the real chunk above
+                    // where detail begins. Neither held: it is the surface.
+                    let above = |u: usize, v: usize| -> bool {
+                        if let Some(above) = above_summary {
+                            return mesher::summary_floor_is_fluid(above, u, v, width, &fluids);
+                        }
+                        let cell = (tiamat_core::CHUNK_SUBNODES as usize / width.max(1)).max(1);
+                        let block = |c: usize, chunk: i32| -> i32 {
+                            let middle =
+                                (c * cell + cell / 2) / tiamat_core::SUBNODES_PER_AXIS as usize;
+                            chunk * tiamat_core::CHUNK_BLOCKS as i32
+                                + i32::try_from(middle).unwrap_or(0)
+                        };
+                        let at = tiamat_core::BlockPos::new(
+                            block(u, pos.x),
+                            over.y * tiamat_core::CHUNK_BLOCKS as i32,
+                            block(v, pos.z),
+                        );
+                        self.store.fluid_at(at).fluid() != tiamat_core::fluid::FluidId::NONE
+                    };
+                    let mesh = mesher::mesh_summary(summary, &fluids, above);
                     self.renderer.set_chunk(self.drawn_at(*pos), &mesh);
                 }
                 built += 1;

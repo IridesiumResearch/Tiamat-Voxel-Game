@@ -1491,7 +1491,9 @@ fn a_far_hillside_drawn_from_its_summary_fogs_in_the_skys_colour_whatever_the_ca
     ]));
     // A cliff of solid summaries three chunks wide and two high, its face at
     // z = 32 turned to the camera — a wall face, the summary's ten.
-    let cliff = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 16), &[]);
+    let cliff = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 16), &[], |_, _| {
+        false
+    });
     for cx in -1..2 {
         for cy in 0..2 {
             renderer.set_chunk(ChunkPos::new(cx, cy, 2), &cliff);
@@ -5878,8 +5880,10 @@ fn no_sky_shows_through_the_seam_between_two_lod_levels() {
 
     // Fine on the left, coarse on the right, the seam at x = 16. Three chunks
     // deep so the frame has ground either side of it.
-    let fine = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 6), &[]);
-    let coarse = mesher::mesh_summary(&slab_summary(3, 1), &[]);
+    let fine = mesher::mesh_summary(&slab_summary(tiamat_core::lod::FINEST, 6), &[], |_, _| {
+        false
+    });
+    let coarse = mesher::mesh_summary(&slab_summary(3, 1), &[], |_, _| false);
     for cz in 0..3 {
         renderer.set_chunk(ChunkPos::new(0, 0, cz), &fine);
         renderer.set_chunk(ChunkPos::new(1, 0, cz), &coarse);
@@ -10089,6 +10093,85 @@ fn a_hill_in_front_of_the_rainbow_hides_it() {
         assert!(
             beside >= 8,
             "{label}: the bow is gone beside the hill too: {beside}"
+        );
+    }
+}
+
+#[test]
+fn a_far_sea_across_many_summaries_has_no_walls_on_its_seams() {
+    // **Reported from the window: walls of water on the chunk seams of a
+    // sea.** A summary is meshed alone, and drew every fluid cell on its own
+    // edge as if air lay past it — four sides and a bottom to every far
+    // chunk of sea. While far water was an opaque slab those faces hid
+    // inside the next slab; once it went into the blended pass (World ask
+    // 42) each was a transparent wall, a grid of them across the horizon.
+    // Sub-Node Contract §8: a summary's fluid is drawn on its edge only
+    // upward, as a surface.
+    //
+    // A bed of plain rock under plain water, five chunks by five, seen from
+    // above its middle at a low angle. With nothing textured, a row of the
+    // frame across the water may shade smoothly with distance and fog, but
+    // has no sharp steps — and a wall seen through the surface is one.
+    let Some(gpu) = gpu() else { return };
+    const WATER: MaterialId = MaterialId(7);
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    let mut tiles: Vec<Option<Image>> = vec![None; 8];
+    tiles[STONE.0 as usize] = Some(Image::solid(16, 16, [200, 200, 200, 255]));
+    tiles[WATER.0 as usize] = Some(Image::solid(16, 16, [40, 90, 200, 255]));
+    renderer.set_atlas(&Atlas::build(&tiles));
+    let n = tiamat_core::lod::cells_per_axis(tiamat_core::lod::FINEST).expect("a level") as usize;
+    let mut cells = vec![MaterialId::AIR; n * n * n];
+    for z in 0..n {
+        for x in 0..n {
+            for y in 0..10 {
+                cells[(z * n + y) * n + x] = if y < 6 { STONE } else { WATER };
+            }
+        }
+    }
+    let sea =
+        tiamat_core::lod::Summary::from_parts(tiamat_core::lod::FINEST, cells).expect("build");
+    let mesh = mesher::mesh_summary(&sea, &[WATER.0], |_, _| false);
+    for cx in 0..5 {
+        for cz in 0..5 {
+            renderer.set_chunk(ChunkPos::new(cx, 0, cz), &mesh);
+        }
+    }
+    renderer.set_sun(1.0, [1.0, 1.0, 1.0], [0.3, -0.8, 0.4]);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let camera = Camera {
+        position: Position::from_world(40.0, 22.0, -6.0),
+        pitch: -0.32,
+        ..Camera::default()
+    };
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        let frame = target.capture(&mut renderer, &camera).expect("capture");
+        // Rows across the near half of the sea, its middle three fifths:
+        // inside the water whatever the driver, clear of the rim.
+        let mut worst = (0.0_f32, 0, 0);
+        for y in (HEIGHT * 5 / 8..HEIGHT * 15 / 16).step_by(4) {
+            let level = |x: u32| -> f32 {
+                let p = frame.pixel(x, y).unwrap_or([0, 0, 0, 255]);
+                (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / (3.0 * 255.0)
+            };
+            for x in (WIDTH / 5..WIDTH * 4 / 5).step_by(2) {
+                let step = (level(x + 2) - level(x)).abs();
+                if step > worst.0 {
+                    worst = (step, x, y);
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.06,
+            "in {mode:?} the water steps by {:.3} at ({}, {}): a wall on a chunk seam, seen \
+             through the surface",
+            worst.0,
+            worst.1,
+            worst.2
         );
     }
 }

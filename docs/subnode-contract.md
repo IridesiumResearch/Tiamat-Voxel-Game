@@ -856,6 +856,13 @@ Meshing is at sub-node resolution using **binary greedy meshing**, per §1.
   stood a sheet of water on every seam of a sea still streaming in. The
   padding marks the unarrived side wet for the fluid's culling only; terrain's
   faces are unchanged.
+- **The same holds for a summary's fluid at the summary's own edge** (added
+  2026-10-01). A summary is meshed alone, so past its edge it knows nothing:
+  sideways and below, a fluid face on the edge is never drawn — beyond it is
+  the same sea, or a bed that hides it. Upward it is drawn only where the
+  summary above holds no fluid in that cell, or no summary above is held:
+  then it is the surface. Drawing every edge, as a far sea did once its water
+  went into the blended pass, stood a transparent wall on every seam of it.
 - Positions quantise to 6 bits per axis (`0..=48`), giving an 8-byte vertex.
 
 Task 08 implements this. Task 02b's prototype measured 0.110 ms/chunk on

@@ -2993,7 +2993,7 @@ mod summary_tests {
             }
         }
         let sea = tiamat_core::lod::Summary::from_parts(FINEST, cells).expect("build");
-        let mesh = mesh_summary(&sea, &[7]);
+        let mesh = mesh_summary(&sea, &[7], |_, _| false);
         assert!(
             mesh.quads.iter().all(|quad| quad.material == 1),
             "a fluid-family material was emitted as an opaque quad"
@@ -3013,20 +3013,91 @@ mod summary_tests {
                 .iter()
                 .all(|vertex| vertex.material() == 7)
         );
-        // One top face for the whole sheet (merged), its sides, and no
-        // underside against the rock: five faces, twenty vertices.
+        // One top face for the whole sheet (merged), and nothing else: no
+        // underside against the rock, and no sides, because every side of
+        // this sheet is on the summary's own edge, where the same sea goes
+        // on. Five faces once, four of them the walls on every seam of a far
+        // sea (Sub-Node Contract §8).
         assert_eq!(
             mesh.fluid_vertices.len(),
-            5 * 4,
+            4,
             "faces: {}",
             mesh.fluid_vertices.len() / 4
         );
-        assert_eq!(mesh.fluid_indices.len(), 5 * 6);
+        assert_eq!(mesh.fluid_indices.len(), 6);
         // And the same sea drawn without knowing the material is a slab,
         // as it was.
-        let slab = mesh_summary(&sea, &[]);
+        let slab = mesh_summary(&sea, &[], |_, _| false);
         assert!(slab.fluid_vertices.is_empty());
         assert!(slab.quads.iter().any(|quad| quad.material == 7));
+    }
+
+    /// A summary `FINEST` cells across, full of water from its floor up to
+    /// and including row `top`, with a pond of air carved at `(1, top, 1)`
+    /// when `pond` is set.
+    fn water_to(top: usize, pond: bool) -> Summary {
+        let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level") as usize;
+        let mut cells = vec![MaterialId::AIR; n * n * n];
+        for z in 0..n {
+            for y in 0..=top {
+                for x in 0..n {
+                    cells[(z * n + y) * n + x] = MaterialId(7);
+                }
+            }
+        }
+        if pond {
+            cells[(n + top) * n + 1] = MaterialId::AIR;
+        }
+        Summary::from_parts(FINEST, cells).expect("build")
+    }
+
+    #[test]
+    fn a_far_sea_deeper_than_a_summary_has_one_surface_and_no_floors() {
+        // A deep sea spans summaries stacked in y. The lower one is water to
+        // its top; its top there is the surface only if nothing wet is above.
+        let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level") as usize;
+        let full = water_to(n - 1, false);
+        let covered = mesh_summary(&full, &[7], |_, _| true);
+        assert!(
+            covered.fluid_vertices.is_empty(),
+            "water under more water drew {} faces: a floor inside the sea",
+            covered.fluid_vertices.len() / 4
+        );
+        let open = mesh_summary(&full, &[7], |_, _| false);
+        assert_eq!(
+            open.fluid_vertices.len(),
+            4,
+            "the surface on the edge, merged into one"
+        );
+
+        // Water ending inside the summary still meets its air: the surface,
+        // and a pond's walls, are not edges.
+        let shallow = water_to(n / 2, true);
+        let mesh = mesh_summary(&shallow, &[7], |_, _| true);
+        assert!(
+            mesh.fluid_vertices.len() >= 4 * 5,
+            "a surface inside the summary and a pond in it drew {} faces",
+            mesh.fluid_vertices.len() / 4
+        );
+    }
+
+    #[test]
+    fn the_summary_above_is_read_at_its_own_level_of_detail() {
+        let fine = tiamat_core::lod::cells_per_axis(FINEST).expect("a level") as usize;
+        let coarse_level = 3;
+        let coarse = tiamat_core::lod::cells_per_axis(coarse_level).expect("a level") as usize;
+        let mut cells = vec![MaterialId::AIR; coarse * coarse * coarse];
+        // Water in the coarse grid's bottom row, in its first column only.
+        cells[0] = MaterialId(7);
+        let above = Summary::from_parts(coarse_level, cells).expect("build");
+        let per = fine / coarse;
+        assert!(summary_floor_is_fluid(&above, 0, 0, fine, &[7]));
+        assert!(summary_floor_is_fluid(&above, per - 1, per - 1, fine, &[7]));
+        assert!(!summary_floor_is_fluid(&above, per, 0, fine, &[7]));
+        assert!(
+            !summary_floor_is_fluid(&above, 0, 0, fine, &[]),
+            "not a fluid here"
+        );
     }
 
     #[test]
@@ -3034,7 +3105,7 @@ mod summary_tests {
         let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let empty = Summary::from_parts(FINEST, vec![MaterialId::AIR; (n * n * n) as usize])
             .expect("build");
-        assert!(mesh_summary(&empty, &[]).quads.is_empty());
+        assert!(mesh_summary(&empty, &[], |_, _| false).quads.is_empty());
     }
 
     #[test]
@@ -3046,7 +3117,7 @@ mod summary_tests {
             let n = tiamat_core::lod::cells_per_axis(level).expect("a level");
             let solid = Summary::from_parts(level, vec![MaterialId(1); (n * n * n) as usize])
                 .expect("build");
-            let mesh = mesh_summary(&solid, &[]);
+            let mesh = mesh_summary(&solid, &[], |_, _| false);
             assert_eq!(
                 mesh.quads.len(),
                 6,
@@ -3070,7 +3141,7 @@ mod summary_tests {
         let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let solid =
             Summary::from_parts(FINEST, vec![MaterialId(1); (n * n * n) as usize]).expect("build");
-        let mesh = mesh_summary(&solid, &[]);
+        let mesh = mesh_summary(&solid, &[], |_, _| false);
 
         let brightness = |axis: u8, positive: bool| {
             mesh.quads
@@ -3112,9 +3183,12 @@ mod summary_tests {
         let n = tiamat_core::lod::cells_per_axis(FINEST).expect("a level");
         let solid =
             Summary::from_parts(FINEST, vec![MaterialId(1); (n * n * n) as usize]).expect("build");
-        assert_eq!(mesh_summary(&solid, &[]).open_sky, OpenSky::ALL);
         assert_eq!(
-            mesh_summary(&slab(FINEST, 4, 1), &[7]).open_sky,
+            mesh_summary(&solid, &[], |_, _| false).open_sky,
+            OpenSky::ALL
+        );
+        assert_eq!(
+            mesh_summary(&slab(FINEST, 4, 1), &[7], |_, _| false).open_sky,
             OpenSky::ALL
         );
 
@@ -3165,8 +3239,8 @@ mod summary_tests {
         // Done against the quads rather than a rendered frame deliberately: a
         // screenshot answers "was there a hole in this one frame from this one
         // angle", and the claim is about every angle.
-        let coarse = mesh_summary(&slab(3, 2, 1), &[]); // cells 4 blocks tall: surface at 8
-        let fine = mesh_summary(&slab(FINEST, 5, 1), &[]); // cells 1 block tall: surface at 5
+        let coarse = mesh_summary(&slab(3, 2, 1), &[], |_, _| false); // cells 4 blocks tall: surface at 8
+        let fine = mesh_summary(&slab(FINEST, 5, 1), &[], |_, _| false); // cells 1 block tall: surface at 5
 
         // The +x plane of the coarse chunk and the -x plane of the fine one.
         // **A quad's `w` is the last CELL it covers, not the plane** — see
@@ -3209,7 +3283,7 @@ mod summary_tests {
         // boundary plane, buried ones included. A mesher that culled the buried
         // ones against its own neighbours would leave the wall with a hole in
         // it exactly where the neighbouring chunk's surface happened to dip.
-        let mesh = mesh_summary(&slab(FINEST, 16, 1), &[]);
+        let mesh = mesh_summary(&slab(FINEST, 16, 1), &[], |_, _| false);
         let plane = u8::try_from(CHUNK_SUBNODES - 1).expect("fits");
         let wall: Vec<&Quad> = mesh
             .quads
@@ -5172,8 +5246,21 @@ fn summary_shade(axis: usize, positive: bool) -> crate::shade::Shade {
 /// budget for something a mile away. What it gets instead is the sky-visibility
 /// term that stored sunlight would have carried, faked from the face direction:
 /// see [`summary_shade`].
+///
+/// # A sea across many summaries
+///
+/// `above(u, v)` says whether fluid stands directly over cell column `(u, v)`
+/// of this summary's top edge — in the summary above, or the chunk above —
+/// and is all this mesher is told about anything past its own edge. Sideways
+/// and below, a fluid face ON the edge is never drawn: beyond it is the same
+/// sea, or a bed that hides it. Upward it is drawn unless `above` says the
+/// water goes on, because then it is not the surface (Sub-Node Contract §8).
 #[must_use]
-pub fn mesh_summary(summary: &tiamat_core::lod::Summary, fluid_materials: &[u16]) -> Mesh {
+pub fn mesh_summary(
+    summary: &tiamat_core::lod::Summary,
+    fluid_materials: &[u16],
+    above: impl Fn(usize, usize) -> bool,
+) -> Mesh {
     let width = summary.width() as usize;
     let Some(step) = (CHUNK_SUBNODES as usize).checked_div(width) else {
         return Mesh::default();
@@ -5229,7 +5316,18 @@ pub fn mesh_summary(summary: &tiamat_core::lod::Summary, fluid_materials: &[u16]
                     if is_fluid(material) {
                         // Against air alone: two cells of one sea share no
                         // face, and a bank hides the water behind it.
-                        if neighbour == air {
+                        //
+                        // **Never on this summary's own edge, except as a
+                        // surface.** A summary is meshed alone, and drawing
+                        // every edge against "air" stood a transparent wall
+                        // on every seam of a far sea once its water went
+                        // into the blended pass (World ask 42).
+                        let drawn = if at_boundary {
+                            axis == 1 && positive && !above(u, v)
+                        } else {
+                            neighbour == air
+                        };
+                        if drawn {
                             wet[v * width + u] = material;
                         }
                     } else if neighbour == air || is_fluid(neighbour) {
@@ -5276,6 +5374,30 @@ pub fn mesh_summary(summary: &tiamat_core::lod::Summary, fluid_materials: &[u16]
         open_sky: OpenSky::ALL,
         ..Mesh::default()
     }
+}
+
+/// Whether `above`'s bottom row holds fluid over cell column `(u, v)` of a
+/// summary `width` cells across — the two may be at different levels of
+/// detail, so the column is scaled into `above`'s grid.
+#[must_use]
+pub fn summary_floor_is_fluid(
+    above: &tiamat_core::lod::Summary,
+    u: usize,
+    v: usize,
+    width: usize,
+    fluid_materials: &[u16],
+) -> bool {
+    let theirs = above.width() as usize;
+    if width == 0 || theirs == 0 {
+        return false;
+    }
+    let (x, z) = (u * theirs / width, v * theirs / width);
+    above
+        .cells()
+        .get(z * theirs * theirs + x)
+        .is_some_and(|cell| {
+            cell.0 != tiamat_core::MaterialId::AIR.0 && fluid_materials.contains(&cell.0)
+        })
 }
 
 /// Greedily merges one plane of exposed summary faces into quads.
