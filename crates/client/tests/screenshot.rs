@@ -10175,3 +10175,113 @@ fn a_far_sea_across_many_summaries_has_no_walls_on_its_seams() {
         );
     }
 }
+
+#[test]
+fn the_same_stars_show_in_every_lighting_mode_and_the_ground_still_hides_them() {
+    // **Weather ask W31, from the window: "I am not seeing any stars in
+    // Beautiful lighting mode."** The stars were drawn in the cloud pass,
+    // before mode 3's post chain, and that chain fogs from depth: on a pixel
+    // of open sky the fog is total, so it painted the sky over with its own
+    // colour, stars and all. The rainbow is added back after it for that
+    // reason; the stars were not. The star test above never left mode 2.
+    //
+    // The ask's gate: a clear night, `stars = 1`, the same view in all three
+    // modes shows the same stars, and they still sit behind the terrain.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    night(&mut renderer);
+    // **Fog total at a game's view distance**, not `night`'s 2000 blocks:
+    // the sky is drawn beyond it, so mode 3's fog covers every pixel of it,
+    // which is the window the report came from. With the fog out past the
+    // sky, mode 3 showed its stars and this test could not see the fault.
+    renderer.set_sky([0.0; 3], 200.0);
+    let seed = 11;
+    renderer.set_star_catalog(seed);
+    renderer.set_observer(tiamat_core::sky::world_position(seed));
+    renderer.set_stars(1.0, tiamat_core::sky::turn(0.3));
+    let mut up = viewpoint();
+    up.look(0.0, 1.6);
+
+    // Which pixels of the upper sky a star lights: at least half white.
+    let lit = |frame: &Image| -> Vec<bool> {
+        let rows = HEIGHT * 3 / 4;
+        (0..rows)
+            .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                frame
+                    .pixel(x, y)
+                    .is_some_and(|p| p[0].max(p[1]).max(p[2]) >= 120)
+            })
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
+        // None asked for: none drawn, in any mode — so what is lit below is
+        // stars and not a bright sky.
+        renderer.set_stars(0.0, tiamat_core::sky::turn(0.3));
+        let dark = target.capture(&mut renderer, &up).expect("capture");
+        let none = lit(&dark).iter().filter(|&&on| on).count();
+        assert_eq!(
+            none, 0,
+            "{none} bright pixels in {mode:?}'s night with no stars asked for"
+        );
+
+        renderer.set_stars(1.0, tiamat_core::sky::turn(0.3));
+        let starry = target.capture(&mut renderer, &up).expect("capture");
+        let mask = lit(&starry);
+        let count = mask.iter().filter(|&&on| on).count();
+        println!("{mode:?}: {count} star pixels");
+        assert!(
+            (8..WIDTH as usize * HEIGHT as usize / 8).contains(&count),
+            "{count} bright pixels in {mode:?} under a clear starry night: no starfield"
+        );
+        seen.push((mode, mask));
+
+        // And the world still hides them: looking down, nothing bright
+        // shows through the ground.
+        let ground = target
+            .capture(&mut renderer, &viewpoint())
+            .expect("capture");
+        let mut through = 0;
+        for y in HEIGHT * 3 / 4..HEIGHT {
+            for x in 0..WIDTH {
+                if let Some(pixel) = ground.pixel(x, y)
+                    && pixel[0].max(pixel[1]).max(pixel[2]) >= 120
+                {
+                    through += 1;
+                }
+            }
+        }
+        assert_eq!(
+            through, 0,
+            "{through} star pixels drawn through the ground in {mode:?}"
+        );
+    }
+    // The same stars: nearly every pixel a star lights in one mode, it lights
+    // in Beautiful too. Beautiful draws them brighter (the headroom its float
+    // target has for everything on the sky), so its stars may be wider, but
+    // they are the same stars in the same places — one sky, not three.
+    let beautiful = &seen[2].1;
+    for (mode, mask) in &seen[..2] {
+        let theirs = mask.iter().filter(|&&on| on).count();
+        let shared = mask
+            .iter()
+            .zip(beautiful)
+            .filter(|&(&a, &b)| a && b)
+            .count();
+        #[expect(clippy::cast_precision_loss, reason = "pixel counts, as a share")]
+        let share = shared as f32 / theirs.max(1) as f32;
+        assert!(
+            share >= 0.9,
+            "only {:.0}% of {mode:?}'s star pixels are lit in Beautiful: not the same stars",
+            share * 100.0
+        );
+    }
+}

@@ -2716,10 +2716,14 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         view_projection: glam::Mat4,
+        fov_y: f32,
     ) {
         let Some(post) = self.post.as_ref() else {
             return;
         };
+        // The frame's pixel in radians, as the cloud pass is given it: the
+        // composite draws the stars back after its fog (weather ask W31).
+        let pixel_angle = fov_y / f32::from(u16::try_from(self.depth_size.1).unwrap_or(1080));
         post.run(
             &self.gpu,
             encoder,
@@ -2736,8 +2740,15 @@ impl Renderer {
                 place_fog: self.fog_here,
                 cave_fog: self.cave_fog,
                 rainbow: self.rainbow_uniform(),
+                stars: [
+                    self.stars.0,
+                    self.stars.1.0,
+                    self.stars.1.1,
+                    pixel_angle.max(1e-6),
+                ],
             },
             self.place_fog.buffer(),
+            self.clouds.star_buffers(),
         );
     }
 
@@ -3323,7 +3334,7 @@ impl Renderer {
         // The post chain, if this mode has one. It reads the scene texture the
         // pass above just wrote and lands on `target`, so from outside the
         // renderer a frame looks the same in every mode.
-        self.run_post(&mut encoder, target, view_projection);
+        self.run_post(&mut encoder, target, view_projection, camera.fov_y);
 
         self.draw_hands(&mut encoder, target);
 

@@ -1594,16 +1594,17 @@ fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     colour = mix(colour, clouds.sun.xyz * 1.6, disc);
     // The stars, behind everything: only where this pass draws at the
     // frame's own resolution. At a lower one `resolve_main` adds them, so
-    // a star stays a point rather than a block of pixels.
-    if (clouds.stars.w > 0.5) {
+    // a star stays a point rather than a block of pixels. The rainbow with
+    // them, and for their reason: a band a few degrees across lifted a block
+    // of pixels at a time is a staircase.
+    //
+    // **Modes 1 and 2 only, both.** Mode 3's fog paints over a painted sky,
+    // so its post chain adds the stars and the bow after its fog (weather
+    // asks W30, W31). Drawn here too they would be counted twice wherever the
+    // fog left any of the sky showing.
+    if (clouds.stars.w > 0.5 && clouds.quality.w < 2.0) {
         colour = colour + stars_along(direction, clouds.view.y) * headroom;
-        // The rainbow with them, and for their reason: a band a few degrees
-        // across lifted a block of pixels at a time is a staircase. Modes 1
-        // and 2 only — mode 3's fog paints over a painted sky, so its post
-        // chain adds the bow after the fog (weather ask W30).
-        if (clouds.quality.w < 2.0) {
-            colour = colour + rainbow_along(direction);
-        }
+        colour = colour + rainbow_along(direction);
     }
     return colour;
 }
@@ -1960,17 +1961,14 @@ fn resolve_main(in: Varyings) -> Resolved {
     out.colour = textureLoad(deck_colour, at, 0);
     out.depth = textureLoad(deck_depth, at, 0);
     // The stars, at the frame's own resolution, on the pixels the deck left
-    // as sky: the mark says which those are.
-    if (clouds.stars.w < 0.5 && out.colour.a >= SKY_MARK) {
+    // as sky: the mark says which those are. And the rainbow, as `sky_along`
+    // adds it at full resolution. Modes 1 and 2 only, for `sky_along`'s
+    // reason: mode 3's post chain adds both after its fog (W30, W31).
+    if (clouds.stars.w < 0.5 && clouds.quality.w < 2.0 && out.colour.a >= SKY_MARK) {
         let near = clouds.inverse_view_projection * vec4<f32>(in.ndc, 0.0, 1.0);
         let far = clouds.inverse_view_projection * vec4<f32>(in.ndc, 1.0, 1.0);
         let direction = normalize(far.xyz / far.w - near.xyz / near.w);
-        let headroom = select(1.0, 2.6, clouds.quality.w >= 2.0);
-        var added = stars_along(direction, clouds.view.y) * headroom;
-        // And the rainbow, as `sky_along` adds it at full resolution.
-        if (clouds.quality.w < 2.0) {
-            added = added + rainbow_along(direction);
-        }
+        let added = stars_along(direction, clouds.view.y) + rainbow_along(direction);
         out.colour = vec4<f32>(out.colour.xyz + added, out.colour.a);
     }
     return out;

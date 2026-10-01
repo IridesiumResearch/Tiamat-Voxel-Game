@@ -59,6 +59,10 @@ struct Post {
     rainbow: vec4<f32>,
     rainbow_bands: vec4<f32>,
     rainbow_light: vec4<f32>,
+    // The stars — weather ask W31: how much of the catalog shows, the day's
+    // turn as (cos, sin), and the frame's pixel in radians, the numbers
+    // `clouds.wgsl` draws them with. Appended, for `fog_here`'s reason.
+    stars: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> post: Post;
@@ -77,6 +81,11 @@ struct Post {
 // Every place's fog: the same grid the world shader reads. Bound by every pass
 // and read by the composite alone.
 @group(0) @binding(6) var<storage, read> fog_cells: array<vec4<f32>>;
+// The star catalog, as `clouds.wgsl` reads it: bins over an octahedral map of
+// the sky, and the list they index (weather ask W31). Bound by every pass and
+// read by the composite alone.
+@group(0) @binding(7) var<storage, read> star_bins: array<vec2<u32>>;
+@group(0) @binding(8) var<storage, read> star_list: array<vec4<u32>>;
 
 // How far a view of the sky is taken to cross a place's fog, in blocks. Must
 // match `render::SKY_FOG_REACH`, which clears the sky to the same answer in
@@ -324,6 +333,60 @@ fn view_ray(uv: vec2<f32>) -> vec3<f32> {
     return normalize(far.xyz / far.w);
 }
 
+// Bins per axis of the star map. Must match `clouds.wgsl`, which must match
+// `clouds.rs::STAR_BINS_PER_AXIS`.
+const STAR_BINS_PER_AXIS: u32 = 32u;
+
+// How much brighter mode 3 draws a star than modes 1 and 2: the `headroom`
+// `clouds.wgsl` gives everything on the sky in a float target that is
+// tonemapped after.
+const STAR_HEADROOM: f32 = 2.6;
+
+// `clouds.wgsl`'s `oct_encode` and `stars_along`, word for word but reading
+// `post.stars`. The stars are added back here, after the fog, for the reason
+// the rainbow is: the fog has just painted the sky over with its own colour,
+// stars and all (weather ask W31: no stars in Beautiful).
+fn oct_encode(d: vec3<f32>) -> vec2<f32> {
+    let p = d.xy / (abs(d.x) + abs(d.y) + abs(d.z));
+    let signs = select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+    let q = select(p, (1.0 - abs(p.yx)) * signs, d.z < 0.0);
+    return q * 0.5 + 0.5;
+}
+
+fn stars_along(direction: vec3<f32>, pixel: f32) -> vec3<f32> {
+    let visibility = post.stars.x;
+    if (visibility <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let c = post.stars.y;
+    let s = post.stars.z;
+    let d = vec3<f32>(
+        direction.x * c - direction.y * s,
+        direction.y * c + direction.x * s,
+        direction.z,
+    );
+    let uv = clamp(oct_encode(d), vec2<f32>(0.0), vec2<f32>(0.99999));
+    let cell = vec2<u32>(uv * f32(STAR_BINS_PER_AXIS));
+    let bin = star_bins[cell.y * STAR_BINS_PER_AXIS + cell.x];
+    let core = max(0.0016, pixel * 0.9);
+    var light = vec3<f32>(0.0);
+    for (var i = 0u; i < bin.y; i = i + 1u) {
+        let star = star_list[bin.x + i];
+        let at = bitcast<vec3<f32>>(star.xyz);
+        if (dot(d, at) <= 0.0) {
+            continue;
+        }
+        let bw = unpack2x16unorm(star.w);
+        let off = length(cross(d, at));
+        let radius = core * (1.0 + 1.5 * bw.x);
+        let point = 1.0 - smoothstep(0.0, radius, off);
+        let halo = 1.0 - smoothstep(0.0, radius * 4.0, off);
+        let colour = mix(vec3<f32>(0.70, 0.80, 1.0), vec3<f32>(1.0, 0.86, 0.66), bw.y);
+        light = light + colour * bw.x * (point + 0.12 * halo * halo);
+    }
+    return light * visibility;
+}
+
 // `clouds.wgsl`'s `rainbow_bump`, `rainbow_band` and `rainbow_along`, word
 // for word but for the uniform they read — weather ask W30. Mode 3 draws the
 // rainbow here rather than in the cloud pass, because the fog below paints a
@@ -460,6 +523,10 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     let at_sky_depth = textureLoad(scene_depth, vec2<i32>(input.clip.xy), 0) >= 1.0;
     let open_sky = select(0.0, 1.0 - is_cloud, at_sky_depth);
     let bowed = fogged + rainbow_along(view_ray(input.uv)) * post.exposure * open_sky;
+    // **And the stars, behind the bow** (weather ask W31): the same pixels,
+    // for the same reason. Without this Beautiful had no night sky at all.
+    let starred = bowed
+        + stars_along(view_ray(input.uv), post.stars.w) * STAR_HEADROOM * post.exposure * open_sky;
 
     // Graded last, on the display-referred result. The table's domain is 0..1
     // and this is where the frame first lives in it: grading before the tonemap
@@ -469,6 +536,6 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // an `if`: the condition is uniform so a branch would be legal, but a select
     // needs no argument about that and costs one fetch in the pass that runs
     // once per pixel per frame.
-    let display = tonemap(bowed);
+    let display = tonemap(starred);
     return vec4<f32>(select(display, graded(display), post.graded > 0.5), 1.0);
 }

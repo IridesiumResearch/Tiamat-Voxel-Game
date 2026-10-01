@@ -104,6 +104,10 @@ struct Uniforms {
     /// The rainbow the composite adds after its fog — weather ask W30.
     /// **Appended**, for `place_fog`'s reason.
     rainbow: super::rainbow::Uniform,
+    /// The stars the composite adds after its fog — weather ask W31: how
+    /// much of the catalog shows, the day's turn as (cos, sin), and the
+    /// frame's pixel in radians. **Appended**, for `place_fog`'s reason.
+    stars: [f32; 4],
 }
 
 /// What the frame's sky is doing, as the composite needs it.
@@ -141,6 +145,10 @@ pub struct Frame {
     /// The rainbow painted on the sky — weather ask W30. Mode 3 adds it in
     /// the composite, after the fog that would otherwise paint it over.
     pub rainbow: super::rainbow::Uniform,
+    /// The stars, for the same reason as the rainbow (weather ask W31): how
+    /// much of the catalog shows, the day's turn as (cos, sin), and the
+    /// frame's pixel in radians — the numbers the cloud pass draws them with.
+    pub stars: [f32; 4],
 }
 
 /// How much of the sun's colour the haze takes on where the view points at it.
@@ -272,6 +280,28 @@ fn post_bind_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
                     },
                     count: None,
                 },
+                // The star catalog's bins and list (weather ask W31): the
+                // composite adds the stars back after mode 3's fog.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         })
 }
@@ -363,6 +393,9 @@ struct Step<'a> {
     /// The grid of every place's fog, which every pass binds and the
     /// composite reads.
     fog: &'a wgpu::Buffer,
+    /// The star catalog's bins and list, which the composite reads to add
+    /// the stars back after its fog (weather ask W31).
+    stars: (&'a wgpu::Buffer, &'a wgpu::Buffer),
 }
 
 /// The world pipeline for the float target, with or without cascades to bind.
@@ -703,6 +736,7 @@ impl Post {
         target: &wgpu::TextureView,
         frame: &Frame,
         fog: &wgpu::Buffer,
+        stars: (&wgpu::Buffer, &wgpu::Buffer),
     ) {
         let full_texel = [1.0 / self.size.0 as f32, 1.0 / self.size.1 as f32];
         // The BLOOM buffer's texel, not the frame's. Stepping a blur by a
@@ -730,6 +764,7 @@ impl Post {
                 bloom: None,
                 target: &self.bloom[0].view,
                 fog,
+                stars,
             },
             Step {
                 label: "post-blur-h",
@@ -739,6 +774,7 @@ impl Post {
                 bloom: None,
                 target: &self.bloom[1].view,
                 fog,
+                stars,
             },
             Step {
                 label: "post-blur-v",
@@ -748,6 +784,7 @@ impl Post {
                 bloom: None,
                 target: &self.bloom[0].view,
                 fog,
+                stars,
             },
             Step {
                 label: "post-composite",
@@ -757,6 +794,7 @@ impl Post {
                 bloom: Some(&self.bloom[0].view),
                 target,
                 fog,
+                stars,
             },
         ] {
             self.step(gpu, encoder, &step);
@@ -789,6 +827,7 @@ impl Post {
                 place_fog: frame.place_fog,
                 cave_fog: [frame.cave_fog[0], frame.cave_fog[1], frame.cave_fog[2], 0.0],
                 rainbow: frame.rainbow,
+                stars: frame.stars,
             }),
         );
     }
@@ -831,6 +870,14 @@ impl Post {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: step.fog.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: step.stars.0.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: step.stars.1.as_entire_binding(),
                 },
             ],
         });

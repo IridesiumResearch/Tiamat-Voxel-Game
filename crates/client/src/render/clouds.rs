@@ -585,6 +585,16 @@ impl Pass {
         self.starfield.rebuild(gpu);
     }
 
+    /// The star catalog as the shader reads it: its bins and its list.
+    ///
+    /// Lent to the post chain, which adds the stars back after mode 3's fog
+    /// has painted the sky over (weather ask W31). Created once at a fixed
+    /// size and written in place, so a bind group holding them stays good.
+    #[must_use]
+    pub fn star_buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        (&self.starfield.bins, &self.starfield.list)
+    }
+
     /// Moves the point the catalog is seen from.
     pub fn set_observer(&mut self, gpu: &Gpu, observer: tiamat_core::sky::UniversalPos) {
         if self.starfield.observer == observer {
