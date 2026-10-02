@@ -1021,11 +1021,14 @@ fn a_cave_under_a_fogged_column_is_clear_when_the_fog_has_a_bottom_above_it() {
     // `bottom` above the camera it thins below it over a few blocks and the
     // cave is clear; and a `bottom` under the camera is the control that the
     // fog is the same fog, drawn, when the cave is inside the layer.
-    // Structural bounds with wide margins, as this file's header says.
+    // Structural bounds with wide margins, as this file's header says. In
+    // all three lighting modes: modes 1 and 2 fog in the world shader, mode
+    // 3 in the post chain from depth, and each reads the bottom on its own.
     let Some(gpu) = gpu() else { return };
     let chunks = scene();
-    let redness = |bottom: Option<i32>| {
+    let redness = |mode: LightingMode, bottom: Option<i32>| {
         let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
         fog_everywhere(
             &mut renderer,
             tiamat_core::proto::ChunkFog {
@@ -1043,21 +1046,29 @@ fn a_cave_under_a_fogged_column_is_clear_when_the_fog_has_a_bottom_above_it() {
         ground[0] - ground[1]
     };
     // The floor's surface is at y = 8 and the camera at y = 18.
-    let unbounded = redness(None);
-    let inside = redness(Some(-40));
-    let above = redness(Some(40));
-    assert!(
-        unbounded > 0.35,
-        "with no bottom the fog under its top left the cave at {unbounded:.3}"
-    );
-    assert!(
-        inside > 0.35,
-        "a bottom under the cave changed the fog: {inside:.3}"
-    );
-    assert!(
-        above < 0.05,
-        "a fog whose bottom is twenty blocks over the camera still reddened the cave by {above:.3}"
-    );
+    for mode in [
+        LightingMode::Simple,
+        LightingMode::Classic,
+        LightingMode::Beautiful,
+    ] {
+        let unbounded = redness(mode, None);
+        let inside = redness(mode, Some(-40));
+        let above = redness(mode, Some(40));
+        println!("{mode:?}: none {unbounded:.3}, under {inside:.3}, over {above:.3}");
+        assert!(
+            unbounded > 0.35,
+            "in {mode:?} with no bottom the fog under its top left the cave at {unbounded:.3}"
+        );
+        assert!(
+            inside > 0.35,
+            "in {mode:?} a bottom under the cave changed the fog: {inside:.3}"
+        );
+        assert!(
+            above < 0.05,
+            "in {mode:?} a fog whose bottom is twenty blocks over the camera still reddened \
+             the cave by {above:.3}"
+        );
+    }
 }
 
 #[test]
