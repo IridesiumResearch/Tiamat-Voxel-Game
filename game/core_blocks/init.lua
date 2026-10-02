@@ -147,6 +147,49 @@ game.register_block{
 
 game.log("registered the saturation chain: core:ground, core:damp, core:soaked")
 
+-- A block drawn as a model, and a block that comes off in one piece.
+--
+-- Sub-Node Contract §7.5 and §8.6, each with a reference implementation so
+-- the mechanism has been checked from the outside. The brazier names a model
+-- (`models/brazier.glb`, written by `cargo run -p tiamat-core --example
+-- block_model_fixture`): the client draws that in place of the block's cells,
+-- and what the world knows of it is its `shape` — the foot, the stem, the bowl
+-- — for collision, light, fluid and the aim. A model block is whole without
+-- saying so: any tool takes the block, it never crumbles, it pays 27 units
+-- however many cells its shape has, and nothing is ever written into it.
+game.register_model{ id = "brazier", file = "models/brazier.glb" }
+
+game.register_block{
+    id = "brazier",
+    sounds = { step = "step" },
+    name = "Brazier",
+    description = "A foot, a stem and a bowl. It comes up in one piece.",
+    model = "brazier",
+    shape = {
+        "### ### ###",   -- the foot, across the whole block
+        "... .#. ...",   -- the stem, the centre cell
+        "### ### ###",   -- the bowl
+    },
+    hardness = 0.5,
+    -- The inventory still shows a block by its texture.
+    textures = { all = "textures/white.png" },
+}
+
+-- And `whole` alone: a cube-looking block that a chisel cannot take a corner
+-- off. Delete this and the brazier and the engine keeps working; a mod set
+-- with neither has no one-piece blocks, which is a mod set's decision.
+game.register_block{
+    id = "anvil",
+    sounds = { step = "step" },
+    name = "Anvil",
+    description = "Solid, and all of a piece.",
+    whole = true,
+    hardness = 2.0,
+    textures = { all = "textures/white.png" },
+}
+
+game.log("registered core:brazier (a model block) and core:anvil (a whole block)")
+
 
 -- The engine's movement cues, given a noise.
 --

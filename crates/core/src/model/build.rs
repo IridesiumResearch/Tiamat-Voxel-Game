@@ -152,8 +152,16 @@ pub fn to_glb(model: &Model) -> Vec<u8> {
     }
 
     // Node 0 is the mesh; joints start at 1. A flat list, because the reader
-    // finds parents by walking `children` rather than by position.
-    let mut nodes = vec![json!({ "mesh": 0, "skin": 0 })];
+    // finds parents by walking `children` rather than by position. A model with
+    // no joints names no skin: the reader refuses a skin index into an empty
+    // list, as it should, and until 2026-10-02 this wrote one anyway — so the
+    // "static" fuzz seed was a file the reader answered with an error rather
+    // than a static mesh, and the first model block found it.
+    let mut nodes = vec![if model.skin.joints.is_empty() {
+        json!({ "mesh": 0 })
+    } else {
+        json!({ "mesh": 0, "skin": 0 })
+    }];
     for (index, bone) in model.skin.joints.iter().enumerate() {
         let children: Vec<usize> = model
             .skin
