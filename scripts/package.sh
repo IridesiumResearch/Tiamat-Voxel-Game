@@ -58,6 +58,22 @@ echo "==> building ${name} (channel ${channel})"
 export TIAMAT_CHANNEL="$channel"
 [ -n "$commit" ] && export TIAMAT_COMMIT="$commit"
 
+# **A Windows binary carries its C runtime inside it.** The MSVC target links
+# `VCRUNTIME140.dll` dynamically by default, and that DLL is not part of
+# Windows: it arrives with the Visual C++ Redistributable, which most machines
+# have because some other program installed it and a fresh one does not —
+# "The code execution cannot proceed because VCRUNTIME140.dll was not found",
+# and no game. `+crt-static` links the runtime in, so the archive works on a
+# machine that has never seen a C compiler. It is set HERE, not in
+# `.cargo/config.toml`: Cargo drops a config file's rustflags whenever
+# RUSTFLAGS is set in the environment (CI sets it), and a flag that quietly
+# stops applying is worse than none. With `--target` given, the flag reaches
+# the shipped binaries only, not build scripts or proc macros.
+# `check-archive.sh` looks at the result rather than trusting this.
+case "$target" in
+    *-msvc) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" ;;
+esac
+
 # The updater is built when it exists, so this script works before and after it
 # lands rather than having to be rewritten the day it does.
 packages=(-p client -p server)
@@ -246,7 +262,11 @@ macOS
   app straight out of Downloads from a read-only copy that cannot see current/.
 
 Windows
+  Extract the whole zip first (right-click it, Extract All), then open
+  tiamat.exe from the extracted folder. Opened from inside the zip, Windows
+  copies out that one file alone, with no game beside it to start.
   SmartScreen will warn about an unrecognised app. More info -> Run anyway.
+  Nothing else to install: the C runtime is built in.
 
 Linux
   ./tiamat${suffix}

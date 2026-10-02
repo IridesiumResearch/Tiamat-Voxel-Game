@@ -142,6 +142,23 @@ Windows `%LOCALAPPDATA%\Tiamat`, macOS wherever the player unpacks the folder
 where they already live and are **never** touched by an update — a player who
 reinstalls keeps their worlds.
 
+### Windows: nothing to install first
+
+The Windows binaries link the C runtime statically (`+crt-static`, set in
+`scripts/package.sh` for the MSVC target). The default is a dynamic link to
+`VCRUNTIME140.dll`, which is not part of Windows: it comes with the Visual C++
+Redistributable, which most machines have from some other program and a fresh
+one has not — the player sees "The code execution cannot proceed because
+VCRUNTIME140.dll was not found" and nothing starts. The archive is checked for
+that import rather than the build trusted (`scripts/check-archive.sh`), on the
+same principle as §7.
+
+The one Windows step that cannot be built away: the zip has to be extracted
+before `tiamat.exe` is opened. Explorer runs a file double-clicked inside a zip
+from a temporary copy of that one file, with no `current/` beside it; the
+launcher says so, in a box, when it finds no game (`explain_failure` in the
+updater), and the archive's README says it first.
+
 ### macOS: `Tiamat.app`
 
 The macOS archive has the same shape with one addition, and one difference:
@@ -319,4 +336,9 @@ Recorded so a later reader knows these were decided rather than forgotten:
   front screen, and shows nothing itself. If an update ever has to be applied
   slowly enough to notice, it needs one.
 - **An in-place installer for Windows** (MSI or Inno Setup). The first round
-  ships an archive and a launcher that installs on first run.
+  ships an archive and a launcher that installs on first run. What an
+  installer would add is a Start-menu entry, an uninstaller and the extraction
+  step done for the player; it would not have fixed the missing C runtime
+  (§5), which is a matter of how the binary is linked, and it does not quiet
+  SmartScreen, which only a signature does. If it is built, it wraps the same
+  layout, so the updater's three renames keep working underneath it.

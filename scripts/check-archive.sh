@@ -105,6 +105,23 @@ else
 fi
 need "current/client${suffix}"
 need "current/server${suffix}"
+
+# A Windows binary that imports the Visual C++ runtime DLLs only runs where the
+# Redistributable is installed, and a fresh machine has not got it
+# (package.sh links the runtime in statically). A PE import table names each
+# DLL in plain ASCII, so searching the bytes is the whole check and needs no
+# PE tooling on the runner.
+if [ "$suffix" = ".exe" ]; then
+    for exe in "$root/tiamat.exe" "$root"/current/*.exe; do
+        [ -f "$exe" ] || continue
+        rel="${exe#"$root/"}"
+        if grep -a -q -i -E 'vcruntime140(_1)?\.dll|msvcp140\.dll' "$exe"; then
+            fail "$rel imports VCRUNTIME140.dll and needs the Visual C++ Redistributable; package.sh builds with +crt-static"
+        else
+            ok "$rel carries its own C runtime"
+        fi
+    done
+fi
 need "current/LICENSE"
 need "current/LICENSE.EXCEPTION"
 need "current/THIRD-PARTY.md"
