@@ -32,7 +32,7 @@ fills: half of all new worlds were dirt with no biome claim, with air holes
 and solid boxes. `generate.lua`'s float branch in `seed_int` no longer runs
 and can go.
 
-## 45. A chunk's fog has a top and no bottom (2026-10-01)
+## 45. A chunk's fog has a top and no bottom (2026-10-01): LANDED 2026-10-02 (engine 5d20328, protocol 84), awaiting the eye
 
 **Seen.** The designer, in the Veined Silver Gallery (a dark cave, 2.1 to
 3.6 km down): "way too much bright yellowish fog. It should be dark and
@@ -54,7 +54,19 @@ look and cannot go.
 `top`. A surface fog would give its biome's ground less a margin, a cave's
 its storey's floor, and an answer without one would be today's.
 
-## 44. The sky modifier has no say over the stars (2026-10-01)
+**From the engine, 2026-10-02 (engine 5d20328, protocol 84).** As asked:
+a `register_chunk_fog` answer takes `bottom`, a block height floored like
+`top`, and the fog thins below it over the same blocks it thins above
+`top`. Omitted, or not a number, is today's fog exactly; a `bottom` above
+its own `top` is lowered to the `top`, so a slip cannot thin a fog inside
+its own layer; a non-number faults the answering mod, as a bad `top`
+does. The gate as a screenshot test in all three lighting modes: a cave
+under a fogged column is red with no `bottom` or one beneath it, and clear
+with one twenty blocks above it. For the eye ([H]): once the surface fogs
+give a `bottom` of ground less a margin, the Veined Silver Gallery is
+clear, and the fog still shows above the margin.
+
+## 44. The sky modifier has no say over the stars (2026-10-01): LANDED 2026-10-02 (engine 5d20328, protocol 84), awaiting the eye
 
 **Seen.** "Below the surface only darkness and stars should be seen in the
 sky, and the day/night cycle should not be there." The underside under the
@@ -72,6 +84,16 @@ and per domain, and the underside is the overworld.
 **Smallest change.** An optional `stars` (0 to 1) on the modifier, which
 replaces the keyframe's value while it is set, eased like the rest. With
 it the world asks `stars = 1` under the line.
+
+**From the engine, 2026-10-02 (engine 5d20328, protocol 84).** As asked:
+`game.set_sky_modifier(uuid, { ..., stars = 0..1 })`. While the modifier
+is set, `stars` replaces the keyframes' value, by day as by night, eased
+like the rest; omitted, the keyframes decide; `0` is a say (no stars);
+out of range clamps, and a wrong type is an error naming the function. So
+`underside.lua`'s black modifier with `stars = 1` gives darkness and stars
+under the line, and clearing it eases back to the day's sky. For the eye
+([H]): under Spindle 14 km by day, a black sky with stars; climbing out,
+the day comes back without a jump.
 
 ## 43. `absorbs.becomes` cannot name another mod's block: LANDED 2026-09-26 (engine 1c475a8)
 
