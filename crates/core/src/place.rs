@@ -75,6 +75,11 @@ pub enum Refusal {
     /// The geometry would be inside a player.
     #[error("someone is standing there")]
     InsideAPlayer,
+
+    /// The block holds a `whole` material, which nothing is written into
+    /// (Sub-Node Contract §7.5): a campfire's empty cells are not room.
+    #[error("that is one piece; there is no room in it")]
+    Whole,
 }
 
 /// What a placement would write.
@@ -84,8 +89,41 @@ pub struct Placement {
     pub block: BlockPos,
     /// Which of its cells get filled.
     pub occupancy: u32,
-    /// Units taken from the player, which is `occupancy.count_ones()`.
+    /// Units taken from the player. `occupancy.count_ones()` for loose
+    /// material and a cut; [`crate::UNITS_PER_BLOCK`] for a `whole`
+    /// material, whatever its shape (Sub-Node Contract §7.5 and §9).
     pub units: u32,
+}
+
+/// What placing a `whole` material would write: its shape, into an empty
+/// block, for a whole block's units (Sub-Node Contract §7.5).
+///
+/// The brush is not consulted, as it is not for a cut: the material's shape is
+/// the material's, and a whole thing is placed whole or not at all. `filled`
+/// is what the target block already holds; anything at all in it refuses the
+/// placement, because a whole material never shares a block.
+///
+/// # Errors
+///
+/// [`Refusal::NothingHeld`] if fewer than a block's units are held, or
+/// [`Refusal::Occupied`] if the block is not empty.
+pub fn plan_whole(
+    target: SubNodePos,
+    held: u32,
+    shape: u32,
+    filled: u32,
+) -> Result<Placement, Refusal> {
+    if held < crate::UNITS_PER_BLOCK {
+        return Err(Refusal::NothingHeld);
+    }
+    if filled & crate::block::OCCUPANCY_FULL != 0 {
+        return Err(Refusal::Occupied);
+    }
+    Ok(Placement {
+        block: target.block(),
+        occupancy: shape & crate::block::OCCUPANCY_FULL,
+        units: crate::UNITS_PER_BLOCK,
+    })
 }
 
 /// Works out what placing into `target` with `brush` would write, given what is
@@ -137,7 +175,10 @@ pub fn plan(
             occupancy: 1 << cell_index(target),
             units: 1,
         }),
-        Brush::Block => {
+        // A tool never carries `Whole` — a material decides that, for digging
+        // (Contract §7.5) — so the arm is for completeness: a whole thing in
+        // hand is planned by `plan_whole`, and this is what a block brush does.
+        Brush::Block | Brush::Whole => {
             // **The EMPTY cells, not the first N.** Reported from the window:
             // placing a block against one that had been partly mined said
             // "there is already something there" and did nothing, because the
@@ -933,6 +974,38 @@ mod tests {
 
     fn cell(x: i32, y: i32, z: i32) -> SubNodePos {
         SubNodePos::new(x, y, z)
+    }
+
+    #[test]
+    fn a_whole_material_places_its_shape_into_an_empty_block_for_a_whole_blocks_units() {
+        // Contract §7.5: the shape as declared, 27 units whatever it occupies,
+        // and never into a block that holds anything.
+        let bottom: u32 = (0..9).map(|i| 1 << i).sum();
+        let placed = plan_whole(cell(4, 1, 2), 27, bottom, 0).expect("held a whole one");
+        assert_eq!(placed.block, cell(4, 1, 2).block());
+        assert_eq!(placed.occupancy, bottom, "the shape, not the aimed cell");
+        assert_eq!(
+            placed.units, UNITS_PER_BLOCK,
+            "a whole block's units for nine cells"
+        );
+        // Holding less than a block is holding none of it.
+        assert_eq!(
+            plan_whole(cell(0, 0, 0), 26, bottom, 0),
+            Err(Refusal::NothingHeld)
+        );
+        // One cell in the block, even one the shape would not touch, refuses.
+        let top_corner = 1 << 26;
+        assert_eq!(
+            plan_whole(cell(0, 0, 0), 27, bottom, top_corner),
+            Err(Refusal::Occupied)
+        );
+        // Bits above the 27 are not cells.
+        assert_eq!(
+            plan_whole(cell(0, 0, 0), 27, bottom, 1 << 30)
+                .expect("junk bits ignored")
+                .units,
+            UNITS_PER_BLOCK
+        );
     }
 
     #[test]

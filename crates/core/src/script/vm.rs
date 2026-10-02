@@ -387,6 +387,23 @@ pub struct BlockRules {
     /// the material table so the client can multiply the texture by it, and
     /// charter rule 4's determinism does not reach it (rendering is exempt).
     pub tint: Option<crate::proto::Tint>,
+    /// Whether a block of it is one piece: dug whole by any brush, placed as
+    /// its [`shape`](Self::shape) into an empty block, never written into.
+    ///
+    /// Sub-Node Contract §7.5. Implied by [`model`](Self::model). The client
+    /// is told, so its aim outlines the block whatever brush is held.
+    pub whole: bool,
+    /// Which of the 27 cells a placed block of it occupies, as an occupancy
+    /// mask in `crate::block`'s cell order. [`crate::block::OCCUPANCY_FULL`]
+    /// unless the mod declared a `shape`, which it may only for a `whole`
+    /// material (Contract §7.5).
+    pub shape: u32,
+    /// The registered model the client draws in place of its cells, if any.
+    ///
+    /// A model id as `register_model` qualified it. Sub-Node Contract §8.6:
+    /// the cells are still what the world knows of the block; the model is
+    /// what the player sees. Travels with the material table.
+    pub model: Option<String>,
 }
 
 impl BlockRules {

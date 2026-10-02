@@ -1302,6 +1302,56 @@ Blending a biome's COLOUR is the exception, and it is an engine feature
 (`register_chunk_tint`, above) for a reason you cannot work around: the blend
 has to happen where the pixels are, and a mod has no way to reach them.
 
+**A campfire is a `model` block, and it is `whole`.** A block whose look is a
+shape no cube is — a campfire, a brazier, an anvil, a machine — names a model
+you registered, and the client draws that in place of the block's cells. What
+the WORLD knows of it is its `shape`: which of the 27 cells it occupies, for
+collision, light, fluid and the aim. The two need not agree, as a creature's
+collider and its mesh need not: a fire whose flames reach the top of the block
+and whose shape is its bottom layer is the intended use.
+
+```lua
+game.register_model{ id = "campfire", file = "models/campfire.glb", texture = "models/campfire.png" }
+
+game.register_block{
+    id = "campfire",
+    model = "campfire",             -- your own model; another mod's as "their_mod:thing"
+    shape = {                       -- three layers, bottom first; nine cells each
+        "### ### ###",              -- z = 0, 1, 2 rows, x left to right
+        ".#. .#. .#.",
+        "... ... ...",
+    },
+    light_emit = { r = 15, g = 10, b = 4 },
+    hardness = 0.5,
+    textures = { all = "textures/campfire_icon.png" },   -- what the inventory shows
+}
+```
+
+A model block is **whole** without saying so: any tool digs the block, not the
+cell — a chisel included — in the block's own `hardness`, it comes off in one
+piece and pays a whole block's units (27, or your `drops` table in full) however
+many cells its shape has; placing it writes the shape into an EMPTY block and
+costs 27 units whatever brush is held; and nothing is ever written into its
+block — a chisel cannot fill in a campfire, and a `set_block` with a mask or a
+merge naming one is refused and logged. `whole = true` alone, with no model,
+gives a cube-looking block the same one-piece behaviour. `shape` needs one or
+the other: a registered shape a chisel could take apart would be a cut, and a
+cut is carried, not registered.
+
+The model is in cells, like a creature's: **three units to the block**, origin
+at the bottom centre, +Z forward, and `register_model`'s `scale` applies. It is
+lit as a creature is — one light for the model, the brightest at the block and
+its six neighbours — and it draws nothing until the model table has arrived,
+never a placeholder cube. `transparent`, `cutout`, `sway` and `billboard` are
+refused on it: it has no faces for them to apply to. The shape is written as
+declared, not turned to face the player; a block that should face four ways is
+four registered blocks for now.
+
+`game.set_block(x, y, z, "my_mod:campfire")` writes the shape; so do a stamped
+plan and a generator's `buf:set_block` / `buf:set_world`. A generator's area
+fills (`fill_density`, cover, palette, a scattered schematic) take a material as
+named — a full cube — so a schematic that wants the shape carries the cells.
+
 ---
 
 ## The sandbox

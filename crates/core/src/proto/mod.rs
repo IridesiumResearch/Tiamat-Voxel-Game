@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 84;
+pub const PROTOCOL_VERSION: u32 = 85;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,14 @@ pub const PROTOCOL_VERSION: u32 = 84;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v85 (model blocks and whole blocks, Sub-Node Contract §7.5 and §8.6):
+// `MaterialDef` gains two fields, appended after `tint`. `whole`: whether a
+// block of the material is one piece, dug whole by any brush — the client's
+// aim outlines the block. `model`: the registered model id the client draws in
+// place of the material's cells, or `None` for every material that is a cube
+// (refused on decode when it is empty or longer than a model id may be).
+// **Fields on an existing shape**, so the version check is what keeps a v84
+// peer from reading the flag as the start of the next material.
 // v84 (World 44 and 45): two changes under one number. `SkyModifier` gains
 // `stars`, appended after `saturation`: `None`, or a brightness for the star
 // catalog that replaces the keyframes' while the modifier stands, eased like
@@ -1030,6 +1038,23 @@ pub struct MaterialDef {
     /// draws its texture exactly as it is.
     #[serde(default)]
     pub tint: Option<Tint>,
+    /// Whether a block of it is one piece: dug whole by any brush, placed as
+    /// its shape, never written into (Sub-Node Contract §7.5).
+    ///
+    /// **Not presentation.** The server decides the dig; this is so the
+    /// client's aim outlines the block a chisel is about to take whole,
+    /// rather than the one cell it would take of anything else.
+    #[serde(default)]
+    pub whole: bool,
+    /// The registered model the client draws in place of its cells, if any.
+    ///
+    /// A model id from the model table (Sub-Node Contract §8.6). The cells
+    /// are still what the world knows of the block — collision, light, fluid,
+    /// aim — and emit no faces; the model is what the player sees. `None` is
+    /// every material that is drawn as its cells, which is every material
+    /// until a mod says otherwise.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// One mod in the server's resolved set.
@@ -3581,6 +3606,19 @@ fn check_materials(materials: &[MaterialDef]) -> Result<(), ProtocolError> {
             ),
         });
     }
+    // A model id is looked up in the model table, whose ids are bounded the
+    // same way; an empty one would name nothing and a long one is a server
+    // sending something no `register_model` could have produced.
+    for material in materials {
+        if let Some(model) = &material.model {
+            if model.is_empty() {
+                return Err(ProtocolError::Unusable {
+                    what: format!("material `{}` names an empty model id", material.name),
+                });
+            }
+            check_len("material_model", model.len(), MAX_ID_BYTES)?;
+        }
+    }
     Ok(())
 }
 
@@ -5394,6 +5432,8 @@ mod tests {
                 friction,
                 tint: None,
                 step_sound: None,
+                whole: false,
+                model: None,
             }],
         };
         for fine in [0.0, 0.05, 1.0] {
@@ -5425,6 +5465,8 @@ mod tests {
                     friction: 1.0,
                     tint: None,
                     step_sound: None,
+                    whole: false,
+                    model: None,
                 },
                 MaterialDef {
                     id: 2,
@@ -5440,12 +5482,62 @@ mod tests {
                     friction: 1.0,
                     tint: None,
                     step_sound: None,
+                    whole: false,
+                    model: None,
+                },
+                // A whole block drawn as a model (Contract §7.5 and §8.6).
+                MaterialDef {
+                    id: 3,
+                    name: "camp:fire".to_owned(),
+                    texture: None,
+                    placeable: true,
+                    transparent: false,
+                    cutout: false,
+                    passable: false,
+                    sway: false,
+                    billboard: false,
+                    billboard_cross: false,
+                    friction: 1.0,
+                    tint: None,
+                    step_sound: None,
+                    whole: true,
+                    model: Some("camp:campfire".to_owned()),
                 },
             ],
         };
         let bytes = encode(&message).expect("encode");
         let decoded: ServerMessage = decode(&bytes).expect("decode");
         assert_eq!(decoded, message);
+        assert!(validate_server_message(&message).is_ok());
+    }
+
+    #[test]
+    fn a_material_naming_an_empty_or_endless_model_is_refused() {
+        // The id is looked up in the model table, whose ids are bounded the
+        // same way; an empty one names nothing and a long one is a server
+        // sending what no `register_model` could have made (charter rule 14).
+        let with = |model: &str| ServerMessage::MaterialTable {
+            materials: vec![MaterialDef {
+                id: 3,
+                name: "camp:fire".to_owned(),
+                texture: None,
+                placeable: true,
+                transparent: false,
+                cutout: false,
+                passable: false,
+                sway: false,
+                billboard: false,
+                billboard_cross: false,
+                friction: 1.0,
+                tint: None,
+                step_sound: None,
+                whole: true,
+                model: Some(model.to_owned()),
+            }],
+        };
+        assert!(validate_server_message(&with("camp:campfire")).is_ok());
+        assert!(validate_server_message(&with("")).is_err());
+        assert!(validate_server_message(&with(&"x".repeat(MAX_ID_BYTES + 1))).is_err());
     }
 
     #[test]

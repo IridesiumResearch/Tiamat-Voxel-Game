@@ -2393,6 +2393,8 @@ mod tests {
                 billboard_cross: false,
                 friction: 1.0,
                 tint: None,
+                whole: false,
+                model: None,
             })
             .collect()
     }

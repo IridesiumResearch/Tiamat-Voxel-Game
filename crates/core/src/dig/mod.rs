@@ -51,10 +51,23 @@ pub enum Brush {
     /// The mechanism the whole sub-node design exists for. `core:chisel` in the
     /// reference mods is the proof that a mod can reach it.
     SubNode,
+    /// Removes the whole block in one edit, because the material under the
+    /// crosshair is one piece (Sub-Node Contract §7.5).
+    ///
+    /// **Chosen by the material, never by a tool**: `parse` does not know the
+    /// word, and `register_tool` refuses it. A dig starts with the tool's brush
+    /// and becomes this on the first tick that sees a `whole` material under
+    /// the aim ([`Dig::make_whole`]). Unlike [`Brush::Block`] it does not
+    /// crumble — half a campfire is not a thing — and it pays the block's full
+    /// yield however many cells the block's shape has (§9).
+    Whole,
 }
 
 impl Brush {
     /// Parses the wire/script spelling.
+    ///
+    /// `"whole"` is deliberately not one: a tool cannot ask for it, a material
+    /// decides it (Contract §7.5).
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name {
@@ -64,12 +77,14 @@ impl Brush {
         }
     }
 
-    /// The spelling a mod writes.
+    /// The spelling a mod writes — or, for [`Brush::Whole`], the one a hook
+    /// reads, since no mod writes it.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Block => "block",
             Self::SubNode => "subnode",
+            Self::Whole => "whole",
         }
     }
 }
@@ -253,6 +268,17 @@ impl Dig {
         self.total > 0 && self.chipped >= self.total
     }
 
+    /// Makes this a dig of the whole block (Contract §7.5).
+    ///
+    /// Called on the first tick that sees a `whole` material under the aim —
+    /// the material is not known where the dig is set, since that has no
+    /// world to read. Nothing else changes: the dig is still fresh, and
+    /// [`Dig::advance`] is then fed one cell, so the block comes off at the
+    /// end in one edit rather than crumbling.
+    pub const fn make_whole(&mut self) {
+        self.brush = Brush::Whole;
+    }
+
     /// Whether nothing has happened to this target yet: the tick a dig
     /// begins, and again after a retarget, which is a new dig of a new
     /// block. What `on_dig_start` is asked on.
@@ -272,6 +298,13 @@ impl Dig {
     /// would stop meaning what it says.
     pub fn retarget(&mut self, target: SubNodePos, brush: Brush) -> bool {
         if self.target == target && self.brush == brush {
+            return false;
+        }
+        // A whole dig is a dig of a block, so another cell of the same block
+        // is the same dig — and the tool's brush is not consulted while it
+        // stands, because the material decided (Contract §7.5). Without this a
+        // client re-aiming within the block would reset the dig every time.
+        if self.brush == Brush::Whole && self.target.block() == target.block() {
             return false;
         }
         let had_progress = self.elapsed > 0;
@@ -558,6 +591,45 @@ mod tests {
         assert!(dig.retarget(CELL, Brush::Block), "the brush changed");
         assert_eq!(dig.brush(), Brush::Block);
         assert_eq!(dig.elapsed(), 0);
+    }
+
+    #[test]
+    fn a_whole_dig_stays_on_its_block_whatever_the_tool_says() {
+        // Contract §7.5: the material decided, so re-aiming at another cell of
+        // the same block with the tool's own brush is the same dig, and the
+        // block comes off in one bite at the end — never half standing.
+        let mut dig = Dig::start(CELL, Brush::SubNode);
+        assert!(dig.is_fresh());
+        dig.make_whole();
+        assert_eq!(dig.brush(), Brush::Whole);
+        assert!(dig.is_fresh(), "becoming whole is not progress");
+        // Fed one cell: nothing comes off until the block's time is up.
+        let needed = ticks_to_break(1.5, 1.0);
+        for _ in 1..needed {
+            assert_eq!(dig.advance(1.5, 1.0, 1), 0);
+        }
+        assert!(!dig.is_done());
+        let same_block = SubNodePos::new(CELL.x + 1, CELL.y, CELL.z);
+        assert_eq!(same_block.block(), CELL.block());
+        assert!(
+            !dig.retarget(same_block, Brush::SubNode),
+            "another cell of the block"
+        );
+        assert_eq!(
+            dig.brush(),
+            Brush::Whole,
+            "the tool's brush does not take over"
+        );
+        assert_eq!(dig.advance(1.5, 1.0, 1), 1, "the one bite, at the end");
+        assert!(dig.is_done());
+        // Another block is another dig, and the tool's brush again until the
+        // material there is seen.
+        assert!(dig.retarget(OTHER, Brush::SubNode));
+        assert_eq!(dig.brush(), Brush::SubNode);
+        assert!(dig.is_fresh());
+        // And no tool can ask for it by name.
+        assert_eq!(Brush::parse("whole"), None);
+        assert_eq!(Brush::Whole.name(), "whole");
     }
 
     #[test]

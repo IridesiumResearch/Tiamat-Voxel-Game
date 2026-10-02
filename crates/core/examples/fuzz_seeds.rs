@@ -730,6 +730,8 @@ fn server_messages() -> Vec<Vec<u8>> {
                     friction: 1.0,
                     tint: None,
                     step_sound: None,
+                    whole: false,
+                    model: None,
                 },
                 MaterialDef {
                     id: 1,
@@ -745,6 +747,8 @@ fn server_messages() -> Vec<Vec<u8>> {
                     friction: 1.0,
                     tint: None,
                     step_sound: None,
+                    whole: false,
+                    model: None,
                 },
                 MaterialDef {
                     id: 2,
@@ -760,6 +764,8 @@ fn server_messages() -> Vec<Vec<u8>> {
                     friction: 1.0,
                     tint: None,
                     step_sound: None,
+                    whole: false,
+                    model: None,
                 },
                 MaterialDef {
                     id: u16::MAX,
@@ -775,6 +781,28 @@ fn server_messages() -> Vec<Vec<u8>> {
                     friction: 1.0,
                     tint: None,
                     step_sound: None,
+                    whole: false,
+                    model: None,
+                },
+                // Protocol v85: a whole block drawn as a model, with a model id
+                // at the id limit — the `Option<String>` inside the `Vec` is a
+                // length claim after a discriminant after a flag.
+                MaterialDef {
+                    id: 7,
+                    name: "camp:fire".to_owned(),
+                    texture: None,
+                    placeable: true,
+                    transparent: false,
+                    cutout: false,
+                    passable: false,
+                    sway: false,
+                    billboard: false,
+                    billboard_cross: false,
+                    friction: 1.0,
+                    tint: None,
+                    step_sound: None,
+                    whole: true,
+                    model: Some("m".repeat(tiamat_core::proto::MAX_ID_BYTES)),
                 },
             ],
         },

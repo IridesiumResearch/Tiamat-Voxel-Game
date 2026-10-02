@@ -696,6 +696,10 @@ cell it would fill is already occupied — so a chiselled block's empty cells ca
 be filled, and a whole-block placement into a block with no room left is refused
 because its cells overlap.
 
+**A `whole` material places its shape (§7.5), whatever brush is held** — as a
+cut places its cut. It is the third kind of thing a hand can hold, after loose
+material and a cut, and the brush is not consulted for it either.
+
 Together these are what make carving **reversible**: a cell taken out of a block
 can be put back into the same cell of the same block. Without either half — a
 fill anchored to the block's bottom, or a refusal that looked at the whole block
@@ -838,6 +842,58 @@ of an inventory, exactly as §7.3 describes for stamps.
 Implemented by `WorldEdit::merge_partial`, resolved where the seeds are drained
 because that is where the world can be read; `place::writes` is the shared
 implementation of both shapes, so this section and §7.2 cannot drift apart.
+
+### 7.5 Whole materials — one piece, whatever the brush
+
+(Added 2026-10-02.) A material may declare itself **`whole`**, and then a block
+of it is one thing and never a part of one. A campfire is the case; a brazier,
+an anvil, a crafted machine are the same case: things a player picks up and
+puts down, not stuff a chisel takes a corner off.
+
+- **Dug as one, by any brush.** A sub-node brush aimed at a cell of a whole
+  material digs the block, not the cell. The dig's hardness is the block's
+  (§2's block rule, which for a block of one material is that material's
+  `hardness`; the sub-node share does not apply), and when it completes
+  **every cell of the block goes in one edit**, never in `crumble_order` bites
+  — a whole material is never left half standing, because half of it is not a
+  thing. The dig hooks see one dig of one block.
+- **Pays whole.** Breaking it yields 27 units of itself, or its `drops` table
+  in full, however many cells its shape occupies (§9).
+- **Placed as its shape, into an empty block, all or nothing.** Whatever brush
+  is held, loose material of a whole material fills the material's **shape**
+  (below) and costs 27 units; if any of the block's 27 cells is not air the
+  placement is `Refusal::Occupied`. The shape is written as declared — not
+  turned to face the player, not tipped against a wall. §7.1's `oriented` is
+  for cuts, which are a player's own; a whole material's shape is the
+  material's, and its model (§8.6) is drawn the same way up.
+- **Nothing is written into its cells.** A block holding a whole material
+  accepts no placement into its empty cells (`Refusal::Whole`: "that is one
+  piece"), and no merge write — a §7.4 merge naming a cell of such a block is a
+  mod error, logged, and the write is skipped. It never shares a block with
+  another material, from either side: a sub-node write OF a whole material — a
+  brush's single cell, a §5 sub-node worldgen write, a merge — is refused the
+  same way. Block-resolution writes write its shape: a placement,
+  `game.set_block`, a stamped plan, and a generator's `set_block` and
+  `set_world`. A generator's AREA fills (`fill_density`, cover, the palette, a
+  scattered schematic) are terrain and take a material as named, a full cube;
+  a schematic that wants a whole material's shape carries the cells itself.
+- **Its cells are ordinary cells.** Collision (§2), lighting (§3) and fluid
+  (§4) ask the same per-cell questions they ask of any `Partial` block: a shape
+  with empty cells holds fluid in them, lets light through them, and is stood
+  on at the height of its top cells. Only writing and digging treat the block
+  as one, which is what "whole" means here and all it means.
+
+**`shape`** is which of the 27 cells a block of the material occupies, declared
+with the material as three layers, bottom first, nine cells each (`#` occupied,
+`.` empty; see `register_block`). Default: all 27. **`shape` requires
+`whole`**, and is refused at registration without it: a registered shape a
+chisel could take apart would be a cut, and a cut is carried as a cut (§9.1),
+not registered as a material.
+
+Implemented by `dig::Brush::Whole` (chosen when the dig is set, from the
+material under the aim), `place::plan` for the shape and the refusals, and the
+block-resolution write paths' shape lookup; `BlockRules::whole`/`shape` carry
+the declaration and `MaterialDef::whole` tells the client to outline the block.
 
 ---
 
@@ -1158,6 +1214,50 @@ to land on.
 `ServerMessage::ChunkData::tint`, held by `Renderer::set_chunk_tint` and blended
 by `biome_at` in `world.wgsl`.
 
+### 8.6 Model materials — a block drawn as a model
+
+(Added 2026-10-02.) A material may name a **model** — `register_block{ model =
+<a model id from register_model> }` — and then its cells are not drawn as
+geometry at all. The client draws the registered glTF once per block of the
+material, standing at the block's bottom centre, the way a creature stands on
+its feet: model space is cells, so a model that fills its block is three units
+across, and `register_model`'s `scale` applies. A campfire, a brazier, an anvil:
+things whose look is a shape no cube is.
+
+- **A model material is `whole` (§7.5)**, implied, and may carry a `shape`. The
+  shape is what the world knows of it — collision, light, fluid, aim — and the
+  model is what the player sees. **They need not agree, and nothing checks that
+  they do**, as a creature's collider and its mesh need not agree; a campfire
+  whose flames reach the top of the block and whose shape is its bottom layer
+  is the intended use, not an inconsistency.
+- **Culling (§8). A model cell is in NO occupancy set** — it emits no faces and
+  culls none of its neighbours', exactly as a billboard cell (§8.4). The floor
+  under a brazier keeps its face; the wall behind it keeps its face.
+- **Lit as a creature is**: one light for the whole model, flat, the brightest
+  sky and colour found at the block and its six neighbours. A block's own
+  cells may be opaque and hold no light of their own, and a model drawn in the
+  dark inside a lit room would be a hole.
+- **Found at remesh, drawn with the chunk.** The instances of a chunk are
+  enumerated when the chunk is meshed, from the same cells the mesher reads,
+  and are shown and hidden with the chunk's own visibility. A summary (the
+  far field) draws its cells as any material's, in the material's colour: the
+  model is a near-field thing, and a far campfire is a dot either way.
+- **A model that has not arrived draws nothing.** The material table reaches
+  the client before the world and the model table after the join, so there is
+  a moment when the material is known and its model is not. Nothing is drawn
+  in that moment — not the cells (the rule above hides them) and not a
+  placeholder cube, which would be a thing that flickers into a different thing
+  on every join.
+- **Aim outlines the block**, whatever brush is held: the dig takes the block
+  (§7.5), and an outline of one cell of a thing that comes off whole would be a
+  lie about what is about to happen.
+
+Implemented by `mesher::Sight::models` (the no-faces class) and the per-chunk
+instance list the mesher returns beside its vertices, drawn by the client's
+skinned pass with an identity palette for a model with no skin;
+`MaterialDef::model` names the model and `BlockRules::model` carries it from
+registration.
+
 ---
 
 ## 9. Inventory — 27-unit arithmetic, no exceptions
@@ -1171,6 +1271,11 @@ Breaking a block yields:
 - `Uniform(AIR)` → nothing
 - `Partial` → one unit per set occupancy bit
 - `Mixed` → one stack per distinct non-air material, each with its cell count
+- A block of a **`whole` material** (§7.5) → 27 units of it, or its `drops`
+  table in full, whatever its shape occupies. It was placed from 27 units and
+  it is one thing. The unit-per-cell identity above is the identity of LOOSE
+  material, and a whole material is never loose in part: the arithmetic still
+  has no exceptions, because 27 went in and 27 come out.
 
 **Output order is ascending `MaterialId`, always.** Drop order is observable — it
 decides which stack an almost-full inventory keeps — so it must not depend on

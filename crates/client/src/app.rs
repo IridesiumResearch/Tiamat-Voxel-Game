@@ -7649,6 +7649,8 @@ mod tests {
                 friction: 1.0,
                 tint: None,
                 step_sound: None,
+                whole: false,
+                model: None,
             },
             MaterialDef {
                 id: 5,
@@ -7664,6 +7666,8 @@ mod tests {
                 friction: 1.0,
                 tint: None,
                 step_sound: None,
+                whole: false,
+                model: None,
             },
         ];
         let mut images = BTreeMap::new();
@@ -7703,6 +7707,8 @@ mod tests {
             friction: 1.0,
             tint: None,
             step_sound: None,
+            whole: false,
+            model: None,
         }];
         let atlas = build_atlas(&table, &BTreeMap::new());
 

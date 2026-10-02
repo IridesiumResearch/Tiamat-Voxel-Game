@@ -2063,6 +2063,8 @@ fn a_declared_tint_colours_the_world_and_stays_where_the_world_is() {
             low: [64, 128, 64],
             high: [200, 128, 200],
         }),
+        whole: false,
+        model: None,
     }];
     renderer.set_tints(&table);
     let tinted = target
@@ -4222,6 +4224,8 @@ fn a_swaying_material_moves_with_the_clock_and_a_still_one_does_not() {
             billboard_cross: false,
             friction: 1.0,
             tint: None,
+            whole: false,
+            model: None,
         }]
     };
 
@@ -4310,6 +4314,8 @@ fn a_billboard_turns_to_face_the_camera_from_any_side() {
         billboard_cross: false,
         friction: 1.0,
         tint: None,
+        whole: false,
+        model: None,
     }]);
     upload_with(
         &mut renderer,
@@ -4419,6 +4425,8 @@ fn glass_beside_a_sprite_still_draws_from_its_own_chunk() {
         billboard_cross: false,
         friction: 1.0,
         tint: None,
+        whole: false,
+        model: None,
     };
     renderer.set_tints(&[
         material(GRASS, "grass", false, true),
@@ -4529,6 +4537,8 @@ fn a_biome_colour_blends_across_a_chunk_edge_instead_of_tiling_it() {
             low: [255, 255, 255],
             high: [255, 255, 255],
         }),
+        whole: false,
+        model: None,
     }]);
 
     // Green at the west end, red at the east, over the columns the four chunks
@@ -5815,6 +5825,8 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             friction: 1.0,
             tint: None,
             texture: None,
+            whole: false,
+            model: None,
         },
         MaterialDef {
             step_sound: None,
@@ -5830,6 +5842,8 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             friction: 1.0,
             tint: None,
             texture: None,
+            whole: false,
+            model: None,
         },
         MaterialDef {
             step_sound: None,
@@ -5845,6 +5859,8 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             friction: 1.0,
             tint: None,
             texture: Some([7u8; 32]),
+            whole: false,
+            model: None,
         },
     ];
     let mut images = std::collections::BTreeMap::new();
@@ -6040,6 +6056,8 @@ fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
         billboard_cross: false,
         friction: 1.0,
         tint: None,
+        whole: false,
+        model: None,
     }]);
     upload_with(
         &mut renderer,
@@ -6276,6 +6294,8 @@ fn a_biome_colour_brighter_than_one_brightens_the_world() {
             low: Tint::NEUTRAL,
             high: Tint::NEUTRAL,
         }),
+        whole: false,
+        model: None,
     }]);
 
     let brightness = |frame: &Image| {

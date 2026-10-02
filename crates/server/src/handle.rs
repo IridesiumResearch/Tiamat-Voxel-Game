@@ -118,6 +118,14 @@ fn material_table(
                 // the texture by a field sampled from world position, and
                 // nothing here ever looks at the answer.
                 tint: rules.get(name).and_then(|rules| rules.tint),
+                // One piece (Contract §7.5): the client's aim outlines the
+                // block whatever brush is held, because that is what comes off.
+                whole: rules.get(name).is_some_and(|rules| rules.whole),
+                // Drawn as this model instead of its cells (Contract §8.6).
+                // Whether a model of that id was registered is checked where
+                // the model table is built; a name nobody registered draws
+                // nothing on the client, which the contract says is right.
+                model: rules.get(name).and_then(|rules| rules.model.clone()),
             })
         })
         .collect();
@@ -2058,6 +2066,27 @@ impl ServerHandle {
             .collect();
         info!(models = model_table.len(), "model table built");
 
+        // A block drawn as a model (Contract §8.6) names one by id, and the
+        // model may have been registered after the block, so this is where
+        // the name can first be checked. A name nobody registered is an error
+        // that names both, and the block draws nothing on the client, which
+        // is what the contract says a model that never arrives does.
+        for rules in host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+        {
+            if let Some(model) = &rules.model
+                && !model_table.iter().any(|entry| entry.id == *model)
+            {
+                error!(
+                    block = %rules.block,
+                    model = %model,
+                    "block names a model nobody registered; clients will draw nothing for it"
+                );
+            }
+        }
+
         // The engine's own screens, wearing a mod's look (charter rule 1).
         let mut font_table = font_table;
         let mut picture_table = picture_table;
@@ -2197,6 +2226,16 @@ impl ServerHandle {
         // be any mod's block (Craft ask 7), so the name may be a typo or a mod
         // that is not loaded, and neither should cost the block its other
         // drops.
+        // Which materials are one piece, and the shape each is placed as
+        // (Contract §7.5), keyed like the hardness.
+        let whole: std::collections::BTreeMap<tiamat_core::MaterialId, u32> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rules| rules.whole)
+            .filter_map(|rules| Some((runtime_of(&rules.block)?, rules.shape)))
+            .collect();
         let drop_rules = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_block_rules())
@@ -2719,6 +2758,7 @@ impl ServerHandle {
             default_tool,
             tool_speeds,
             drop_rules,
+            whole,
             material_ids,
             main_slots,
         });
@@ -3356,6 +3396,24 @@ impl ServerHandle {
                                     material,
                                     occupancy,
                                 } => match world.block_cells(&seeded_in, pos, &mut source) {
+                                    // **Nothing is merged into a whole
+                                    // material's block** (Contract §7.5): its
+                                    // empty cells are not room. A mod error,
+                                    // said once, and the write is skipped.
+                                    Ok(held)
+                                        if held.iter().any(|cell| {
+                                            !cell.is_air() && shared.whole_shape(*cell).is_some()
+                                        }) =>
+                                    {
+                                        warn!(
+                                            x = pos.x,
+                                            y = pos.y,
+                                            z = pos.z,
+                                            "a mod's merge named a block that holds a whole material; \
+                                             nothing is written into one (Sub-Node Contract §7.5)"
+                                        );
+                                        Vec::new()
+                                    }
                                     Ok(held) => {
                                         let filled = held.iter().enumerate().fold(
                                             0u32,
@@ -3937,6 +3995,23 @@ impl ServerHandle {
                             // two cells out and then stalls for ever, which is
                             // what the domain persistence test found.
                             let digging_in = shared.player_domain(&uuid);
+                            // **A whole material decides the brush, not the
+                            // tool** (Sub-Node Contract §7.5). Decided once, on
+                            // the first tick, from the cell under the aim:
+                            // `set_dig` has no world to read, and a dig in
+                            // progress never changes its mind — the block
+                            // cannot have been written into since.
+                            let brush = if fresh
+                                && brush != tiamat_core::dig::Brush::Whole
+                                && world
+                                    .subnode(&digging_in, target, &mut source)
+                                    .is_ok_and(|under| shared.whole_shape(under).is_some())
+                            {
+                                shared.make_dig_whole(&uuid);
+                                tiamat_core::dig::Brush::Whole
+                            } else {
+                                brush
+                            };
                             // **What is being dug, which is not always the cell
                             // that was aimed at.**
                             //
@@ -3955,13 +4030,15 @@ impl ServerHandle {
                                 tiamat_core::dig::Brush::SubNode => world
                                     .subnode(&digging_in, target, &mut source)
                                     .unwrap_or(tiamat_core::MaterialId::AIR),
-                                tiamat_core::dig::Brush::Block => world
-                                    .block_cells(&digging_in, target.block(), &mut source)
-                                    .ok()
-                                    .and_then(|cells| {
-                                        cells.into_iter().find(|material| !material.is_air())
-                                    })
-                                    .unwrap_or(tiamat_core::MaterialId::AIR),
+                                tiamat_core::dig::Brush::Block | tiamat_core::dig::Brush::Whole => {
+                                    world
+                                        .block_cells(&digging_in, target.block(), &mut source)
+                                        .ok()
+                                        .and_then(|cells| {
+                                            cells.into_iter().find(|material| !material.is_air())
+                                        })
+                                        .unwrap_or(tiamat_core::MaterialId::AIR)
+                                }
                             };
                             if material.is_air() {
                                 // Whatever they aimed at is already gone —
@@ -4002,7 +4079,10 @@ impl ServerHandle {
                                 tiamat_core::dig::Brush::SubNode => {
                                     shared.subnode_hardness_of(material)
                                 }
-                                tiamat_core::dig::Brush::Block => {
+                                // A whole material is a block of one material,
+                                // so the blend is its own hardness; the sub-node
+                                // share never applies to it (Contract §7.5).
+                                tiamat_core::dig::Brush::Block | tiamat_core::dig::Brush::Whole => {
                                     let cells = world
                                         .block_cells(&digging_in, target.block(), &mut source)
                                         .unwrap_or(tiamat_core::block::EMPTY_CELLS);
@@ -4016,6 +4096,9 @@ impl ServerHandle {
                             // takes its one cell at the end, as it always did.
                             let cells = match brush {
                                 tiamat_core::dig::Brush::SubNode => 1,
+                                // One bite at the end: the block comes off in
+                                // one edit, never half standing (Contract §7.5).
+                                tiamat_core::dig::Brush::Whole => 1,
                                 tiamat_core::dig::Brush::Block => world
                                     .block_cells(&digging_in, target.block(), &mut source)
                                     .map(|cells| {
@@ -4146,6 +4229,13 @@ impl ServerHandle {
                                         material: tiamat_core::MaterialId::AIR.0,
                                     }]
                                 }
+                                // The whole block, in one edit (Contract §7.5).
+                                tiamat_core::dig::Brush::Whole => {
+                                    vec![tiamat_core::proto::Edit::Block {
+                                        pos: target.block(),
+                                        material: tiamat_core::MaterialId::AIR.0,
+                                    }]
+                                }
                                 // **The block comes apart in a fixed random
                                 // order**, seeded by its own position so every
                                 // client sees the same shape at the same moment
@@ -4188,11 +4278,26 @@ impl ServerHandle {
                             // no screen shows. Checked against what the bite
                             // would remove and what the yield rules would pay
                             // for it, before anything is removed.
+                            // **A whole block pays a whole block** (Contract
+                            // §9): 27 units of its material however many cells
+                            // its shape has, because 27 went in. Loose material
+                            // pays what the edit removed, cell for cell.
+                            let whole_yield = (brush == tiamat_core::dig::Brush::Whole)
+                                .then(|| {
+                                    tiamat_core::inventory::Stack::new(
+                                        material,
+                                        tiamat_core::UNITS_PER_BLOCK,
+                                    )
+                                    .into_iter()
+                                    .collect::<Vec<_>>()
+                                });
                             if shared.main_slots.is_some() {
                                 let cells = world
                                     .block_cells(&digging_in, target.block(), &mut source)
                                     .unwrap_or(tiamat_core::block::EMPTY_CELLS);
-                                let removed = would_remove(&cells, &edits);
+                                let removed = whole_yield
+                                    .clone()
+                                    .unwrap_or_else(|| would_remove(&cells, &edits));
                                 let paid = shared.would_yield(&uuid, &removed);
                                 if !shared.can_carry(&uuid, &paid) {
                                     shared.set_dig(&uuid, None);
@@ -4222,7 +4327,10 @@ impl ServerHandle {
                                             .touch(edited_block(&edit));
                                         // Through the drop rules: the block's
                                         // own, or the one the hook gave this
-                                        // dig, paid as the block comes apart.
+                                        // dig, paid as the block comes apart —
+                                        // or, for a whole material, paid in
+                                        // full for the one edit it comes off in.
+                                        let removed = whole_yield.clone().unwrap_or(removed);
                                         let paid = shared.yield_of(&uuid, removed);
                                         shared.credit(uuid, paid);
                                         shared.broadcast_in(
@@ -4430,16 +4538,40 @@ impl ServerHandle {
                             // (§7.1); everything else as it always was.
                             let planned = match &placed_cells {
                                 Some(cells) => tiamat_core::place::plan_cut(target, held, cells),
-                                None => tiamat_core::place::plan(
-                                    target,
-                                    held,
-                                    placed_shape,
-                                    brush,
-                                    filled,
-                                ),
+                                // **A whole material places its shape, whatever
+                                // the brush** (Sub-Node Contract §7.5), into an
+                                // empty block, for a whole block's units.
+                                None => match shared.whole_shape(material) {
+                                    Some(shape) => {
+                                        tiamat_core::place::plan_whole(target, held, shape, filled)
+                                    }
+                                    None => tiamat_core::place::plan(
+                                        target,
+                                        held,
+                                        placed_shape,
+                                        brush,
+                                        filled,
+                                    ),
+                                },
                             };
                             let outcome = planned
                                 .and_then(|plan| {
+                                    // **Nothing is written into a whole
+                                    // material's block** (Contract §7.5): its
+                                    // empty cells are not room, so a chisel
+                                    // cannot fill in a campfire. Asked before
+                                    // the air check, so the player hears the
+                                    // reason that matters.
+                                    let holds_whole = world
+                                        .block_cells(&building_in, plan.block, &mut source)
+                                        .is_ok_and(|cells| {
+                                            cells.iter().any(|cell| {
+                                                !cell.is_air() && shared.whole_shape(*cell).is_some()
+                                            })
+                                        });
+                                    if holds_whole {
+                                        return Err(tiamat_core::place::Refusal::Whole);
+                                    }
                                     // Air only, judged cell by cell. Placing
                                     // into occupied space would have to decide
                                     // what happens to what was already there,

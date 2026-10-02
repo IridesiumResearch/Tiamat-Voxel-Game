@@ -436,6 +436,11 @@ pub struct Shared {
     /// credited what the edit removed regardless.
     pub drop_rules:
         std::collections::BTreeMap<tiamat_core::MaterialId, Vec<(tiamat_core::MaterialId, u32)>>,
+    /// The shape a block of each `whole` material occupies when placed, by
+    /// runtime id (Sub-Node Contract §7.5). A material in this map is whole:
+    /// dug as one, placed as this mask into an empty block, never written
+    /// into. Every other material is loose, as every material was.
+    pub whole: std::collections::BTreeMap<tiamat_core::MaterialId, u32>,
     /// Every registered material by name, to its runtime id — what a dig
     /// hook's `drops` answer is resolved with, at the moment it is given, and
     /// what an inventory holds.
@@ -1350,6 +1355,57 @@ impl Shared {
     ///
     /// Returns whether it was accepted; the queue is bounded like the others.
     pub fn queue_seed(&self, domain: &str, edit: Edit) -> bool {
+        // **A whole material is written as its shape, or not at all** (Sub-Node
+        // Contract §7.5). Here, because every mod-side write — `set_block`, a
+        // stamped plan, a generator's runtime write — comes through this queue,
+        // so a block-resolution write of a campfire gets the campfire's shape
+        // wherever it was asked for, and a sub-node write of one is refused
+        // once rather than in each caller.
+        let edit = match edit {
+            Edit::Block { pos, material } => {
+                match self.whole_shape(tiamat_core::MaterialId(material)) {
+                    Some(shape) if shape != tiamat_core::block::OCCUPANCY_FULL => Edit::Partial {
+                        pos,
+                        material,
+                        occupancy: shape,
+                    },
+                    _ => Edit::Block { pos, material },
+                }
+            }
+            Edit::Partial {
+                pos,
+                material,
+                occupancy,
+            } => match self.whole_shape(tiamat_core::MaterialId(material)) {
+                Some(shape) if shape != occupancy => {
+                    tracing::warn!(
+                        material,
+                        "a mod asked to write part of a whole material; a whole material is written as \
+                         its own shape, with `set_block` (Sub-Node Contract §7.5)"
+                    );
+                    return false;
+                }
+                _ => Edit::Partial {
+                    pos,
+                    material,
+                    occupancy,
+                },
+            },
+            Edit::SubNode { pos, material } => {
+                if self
+                    .whole_shape(tiamat_core::MaterialId(material))
+                    .is_some()
+                {
+                    tracing::warn!(
+                        material,
+                        "a mod asked to write one cell of a whole material; a whole material is written \
+                         as its own shape, with `set_block` (Sub-Node Contract §7.5)"
+                    );
+                    return false;
+                }
+                Edit::SubNode { pos, material }
+            }
+        };
         let Ok(mut queue) = self.seeds.lock() else {
             return false;
         };
@@ -1372,6 +1428,19 @@ impl Shared {
         material: u16,
         occupancy: u32,
     ) -> bool {
+        // A whole material never shares a block (Contract §7.5), and a merge
+        // is exactly a write that shares one.
+        if self
+            .whole_shape(tiamat_core::MaterialId(material))
+            .is_some()
+        {
+            tracing::warn!(
+                material,
+                "a mod asked to merge a whole material into a block; a whole material is written as \
+                 its own shape, with `set_block` (Sub-Node Contract §7.5)"
+            );
+            return false;
+        }
         let Ok(mut queue) = self.seeds.lock() else {
             return false;
         };
@@ -1616,6 +1685,23 @@ impl Shared {
                     player.dig_yield = tiamat_core::dig::Yield::new();
                 }
             }
+        }
+    }
+
+    /// The shape a `whole` material is placed as, or `None` for loose material
+    /// (Sub-Node Contract §7.5).
+    #[must_use]
+    pub fn whole_shape(&self, material: tiamat_core::MaterialId) -> Option<u32> {
+        self.whole.get(&material).copied()
+    }
+
+    /// Makes a player's dig a dig of the whole block (Contract §7.5), on the
+    /// tick the material under the aim turns out to be `whole`.
+    pub fn make_dig_whole(&self, uuid: &PlayerUuid) {
+        if let Ok(mut bodies) = self.bodies.lock()
+            && let Some(dig) = bodies.get_mut(uuid).and_then(|player| player.dig.as_mut())
+        {
+            dig.make_whole();
         }
     }
 
@@ -4423,6 +4509,7 @@ mod tests {
             default_tool: None,
             tool_speeds: std::collections::BTreeMap::new(),
             drop_rules: std::collections::BTreeMap::new(),
+            whole: std::collections::BTreeMap::new(),
             material_ids: std::collections::BTreeMap::new(),
             main_slots: None,
         }

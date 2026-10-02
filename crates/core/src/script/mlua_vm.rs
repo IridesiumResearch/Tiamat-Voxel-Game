@@ -696,9 +696,33 @@ struct BufferHandle {
     /// field — so taking it from the script would be one more thing to get
     /// wrong for no gain.
     world_seed: u64,
+    /// The shape each `whole` material is written as, by numeric id, for the
+    /// ones whose shape is not the full block (Sub-Node Contract §7.5).
+    ///
+    /// A generator's `set_block` and `set_world` of such a material write the
+    /// shape, as a player's placement does; the area fills are terrain and
+    /// take the material as it is named. Read once per chunk, like `fluids`.
+    shapes: BTreeMap<u16, u32>,
 }
 
 impl BufferHandle {
+    /// Writes one block of `material`: its shape if it is a whole material
+    /// with one (Contract §7.5), the full block otherwise.
+    fn write_block(&mut self, local: LocalBlock, material: u16) {
+        match self.shapes.get(&material) {
+            Some(&shape) => {
+                let mut cells = crate::block::EMPTY_CELLS;
+                for (index, cell) in cells.iter_mut().enumerate() {
+                    if shape & (1 << index) != 0 {
+                        *cell = MaterialId(material);
+                    }
+                }
+                self.buffer.set_block_cells(local, &cells);
+            }
+            None => self.buffer.set_block(local, MaterialId(material)),
+        }
+    }
+
     /// Registers `buf:set_world` and `buf:set_subnode_world`.
     ///
     /// Its own function for the same reason `add_cover_method` is: `add_methods`
@@ -711,9 +735,12 @@ impl BufferHandle {
         methods.add_method_mut(
             "set_world",
             |_, this, (x, y, z, material): (i32, i32, i32, u16)| {
-                Ok(this
-                    .buffer
-                    .set_block_world(crate::BlockPos::new(x, y, z), MaterialId(material)))
+                let at = crate::BlockPos::new(x, y, z);
+                if at.chunk() != this.buffer.pos() {
+                    return Ok(false);
+                }
+                this.write_block(at.local(), material);
+                Ok(true)
             },
         );
         methods.add_method_mut(
@@ -1040,8 +1067,7 @@ impl mlua::UserData for BufferHandle {
                         "block ({x}, {y}, {z}) is outside the chunk"
                     )));
                 }
-                this.buffer
-                    .set_block(LocalBlock::new(x, y, z), MaterialId(material));
+                this.write_block(LocalBlock::new(x, y, z), material);
                 Ok(())
             },
         );
@@ -1464,6 +1490,26 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
 
         Ok(env)
+    }
+
+    /// The shape of every `whole` material whose shape is not the full block,
+    /// by numeric id (Contract §7.5) — what a generator writes for one.
+    fn whole_shapes(&self) -> BTreeMap<u16, u32> {
+        let (Ok(blocks), Ok(rules)) = (
+            self.lua.named_registry_value::<Table>("tiamat.blocks"),
+            self.lua.named_registry_value::<Table>("tiamat.block_rules"),
+        ) else {
+            return BTreeMap::new();
+        };
+        blocks
+            .pairs::<String, u16>()
+            .filter_map(Result::ok)
+            .filter_map(|(name, id)| {
+                let entry: Table = rules.get(name).ok()?;
+                let shape: u32 = entry.get::<Option<u32>>("shape").ok()??;
+                (shape != crate::block::OCCUPANCY_FULL).then_some((id, shape))
+            })
+            .collect()
     }
 
     #[allow(
@@ -3374,6 +3420,7 @@ impl ScriptVm for MluaVm {
                 buffer: ChunkBuffer::new(pos, fill),
                 world_seed,
                 fluids,
+                shapes: self.whole_shapes(),
             })
             .map_err(|err| self.vm_error(&err))?;
 
@@ -4124,6 +4171,14 @@ impl ScriptVm for MluaVm {
                             .as_ref()
                             .and_then(|entry| entry.get::<Option<f32>>("friction").ok().flatten())
                             .unwrap_or(1.0),
+                        whole: flag(entry.as_ref(), "whole"),
+                        shape: entry
+                            .as_ref()
+                            .and_then(|entry| entry.get::<Option<u32>>("shape").ok().flatten())
+                            .unwrap_or(crate::block::OCCUPANCY_FULL),
+                        model: entry
+                            .as_ref()
+                            .and_then(|entry| entry.get::<Option<String>>("model").ok().flatten()),
                     },
                 )
             })
@@ -7130,10 +7185,10 @@ impl MluaVm {
                 table.set("material", event.material.0)?;
                 table.set(
                     "brush",
-                    match event.brush {
-                        crate::dig::Brush::Block => "block",
-                        crate::dig::Brush::SubNode => "subnode",
-                    },
+                    // `brush` is the shape coming out: a hook may see "whole"
+                    // for a material the tool's brush had no say over
+                    // (Contract §7.5).
+                    event.brush.name(),
                 )?;
                 Ok(table)
             })
@@ -9713,6 +9768,107 @@ fn copy_block_flags(spec: &Table, entry: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Records `whole`, `model` and `shape` — Sub-Node Contract §7.5 and §8.6.
+///
+/// Its own function because `register_block` is at clippy's line limit. A
+/// `model` implies `whole`, and is qualified with the owner's id the way
+/// `register_model` qualified it, so a bare name is the mod's own model;
+/// whether the model exists is checked once every mod has registered, as a
+/// `drops` entry is, because the model may be registered after the block.
+/// `whole` is recorded whether or not the mod set it, like the flags beside it.
+fn copy_whole(owner: &str, id: &str, spec: &Table, entry: &Table) -> mlua::Result<()> {
+    let model = match spec.get::<Option<Value>>("model")? {
+        None | Some(Value::Nil) => None,
+        Some(Value::String(name)) => {
+            let name = name.to_string_lossy();
+            if name.is_empty() {
+                return Err(mlua::Error::external(format!(
+                    "register_block(\"{id}\"): `model` names a registered model; it is empty"
+                )));
+            }
+            Some(named_block(owner, &name))
+        }
+        Some(other) => {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): `model` is a model id (a string), not a {}",
+                other.type_name()
+            )));
+        }
+    };
+    let whole = spec.get::<Option<bool>>("whole")?.unwrap_or(false) || model.is_some();
+    entry.set("whole", whole)?;
+    if let Some(model) = model {
+        entry.set("model", model)?;
+    }
+    if let Some(shape) = spec.get::<Option<Value>>("shape")? {
+        entry.set("shape", shape_mask(id, &shape)?)?;
+    }
+    Ok(())
+}
+
+/// Parses `shape = { "<layer y=0>", "<layer y=1>", "<layer y=2>" }` into an
+/// occupancy mask in [`crate::block::subnode_index`]'s order.
+///
+/// Each layer is nine cells, `#` occupied and `.` empty, in three rows of
+/// three: a row is one `z`, read `x = 0, 1, 2` left to right, and the rows
+/// are `z = 0, 1, 2` in turn. Whitespace is ignored, so a mod may write
+/// `"### ### ###"` or spread a layer over several lines. The bottom layer
+/// comes first because that is how a thing is drawn on paper when it is
+/// standing up.
+fn shape_mask(id: &str, shape: &Value) -> mlua::Result<u32> {
+    let Value::Table(layers) = shape else {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): `shape` is a table of three strings, one layer of nine \
+             cells each, bottom first"
+        )));
+    };
+    let mut mask = 0u32;
+    let mut count = 0u32;
+    for (y, layer) in layers.sequence_values::<String>().enumerate() {
+        let layer = layer?;
+        if y >= 3 {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): `shape` has more than three layers; a block is three \
+                 cells tall"
+            )));
+        }
+        let cells: Vec<char> = layer.chars().filter(|c| !c.is_whitespace()).collect();
+        if cells.len() != 9 {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): `shape` layer {} has {} cells, not nine",
+                y + 1,
+                cells.len()
+            )));
+        }
+        for (at, cell) in cells.iter().enumerate() {
+            let (x, z) = (at % 3, at / 3);
+            match cell {
+                '#' => {
+                    mask |= 1 << crate::block::subnode_index(x as u32, y as u32, z as u32);
+                }
+                '.' => {}
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "register_block(\"{id}\"): `shape` cells are `#` or `.`, not `{other}`"
+                    )));
+                }
+            }
+        }
+        count += 1;
+    }
+    if count != 3 {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): `shape` has {count} layers, not three (bottom first)"
+        )));
+    }
+    if mask == 0 {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): `shape` occupies no cell; a block of nothing is air"
+        )));
+    }
+    Ok(mask)
+}
+
 /// Refuses a block spec with a field the engine does not know.
 ///
 /// A typo in `hardness` should say so rather than silently taking the default.
@@ -9762,6 +9918,39 @@ fn check_block_fields(id: &str, spec: &Table) -> mlua::Result<()> {
                  `{other}` to apply to; declare the billboard alone (it alpha-tests already)"
             )));
         }
+    }
+    // **A model has no faces either.** Sub-Node Contract §8.6: a model
+    // material's cells are not drawn, so the four flags that say how faces are
+    // drawn have nothing to apply to, and a mod setting one has misunderstood
+    // what it registered — told, rather than given a flag that does nothing.
+    let model = !matches!(
+        spec.get::<Option<Value>>("model"),
+        Ok(None | Some(Value::Nil))
+    );
+    for other in ["transparent", "cutout", "sway"] {
+        if model && declared(other) {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): a block with a `model` is drawn as the model and has no \
+                 faces for `{other}` to apply to"
+            )));
+        }
+    }
+    if model && billboard {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): a block is drawn as a `model` or as a `billboard`, not both"
+        )));
+    }
+    // **A shape that is not whole is a cut**, and a cut is carried, not
+    // registered (Contract §7.5 and §9.1).
+    let shaped = !matches!(
+        spec.get::<Option<Value>>("shape"),
+        Ok(None | Some(Value::Nil))
+    );
+    if shaped && !model && !declared("whole") {
+        return Err(mlua::Error::external(format!(
+            "register_block(\"{id}\"): `shape` needs `whole = true` (or a `model`, which implies \
+             it): a shape a chisel could take apart is a cut, and a cut is carried, not registered"
+        )));
     }
     Ok(())
 }
@@ -10024,6 +10213,7 @@ fn register_block(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
         // **Recorded whether or not the mod set it**, like the rules above: an
         // absent flag and a `false` one must not be distinguishable downstream.
         copy_block_flags(spec, &entry)?;
+        copy_whole(owner, &id, spec, &entry)?;
         if let Some(absorbs) = spec.get::<Option<Table>>("absorbs")? {
             entry.set("absorbs", block_absorbs(lua, owner, &id, &absorbs)?)?;
         }
@@ -11098,7 +11288,7 @@ const FLUID_FIELDS: [&str; 9] = [
 /// accepted them would be an API promising behaviour nothing implements.
 const ITEM_FIELDS: [&str; 4] = ["id", "name", "texture", "description"];
 
-const BLOCK_FIELDS: [&str; 20] = [
+const BLOCK_FIELDS: [&str; 23] = [
     "id",
     "name",
     "drops",
@@ -11119,6 +11309,9 @@ const BLOCK_FIELDS: [&str; 20] = [
     "friction",
     "washes_away",
     "light_falloff",
+    "whole",
+    "shape",
+    "model",
 ];
 
 /// Keys the `textures` sub-table accepts.
@@ -14668,6 +14861,118 @@ mod tests {
              game.register_block{ id = 'grass', billboard = 'cross' }",
         )
         .expect("a lone billboard, or a non-billboard leaf, should load");
+    }
+
+    #[test]
+    fn a_whole_block_records_its_shape_and_a_model_implies_whole() {
+        // **Contract §7.5 and §8.6.** The shape is three layers, bottom first,
+        // nine cells each in rows of z with x fastest, and lands in
+        // `subnode_index` order; a model makes the block whole without saying
+        // so; a bare model name is the mod's own.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "camp",
+            "game.register_block{ id = 'fire', model = 'campfire',\n\
+               shape = { '### ### ###', '.#. .#. .#.', '... .#. ...' } }\n\
+             game.register_block{ id = 'anvil', whole = true }\n\
+             game.register_block{ id = 'stone' }",
+        )
+        .expect("a model block, a whole block and a plain one should load");
+        let rules = vm.registered_block_rules();
+        let of = |name: &str| {
+            rules
+                .iter()
+                .find(|rules| rules.block == name)
+                .unwrap_or_else(|| panic!("{name} is registered"))
+        };
+        let fire = of("camp:fire");
+        assert!(fire.whole, "a model implies whole");
+        assert_eq!(fire.model.as_deref(), Some("camp:campfire"));
+        let mut expected = 0u32;
+        for (x, z) in [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+        ] {
+            expected |= 1 << crate::block::subnode_index(x, 0, z);
+        }
+        for z in 0..3 {
+            expected |= 1 << crate::block::subnode_index(1, 1, z);
+        }
+        expected |= 1 << crate::block::subnode_index(1, 2, 1);
+        assert_eq!(
+            fire.shape, expected,
+            "the layers land in subnode_index order"
+        );
+        assert_eq!(fire.shape.count_ones(), 13);
+        let anvil = of("camp:anvil");
+        assert!(anvil.whole && anvil.model.is_none());
+        assert_eq!(
+            anvil.shape,
+            crate::block::OCCUPANCY_FULL,
+            "no shape means the full block"
+        );
+        let stone = of("camp:stone");
+        assert!(!stone.whole && stone.model.is_none());
+        assert_eq!(stone.shape, crate::block::OCCUPANCY_FULL);
+    }
+
+    #[test]
+    fn a_shape_needs_whole_and_a_model_has_no_faces() {
+        // A shape a chisel could take apart is a cut (§7.5 and §9.1); a model
+        // has no faces for the face flags to apply to (§8.6); a shape is three
+        // layers of nine, of `#` and `.`, and occupies something.
+        let refused = |source: &str, says: &str| {
+            let mut vm = vm();
+            let err = load(&mut vm, "camp", source).expect_err(source);
+            let detail = format!("{err:?}");
+            assert!(detail.contains(says), "{source}: {detail}");
+        };
+        refused(
+            "game.register_block{ id = 'step', shape = { '#########', '.........', '.........' } }",
+            "needs `whole = true`",
+        );
+        for flag in ["transparent", "cutout", "sway"] {
+            refused(
+                &format!("game.register_block{{ id = 'fire', model = 'campfire', {flag} = true }}"),
+                "has no faces",
+            );
+        }
+        refused(
+            "game.register_block{ id = 'fire', model = 'campfire', billboard = true }",
+            "not both",
+        );
+        refused(
+            "game.register_block{ id = 'fire', whole = true, shape = { '#########', '.........' } }",
+            "not three",
+        );
+        refused(
+            "game.register_block{ id = 'fire', whole = true, shape = { '####', '.........', '.........' } }",
+            "not nine",
+        );
+        refused(
+            "game.register_block{ id = 'fire', whole = true, shape = { '####x####', '.........', '.........' } }",
+            "`#` or `.`",
+        );
+        refused(
+            "game.register_block{ id = 'fire', whole = true, shape = { '.........', '.........', '.........' } }",
+            "occupies no cell",
+        );
+        refused(
+            "game.register_block{ id = 'fire', model = 7 }",
+            "a model id",
+        );
+        refused(
+            "game.register_block{ id = 'fire', model = '' }",
+            "it is empty",
+        );
     }
 
     #[test]
