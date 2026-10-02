@@ -960,6 +960,12 @@ pub struct Renderer {
     /// [`Self::set_fluid_opacity`].
     fluid_opacity: Vec<(u16, f32)>,
     chunks: BTreeMap<ChunkPos, ChunkMesh>,
+    /// The model blocks of each resident chunk, from the mesh that chunk was
+    /// last built with (Contract §8.6 "Found at remesh"). **Its own map rather
+    /// than a field of [`ChunkMesh`]**, because a chunk holding only a brazier
+    /// has no quads and `set_chunk` stores no mesh for it, yet it still has a
+    /// model to draw.
+    model_blocks: BTreeMap<ChunkPos, Vec<crate::mesher::ModelInstance>>,
     /// Each chunk COLUMN's biome colour, keyed on `(x, z)`. See
     /// [`Self::set_chunk_tint`]. Distinct from `tints`, which is the per
     /// MATERIAL table: this one says what a place is, that one what a thing is.
@@ -1221,6 +1227,7 @@ impl Renderer {
             fluid_opacity: Vec::new(),
             biome_tints: BTreeMap::new(),
             chunks: BTreeMap::new(),
+            model_blocks: BTreeMap::new(),
             pool: BufferPool::default(),
             selection_pipeline,
             borders: border_buffer,
@@ -2015,8 +2022,9 @@ impl Renderer {
     /// buffer: a chunk that was solid and has been dug out entirely must stop
     /// being drawn, and a zero-index draw call is a per-frame cost for nothing.
     pub fn set_chunk(&mut self, pos: ChunkPos, mesh: &Mesh) {
+        self.set_model_blocks(pos, &mesh.models);
         if mesh.is_empty() {
-            self.remove_chunk(&pos);
+            self.drop_mesh(&pos);
             return;
         }
 
@@ -2137,15 +2145,42 @@ impl Renderer {
         );
     }
 
+    /// Replaces a chunk's model blocks with the mesh's, whether or not the
+    /// mesh has quads (§8.6 "Found at remesh").
+    fn set_model_blocks(&mut self, pos: ChunkPos, models: &[crate::mesher::ModelInstance]) {
+        if models.is_empty() {
+            self.model_blocks.remove(&pos);
+        } else {
+            self.model_blocks.insert(pos, models.to_vec());
+        }
+    }
+
     /// Drops a chunk's mesh, returning its buffers to the pool.
     pub fn remove_chunk(&mut self, pos: &ChunkPos) {
+        self.model_blocks.remove(pos);
+        self.drop_mesh(pos);
+    }
+
+    /// Returns a chunk's buffers to the pool, keeping its model blocks.
+    fn drop_mesh(&mut self, pos: &ChunkPos) {
         if let Some(mesh) = self.chunks.remove(pos) {
             self.pool.give_mesh(mesh);
         }
     }
 
+    /// The model blocks of every resident chunk, by drawn position — what the
+    /// app turns into figures each frame (Contract §8.6).
+    pub fn model_blocks(
+        &self,
+    ) -> impl Iterator<Item = (ChunkPos, &[crate::mesher::ModelInstance])> + '_ {
+        self.model_blocks
+            .iter()
+            .map(|(pos, models)| (*pos, models.as_slice()))
+    }
+
     /// Forgets every mesh, for a reconnection.
     pub fn clear(&mut self) {
+        self.model_blocks.clear();
         for (_, mesh) in std::mem::take(&mut self.chunks) {
             self.pool.give_mesh(mesh);
         }
@@ -2357,6 +2392,15 @@ impl Renderer {
         if delta == [0, 0, 0] {
             return;
         }
+        self.model_blocks = std::mem::take(&mut self.model_blocks)
+            .into_iter()
+            .map(|(pos, models)| {
+                (
+                    ChunkPos::new(pos.x + delta[0], pos.y + delta[1], pos.z + delta[2]),
+                    models,
+                )
+            })
+            .collect();
         self.chunks = std::mem::take(&mut self.chunks)
             .into_iter()
             .map(|(pos, mesh)| {

@@ -550,6 +550,45 @@ impl ChunkStore {
             })
     }
 
+    /// The light a block-sized thing is lit by: the brightest sky and the
+    /// brightest red, green and blue over the block and its six face
+    /// neighbours, each `0.0..=1.0`, as [`Self::light_on_body`] returns them.
+    ///
+    /// For a model block (Sub-Node Contract §8.6 "Lit as a creature is"): its
+    /// own cells may be opaque and hold no light, and a model drawn black
+    /// inside a lit room would be a hole.
+    #[must_use]
+    pub fn light_around_block(&self, at: BlockPos) -> [f32; 4] {
+        let level = |value: u8| f32::from(value) / f32::from(tiamat_core::light::MAX_LEVEL);
+        [
+            (0, 0, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ]
+        .into_iter()
+        .map(|(dx, dy, dz)| {
+            let light = self.light_at(BlockPos::new(at.x + dx, at.y + dy, at.z + dz));
+            [
+                level(light.sun()),
+                level(light.red()),
+                level(light.green()),
+                level(light.blue()),
+            ]
+        })
+        .fold([0.0; 4], |most, here| {
+            [
+                most[0].max(here[0]),
+                most[1].max(here[1]),
+                most[2].max(here[2]),
+                most[3].max(here[3]),
+            ]
+        })
+    }
+
     /// Whether any light has arrived for a chunk.
     #[must_use]
     pub fn has_light(&self, pos: ChunkPos) -> bool {

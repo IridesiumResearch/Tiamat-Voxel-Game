@@ -237,6 +237,15 @@ pub struct SubNodeGrid {
     /// every set — a sprite is not geometry and neither hides a face nor has
     /// one (Contract §8.4).
     sprite_columns: Option<[Vec<u64>; 3]>,
+    /// The cells of model materials as an occupancy mask, taken out of every
+    /// set exactly as the sprites' are (Contract §8.6 "Culling"): a model cell
+    /// emits no face and hides none. A parallel set rather than a share of the
+    /// sprites', because a sprite becomes a billboard quad and a model must
+    /// become none.
+    model_columns: Option<[Vec<u64>; 3]>,
+    /// One entry per block holding a model material's cell, found with the
+    /// cells themselves (Contract §8.6 "Found at remesh").
+    models: Vec<ModelInstance>,
     /// Each block's fluid surface height, in sixteenths of a cell, `0` for dry.
     ///
     /// **This is what makes the surface smooth rather than a staircase.** The
@@ -458,6 +467,8 @@ impl SubNodeGrid {
         let cutout = cutout_columns(&materials, transparent);
         let sprites = billboards_of(&materials, transparent);
         let sprite_columns = sprite_columns_of(&materials, transparent);
+        let model_columns = model_columns_of(&materials, transparent);
+        let models = model_instances_of(&materials, transparent);
 
         let mut grid = Self {
             materials,
@@ -467,6 +478,8 @@ impl SubNodeGrid {
             cutout,
             sprites,
             sprite_columns,
+            model_columns,
+            models,
             heights,
             walls,
         };
@@ -531,6 +544,8 @@ impl SubNodeGrid {
                             mark(&mut self.cutout);
                         } else if transparent.is_billboard(material) {
                             mark(&mut self.sprite_columns);
+                        } else if transparent.is_model(material) {
+                            mark(&mut self.model_columns);
                         }
                         continue;
                     }
@@ -876,6 +891,17 @@ pub trait Transparency {
         false
     }
 
+    /// Whether a material's cells are drawn as a model instead of geometry:
+    /// no faces, no culling. Sub-Node Contract §8.6.
+    fn is_model(&self, _material: u16) -> bool {
+        false
+    }
+
+    /// Whether ANY material in play is a model material.
+    fn any_model(&self) -> bool {
+        false
+    }
+
     /// Whether ANY material in play is transparent.
     ///
     /// **Defaults to yes, which is the safe answer**, and every implementation
@@ -915,6 +941,36 @@ impl<T: Transparency + ?Sized> Transparency for &T {
     fn any(&self) -> bool {
         (*self).any()
     }
+
+    fn is_cutout(&self, material: u16) -> bool {
+        (*self).is_cutout(material)
+    }
+
+    fn any_cutout(&self) -> bool {
+        (*self).any_cutout()
+    }
+
+    fn is_billboard(&self, material: u16) -> bool {
+        (*self).is_billboard(material)
+    }
+
+    fn is_cross(&self, material: u16) -> bool {
+        (*self).is_cross(material)
+    }
+
+    fn any_billboard(&self) -> bool {
+        (*self).any_billboard()
+    }
+
+    /// Forwarded for the reason `any` is: a default `false` here would make a
+    /// `&Sight` draw a model's cells as stone (Contract §8.6).
+    fn is_model(&self, material: u16) -> bool {
+        (*self).is_model(material)
+    }
+
+    fn any_model(&self) -> bool {
+        (*self).any_model()
+    }
 }
 
 /// Which materials are see-through, and in which of the two ways.
@@ -933,6 +989,8 @@ pub struct Sight {
     pub sprites: std::collections::BTreeSet<u16>,
     /// Of those, the ones drawn as two fixed crossed cards. Contract §8.4.
     pub crosses: std::collections::BTreeSet<u16>,
+    /// Drawn as a registered model rather than as geometry. Contract §8.6.
+    pub models: std::collections::BTreeSet<u16>,
 }
 
 impl Transparency for Sight {
@@ -962,6 +1020,14 @@ impl Transparency for Sight {
 
     fn is_cross(&self, material: u16) -> bool {
         self.crosses.contains(&material)
+    }
+
+    fn is_model(&self, material: u16) -> bool {
+        self.models.contains(&material)
+    }
+
+    fn any_model(&self) -> bool {
+        !self.models.is_empty()
     }
 }
 
@@ -1227,6 +1293,8 @@ pub struct Mesh {
     pub glass_quads: Vec<Quad>,
     /// The sprites: one per run of billboard cells. Contract §8.4.
     pub billboards: Vec<Billboard>,
+    /// The model blocks of the chunk, one per block. Contract §8.6.
+    pub models: Vec<ModelInstance>,
     /// The merged alpha-tested quads: foliage.
     ///
     /// Their own list rather than the opaque one because their pipeline
@@ -1250,6 +1318,17 @@ pub struct Mesh {
     /// chunk's own from the light it was meshed against, which the mesher
     /// cannot see — see `ChunkStore::open_sky`.
     pub open_sky: OpenSky,
+}
+
+/// One block of a chunk that is drawn as a model rather than as cells.
+/// Contract §8.6: found when the chunk is meshed, from the cells the mesher
+/// reads, and shown and hidden with the chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelInstance {
+    /// The block within its chunk, each axis `0..16`.
+    pub local: [u8; 3],
+    /// The block's model material (the lowest id if it holds two).
+    pub material: u16,
 }
 
 /// Which of a mesh's vertices its fog takes as under the open sky, whatever
@@ -1988,6 +2067,7 @@ fn cull_face(grid: &SubNodeGrid, (axis, positive): (usize, bool), scratch: &mut 
     let glass = grid.glass.as_ref().map(|glass| &glass[axis]);
     let cutout = grid.cutout.as_ref().map(|cutout| &cutout[axis]);
     let billboards = grid.sprite_columns.as_ref().map(|sprites| &sprites[axis]);
+    let models = grid.model_columns.as_ref().map(|models| &models[axis]);
     scratch.plane.fill(0);
     scratch.wet_plane.fill(0);
     scratch.glass_plane.fill(0);
@@ -2080,7 +2160,11 @@ fn cull_face(grid: &SubNodeGrid, (axis, positive): (usize, bool), scratch: &mut 
             // taken out of every set here, and the ground under it keeps the
             // face it would otherwise have lost.
             let sprites = billboards.map_or(0, |sprites| sprites[u * N + v]);
-            let opaque = solid & !panes & !leaves & !sprites;
+            // **A model cell is in no set either** (§8.6 "Culling"): the
+            // model is drawn by the skinned pass, so the floor under a brazier
+            // keeps its face.
+            let model_cells = models.map_or(0, |models| models[u * N + v]);
+            let opaque = solid & !panes & !leaves & !sprites & !model_cells;
             // An exterior leaf's face INTO the opaque interior is culled too:
             // it faces solid foliage and nothing can see it.
             let (faces, glass_faces, leaf_faces) = if positive {
@@ -2361,6 +2445,7 @@ impl MeshJob {
         let Self { grid, scratch, .. } = self;
         let mut mesh = scratch.finish(&grid);
         mesh.billboards = lit_billboards(&grid, light);
+        mesh.models = grid.models;
         mesh
     }
 }
@@ -2376,6 +2461,7 @@ pub fn mesh(grid: &SubNodeGrid, light: &impl BlockLight) -> Mesh {
     }
     let mut mesh = scratch.finish(grid);
     mesh.billboards = lit_billboards(grid, light);
+    mesh.models.clone_from(&grid.models);
     mesh
 }
 
@@ -2591,6 +2677,64 @@ fn sprite_columns_of(materials: &[u16], transparent: &impl Transparency) -> Opti
     found.then_some(columns)
 }
 
+/// The occupancy columns of every model-material cell, or `None` if there are
+/// none. The sprite walk over the other flag (Contract §8.6).
+fn model_columns_of(materials: &[u16], transparent: &impl Transparency) -> Option<[Vec<u64>; 3]> {
+    if !transparent.any_model() {
+        return None;
+    }
+    let mut columns = [vec![0u64; N * N], vec![0u64; N * N], vec![0u64; N * N]];
+    let mut found = false;
+    for z in 0..N {
+        for y in 0..N {
+            for x in 0..N {
+                let material = materials[x + N * y + N * N * z];
+                if material == 0 || !transparent.is_model(material) {
+                    continue;
+                }
+                found = true;
+                columns[0][y * N + z] |= 1 << (x as u32 + FIRST);
+                columns[1][x * N + z] |= 1 << (y as u32 + FIRST);
+                columns[2][x * N + y] |= 1 << (z as u32 + FIRST);
+            }
+        }
+    }
+    found.then_some(columns)
+}
+
+/// One instance per block that holds a model material's cell, in block order.
+/// If a block holds two model materials the lowest id wins (Contract §8.6).
+fn model_instances_of(materials: &[u16], transparent: &impl Transparency) -> Vec<ModelInstance> {
+    if !transparent.any_model() {
+        return Vec::new();
+    }
+    let per = SUBNODES_PER_AXIS as usize;
+    let blocks = N / per;
+    let mut found: std::collections::BTreeMap<[u8; 3], u16> = std::collections::BTreeMap::new();
+    for z in 0..N {
+        for y in 0..N {
+            for x in 0..N {
+                let material = materials[x + N * y + N * N * z];
+                if material == 0 || !transparent.is_model(material) {
+                    continue;
+                }
+                let key = [(x / per) as u8, (y / per) as u8, (z / per) as u8];
+                let entry = found.entry(key).or_insert(material);
+                *entry = (*entry).min(material);
+            }
+        }
+    }
+    debug_assert!(
+        found
+            .keys()
+            .all(|key| key.iter().all(|&c| usize::from(c) < blocks))
+    );
+    found
+        .into_iter()
+        .map(|(local, material)| ModelInstance { local, material })
+        .collect()
+}
+
 /// Finds every run of billboard cells and makes one sprite of each.
 ///
 /// **A run, not a cell.** Sub-Node Contract §8.4: three stacked cells of grass
@@ -2721,6 +2865,17 @@ impl crate::shade::CellOccupancy for SubNodeGrid {
             // is documented there rather than guessed at here.
             return false;
         };
+        // **A model does not occlude either** (§8.6): it is in no occupancy
+        // set, and darkening the corners of the stone round a brazier as if
+        // its cells were a wall would make the block's neighbours disagree
+        // with the floor and wall they are culled as if it were not there.
+        if self
+            .model_columns
+            .as_ref()
+            .is_some_and(|models| models[0][y * N + z] & (1 << (x as u32 + FIRST)) != 0)
+        {
+            return false;
+        }
         self.is_solid(x, y, z)
     }
 }
@@ -5162,6 +5317,142 @@ mod tests {
         );
         assert!(mesh.is_empty());
         assert_eq!(mesh.gpu_bytes(), 0);
+    }
+
+    /// A world in which exactly the listed materials are drawn as models.
+    fn models_of(materials: &[u16]) -> Sight {
+        Sight {
+            models: materials.iter().copied().collect(),
+            ..Sight::default()
+        }
+    }
+
+    /// Stone on every side of block (4,4,4), and `centre` in it.
+    fn brazier_scene(centre: BlockValue) -> Chunk {
+        let mut chunk = empty();
+        for (x, y, z) in [
+            (3, 4, 4),
+            (5, 4, 4),
+            (4, 3, 4),
+            (4, 5, 4),
+            (4, 4, 3),
+            (4, 4, 5),
+        ] {
+            chunk
+                .set_block(BlockPos::new(x, y, z), BlockValue::Uniform(STONE))
+                .expect("in chunk");
+        }
+        chunk
+            .set_block(BlockPos::new(4, 4, 4), centre)
+            .expect("in chunk");
+        chunk
+    }
+
+    fn model_mesh(chunk: &Chunk, sight: &Sight) -> Mesh {
+        mesh_chunk(
+            chunk,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &NoFluid,
+            sight,
+        )
+    }
+
+    #[test]
+    fn a_model_cell_emits_no_faces_hides_none_and_is_found_as_an_instance() {
+        // Contract §8.6 "Culling" and "Found at remesh".
+        let brazier = MaterialId(9);
+        let sight = models_of(&[9]);
+        let with = model_mesh(&brazier_scene(BlockValue::Uniform(brazier)), &sight);
+        let air = model_mesh(&brazier_scene(BlockValue::Uniform(MaterialId::AIR)), &sight);
+
+        assert!(
+            with.quads.iter().all(|quad| quad.material != 9),
+            "a model cell emitted a face"
+        );
+        assert_eq!(
+            with.quads.len(),
+            air.quads.len(),
+            "the stone's faces toward a model block must be drawn exactly as toward air"
+        );
+        assert_eq!(
+            with.models,
+            vec![ModelInstance {
+                local: [4, 4, 4],
+                material: 9
+            }]
+        );
+        assert!(air.models.is_empty());
+    }
+
+    #[test]
+    fn two_model_blocks_are_two_instances() {
+        let sight = models_of(&[9]);
+        let mut chunk = empty();
+        for x in [4, 5] {
+            chunk
+                .set_block(BlockPos::new(x, 4, 4), BlockValue::Uniform(MaterialId(9)))
+                .expect("in chunk");
+        }
+        let mesh = model_mesh(&chunk, &sight);
+        assert!(mesh.quads.is_empty());
+        assert_eq!(
+            mesh.models,
+            vec![
+                ModelInstance {
+                    local: [4, 4, 4],
+                    material: 9
+                },
+                ModelInstance {
+                    local: [5, 4, 4],
+                    material: 9
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partial_model_block_is_one_instance_and_a_stepped_job_agrees() {
+        let sight = models_of(&[9]);
+        let mut chunk = empty();
+        chunk
+            .set_subnode(BlockPos::new(2, 2, 2).subnode(0, 0, 0), MaterialId(9))
+            .expect("in chunk");
+        chunk
+            .set_subnode(BlockPos::new(2, 2, 2).subnode(2, 2, 2), MaterialId(9))
+            .expect("in chunk");
+        let one_shot = model_mesh(&chunk, &sight);
+        assert_eq!(one_shot.models.len(), 1);
+        let mut job = MeshJob::start(&chunk, &Neighbours::open(), Absent::Air, &NoFluid, &sight)
+            .expect("not empty air");
+        while !job.step(&DAY) {}
+        assert_eq!(job.finish(&DAY).models, one_shot.models);
+    }
+
+    #[test]
+    fn a_summary_draws_a_model_materials_cells_as_any_materials() {
+        // Contract §8.6: the far field has no models; the summary mesher is
+        // handed no material table and the face count must not depend on which
+        // material a cell is.
+        let n =
+            tiamat_core::lod::cells_per_axis(tiamat_core::lod::FINEST).expect("a level") as usize;
+        let build = |material: u16| {
+            let mut cells = vec![MaterialId::AIR; n * n * n];
+            for z in 0..n {
+                for x in 0..n {
+                    cells[(z * n) * n + x] = MaterialId(material);
+                }
+            }
+            let summary = tiamat_core::lod::Summary::from_parts(tiamat_core::lod::FINEST, cells)
+                .expect("build");
+            mesh_summary(&summary, &[], |_, _| false)
+        };
+        let plain = build(2);
+        let model = build(9);
+        assert!(!model.quads.is_empty());
+        assert_eq!(plain.quads.len(), model.quads.len());
+        assert!(model.models.is_empty());
     }
 }
 

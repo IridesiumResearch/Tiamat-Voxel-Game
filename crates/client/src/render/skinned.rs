@@ -36,6 +36,14 @@ use wgpu::util::DeviceExt as _;
 
 use super::{DEPTH_FORMAT, Gpu, RenderMode};
 
+/// One 4x4 identity, column-major: the whole palette of a model with no skin.
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
+
 /// A figure to draw this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Figure {
@@ -319,22 +327,30 @@ impl Skinned {
             return;
         }
 
+        // **A model with no skin is a rigid mesh, not an undrawable one**
+        // (Contract §8.6: a block's model is usually a static glTF). Its
+        // vertices all name joint 0 at weight 1, so a palette of one identity
+        // matrix per figure draws it exactly where it is authored. It used to
+        // draw nothing at all, which is what a skinless model read as.
         let joints = self.joints();
-        if joints == 0 {
-            self.drawn = 0;
-            return;
-        }
+        let rigid = joints == 0;
+        let per_figure = joints.max(1);
 
         let mut instances = Vec::with_capacity(figures.len());
-        let mut matrices: Vec<f32> = Vec::with_capacity(figures.len() * joints * 16);
+        let mut matrices: Vec<f32> = Vec::with_capacity(figures.len() * per_figure * 16);
         for figure in figures {
             let base = u32::try_from(matrices.len() / 16).unwrap_or(0);
-            let clip = self
-                .model
-                .clip(model::clip_for(tiamat_core::ent::AnimTag(figure.anim)));
-            let posed = self.carry_pose(figure);
-            for matrix in model::skinning_matrices_with(&self.model, clip, figure.phase, &posed) {
-                matrices.extend_from_slice(&matrix);
+            if rigid {
+                matrices.extend_from_slice(&IDENTITY);
+            } else {
+                let clip = self
+                    .model
+                    .clip(model::clip_for(tiamat_core::ent::AnimTag(figure.anim)));
+                let posed = self.carry_pose(figure);
+                for matrix in model::skinning_matrices_with(&self.model, clip, figure.phase, &posed)
+                {
+                    matrices.extend_from_slice(&matrix);
+                }
             }
             instances.push(Instance {
                 offset: [figure.offset[0], figure.offset[1], figure.offset[2], 0.0],

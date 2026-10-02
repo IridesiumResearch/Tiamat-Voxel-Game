@@ -4325,6 +4325,7 @@ fn a_billboard_turns_to_face_the_camera_from_any_side() {
             foliage: std::collections::BTreeSet::new(),
             sprites: [GRASS.get()].into_iter().collect(),
             crosses: std::collections::BTreeSet::new(),
+            models: std::collections::BTreeSet::new(),
         },
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -4440,6 +4441,7 @@ fn glass_beside_a_sprite_still_draws_from_its_own_chunk() {
             foliage: std::collections::BTreeSet::new(),
             sprites: [GRASS.get()].into_iter().collect(),
             crosses: std::collections::BTreeSet::new(),
+            models: std::collections::BTreeSet::new(),
         },
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -6067,6 +6069,7 @@ fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
             foliage: std::collections::BTreeSet::new(),
             sprites: [GRASS.get()].into_iter().collect(),
             crosses: std::collections::BTreeSet::new(),
+            models: std::collections::BTreeSet::new(),
         },
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -10365,4 +10368,134 @@ fn the_same_stars_show_in_every_lighting_mode_and_the_ground_still_hides_them() 
             share * 100.0
         );
     }
+}
+
+/// A stone floor eight blocks deep over one chunk, with `centre` standing on it
+/// at block (8, 8, 8).
+fn brazier_scene(centre: BlockValue) -> Vec<Chunk> {
+    let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+    for x in 0..16 {
+        for z in 0..16 {
+            for y in 0..8 {
+                chunk
+                    .set_block(BlockPos::new(x, y, z), BlockValue::Uniform(STONE))
+                    .expect("in chunk");
+            }
+        }
+    }
+    chunk
+        .set_block(BlockPos::new(8, 8, 8), centre)
+        .expect("in chunk");
+    vec![chunk]
+}
+
+/// One frame of a brazier scene, with or without the model it names.
+///
+/// Does by hand what the app does each frame (`App::place_model_blocks`): reads
+/// the renderer's per-chunk model blocks and hands a figure per instance to the
+/// model's pass. The mesher's instance list, the renderer's chunk map and the
+/// skinned pass's skinless path are all the real ones.
+fn brazier_frame(gpu: Gpu, centre: BlockValue, model: bool) -> Image {
+    const BRAZIER: u16 = 3;
+    let chunks = brazier_scene(centre);
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    let atlas = Atlas::build(&[None, None, Some(Image::white_with_border())]);
+    renderer.set_atlas(&atlas);
+    upload_with(
+        &mut renderer,
+        &chunks,
+        &mesher::Sight {
+            models: [BRAZIER].into_iter().collect(),
+            ..mesher::Sight::default()
+        },
+    );
+    let mut camera = Camera {
+        position: Position::from_world(8.5, 10.5, 5.5),
+        ..Camera::default()
+    };
+    camera.look(0.0, -0.69);
+
+    if model {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../game/core_blocks/models/brazier.glb"
+        );
+        let bytes = std::fs::read(path).expect("the reference brazier model");
+        let loaded = tiamat_core::model::load(&bytes, &tiamat_core::model::Limits::default())
+            .expect("a static glTF with no skin loads");
+        renderer.add_model("core:brazier", loaded, 1.0);
+        let figures: Vec<client::render::skinned::Figure> = renderer
+            .model_blocks()
+            .flat_map(|(pos, models)| {
+                let corner = camera.position.chunk_offset(pos);
+                models.iter().map(move |instance| {
+                    let [x, y, z] = instance.local.map(f32::from);
+                    client::render::skinned::Figure {
+                        offset: [corner.x + x + 0.5, corner.y + y, corner.z + z + 0.5],
+                        yaw: 0.0,
+                        anim: 0,
+                        phase: 0.0,
+                        carrying: [false; 2],
+                        light: client::render::skinned::OPEN_SKY,
+                    }
+                })
+            })
+            .collect();
+        assert_eq!(figures.len(), 1, "one model block, one instance");
+        renderer.set_model_figures([("core:brazier".to_owned(), figures)].into());
+    }
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    target.capture(&mut renderer, &camera).expect("capture")
+}
+
+#[test]
+fn a_model_block_is_drawn_as_its_model_and_its_cells_are_not() {
+    // Contract §8.6. Three claims, each a different way the feature breaks:
+    // the model is not drawn (a skinless glTF used to draw nothing), the cells
+    // are drawn as well (a cube where a brazier should be), or the cells hide
+    // the floor's face (a hole under the brazier).
+    let Some(first) = gpu() else { return };
+    let air = brazier_frame(first, BlockValue::Uniform(MaterialId::AIR), false);
+    let Some(second) = gpu() else { return };
+    let with_model = brazier_frame(second, BlockValue::Uniform(MaterialId(3)), true);
+    let Some(third) = gpu() else { return };
+    let cells_only = brazier_frame(third, BlockValue::Uniform(MaterialId(3)), false);
+    let Some(fourth) = gpu() else { return };
+    let stone = brazier_frame(fourth, BlockValue::Uniform(STONE), false);
+
+    // (1) The model is drawn: the brazier's pixels differ from the empty floor.
+    let drawn = pixels_beyond(&air, &with_model, 8);
+    assert!(
+        drawn > 0.003,
+        "the model left {drawn} of the frame different from the bare floor: it was not drawn"
+    );
+
+    // (2) Its cells are not: with the model absent (not arrived) the frame is
+    // the bare floor, no cube and no placeholder.
+    let cubes = pixels_beyond(&air, &cells_only, 4);
+    assert!(
+        cubes < 0.0005,
+        "an unarrived model's cells changed {cubes} of the frame: they were drawn"
+    );
+
+    // (3) The floor's face under it is still there: the patch the camera looks
+    // at is the floor in the bare frame, and in the cells-only frame, and is
+    // not the stone cube a plain block would have put there.
+    let centre = |frame: &Image| {
+        average(
+            frame,
+            WIDTH / 2 - 4,
+            HEIGHT / 2 - 4,
+            WIDTH / 2 + 4,
+            HEIGHT / 2 + 4,
+        )
+    };
+    assert!(
+        !is_sky(centre(&cells_only)),
+        "a hole where the floor should be"
+    );
+    assert!(
+        pixels_beyond(&air, &stone, 4) > 0.003,
+        "the control (a plain stone block there) should differ from the bare floor"
+    );
 }

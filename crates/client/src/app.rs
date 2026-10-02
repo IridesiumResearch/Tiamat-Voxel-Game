@@ -1303,6 +1303,9 @@ pub struct App {
     /// on bytes a server chose.
     pub fonts: crate::fonts::Fonts,
     transparent: mesher::Sight,
+    /// The whole and model materials: aimed at, a whole one outlines and locks
+    /// the dig onto the block whatever the tool's brush (Contract §7.5, §8.6).
+    block_models: BlockModels,
     /// Materials a body walks through — Sub-Node Contract §2.
     ///
     /// **The client keeps its own copy because it predicts its own movement.**
@@ -1508,6 +1511,7 @@ impl App {
             hosting: None,
             seed: None,
             transparent: mesher::Sight::default(),
+            block_models: BlockModels::default(),
             passable: Vec::new(),
             friction: Vec::new(),
             pictures: crate::pictures::Pictures::new(),
@@ -2449,8 +2453,8 @@ impl App {
     /// again, so holding the button walks along a wall one whole block at a
     /// time instead of boring a tunnel through several at once.
     fn held_dig_target(&self) -> Option<tiamat_core::SubNodePos> {
-        if self.locks_onto_a_block()
-            && let Some(locked) = self.dig_lock
+        if let Some(locked) = self.dig_lock
+            && self.locks_onto(locked)
             && let Some(to_block) = self.toward(locked)
             && keeps_lock(
                 to_block,
@@ -2493,6 +2497,13 @@ impl App {
     fn locks_onto_a_block(&self) -> bool {
         self.held_tool()
             .is_none_or(|tool| tool.brush != tiamat_core::dig::Brush::SubNode.name())
+    }
+
+    /// Whether a dig aimed at this cell takes the whole block: the tool's brush
+    /// says so, or the cell is of a `whole` material, which is dug as one by
+    /// any brush (Contract §7.5, §8.6 "Aim outlines the block").
+    fn locks_onto(&self, cell: tiamat_core::SubNodePos) -> bool {
+        self.locks_onto_a_block() || is_whole_cell(&self.store, &self.block_models.whole, cell)
     }
 
     /// Whether the block containing this cell still has any material in it.
@@ -2611,38 +2622,7 @@ impl App {
             return Vec::new();
         };
 
-        let whole_block = self.locks_onto_a_block();
-        if !whole_block {
-            return vec![cell];
-        }
-
-        // Every occupied cell of the block. Reading the chunk rather than
-        // assuming 27: the whole point of sub-nodes is that a block need not be
-        // a cube, and an outline that drew one anyway would be a lie exactly
-        // where the player is looking.
-        let block = cell.block();
-        let base = tiamat_core::SubNodePos::new(block.x * 3, block.y * 3, block.z * 3);
-        let Some(chunk) = self.store.get(block.chunk()) else {
-            return vec![cell];
-        };
-        let occupied: Vec<tiamat_core::SubNodePos> = (0..3)
-            .flat_map(|y| (0..3).flat_map(move |z| (0..3).map(move |x| (x, y, z))))
-            .map(|(x, y, z)| tiamat_core::SubNodePos::new(base.x + x, base.y + y, base.z + z))
-            .filter(|at| {
-                chunk
-                    .get_subnode(*at)
-                    .is_some_and(|material| !material.is_air())
-            })
-            .collect();
-
-        // A block that reads as entirely air is one the ray hit and the store
-        // disagrees about — a chunk edit in flight. Outlining the cell that was
-        // actually hit is better than outlining nothing.
-        if occupied.is_empty() {
-            vec![cell]
-        } else {
-            occupied
-        }
+        outline_of(&self.store, cell, self.locks_onto(cell))
     }
 
     /// Hands the current selection to the renderer, camera-relative.
@@ -2727,7 +2707,23 @@ impl App {
                 .filter(|entry| entry.billboard_cross)
                 .map(|entry| entry.id)
                 .collect(),
+            // Contract §8.6: drawn as a model, so no faces and no culling.
+            models: table
+                .iter()
+                .filter(|entry| entry.model.is_some())
+                .map(|entry| entry.id)
+                .collect(),
         };
+        // A model material is whole by implication (§8.6).
+        self.block_models.whole = table
+            .iter()
+            .filter(|entry| entry.whole || entry.model.is_some())
+            .map(|entry| entry.id)
+            .collect();
+        self.block_models.model_of = table
+            .iter()
+            .filter_map(|entry| entry.model.clone().map(|model| (entry.id, model)))
+            .collect();
 
         // And what a body walks through. Not part of `Sight`: it changes no
         // geometry, only what stops a step (Contract §2).
@@ -6368,8 +6364,69 @@ impl App {
                 placed.push(figure);
             }
         }
+        self.place_model_blocks(&mut by_model);
         self.renderer.set_model_figures(by_model);
         self.renderer.set_entities(placed);
+    }
+
+    /// Adds a figure for every model block of every resident chunk, grouped by
+    /// the model that draws it. Contract §8.6.
+    ///
+    /// **Gathered for every resident near-field chunk, not only the visible
+    /// ones**: the instance lists live with the chunk's mesh and the frustum
+    /// is computed inside the renderer's own pass, so a chunk behind the player
+    /// still has its braziers posed (a handful of palette matrices, and the
+    /// skinned pass's own culling does not exist either). A model whose pass has
+    /// not arrived draws nothing — never a placeholder (§8.6 "A model that has
+    /// not arrived draws nothing").
+    fn place_model_blocks(
+        &self,
+        by_model: &mut std::collections::BTreeMap<String, Vec<crate::render::skinned::Figure>>,
+    ) {
+        if self.block_models.model_of.is_empty() {
+            return;
+        }
+        let side = tiamat_core::CHUNK_BLOCKS as i32;
+        let mut found: Vec<(String, crate::render::skinned::Figure)> = Vec::new();
+        for (drawn, models) in self.renderer.model_blocks() {
+            let chunk = ChunkPos::new(
+                drawn.x - self.displacement[0],
+                drawn.y - self.displacement[1],
+                drawn.z - self.displacement[2],
+            );
+            let corner = self.camera.position.chunk_offset(drawn);
+            for model in models {
+                let Some(id) = self.block_models.model_of.get(&model.material) else {
+                    continue;
+                };
+                if !self.renderer.has_model(id) {
+                    continue;
+                }
+                let [lx, ly, lz] = model.local.map(f32::from);
+                let block = tiamat_core::BlockPos::new(
+                    chunk.x * side + i32::from(model.local[0]),
+                    chunk.y * side + i32::from(model.local[1]),
+                    chunk.z * side + i32::from(model.local[2]),
+                );
+                found.push((
+                    id.clone(),
+                    crate::render::skinned::Figure {
+                        // The block's bottom centre, as a creature stands on
+                        // its feet; model space is cells, so a model three
+                        // cells across fills its block.
+                        offset: [corner.x + lx + 0.5, corner.y + ly, corner.z + lz + 0.5],
+                        yaw: 0.0,
+                        anim: tiamat_core::ent::AnimTag::IDLE.0,
+                        phase: 0.0,
+                        carrying: [false, false],
+                        light: self.store.light_around_block(block),
+                    },
+                ));
+            }
+        }
+        for (id, figure) in found {
+            by_model.entry(id).or_default().push(figure);
+        }
     }
 
     /// Jumps to the edge of the world, for the floating-origin check.
@@ -6950,6 +7007,65 @@ const fn resync_plan(client: u64, server: u64) -> Resync {
     }
 }
 
+/// What the material table says about whole and model materials.
+#[derive(Debug, Default)]
+struct BlockModels {
+    /// Materials that are `whole` (Contract §7.5), model materials included.
+    whole: std::collections::BTreeSet<u16>,
+    /// Which registered model draws each model material. Contract §8.6.
+    model_of: std::collections::BTreeMap<u16, String>,
+}
+
+/// Whether the cell is of a `whole` material. Contract §7.5.
+fn is_whole_cell(
+    store: &crate::world::ChunkStore,
+    whole: &std::collections::BTreeSet<u16>,
+    cell: tiamat_core::SubNodePos,
+) -> bool {
+    !whole.is_empty()
+        && store
+            .get(cell.block().chunk())
+            .and_then(|chunk| chunk.get_subnode(cell))
+            .is_some_and(|material| whole.contains(&material.get()))
+}
+
+/// The cells an aim outlines: the one, or with `block_wide` every occupied cell
+/// of its block.
+///
+/// Reading the chunk rather than assuming 27: the whole point of sub-nodes is
+/// that a block need not be a cube, and an outline that drew one anyway would
+/// be a lie exactly where the player is looking. A block the store reads as
+/// entirely air is one the ray hit and the store disagrees about — a chunk edit
+/// in flight — so the cell actually hit is outlined rather than nothing.
+fn outline_of(
+    store: &crate::world::ChunkStore,
+    cell: tiamat_core::SubNodePos,
+    block_wide: bool,
+) -> Vec<tiamat_core::SubNodePos> {
+    if !block_wide {
+        return vec![cell];
+    }
+    let block = cell.block();
+    let base = tiamat_core::SubNodePos::new(block.x * 3, block.y * 3, block.z * 3);
+    let Some(chunk) = store.get(block.chunk()) else {
+        return vec![cell];
+    };
+    let occupied: Vec<tiamat_core::SubNodePos> = (0..3)
+        .flat_map(|y| (0..3).flat_map(move |z| (0..3).map(move |x| (x, y, z))))
+        .map(|(x, y, z)| tiamat_core::SubNodePos::new(base.x + x, base.y + y, base.z + z))
+        .filter(|at| {
+            chunk
+                .get_subnode(*at)
+                .is_some_and(|material| !material.is_air())
+        })
+        .collect();
+    if occupied.is_empty() {
+        vec![cell]
+    } else {
+        occupied
+    }
+}
+
 /// Pairs of actions whose DEFAULT key is the same, as `(held, clashing)`.
 ///
 /// Defaults only: a player who has deliberately put two actions on one key has
@@ -7120,6 +7236,44 @@ mod dig_lock_tests {
 mod tests {
     use super::*;
     use tiamat_core::proto::MaterialDef;
+
+    #[test]
+    fn a_whole_material_outlines_its_block_under_a_chisel_and_a_plain_one_one_cell() {
+        // Contract §7.5 / §8.6 "Aim outlines the block": the outline follows
+        // what the dig will take, and a whole material comes off as one.
+        use tiamat_core::{BlockPos, Chunk, ChunkPos, MaterialId};
+        let mut store = ChunkStore::new();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+        // Block (1,0,0): a brazier-ish L of three whole-material cells.
+        // Block (3,0,0): the same three cells of plain stone.
+        for (block, material) in [(1, 9u16), (3, 2u16)] {
+            for (x, y, z) in [(0, 0, 0), (1, 0, 0), (0, 1, 0)] {
+                chunk
+                    .set_subnode(
+                        BlockPos::new(block, 0, 0).subnode(x, y, z),
+                        MaterialId(material),
+                    )
+                    .expect("in chunk");
+            }
+        }
+        store.insert(chunk);
+        let whole: std::collections::BTreeSet<u16> = [9].into_iter().collect();
+
+        let brazier_cell = BlockPos::new(1, 0, 0).subnode(0, 0, 0);
+        let stone_cell = BlockPos::new(3, 0, 0).subnode(0, 0, 0);
+        // The chisel is a sub-node brush: block_wide = false from the tool.
+        let chisel = |cell| outline_of(&store, cell, is_whole_cell(&store, &whole, cell));
+        assert_eq!(
+            chisel(brazier_cell).len(),
+            3,
+            "the whole block's occupied cells"
+        );
+        assert_eq!(
+            chisel(stone_cell),
+            vec![stone_cell],
+            "a plain cell is one cell"
+        );
+    }
 
     #[test]
     fn a_badge_is_a_centred_row_over_an_entitys_head() {
