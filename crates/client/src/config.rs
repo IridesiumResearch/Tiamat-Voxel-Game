@@ -453,8 +453,11 @@ pub struct Config {
     /// are players on hardware nobody here will ever see, and they need the
     /// instrument.
     ///
-    /// On by default for that reason: an instrument nobody knows exists is an
-    /// instrument nobody uses.
+    /// **Off by default** since 2026-10-02 (it was on, so that nobody could
+    /// miss it): a new player's first sight of the game was a wall of timings
+    /// over the world, and the designer judged that cost higher than the
+    /// instrument's discoverability. The checkbox on the settings screen is
+    /// how it is found, and a bug report form can ask for it by name.
     #[serde(default = "Config::default_debug_overlay")]
     pub debug_overlay: bool,
 
@@ -544,7 +547,7 @@ impl Config {
     }
 
     const fn default_debug_overlay() -> bool {
-        true
+        false
     }
 
     const fn default_fog_chunks() -> u8 {
@@ -1023,23 +1026,24 @@ mod tests {
     }
 
     #[test]
-    fn the_debug_overlay_is_on_unless_a_player_turned_it_off() {
-        // Charter rule 18's instrument ships and is on: an instrument nobody
-        // knows exists is an instrument nobody uses, and every frame-pacing
-        // question so far was answered by somebody reading it off their screen.
-        assert!(Config::default().debug_overlay);
+    fn the_debug_overlay_is_off_unless_a_player_turned_it_on() {
+        // Charter rule 18's instrument ships, on the settings screen; it is
+        // not over a new player's first view of the world (off by default
+        // since 2026-10-02, the designer's call).
+        assert!(!Config::default().debug_overlay);
 
-        // Absent means the default, so a config written before this setting
-        // existed keeps the overlay rather than silently losing it.
+        // Absent means the default, so a config written when the overlay was
+        // on by default and never mentioned it follows the new default.
         let path = temp_config("overlay-absent", "server = \"embedded\"\n");
-        assert!(Config::load(&path).expect("valid config").debug_overlay);
-
-        // And a player who turned it off gets it left off.
-        let path = temp_config(
-            "overlay-off",
-            "server = \"embedded\"\ndebug_overlay = false\n",
-        );
         assert!(!Config::load(&path).expect("valid config").debug_overlay);
+
+        // And a player who turned it on — the settings screen writes the
+        // value — gets it left on.
+        let path = temp_config(
+            "overlay-on",
+            "server = \"embedded\"\ndebug_overlay = true\n",
+        );
+        assert!(Config::load(&path).expect("valid config").debug_overlay);
     }
 
     #[test]

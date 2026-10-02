@@ -480,16 +480,13 @@ const ENGINE_ACTIONS: &[(&str, &str, Option<Input>)] = &[
         "Say something",
         Some(Input::Key(KeyCode::KeyT)),
     ),
-    // **Charter rule 18's instrument, and it ships.** Not a developer-only
-    // overlay: a player on hardware nobody here will ever own is the person
-    // best placed to measure frame pacing, and they need a way to read it. Also
-    // in the settings screen, because a key nobody discovers is a key nobody
-    // presses.
-    (
-        "engine:debug_overlay",
-        "Show the debug overlay",
-        Some(Input::Key(KeyCode::F3)),
-    ),
+    // **Charter rule 18's instrument, and it ships** — as a checkbox on the
+    // settings screen and as an action a player can put on a key, not on a key
+    // of its own. It shipped on F3 until 2026-10-02; the designer had it off
+    // the keyboard, because a readout a player toggles by accident, with no
+    // idea what the wall of numbers is, costs more than the key saves the
+    // player who wants it, and that player has the controls page.
+    ("engine:debug_overlay", "Show the debug overlay", None),
     (
         "engine:menu",
         "Release the cursor",

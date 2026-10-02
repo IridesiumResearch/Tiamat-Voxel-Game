@@ -1825,7 +1825,7 @@ impl App {
         format!(
             "keys: L light · K shadows · V third person · B borders {} · N sources · [ ] time \
              · \\ resync \
-             · G blocks · Y/H teleport · T chat · E inventory · F1 settings · F3 this",
+             · G blocks · Y/H teleport · T chat · E inventory · F1 settings · this overlay: in settings",
             if self.renderer.chunk_borders() {
                 "ON"
             } else {

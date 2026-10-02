@@ -12,7 +12,7 @@
 # mods register named actions, the player binds keys to them on the controls
 # page of the menu (Escape, or F1), and the result lives in its own file, bindings.toml,
 # beside this one in the data directory, so a hand-written comment here is
-# never lost to a key change. F3 in game lists the current keys.
+# never lost to a key change.
 
 # Which server to play on.
 #   "embedded"          — start a server in this process and connect over
@@ -102,15 +102,15 @@ shadow_quality = "medium"
 vsync = true
 
 # The debug overlay: frame timings, the worst-frame breakdown, memory, the
-# adapter and the present mode. On by default, and also a checkbox on the
-# settings screen (F1) and a key (F3).
+# adapter and the present mode. Off by default; a checkbox on the settings
+# screen (F1) turns it on, and the controls page can give it a key.
 #
 # It is not a developer-only build. Charter rule 18 makes frame PACING the
 # metric and calls integrated graphics best-effort, which means the people best
 # placed to measure it are players on hardware nobody upstream will ever own —
 # and they need the instrument. If you report a stutter, this is the readout to
 # paste.
-debug_overlay = true
+debug_overlay = false
 
 # How large the interface is drawn: the menu, the inventory, chat, and a mod's
 # HUD all scale together. Between 0.5 and 3.0; a value outside that refuses to
