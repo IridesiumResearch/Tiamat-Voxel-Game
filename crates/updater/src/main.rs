@@ -54,16 +54,86 @@ fn main() -> std::process::ExitCode {
         }
     }
 
+    // A box only for the double-click path: `--status` and `--rollback` are
+    // typed into a terminal, where the text is already in front of the player.
+    let from_a_click = matches!(command, Command::Run);
     match run(command, launch, &passthrough) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("tiamat: {err}");
-            eprintln!();
-            eprintln!("The game itself is in `current`, and can be started directly.");
-            eprintln!("If it will not, unpack a fresh download beside this one.");
+            explain_failure(&err, from_a_click);
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// The title of the box a failed start puts up.
+const FAILURE_TITLE: &str = "Tiamat cannot start";
+
+/// What to tell a player whose launcher has no game beside it.
+///
+/// The usual way to get here on Windows is to double-click `tiamat.exe` inside
+/// the downloaded zip in Explorer, which copies out that one file to a
+/// temporary folder and runs it there, with no `current/` beside it.
+const NOTHING_TO_RUN_HINT: &str = "There is no `current` folder with the game beside the launcher. If you opened it from inside the downloaded zip, extract the whole zip first (right-click it, Extract All), then open the launcher from the extracted folder.";
+
+/// What to tell a player when anything else stopped the start.
+const GENERIC_HINT: &str = "The game itself is in `current`, and can be started directly. If it will not, unpack a fresh download beside this one.";
+
+/// Says why the game did not start, where the player can read it.
+///
+/// On the terminal always. On Windows, when started by a click, in a message
+/// box as well: a double-clicked console program gets a console of its own,
+/// and that console closes the moment the program exits, so an error printed
+/// there is a black window that flashes and is gone. `powershell` ships with
+/// Windows and puts up a box without a library here, as `osascript` does for
+/// [`explain_translocation`] on macOS.
+fn explain_failure(err: &InstallError, from_a_click: bool) {
+    let hint = match err {
+        InstallError::NothingToRun => NOTHING_TO_RUN_HINT,
+        _ => GENERIC_HINT,
+    };
+    eprintln!("tiamat: {err}");
+    eprintln!();
+    eprintln!("{hint}");
+    if from_a_click {
+        message_box(FAILURE_TITLE, &format!("{err}\n\n{hint}"));
+    }
+}
+
+/// Puts up an alert with the operating system's own means, where it has one.
+fn message_box(title: &str, body: &str) {
+    // Built on every platform, so the test below exercises what Windows ships.
+    let script = powershell_alert(title, body);
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status();
+    }
+    #[cfg(not(windows))]
+    let _ = script;
+}
+
+/// The PowerShell that shows `body` in a box titled `title`.
+fn powershell_alert(title: &str, body: &str) -> String {
+    format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show({}, {})",
+        powershell_literal(body),
+        powershell_literal(title)
+    )
+}
+
+/// `text` as a PowerShell expression that evaluates to exactly `text`.
+///
+/// A single-quoted PowerShell string has one escape, a doubled quote, and
+/// interprets nothing else — no `$name`, no backtick — so arbitrary text is
+/// safe inside one. A newline is spliced in as `"`n"`, because a raw newline
+/// on a command line is at the mercy of whatever parses it first.
+fn powershell_literal(text: &str) -> String {
+    text.split('\n')
+        .map(|line| format!("'{}'", line.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(" + \"`n\" + ")
 }
 
 const HELP: &str = "\
@@ -229,6 +299,39 @@ mod tests {
             root_of(Path::new("/x/Thing/Contents/MacOS/tiamat")),
             Path::new("/x/Thing/Contents/MacOS")
         );
+    }
+
+    #[test]
+    fn a_powershell_literal_interprets_nothing_but_its_own_quote() {
+        assert_eq!(powershell_literal("plain"), "'plain'");
+        // Doubled, the one escape single quotes have.
+        assert_eq!(powershell_literal("it's"), "'it''s'");
+        // Nothing PowerShell expands inside single quotes is touched.
+        assert_eq!(
+            powershell_literal("$env:PATH `n \"x\""),
+            "'$env:PATH `n \"x\"'"
+        );
+        // A newline never reaches the command line raw.
+        assert_eq!(powershell_literal("one\ntwo"), "'one' + \"`n\" + 'two'");
+        assert!(!powershell_literal("a\nb\nc").contains('\n'));
+    }
+
+    #[test]
+    fn the_alert_shows_the_body_under_the_title() {
+        let script = powershell_alert(
+            "Tiamat cannot start",
+            "no game in `current`\n\nextract the zip",
+        );
+        assert!(script.starts_with("Add-Type -AssemblyName System.Windows.Forms;"));
+        assert!(script.ends_with(
+            "::Show('no game in `current`' + \"`n\" + '' + \"`n\" + 'extract the zip', 'Tiamat cannot start')"
+        ));
+    }
+
+    #[test]
+    fn a_missing_game_is_explained_as_a_zip_opened_in_place() {
+        assert!(NOTHING_TO_RUN_HINT.contains("Extract All"));
+        assert!(NOTHING_TO_RUN_HINT.contains("`current`"));
     }
 
     #[test]
