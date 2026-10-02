@@ -76,9 +76,11 @@ pub enum Refusal {
     #[error("someone is standing there")]
     InsideAPlayer,
 
-    /// The block holds a `whole` material, which nothing is written into
-    /// (Sub-Node Contract §7.5): a campfire's empty cells are not room.
-    #[error("that is one piece; there is no room in it")]
+    /// A `whole` material is involved where it cannot be (Sub-Node Contract
+    /// §7.5): the block holds one, and nothing is written into its empty
+    /// cells; or the thing in hand is a cut that includes one, and a whole
+    /// material goes down whole or not at all.
+    #[error("that is one piece; it goes down whole or not at all")]
     Whole,
 }
 

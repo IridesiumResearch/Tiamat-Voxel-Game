@@ -4536,23 +4536,38 @@ impl ServerHandle {
                             // A cut of several materials is planned whole, its
                             // own cells whatever the brush, and never trimmed
                             // (§7.1); everything else as it always was.
-                            let planned = match &placed_cells {
-                                Some(cells) => tiamat_core::place::plan_cut(target, held, cells),
-                                // **A whole material places its shape, whatever
-                                // the brush** (Sub-Node Contract §7.5), into an
-                                // empty block, for a whole block's units.
-                                None => match shared.whole_shape(material) {
-                                    Some(shape) => {
-                                        tiamat_core::place::plan_whole(target, held, shape, filled)
+                            // **A cut never includes a whole material** (Contract
+                            // §7.5): a cut of one material of it, or a cut of
+                            // several with it in a cell, is refused before it
+                            // is planned — the crafter should not have made it,
+                            // and the engine does not write it either way.
+                            let cuts_a_whole = (placed_shape.is_some()
+                                && shared.whole_shape(material).is_some())
+                                || placed_cells.as_ref().is_some_and(|cells| {
+                                    cells.iter().any(|cell| {
+                                        !cell.is_air() && shared.whole_shape(*cell).is_some()
+                                    })
+                                });
+                            let planned = if cuts_a_whole {
+                                Err(tiamat_core::place::Refusal::Whole)
+                            } else {
+                                match &placed_cells {
+                                    Some(cells) => {
+                                        tiamat_core::place::plan_cut(target, held, cells)
                                     }
-                                    None => tiamat_core::place::plan(
-                                        target,
-                                        held,
-                                        placed_shape,
-                                        brush,
-                                        filled,
-                                    ),
-                                },
+                                    None => match shared.whole_shape(material) {
+                                        Some(shape) => tiamat_core::place::plan_whole(
+                                            target, held, shape, filled,
+                                        ),
+                                        None => tiamat_core::place::plan(
+                                            target,
+                                            held,
+                                            placed_shape,
+                                            brush,
+                                            filled,
+                                        ),
+                                    },
+                                }
                             };
                             let outcome = planned
                                 .and_then(|plan| {
