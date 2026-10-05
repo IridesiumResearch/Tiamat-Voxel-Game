@@ -5261,6 +5261,11 @@ impl App {
         self.weather.map.advance(dt);
         self.weather.rainbow.advance(dt);
         let moment = crate::sky::flashed(moment, &self.weather.flashes);
+        // The modifier's light floor, eased (weather ask W32): the sun term
+        // raised to it here, the ambient floor under it in the renderer.
+        let floor = self.weather.modifier.light_floor();
+        let moment = crate::sky::lit_at_least(moment, floor);
+        self.renderer.set_light_floor(floor);
         self.renderer
             .set_sun(moment.intensity, moment.sun, moment.sun_direction);
         self.renderer.set_stars(moment.stars, self.sky.turn());

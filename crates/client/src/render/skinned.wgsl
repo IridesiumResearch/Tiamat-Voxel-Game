@@ -247,7 +247,7 @@ fn lamp_light(stored: vec3<f32>) -> vec3<f32> {
 // sky's hue at a brightness nothing outside can move; one grey in mode 1.
 fn cave_floor() -> vec3<f32> {
     if (globals.lighting_mode == 0u) {
-        return vec3<f32>(SIMPLE_FLOOR);
+        return vec3<f32>(max(SIMPLE_FLOOR, globals.ambient));
     }
     let sky_hue = normalize(globals.sky_colour.rgb + vec3<f32>(0.0001)) * SKY_TINT_SCALE;
     var level = globals.ambient;

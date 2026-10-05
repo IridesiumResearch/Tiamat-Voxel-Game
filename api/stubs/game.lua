@@ -640,6 +640,7 @@ function game.register_sky(spec) end
 ---    fog_distance = 0.6,
 ---    grade = { saturation = 0.7 }, -- or `saturation = 0.7` at the top level
 ---    stars = 1,                    -- the stars' brightness, REPLACING the keyframes'
+---    light_floor = 0.5,            -- the least the frame is lit at, sky-lit or not
 ---    ease_ticks = 400,             -- how long the client takes to get there
 ---})
 ---game.set_sky_modifier(uuid, nil)  -- the plain sky again, eased over the last ease_ticks
@@ -652,12 +653,26 @@ function game.register_sky(spec) end
 ---did; `0` is a say too (no stars). A black sky with `stars = 1` is the sky
 ---from under a world.
 ---
+---**`light_floor` (0 to 1) is a floor, where `intensity` is a multiplier.**
+---The least the frame is lit at, whether the sky reaches it or not: the sun term
+---is raised to at least `light_floor` where the sky reaches, and the renderer's
+---ambient floor is raised to it where it does not, so a cave is lit too.
+---`intensity` cannot do this: it multiplies the keyframe's, so midnight at 0.08
+---stays night however high you set it, and a cave has no sun to multiply. Colours
+---are kept — it is a floor on brightness, never a tint — and it eases like the
+---rest. Leave it out, or `0`, and nothing changes; at noon a floor at or under
+---the day's own light changes nothing in the open. `light_floor = 0.5` at
+---midnight reads as about half of noon, in a field and in a cave. **A mod that
+---composes overlays sends the HIGHEST floor any overlay asks**: a floor is a
+---floor, not a product, so two night-sights do not make a day. Out of range or
+---not a number is an error, not a clamp.
+---
 ---Set it as often as you like: the server sends one message when it CHANGES.
 ---A player who joins is on the plain sky until you set theirs. Wrong types
 ---are errors; wrong numbers are clamped (intensity 0..2, sky channels 0..2,
----sky_mix 0..1, fog_distance 0.05..4, saturation 0..4, stars 0..1, ease_ticks up to 2400).
+---sky_mix 0..1, fog_distance 0.05..4, saturation 0..4, stars 0..1, ease_ticks up to 2400; `light_floor` is the exception, 0..1 or an error).
 ---@param player string A player's UUID in hex, as a hook event reports one.
----@param modifier { intensity?: number, sky?: number[]|{ r: number, g: number, b: number }, sky_mix?: number, fog_distance?: number, saturation?: number, grade?: { saturation?: number }, stars?: number, ease_ticks?: integer }|nil
+---@param modifier { intensity?: number, sky?: number[]|{ r: number, g: number, b: number }, sky_mix?: number, fog_distance?: number, saturation?: number, grade?: { saturation?: number }, stars?: number, light_floor?: number, ease_ticks?: integer }|nil
 ---@return boolean here
 function game.set_sky_modifier(player, modifier) end
 

@@ -1042,6 +1042,10 @@ pub struct Renderer {
     /// Set by the sky each frame once time of day exists; full daylight until
     /// then, which is what Task 08's scenes assumed.
     sun_intensity: f32,
+    /// The least the frame is lit at, `0.0..=1.0` — weather ask W32. The sun
+    /// term's half of it is raised in the sun's own intensity by the caller;
+    /// this is the half under it, the ambient floor where no sky reaches.
+    light_floor: f32,
     /// The sun's colour now.
     sun_colour: [f32; 4],
     /// Which way its light travels, for the cascades. Set by the sky with the
@@ -1260,6 +1264,7 @@ impl Renderer {
             // Full daylight until a sky says otherwise, which is what Task
             // 08's scenes assumed and what a world with no sky mod gets.
             sun_intensity: 1.0,
+            light_floor: 0.0,
             sun_colour: [1.0, 1.0, 1.0, 1.0],
             sun_direction: NOON,
             stars: (0.0, (1.0, 0.0)),
@@ -1308,6 +1313,37 @@ impl Renderer {
         self.sun_intensity = intensity.clamp(0.0, 1.0);
         self.sun_colour = [colour[0], colour[1], colour[2], 1.0];
         self.sun_direction = direction;
+    }
+
+    /// Sets the least the frame is lit at, `0.0..=1.0` — weather ask W32.
+    ///
+    /// Raises the renderer's ambient floor, the darkest a fragment can be
+    /// where no sky reaches, so a cave is lit too; the sun term is raised by
+    /// handing [`Self::set_sun`] an intensity of at least the same floor.
+    /// Colours are kept: the floor is a brightness and the shaders still
+    /// give it the sky's hue. Zero changes nothing.
+    pub fn set_light_floor(&mut self, floor: f32) {
+        self.light_floor = if floor.is_finite() {
+            floor.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// The ambient floor the shaders are given — W32.
+    ///
+    /// [`AMBIENT_FLOOR`] unless the light floor is higher. Mode 2 (classic)
+    /// keeps a third of the ambient it is given underground, so it is handed
+    /// three times the floor to land on the floor itself; mode 1 reads it
+    /// against its own fixed floor. The `max` makes a floor of zero, and any
+    /// floor under the ambient already there, change nothing at all.
+    fn ambient_level(&self) -> f32 {
+        let scale = if self.lighting == crate::config::LightingMode::Classic {
+            3.0
+        } else {
+            1.0
+        };
+        AMBIENT_FLOOR.max(self.light_floor * scale)
     }
 
     /// Sets how much of the star catalog shows and how far it has wheeled.
@@ -2467,7 +2503,7 @@ impl Renderer {
             render_mode: u32::from(self.mode == RenderMode::Flat),
             lighting_mode: self.lighting.code(),
             sun_intensity: self.sun_intensity,
-            ambient: AMBIENT_FLOOR,
+            ambient: self.ambient_level(),
             fog_curve: self.fog_curve,
             tint_any: self.tints.any,
             sway_any: self.tints.swaying,

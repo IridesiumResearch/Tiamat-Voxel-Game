@@ -2142,6 +2142,25 @@ fn rainbow_of(spec: &Value) -> mlua::Result<Option<crate::atmosphere::Rainbow>> 
     )))
 }
 
+/// A modifier's `light_floor` (weather ask W32): absent is no floor; anything
+/// but a number from 0 to 1 is the mod's error, not a silent clamp — a floor
+/// of 1.5 is a mod that believes the scale is something else, and it would
+/// find out at night when it matters.
+fn light_floor_of(spec: &Table) -> mlua::Result<Option<f32>> {
+    let wrong = || {
+        mlua::Error::runtime(
+            "game.set_sky_modifier: `light_floor` is a number from 0 to 1, the least the frame is lit at",
+        )
+    };
+    let floor = spec
+        .get::<Option<f32>>("light_floor")
+        .map_err(|_| wrong())?;
+    match floor {
+        Some(value) if !(0.0..=1.0).contains(&value) => Err(wrong()),
+        other => Ok(other),
+    }
+}
+
 fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier> {
     let number = |name: &str, fallback: f32| -> mlua::Result<f32> {
         Ok(spec.get::<Option<f32>>(name)?.unwrap_or(fallback))
@@ -2175,6 +2194,7 @@ fn sky_modifier_of(spec: &Table) -> mlua::Result<crate::atmosphere::SkyModifier>
                     "game.set_sky_modifier: `stars` is a number from 0 to 1, the brightness of the stars",
                 )
             })?,
+            light_floor: light_floor_of(spec)?,
             ease_ticks: spec.get::<Option<u32>>("ease_ticks")?.unwrap_or(0),
         },
     ))
@@ -14440,6 +14460,45 @@ mod tests {
             "no `stars` leaves the keyframes in charge"
         );
         assert_eq!(set[1].1, None, "nil is the plain sky");
+    }
+
+    #[test]
+    fn a_modifier_may_name_a_light_floor_and_a_careless_one_is_refused() {
+        // **Weather W32.** `light_floor` is 0..=1 as given; out of range or
+        // the wrong type is an error naming the function and the field.
+        let mut host = vm();
+        let weather = std::sync::Arc::new(Weather::default());
+        host.set_atmosphere_access(weather.clone());
+        let uuid = crate::identity::PlayerUuid::from_bytes([7; 32]).to_hex();
+        load(
+            &mut host,
+            "nightsight",
+            &format!(
+                "game.set_sky_modifier('{uuid}', {{ light_floor = 0.5 }})\n\
+                 game.set_sky_modifier('{uuid}', {{ intensity = 0.5 }})\n\
+                 ok1, err1 = pcall(game.set_sky_modifier, '{uuid}', {{ light_floor = 1.5 }})\n\
+                 ok2, err2 = pcall(game.set_sky_modifier, '{uuid}', {{ light_floor = 'x' }})\n\
+                 ok3, err3 = pcall(game.set_sky_modifier, '{uuid}', {{ light_floor = -0.1 }})\n\
+                 err1, err2, err3 = tostring(err1), tostring(err2), tostring(err3)"
+            ),
+        )
+        .expect("load");
+        let set = weather.set.lock().expect("lock").clone();
+        let floors: Vec<Option<f32>> = set
+            .iter()
+            .map(|(_, modifier)| modifier.expect("a modifier").light_floor)
+            .collect();
+        assert_eq!(floors, [Some(0.5), None], "named, then omitted is none");
+        let env = host.environment("nightsight").expect("env");
+        for (ok, err) in [("ok1", "err1"), ("ok2", "err2"), ("ok3", "err3")] {
+            assert!(!env.get::<bool>(ok).expect("ok"), "{ok} was accepted");
+            let message = env.get::<String>(err).expect("the message");
+            assert!(
+                message.contains("game.set_sky_modifier") && message.contains("`light_floor`"),
+                "{message}"
+            );
+        }
+        assert_eq!(set.len(), 2, "a refused call set nothing");
     }
 
     #[test]

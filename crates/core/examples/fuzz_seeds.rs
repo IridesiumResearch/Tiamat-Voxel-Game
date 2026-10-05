@@ -577,6 +577,21 @@ fn server_messages() -> Vec<Vec<u8>> {
                 ..tiamat_core::atmosphere::SkyModifier::NONE
             }),
         },
+        // Protocol v86: a sky modifier with a light floor at each end of its
+        // range.
+        ServerMessage::SkyModifier {
+            modifier: Some(tiamat_core::atmosphere::SkyModifier {
+                light_floor: Some(1.0),
+                ..tiamat_core::atmosphere::SkyModifier::NONE
+            }),
+        },
+        ServerMessage::SkyModifier {
+            modifier: Some(tiamat_core::atmosphere::SkyModifier {
+                light_floor: Some(0.0),
+                ease_ticks: tiamat_core::atmosphere::MAX_EASE_TICKS,
+                ..tiamat_core::atmosphere::SkyModifier::NONE
+            }),
+        },
         ServerMessage::ChunkData {
             pos: ChunkPos::new(0, 0, 0),
             blob: Vec::new(),

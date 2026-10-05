@@ -3510,6 +3510,94 @@ fn a_face_the_sun_is_behind_is_no_brighter_than_the_shadow_it_casts() {
     );
 }
 
+/// The ground's mean colour in the frame's lower quarter — see `viewpoint`.
+fn ground_under(
+    renderer: &mut Renderer,
+    chunks: &[Chunk],
+    light: tiamat_core::light::Light,
+    sky: ([f32; 3], [f32; 3], f32),
+    floor: f32,
+) -> [f32; 3] {
+    // The sun is raised to the floor and the ambient under it set, exactly as
+    // `App` does: `lit_at_least` for the sun, `set_light_floor` beneath.
+    let (sky_colour, sun_colour, intensity) = sky;
+    // Far fog, so the sky's colour is not mixed into what is being measured.
+    renderer.set_sky(sky_colour, 10_000.0);
+    renderer.set_sun(intensity.max(floor), sun_colour, [0.05, -0.99, 0.1]);
+    renderer.set_light_floor(floor);
+    upload_lit(renderer, chunks, &client::shade::Uniform(light));
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let frame = target.capture(renderer, &viewpoint()).expect("capture");
+    average(&frame, 0, HEIGHT * 3 / 4, WIDTH, HEIGHT)
+}
+
+#[test]
+fn a_light_floor_lights_a_field_and_a_cave_at_midnight_and_leaves_noon_alone_in_every_mode() {
+    // **Weather W32.** At midnight (a keyframe of intensity 0.08) with
+    // `light_floor = 0.5` an open field and a place no sky reaches are both
+    // brighter than without it and about half of noon's field, colours kept;
+    // at noon the field is unchanged; and a floor of nothing puts the night
+    // back. The place no sky reaches is a stored light of zero, as in
+    // `a_sealed_room_does_not_get_brighter_when_the_sky_does`: what is under
+    // test is the shader's floor, and zero is zero however a room came by it.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let noon = ([0.53, 0.81, 0.92], [1.0, 1.0, 1.0], 1.0);
+    let midnight = ([0.02, 0.03, 0.06], [0.15, 0.2, 0.4], 0.08);
+    // The frame is sRGB-encoded, and "half as lit" is a statement about light,
+    // so the means are decoded to linear before they are compared.
+    // Gamma 2 stands in for the sRGB curve: `powf` is banned and the band is
+    // wide, so the curve's exact shape is not what is being measured.
+    let linear = |value: f32| value * value;
+    let luma = |colour: [f32; 3]| colour.map(linear).iter().sum::<f32>() / 3.0;
+    for mode in MODES {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
+        let sky_lit = tiamat_core::light::Light::DAYLIGHT;
+        let sealed = tiamat_core::light::Light::DARK;
+        let mut at = |light, sky, floor| ground_under(&mut renderer, &chunks, light, sky, floor);
+
+        let day = luma(at(sky_lit, noon, 0.0));
+        let day_floored = luma(at(sky_lit, noon, 0.5));
+        let night_field = luma(at(sky_lit, midnight, 0.0));
+        let night_cave = luma(at(sealed, midnight, 0.0));
+        let field_colour = at(sky_lit, midnight, 0.5);
+        let field = luma(field_colour);
+        let cave = luma(at(sealed, midnight, 0.5));
+        let restored = luma(at(sky_lit, midnight, 0.0));
+        println!(
+            "{mode:?}: noon {day:.3} (floored {day_floored:.3}); night field {night_field:.3} \
+             cave {night_cave:.3}; floored field {field:.3} cave {cave:.3}"
+        );
+
+        assert!(
+            (day_floored - day).abs() < 0.02,
+            "in {mode:?} a floor of 0.5 changed noon: {day:.3} to {day_floored:.3}"
+        );
+        assert_eq!(restored, night_field, "in {mode:?} no floor is the night");
+        for (name, dark, lit) in [("field", night_field, field), ("cave", night_cave, cave)] {
+            assert!(
+                lit > dark + 0.1,
+                "in {mode:?} the floor left the {name} at {lit:.3}, from {dark:.3}"
+            );
+            assert!(
+                (0.3 * day..=0.7 * day).contains(&lit),
+                "in {mode:?} the floored {name} reads {lit:.3} against noon's {day:.3}, \
+                 which is not about half"
+            );
+        }
+        // A floor on brightness and not a tint: where the shader gives a
+        // floor the sky's hue (every mode but the one with no hue at all)
+        // this night's blue stays blue, and no mode paints it white.
+        if mode != LightingMode::Simple {
+            assert!(
+                field_colour[2] > field_colour[0],
+                "in {mode:?} the floor lost the sky's hue: {field_colour:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_sealed_room_does_not_get_brighter_when_the_sky_does() {
     // **Reported from the window: "when in a cave as day comes the ambient

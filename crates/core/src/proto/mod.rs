@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 85;
+pub const PROTOCOL_VERSION: u32 = 86;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,12 @@ pub const PROTOCOL_VERSION: u32 = 85;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v86 (weather W32): `SkyModifier` gains `light_floor`, appended after
+// `stars`: `None`, or the least the frame is lit at, `0..=1`, which raises
+// the sun term where the sky reaches and the renderer's ambient floor where it
+// does not, eased like the rest (refused on decode when it is not a number or
+// outside 0..=1). **A field on an existing shape**, so the version check is
+// what keeps a v85 peer from reading it as `ease_ticks`.
 // v85 (model blocks and whole blocks, Sub-Node Contract §7.5 and §8.6):
 // `MaterialDef` gains two fields, appended after `tint`. `whole`: whether a
 // block of the material is one piece, dug whole by any brush — the client's
@@ -5696,6 +5702,43 @@ mod tests {
     }
 
     #[test]
+    fn a_modifiers_light_floor_round_trips_and_a_hostile_one_is_refused() {
+        // Protocol v86: weather W32's `light_floor`, appended after `stars`.
+        let with = |floor| crate::atmosphere::SkyModifier {
+            light_floor: floor,
+            ease_ticks: 200,
+            ..crate::atmosphere::SkyModifier::NONE
+        };
+        let wire = |floor| {
+            encode(&ServerMessage::SkyModifier {
+                modifier: Some(with(floor)),
+            })
+            .expect("encode")
+        };
+        let (set, unset) = (wire(Some(0.5)), wire(None));
+        assert_eq!(set.len(), unset.len() + 4, "None is one byte, Some five");
+        assert_eq!(unset[unset.len() - 3..], [0, 0xC8, 0x01]);
+        let mut tail = vec![1];
+        tail.extend(0.5_f32.to_le_bytes());
+        tail.extend([0xC8, 0x01]);
+        assert_eq!(set[set.len() - tail.len()..], tail[..]);
+        for floor in [None, Some(0.0), Some(0.5), Some(1.0)] {
+            let message = ServerMessage::SkyModifier {
+                modifier: Some(with(floor)),
+            };
+            let back: ServerMessage = decode(&wire(floor)).expect("decode");
+            assert_eq!(back, message);
+            assert!(validate_server_message(&message).is_ok(), "{floor:?}");
+        }
+        for poison in [f32::NAN, f32::INFINITY, -0.01, 1.01, 1e30] {
+            let message = ServerMessage::SkyModifier {
+                modifier: Some(with(Some(poison))),
+            };
+            assert!(validate_server_message(&message).is_err(), "{poison:?}");
+        }
+    }
+
+    #[test]
     fn a_modifiers_stars_and_a_fogs_bottom_are_pinned_and_a_hostile_star_is_refused() {
         // Protocol v84: World 44's `stars`, appended after `saturation`, and
         // World 45's `bottom`, appended after `top`.
@@ -5717,6 +5760,7 @@ mod tests {
         want.extend(one); // saturation
         want.push(1); // stars: Some
         want.extend(one);
+        want.push(0); // light_floor: None (v86)
         want.extend([0xC8, 0x01]); // ease_ticks
         assert_eq!(sky, want);
         let decoded: ServerMessage = decode(&sky).expect("decode");

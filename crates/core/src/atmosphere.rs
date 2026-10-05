@@ -40,6 +40,11 @@ pub struct SkyModifier {
     /// `stars` while the modifier is set; `None` leaves the keyframes in
     /// charge. Engine ask World 44.
     pub stars: Option<f32>,
+    /// The least the frame is lit at, `0..=1`, sky-lit or not: the sun term
+    /// is raised to at least this where the sky reaches and the renderer's
+    /// ambient floor to it where it does not (a floor on brightness, never a
+    /// tint). `None` is no floor. Weather ask W32.
+    pub light_floor: Option<f32>,
     /// How long the client takes to get there, in ticks; 0 is at once.
     pub ease_ticks: u32,
 }
@@ -53,6 +58,7 @@ impl SkyModifier {
         fog_distance: 1.0,
         saturation: 1.0,
         stars: None,
+        light_floor: None,
         ease_ticks: 0,
     };
 
@@ -66,6 +72,9 @@ impl SkyModifier {
             && (MIN_FOG_DISTANCE..=MAX_FOG_DISTANCE).contains(&self.fog_distance)
             && (0.0..=MAX_SATURATION).contains(&self.saturation)
             && self.stars.is_none_or(|stars| (0.0..=1.0).contains(&stars))
+            && self
+                .light_floor
+                .is_none_or(|floor| (0.0..=1.0).contains(&floor))
             && self.ease_ticks <= MAX_EASE_TICKS
     }
 }
@@ -110,6 +119,11 @@ pub fn sanitise(mut modifier: SkyModifier) -> SkyModifier {
         .stars
         .filter(|stars| stars.is_finite())
         .map(|stars| stars.clamp(0.0, 1.0));
+    // A floor that is not a number is no floor (W32).
+    modifier.light_floor = modifier
+        .light_floor
+        .filter(|floor| floor.is_finite())
+        .map(|floor| floor.clamp(0.0, 1.0));
     modifier.ease_ticks = modifier.ease_ticks.min(MAX_EASE_TICKS);
     modifier
 }
@@ -846,6 +860,7 @@ mod tests {
             fog_distance: 0.0,
             saturation: -2.0,
             stars: Some(f32::NAN),
+            light_floor: Some(f32::NAN),
             ease_ticks: u32::MAX,
         };
         assert!(!wild.is_valid());
@@ -854,6 +869,15 @@ mod tests {
         assert_eq!(
             tame.intensity, 1.0,
             "not a number falls back to the identity"
+        );
+        assert_eq!(tame.light_floor, None, "W32: not a number is no floor");
+        assert_eq!(
+            sanitise(SkyModifier {
+                light_floor: Some(7.0),
+                ..SkyModifier::NONE
+            })
+            .light_floor,
+            Some(1.0)
         );
         assert_eq!(tame.sky, [MAX_CHANNEL, 0.0, 0.0]);
         assert_eq!(tame.fog_distance, MIN_FOG_DISTANCE);

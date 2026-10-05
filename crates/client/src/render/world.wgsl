@@ -876,7 +876,9 @@ fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     if (globals.lighting_mode == 0u) {
         let day = input.sun * globals.sun_intensity;
         let lamp = max(input.block_light.r, max(input.block_light.g, input.block_light.b));
-        let level = max(max(day, lamp), SIMPLE_FLOOR);
+        // A mod's light floor (weather W32) arrives as `ambient`, which is far
+        // under the fixed floor until a mod asks for more.
+        let level = max(max(day, lamp), max(SIMPLE_FLOOR, globals.ambient));
         return vec3<f32>(input.shade * input.occlusion * level);
     }
     // The sky's own colour at unit brightness. Used for the skylight below and

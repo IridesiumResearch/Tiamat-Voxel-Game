@@ -432,8 +432,26 @@ impl Eased {
             fog_distance: scalar(self.from.fog_distance, self.to.fog_distance),
             saturation: scalar(self.from.saturation, self.to.saturation),
             stars: self.to.stars,
+            light_floor: self.to.light_floor,
             ease_ticks: self.to.ease_ticks,
         }
+    }
+
+    /// The least the frame is lit at, now: `0.0` for no floor.
+    ///
+    /// **Weather ask W32.** An end with no floor counts as zero, so a floor
+    /// eases in from nothing and back out to it — `nil` puts the night back
+    /// over the same ticks it took to leave. Both ends silent is exactly
+    /// zero, and an arrived modifier is exactly what it says.
+    #[must_use]
+    pub fn light_floor(&self) -> f32 {
+        let at = |modifier: &SkyModifier| modifier.light_floor.unwrap_or(0.0);
+        if self.duration <= 0.0 || self.elapsed >= self.duration {
+            return at(&self.to);
+        }
+        let blend = self.elapsed / self.duration;
+        let (from, to) = (at(&self.from), at(&self.to));
+        (from + (to - from) * blend).clamp(0.0, 1.0)
     }
 
     /// The star brightness to draw, given the keyframes' own value.
@@ -601,6 +619,21 @@ pub fn flashed(moment: Moment, flashes: &Flashes) -> Moment {
         intensity: moment.intensity + amount,
         sun: mix(moment.sun, colour, lean),
         sky: mix(moment.sky, colour, lean * 0.5),
+        ..moment
+    }
+}
+
+/// A moment whose sun is at least `floor` strong — weather ask W32.
+///
+/// The sunlight scale the keyframe and the modifier made is raised to the
+/// floor and no further; the sun's and sky's colours are left alone, so this
+/// is a floor on brightness and not a tint. A floor at or under the moment's
+/// own light, and a floor of zero, leave it exactly as it was — which is why
+/// noon is unchanged.
+#[must_use]
+pub fn lit_at_least(moment: Moment, floor: f32) -> Moment {
+    Moment {
+        intensity: moment.intensity.max(floor),
         ..moment
     }
 }
@@ -1320,6 +1353,7 @@ mod tests {
             fog_distance: 0.5,
             saturation: 0.5,
             stars: None,
+            light_floor: None,
             ease_ticks: 20,
         };
         let mut eased = Eased::none();
