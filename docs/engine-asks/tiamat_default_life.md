@@ -42,7 +42,7 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 20. A creature is drawn level, whatever its pitch (2026-10-05): OPEN
+## 20. A creature is drawn level, whatever its pitch (2026-10-05): LANDED 2026-10-05 (engine ed5826d2), awaiting the eye
 
 **Seen.** A spider climbs walls now (mobs.lua, `climbs`): walking into one,
 it goes up the face and over the top. The mod pitches it nose up the wall
@@ -68,6 +68,17 @@ so it could be mod creatures only, or a flag on `register_model` /
 `spawn_entity` (`pitches = true`), which would also suit a bird diving or
 a fish nosing down. Collision is untouched: the box stays upright, which
 is right for a body that is only pressed against a wall.
+
+**Landed.** A figure drawn as a mod's model is turned by its entity's pitch
+as well as its yaw, `Ry(yaw) * Rx(-pitch)` about the middle of its collider,
+so a body pitched a quarter turn up lies against the face it climbs. Pitch
+`+pi/2` is the camera's looking straight up: the model's forward `+Z` goes
+onto `+Y`. The engine's humanoid (players), the mount a rider sits on and
+model blocks are never pitched; there is no flag and no wire change, and the
+box stays upright. **What the mod should do:** nothing new. Set `pitch` with
+`game.set_entity` as it does, and a creature that never sets it stays level.
+**[H] awaiting the eye:** the spider lies against the wall it climbs, and
+levels out over the top.
 
 ## 19. A creature is lit as if it stood in the open, wherever it is (2026-09-29): LANDED 2026-09-29 (engine 847a908), awaiting the eye
 
