@@ -12,11 +12,11 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W32, filed 2026-10-05. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: none. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
-## W32. A light floor on the sky modifier, for night-sight (2026-10-05)
+## W32. A light floor on the sky modifier, for night-sight (2026-10-05): LANDED 2026-10-05 (engine daf73304), awaiting the eye
 
 **Seen.** Magic's Wx-M1 asked Weather for a layered sky overlay so its
 night-sight elixir and Luna talisman can brighten the night; until then
@@ -42,6 +42,29 @@ send the HIGHEST any overlay asks (a floor is a floor, not a product).
 Gate: at midnight with `light_floor = 0.5`, an open field and a cave are
 both lit at about half of noon, colours kept; at noon it changes nothing;
 `nil` puts the night back.
+
+**Landed.** `game.set_sky_modifier{ light_floor = 0..1 }`, protocol 86
+(`SkyModifier.light_floor`, appended after `stars`, refused on decode when not
+a number or outside 0..=1). From Lua, out of range or not a number is an
+error, not a clamp. The client eases it like the rest, from and back to no
+floor, and applies it in both places the ask names: the sun term is raised to
+at least the floor where the sky reaches, and the renderer's ambient floor
+is raised to it where no sky does, so a cave is lit too. Colours are kept: it
+is a floor on brightness and the shaders still give it the sky's hue (mode 1
+has no hue, as always). All three lighting modes show it, mode 3 included —
+it lights in the world shader, ahead of the post chain. Zero, nil and a floor
+under the day's own light change nothing. **For Weather:** `add_overlay`
+takes `light_floor` and sends the HIGHEST any overlay asks, not a product.
+
+The gate as a screenshot test on the software rasteriser: at midnight
+(intensity 0.08) with `light_floor = 0.5` an open field and a sealed place
+are both lit at 0.42 to 0.50 of noon's field in linear light in every mode,
+against 0.01 to 0.09 without it; noon is unchanged within 0.01; no floor puts
+the night back exactly. A floor also lights a cave at noon, by design.
+
+For the eye ([H]): at midnight with 0.5, the field and a cave about half of
+noon, the colours still the night's; at noon nothing changes; `nil` restores
+the night.
 
 ## W31. No stars in Beautiful (2026-10-01): LANDED 2026-10-01 (engine 1235f34), awaiting the eye
 
