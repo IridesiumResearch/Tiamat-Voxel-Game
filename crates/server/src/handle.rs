@@ -5890,6 +5890,7 @@ impl ServerHandle {
                             let load = fluid.load();
                             phases.count("fluid", "active", load.active as u64);
                             phases.count("fluid", "carried", load.carried as u64);
+                            phases.count("fluid", "deferred", load.deferred as u64);
                             phases.count("fluid", "evaporating", load.evaporating as u64);
                             let changes = fluid.tick(
                                 &domain,

@@ -715,9 +715,20 @@ impl Fluidics {
             passable: &self.passable,
             washes_away: &self.washes_away,
         };
+        // **One look each, and none for a block already at rest.** `wake`
+        // rather than `touch`: a halo of five mostly empty neighbours per block
+        // is what turned a sea surface streaming in into a backlog the solver
+        // spent 120 ms a tick walking (2026-10-05), and an empty block changes
+        // nothing on its own — if the look moves anything, the move wakes the
+        // neighbourhood as a move always does. `at_rest` is the surface's
+        // counterpart to `in_a_body`: a level sea top over full water, hemmed
+        // by its own kind or by ground, would be visited and found settled, so
+        // it is not queued at all (Sub-Node Contract §4.5).
         for block in filled {
-            if !tiamat_core::fluid::in_a_body(&view, tunings, block) {
-                solver.touch(block);
+            if !tiamat_core::fluid::in_a_body(&view, tunings, block)
+                && !tiamat_core::fluid::at_rest(&view, tunings, block)
+            {
+                solver.wake(block);
             }
         }
     }
@@ -1204,6 +1215,110 @@ mod tests {
         assert!(
             fluidics.active() > 0,
             "milk saved mid-flow was not woken, so it would never settle"
+        );
+    }
+
+    #[test]
+    fn a_sea_with_a_level_surface_wakes_nothing_and_a_stepped_one_wakes_its_shore() {
+        // 2026-10-05, a player over the sea: the surface layer of every sea
+        // chunk streaming in is partial, so `in_a_body` cannot vouch for it,
+        // and every surface block was woken — with a halo of five — into a
+        // backlog of 1.6 million the solver spent 120 ms a tick walking.
+        // `at_rest` vouches for the surface (Sub-Node Contract §4.5), and a
+        // load wakes a block alone, without a halo.
+        let registered = || {
+            let mut fluids = Fluids::new();
+            let water = fluids
+                .register(tiamat_core::fluid::Registered {
+                    name: "test:sea".into(),
+                    waterlogs_at: 14,
+                    tick_rate: 1,
+                    washes: true,
+                    evaporates: 0,
+                    color: [255, 255, 255],
+                    material: tiamat_core::MaterialId(4),
+                    opacity: tiamat_core::script::FluidRules::DEFAULT_OPACITY,
+                    light_falloff: 0,
+                })
+                .expect("register");
+            (fluids, water)
+        };
+        let (fluids, water) = registered();
+        // Full water up to y = 9, a surface of 20 cells at y = 10, air above.
+        let level = |y: u32| {
+            if y < 10 {
+                Fluid::new(water, MAX_VOLUME)
+            } else if y == 10 {
+                Fluid::new(water, 20)
+            } else {
+                Fluid::EMPTY
+            }
+        };
+        let mut sea = tiamat_core::fluid::FluidLayer::empty();
+        for x in 0..tiamat_core::CHUNK_BLOCKS {
+            for y in 0..tiamat_core::CHUNK_BLOCKS {
+                for z in 0..tiamat_core::CHUNK_BLOCKS {
+                    sea.set(tiamat_core::coords::LocalBlock::new(x, y, z), level(y));
+                }
+            }
+        }
+        assert!(
+            sea.uniformly_full().is_none(),
+            "a surface is not the open-sea fast path"
+        );
+
+        // Loaded alone in empty ground: the chunk's sides are unloaded, which
+        // Contract §4.2 counts solid, so the surface is hemmed on every side
+        // and should be at rest wall to wall.
+        let dir = std::env::temp_dir().join("tiamat-fluid-level-sea");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("world.sqlite");
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let mut registry = tiamat_core::Registry::new();
+        let db = tiamat_core::persist::WorldDb::open(&path, &mut registry).expect("open");
+        let mut world = crate::world::World::open(db, 1).expect("world");
+        let pos = ChunkPos::new(0, 0, 0);
+        world
+            .chunk(tiamat_core::domain::OVERWORLD, pos, &mut crate::world::Air)
+            .expect("an empty chunk of terrain");
+        let mut fluidics = Fluidics::new(fluids);
+        fluidics.chunk_loaded(
+            pos,
+            sea.clone(),
+            &world.solid(tiamat_core::domain::OVERWORLD),
+        );
+        assert_eq!(
+            fluidics.active(),
+            0,
+            "a level sea surface was woken; it would have been visited and found settled"
+        );
+
+        // The next chunk of the same sea, with a step in its surface: one
+        // block holds less than its neighbours, so the four around it are
+        // flows waiting, and only they are woken — each alone, with no halo of
+        // empties. Its terrain arrives with its water, as a chunk's does, and
+        // its west face meets the level sea already loaded.
+        let next = ChunkPos::new(1, 0, 0);
+        world
+            .chunk(tiamat_core::domain::OVERWORLD, next, &mut crate::world::Air)
+            .expect("an empty chunk of terrain");
+        let mut stepped = sea;
+        stepped.set(
+            tiamat_core::coords::LocalBlock::new(8, 10, 8),
+            Fluid::new(water, 10),
+        );
+        fluidics.chunk_loaded(next, stepped, &world.solid(tiamat_core::domain::OVERWORLD));
+        let woken = fluidics.active();
+        assert!(
+            woken > 0,
+            "a step in the surface is a flow waiting and was not woken"
+        );
+        assert!(
+            woken <= 5,
+            "a step should wake its own block and its four neighbours at most, not {woken}: \
+             the halo is back"
         );
     }
 

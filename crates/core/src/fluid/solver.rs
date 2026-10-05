@@ -56,7 +56,7 @@
 //! once (Weather ask W24). Its cost is proportional to the evaporable fluid
 //! lying open, which is exactly what the mod asked to have evaporate.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::coords::BlockPos;
 use crate::detgen::rng::SplitMix64;
@@ -291,6 +291,31 @@ impl Tunings {
             .filter(|(_, registered)| **registered)
             .all(|(tuning, _)| fluid_tick.is_multiple_of(u64::from(tuning.tick_rate.max(1))))
     }
+
+    /// The first full tick after `fluid_tick`: where an empty block is parked.
+    ///
+    /// Found by walking forward rather than by a least common multiple, which
+    /// the rates a mod may register could overflow; the walk is bounded, and
+    /// a set of rates whose full tick is further off than the bound gets the
+    /// next tick instead — examined again a tick later and parked again,
+    /// which is what every deferred block did before parking existed, so the
+    /// fallback is never wrong, only slower.
+    #[must_use]
+    pub fn next_full(&self, fluid_tick: u64) -> u64 {
+        /// How far ahead to look. Rates are small integers — one to a few
+        /// dozen — so a real set of them has its full tick well inside this.
+        const HORIZON: u64 = 1 << 12;
+        (fluid_tick + 1..=fluid_tick + HORIZON)
+            .find(|&tick| self.all_due(tick))
+            .unwrap_or(fluid_tick + 1)
+    }
+
+    /// The first tick after `fluid_tick` on which `fluid` is due.
+    #[must_use]
+    pub fn next_due(&self, fluid: FluidId, fluid_tick: u64) -> u64 {
+        let rate = u64::from(self.of(fluid).tick_rate.max(1));
+        fluid_tick + (rate - fluid_tick % rate)
+    }
 }
 
 /// One block's worth of change, for whoever needs to hear about it.
@@ -406,11 +431,36 @@ impl Sinks {
 pub struct Solver {
     /// Blocks whose state might need to change, in coordinate order.
     active: BTreeSet<BlockPos>,
-    /// Blocks left over from a tick that hit its cap.
+    /// Blocks left over from ticks that hit their cap, oldest batch first.
     ///
     /// Carried rather than dropped: a pour that overruns its budget finishes
     /// next tick instead of leaving milk half-spread forever.
-    carried: BTreeSet<BlockPos>,
+    ///
+    /// **Batches, so that what is not reached costs nothing.** This was one
+    /// set, and every tick took the whole of it, walked it, and put back every
+    /// block the budget had not reached — `O(N log N)` on the backlog each
+    /// tick, whether or not anything moved. With a sea in view the backlog was
+    /// 1.6 million blocks and the fluid tick measured 120 ms of a 50 ms
+    /// budget, on ticks with *nothing active*. A tick now pops from the front
+    /// batch until its budget is spent and leaves the rest where it is; a
+    /// batch it does not open is not touched. The sum of their lengths is
+    /// kept in `carried_len`, so `load` is a read and not a walk.
+    carried: VecDeque<BTreeSet<BlockPos>>,
+    /// How many blocks the batches in `carried` hold between them.
+    carried_len: usize,
+    /// Blocks parked until the fluid tick they are due on, by that tick.
+    ///
+    /// Two rules put a block here rather than visiting it: a slow fluid's
+    /// block on one of its off-ticks, and an empty block waiting for a *full*
+    /// tick (see [`Solver::tick`]). Both used to stay in the carried set and
+    /// be re-examined — a lookup and a re-insertion — on every tick until the
+    /// one they were due on, which with a sea's worth of empties was most of
+    /// the backlog walked for nothing. Parked here, a block costs one
+    /// insertion when it is deferred and is next seen on the tick it is due,
+    /// when its set is taken whole into the queue.
+    deferred: BTreeMap<u64, BTreeSet<BlockPos>>,
+    /// How many blocks `deferred` holds.
+    deferred_len: usize,
     /// Blocks holding an evaporable fluid open to the air — Weather ask W24.
     ///
     /// **What makes `evaporates` a rate rather than a single chance.** The
@@ -460,10 +510,21 @@ pub struct Load {
     pub active: usize,
     /// Blocks a capped tick did not reach, first in line on the next.
     pub carried: usize,
+    /// Blocks parked until the tick they are due on: a slow fluid's off-tick,
+    /// or an empty block waiting for a full tick. Not walked until then.
+    pub deferred: usize,
     /// Blocks of evaporable fluid lying open to the air, walked every tick for
     /// their roll.
     pub evaporating: usize,
 }
+
+/// How many deferrals a tick may make per visit it is allowed.
+///
+/// A deferral is a lookup and an insertion, a visit is up to thirteen lookups
+/// and some transfers; eight deferrals cost about what one visit does, so a
+/// tick that meets nothing but blocks to park spends roughly its visit budget
+/// parking them and no more.
+const EXAMINATIONS_PER_VISIT: usize = 8;
 
 /// How many blocked flows one tick will report.
 ///
@@ -510,13 +571,27 @@ impl Solver {
         }
     }
 
+    /// Queues one block, and nothing around it.
+    ///
+    /// For a chunk arriving (Sub-Node Contract §4.5): every filled block in it
+    /// that is not already at rest gets one look, and if that look moves
+    /// anything the move wakes the neighbourhood as a move always does. Waking
+    /// the halo up front, as [`Solver::touch`] does for an edit, queued six
+    /// blocks for every one — five of them empty, and an empty block changes
+    /// nothing on its own — which is how a sea surface streaming in became a
+    /// backlog of a million and a half.
+    pub fn wake(&mut self, pos: BlockPos) {
+        self.active.insert(pos);
+    }
+
     /// How many blocks are waiting.
     ///
     /// Zero for a settled world, which is the assertion the perf criterion
-    /// makes: milk that has finished moving costs nothing at all.
+    /// makes: milk that has finished moving costs nothing at all. Parked
+    /// blocks count: they are work owed, only not yet due.
     #[must_use]
     pub fn active(&self) -> usize {
-        self.active.len() + self.carried.len()
+        self.active.len() + self.carried_len + self.deferred_len
     }
 
     /// The size of each set the next tick will walk.
@@ -531,7 +606,8 @@ impl Solver {
     pub fn load(&self) -> Load {
         Load {
             active: self.active.len(),
-            carried: self.carried.len(),
+            carried: self.carried_len,
+            deferred: self.deferred_len,
             evaporating: self.evaporating.len(),
         }
     }
@@ -543,7 +619,34 @@ impl Solver {
     /// puddle is gone.
     #[must_use]
     pub fn is_settled(&self) -> bool {
-        self.active.is_empty() && self.carried.is_empty() && self.evaporating.is_empty()
+        self.active.is_empty()
+            && self.carried_len == 0
+            && self.deferred_len == 0
+            && self.evaporating.is_empty()
+    }
+
+    /// Parks `pos` until fluid tick `due`.
+    fn defer(&mut self, due: u64, pos: BlockPos) {
+        if self.deferred.entry(due).or_default().insert(pos) {
+            self.deferred_len += 1;
+        }
+    }
+
+    /// Takes every parked set that is due by `fluid_tick`, oldest first.
+    fn take_due(&mut self, fluid_tick: u64) -> Vec<BTreeSet<BlockPos>> {
+        let later = self.deferred.split_off(&(fluid_tick + 1));
+        let due = std::mem::replace(&mut self.deferred, later);
+        let sets: Vec<BTreeSet<BlockPos>> = due.into_values().collect();
+        self.deferred_len -= sets.iter().map(BTreeSet::len).sum::<usize>();
+        sets
+    }
+
+    /// Puts a batch at the back of the carried queue; an empty one is dropped.
+    fn carry(&mut self, batch: BTreeSet<BlockPos>) {
+        if !batch.is_empty() {
+            self.carried_len += batch.len();
+            self.carried.push_back(batch);
+        }
     }
 
     /// Takes the flows that could not happen since this was last called.
@@ -593,64 +696,85 @@ impl Solver {
         fluid_tick: u64,
     ) -> Vec<Flow> {
         let mut changes = Vec::new();
-        // Last tick's leftovers first, so a block cannot be starved forever by
-        // a pour that keeps re-queueing its own neighbourhood.
-        let mut pending = std::mem::take(&mut self.carried);
-        pending.extend(std::mem::take(&mut self.active));
 
         // W24: an evaporable block open to the air is visited on the tick its
         // roll comes up, which is what makes `evaporates` a rate. The walk is
         // one hash per block lying open; a block found empty — dried, drained,
         // or in a chunk that has gone — is dropped here, and a chunk coming
         // back wakes its loose water (§4.5) and puts it back.
-        let mut due = Vec::new();
+        let mut due = BTreeSet::new();
         let mut gone = Vec::new();
         for &pos in &self.evaporating {
             let held = world.fluid(pos);
             if held.is_empty() {
                 gone.push(pos);
             } else if evaporates(tunings.of(held.fluid()), pos, seed, fluid_tick) {
-                due.push(pos);
+                due.insert(pos);
             }
         }
         for pos in gone {
             self.evaporating.remove(&pos);
         }
-        pending.extend(due);
+
+        // **The queue is batches, oldest first, and a tick pays only for what
+        // it opens.** Last tick's leftovers are at the front, so a block
+        // cannot be starved by a pour that keeps re-queueing its own
+        // neighbourhood; then whatever was parked for this tick, in the order
+        // it was parked; then this tick's wakes and rolls. A batch the budget
+        // never reaches is not touched — not walked, not re-inserted — which
+        // is the whole of the difference between this and the one-set queue it
+        // replaces (see the field).
+        for batch in self.take_due(fluid_tick) {
+            self.carry(batch);
+        }
+        let active = std::mem::take(&mut self.active);
+        self.carry(active);
+        self.carry(due);
 
         let full_tick = tunings.all_due(fluid_tick);
         let mut visited = 0;
+        let mut examined = 0;
         let mut woken = BTreeSet::new();
-        for pos in pending {
-            if visited >= budget {
-                self.carried.insert(pos);
+        // **Examinations are capped as well as visits.** A deferral is one
+        // lookup and not a visit — counting it as one starved a puddle on a
+        // slow fluid's off-ticks — but a tick that may defer without limit is
+        // a tick that walks a sea's worth of empties looking for something due.
+        // Each deferral is paid once, since a parked block is not seen again
+        // until its tick; the cap bounds the tick that meets a batch of them.
+        let examinations = budget.saturating_mul(EXAMINATIONS_PER_VISIT);
+        while visited < budget && examined < examinations {
+            let Some(front) = self.carried.front_mut() else {
+                break;
+            };
+            let Some(pos) = front.pop_first() else {
+                self.carried.pop_front();
                 continue;
-            }
+            };
+            self.carried_len -= 1;
+            examined += 1;
             // **A fluid's own rate.** A block holding a fluid whose tick this
-            // is not is put back for the tick that is, still active — a
-            // viscous fluid is slow, not stopped.
-            //
-            // **Before the visit is counted, and that is not tidiness.** A
-            // deferral is one lookup, and counting it as a visit starved a
-            // puddle: on a slow fluid's off-ticks the pending set does not
-            // shrink, so the same blocks spent the same budget every tick and
-            // a block past the budget line was never looked at on the tick
-            // that mattered. One cell of milk stood on open ground for ever.
+            // is not is parked for the tick that is, still owed — a viscous
+            // fluid is slow, not stopped.
             //
             // **An empty block waits for a full tick.** A block woken empty —
-            // a neighbour of something that moved — is kept in the queue until
-            // every fluid is due, because on that tick it may be FILLED by a
-            // neighbour settled before it and then settled itself in the same
-            // pass. That same-tick cascade is what a one-fluid world always
-            // had, since its off-ticks ran nothing at all; a mixed world that
-            // looked at the empties on a fast fluid's ticks dropped them, lost
-            // the cascade, and left one cell of a slow fluid standing on
-            // level soaked ground where nothing would ever wake it again.
+            // a neighbour of something that moved — is kept until every fluid
+            // is due, because on that tick it may be FILLED by a neighbour
+            // settled before it and then settled itself in the same pass. That
+            // same-tick cascade is what a one-fluid world always had, since its
+            // off-ticks ran nothing at all; a mixed world that looked at the
+            // empties on a fast fluid's ticks dropped them, lost the cascade,
+            // and left one cell of a slow fluid standing on level soaked ground
+            // where nothing would ever wake it again.
             let held = world.fluid(pos);
-            let due = held.is_empty()
-                || fluid_tick.is_multiple_of(u64::from(tunings.of(held.fluid()).tick_rate.max(1)));
-            if !due || (held.is_empty() && !full_tick) {
-                self.carried.insert(pos);
+            if held.is_empty() {
+                if !full_tick {
+                    self.defer(tunings.next_full(fluid_tick), pos);
+                    continue;
+                }
+            } else if !fluid_tick
+                .is_multiple_of(u64::from(tunings.of(held.fluid()).tick_rate.max(1)))
+            {
+                self.defer(tunings.next_due(held.fluid(), fluid_tick), pos);
                 continue;
             }
             visited += 1;
@@ -692,6 +816,10 @@ impl Solver {
                 woken.insert(change.pos);
                 woken.insert(BlockPos::new(change.pos.x, change.pos.y + 1, change.pos.z));
             }
+        }
+        // An emptied front batch is dropped so the next tick starts at a block.
+        while self.carried.front().is_some_and(BTreeSet::is_empty) {
+            self.carried.pop_front();
         }
         for pos in woken {
             self.touch(pos);
@@ -794,6 +922,76 @@ pub fn in_a_body<N: Neighbourhood + ?Sized>(world: &N, tunings: &Tunings, at: Bl
         .into_iter()
         .map(|offset| step(only, offset))
         .any(|next| next != at && brims(world, tunings, next))
+}
+
+/// Whether a visit to `at` would change nothing: the block is at rest.
+///
+/// **Sub-Node Contract §4.5, the other half of [`in_a_body`].** A body test
+/// covers water that brims; the SURFACE of a sea does not brim — its top layer
+/// holds what the generator's level left there — so every surface block of
+/// every sea chunk streaming in was woken, each with its halo, and a player
+/// over deep water queued a million and a half blocks that a visit would have
+/// found settled. This asks the question the visit would ask, by the same
+/// rules [`settle_one`] applies, without visiting:
+///
+/// - nothing to spill (the block holds no more than its room);
+/// - nothing falls (the block below takes none of it);
+/// - nothing runs sideways (every lateral neighbour holds at least as much,
+///   or within one cell of it, or takes none — the same halving rule);
+/// - a droplet has nowhere downhill to go;
+/// - nothing beside or below it drinks;
+/// - and it is not an evaporable fluid lying open to the air, because such a
+///   block has a roll coming and must be visited to join the solver's books.
+///
+/// Conservative in one direction only: a block this calls at rest would not
+/// have changed on a visit, while a block it declines to vouch for is simply
+/// woken and examined as before. Nothing is allocated.
+pub fn at_rest(world: &impl Neighbourhood, tunings: &Tunings, at: BlockPos) -> bool {
+    let here = world.fluid(at);
+    if here.is_empty() {
+        return true;
+    }
+    let fluid = here.fluid();
+    let mine = here.volume();
+    let tuning = tunings.of(fluid);
+    let Some(occupancy) = world.occupancy(at) else {
+        return false;
+    };
+    if mine > capacity(occupancy, tuning.waterlogs_at) {
+        return false;
+    }
+    let step = |[dx, dy, dz]: [i32; 3]| {
+        BlockPos::new(
+            at.x.saturating_add(dx),
+            at.y.saturating_add(dy),
+            at.z.saturating_add(dz),
+        )
+    };
+    let below = step(BELOW);
+    if accepts(world, tunings, below, fluid) > 0 {
+        return false;
+    }
+    for offset in LATERAL {
+        let beside = step(offset);
+        let theirs = world.fluid(beside).volume();
+        if theirs < mine && (mine - theirs) / 2 > 0 && accepts(world, tunings, beside, fluid) > 0 {
+            return false;
+        }
+        if mine <= DROPLET
+            && world.fluid(beside).is_empty()
+            && accepts(world, tunings, beside, fluid) >= mine
+            && accepts(world, tunings, step([offset[0], -1, offset[2]]), fluid) > 0
+        {
+            return false;
+        }
+    }
+    for offset in std::iter::once(BELOW).chain(LATERAL) {
+        let near = step(offset);
+        if world.occupancy(near).is_some() && world.absorbency(near, fluid) > 0 {
+            return false;
+        }
+    }
+    !(tuning.evaporates > 0 && open_to_the_air(world, at))
 }
 
 /// How much more fluid a block will take of `fluid`, in cells.
@@ -1365,6 +1563,195 @@ mod tests {
             solver.tick(scene, &tunings, usize::MAX, seed, tick);
         }
         solver.take_sinks()
+    }
+
+    #[test]
+    fn a_backlog_the_budget_does_not_reach_is_left_where_it_is() {
+        // 2026-10-05: a sea in view queued 1.6 million blocks, and every tick
+        // took the whole set, walked it, and put back all but 512 — 120 ms of
+        // a 50 ms budget on ticks with nothing active. The queue is batches
+        // now, and a tick pays for what it opens: the carried count falls by
+        // exactly the budget each tick, oldest first, and nothing is lost.
+        let mut scene = Scene::sealed(12);
+        let tunings = Tunings::uniform(Tuning::DEFAULT);
+        let mut solver = Solver::new();
+        // A level pond, one deep, wall to wall on the floor: every block is
+        // settled already.
+        let mut woken = Vec::new();
+        for x in -11..=11 {
+            for z in -11..=11 {
+                let at = BlockPos::new(x, -11, z);
+                scene.pour(at, MAX_VOLUME);
+                solver.wake(at);
+                woken.push(at);
+            }
+        }
+        let total = woken.len();
+        assert_eq!(solver.load().active, total);
+
+        let budget = 50;
+        let mut ticks = 0;
+        while solver.active() > 0 {
+            let changes = solver.tick(&mut scene, &tunings, budget, SEED, ticks);
+            assert!(changes.is_empty(), "a settled pond moved: {changes:?}");
+            ticks += 1;
+            let left = solver.load();
+            assert_eq!(left.active, 0, "a wake is carried, not left active");
+            assert_eq!(
+                left.carried,
+                total.saturating_sub(budget * ticks as usize),
+                "tick {ticks}: the backlog should fall by the budget and no faster"
+            );
+            assert!(ticks < 100, "the backlog never drained");
+        }
+        assert_eq!(ticks as usize, total.div_ceil(budget));
+        assert!(solver.is_settled());
+    }
+
+    #[test]
+    fn a_block_not_due_is_parked_until_its_tick_and_not_walked_in_between() {
+        // The other half of the 2026-10-05 cost: a slow fluid's blocks on an
+        // off-tick, and empties waiting for a full tick, stayed in the carried
+        // set and were re-examined every tick. Parked, they are owed and
+        // counted (`deferred`), not carried, and come back on the tick they
+        // are due — a viscous fluid is slow, not stopped.
+        const SLOW: FluidId = FluidId(2);
+        let slow = Tuning {
+            tick_rate: 4,
+            ..Tuning::DEFAULT
+        };
+        let tunings = Tunings::from_pairs([(MILK, Tuning::DEFAULT), (SLOW, slow)]);
+        let mut scene = Scene::sealed(6);
+        let mut solver = Solver::new();
+        // A column of the slow fluid with room beneath it, woken on an
+        // off-tick of its own.
+        let perch = BlockPos::new(0, -2, 0);
+        scene.fluid.insert((0, -2, 0), Fluid::new(SLOW, MAX_VOLUME));
+        solver.wake(perch);
+        // And an empty block woken as a neighbour would be.
+        let empty = BlockPos::new(3, -5, 3);
+        solver.wake(empty);
+
+        // Tick 1 is nobody's full tick and not the slow fluid's: both park.
+        let changes = solver.tick(&mut scene, &tunings, 512, SEED, 1);
+        assert!(changes.is_empty());
+        let load = solver.load();
+        assert_eq!((load.active, load.carried), (0, 0), "{load:?}");
+        assert_eq!(load.deferred, 2, "both blocks are parked, not carried");
+        assert_eq!(tunings.next_due(SLOW, 1), 4);
+        assert_eq!(tunings.next_full(1), 4, "the full tick is the slow fluid's");
+
+        // Ticks 2 and 3: due for nothing, and the parked blocks stay parked.
+        for tick in 2..4 {
+            assert!(
+                solver
+                    .tick(&mut scene, &tunings, 512, SEED, tick)
+                    .is_empty()
+            );
+            assert_eq!(
+                solver.load().deferred,
+                2,
+                "tick {tick} walked a parked block"
+            );
+        }
+        // Tick 4: the slow fluid falls, and the empty block is looked at and
+        // dropped.
+        let changes = solver.tick(&mut scene, &tunings, 512, SEED, 4);
+        assert!(
+            changes
+                .iter()
+                .any(|flow| flow.pos == perch && flow.now.volume() < MAX_VOLUME),
+            "the slow fluid should move on its tick: {changes:?}"
+        );
+        assert_eq!(solver.load().deferred, 0);
+    }
+
+    #[test]
+    fn a_level_sea_surface_is_at_rest_and_its_shore_is_not() {
+        // Sub-Node Contract §4.5: `in_a_body` vouches for water that brims, and
+        // this vouches for the surface over it — which is what a sea chunk
+        // streaming in is mostly made of. A surface block beside a lower
+        // neighbour, over room, beside a drinker, or evaporable and open is
+        // not at rest and is woken as before.
+        let tunings = Tunings::uniform(Tuning::DEFAULT);
+        let mut scene = Scene::sealed(8);
+        // Full water from the floor up to y = -3, a surface layer of 20 cells
+        // at y = -2, across the whole box.
+        for x in -7..=7 {
+            for z in -7..=7 {
+                for y in -7..-2 {
+                    scene.pour(BlockPos::new(x, y, z), MAX_VOLUME);
+                }
+                scene.pour(BlockPos::new(x, -2, z), 20);
+            }
+        }
+        let surface = BlockPos::new(0, -2, 0);
+        assert!(
+            !in_a_body(&scene, &tunings, surface),
+            "a partial block does not brim"
+        );
+        assert!(
+            at_rest(&scene, &tunings, surface),
+            "a level surface over full water is at rest"
+        );
+        let deep = BlockPos::new(0, -5, 0);
+        assert!(at_rest(&scene, &tunings, deep), "deep water is at rest too");
+        // And a visit agrees: nothing moves.
+        let mut solver = Solver::new();
+        solver.wake(surface);
+        assert!(solver.tick(&mut scene, &tunings, 512, SEED, 0).is_empty());
+
+        // A shore: the neighbour holds less, and would take some.
+        scene.pour(BlockPos::new(1, -2, 0), 10);
+        assert!(
+            !at_rest(&scene, &tunings, surface),
+            "a lower neighbour is a flow waiting"
+        );
+        scene.pour(BlockPos::new(1, -2, 0), 20);
+        assert!(at_rest(&scene, &tunings, surface));
+        // Within a cell of level is level: the halving rule moves nothing.
+        scene.pour(BlockPos::new(1, -2, 0), 19);
+        assert!(
+            at_rest(&scene, &tunings, surface),
+            "one cell of difference moves nothing"
+        );
+        scene.pour(BlockPos::new(1, -2, 0), 20);
+
+        // Room below: the block under it drained.
+        scene.set_fluid(BlockPos::new(0, -3, 0), Fluid::EMPTY);
+        assert!(!at_rest(&scene, &tunings, surface), "water over room falls");
+        scene.pour(BlockPos::new(0, -3, 0), MAX_VOLUME);
+        assert!(at_rest(&scene, &tunings, surface));
+
+        // A drinker beside it.
+        scene.make_solid(0, -2, 1);
+        scene.make_absorbent(0, -2, 1, 1);
+        assert!(
+            !at_rest(&scene, &tunings, surface),
+            "ground that drinks is a sink waiting"
+        );
+        let mut dry = Scene::sealed(8);
+        for x in -7..=7 {
+            for z in -7..=7 {
+                for y in -7..-2 {
+                    dry.pour(BlockPos::new(x, y, z), MAX_VOLUME);
+                }
+                dry.pour(BlockPos::new(x, -2, z), 20);
+            }
+        }
+        // Evaporable and open to the air: it has a roll coming, so it is
+        // visited to join the books.
+        let evaporable = Tunings::uniform(Tuning {
+            evaporates: 100,
+            ..Tuning::DEFAULT
+        });
+        assert!(!at_rest(&dry, &evaporable, surface));
+        // Overfilled: terrain arrived in it.
+        dry.occupy(0, -2, 0, 10);
+        assert!(
+            !at_rest(&dry, &tunings, surface),
+            "more than its room spills"
+        );
     }
 
     #[test]

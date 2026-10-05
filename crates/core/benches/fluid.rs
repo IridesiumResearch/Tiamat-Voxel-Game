@@ -312,11 +312,97 @@ fn bench_sinks(c: &mut Criterion) {
     group.finish();
 }
 
+/// A sea's worth of settled water, all of it queued: the 2026-10-05 case.
+///
+/// Nothing is stored per block. A pond `2 * span + 1` across lies one deep on
+/// a floor, walled by the edge of the loaded world, and every block of it is
+/// woken as a chunk load used to wake a surface. Each tick visits 512 and
+/// finds them settled; what the tick costs beyond those 512 is what the
+/// backlog costs, and it used to be the whole backlog.
+struct Backlog {
+    span: i32,
+    changed: BTreeMap<(i32, i32, i32), Fluid>,
+}
+
+impl Neighbourhood for Backlog {
+    fn occupancy(&self, pos: BlockPos) -> Option<u32> {
+        if pos.x.abs() > self.span || pos.z.abs() > self.span || pos.y < -1 || pos.y > 4 {
+            return None;
+        }
+        Some(if pos.y == 0 {
+            tiamat_core::UNITS_PER_BLOCK
+        } else {
+            0
+        })
+    }
+
+    fn absorbency(&self, _pos: BlockPos, _fluid: tiamat_core::fluid::FluidId) -> u32 {
+        0
+    }
+
+    fn fluid(&self, pos: BlockPos) -> Fluid {
+        if let Some(changed) = self.changed.get(&(pos.x, pos.y, pos.z)) {
+            return *changed;
+        }
+        if pos.y == 1 && pos.x.abs() <= self.span && pos.z.abs() <= self.span {
+            Fluid::new(MILK, MAX_VOLUME)
+        } else {
+            Fluid::EMPTY
+        }
+    }
+
+    fn set_fluid(&mut self, pos: BlockPos, value: Fluid) {
+        self.changed.insert((pos.x, pos.y, pos.z), value);
+    }
+}
+
+fn bench_backlog(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fluid_backlog");
+    group.sample_size(20);
+    for span in [40_i32, 400] {
+        let blocks = (2 * span + 1).pow(2);
+        let mut scene = Backlog {
+            span,
+            changed: BTreeMap::new(),
+        };
+        let mut solver = Solver::new();
+        for x in -span..=span {
+            for z in -span..=span {
+                solver.wake(BlockPos::new(x, 1, z));
+            }
+        }
+        // One tick to turn the wakes into carried backlog, as the first tick
+        // over a freshly loaded sea does. Each measured tick then starts from
+        // a copy of that state, so the backlog never drains under measurement
+        // and the copy is made outside the timing.
+        let tunings = tiamat_core::fluid::Tunings::uniform(Tuning::DEFAULT);
+        solver.tick(&mut scene, &tunings, VISITS, SEED, 0);
+        let carried = solver.load().carried;
+        group.bench_function(format!("tick_with_{blocks}_carried"), |b| {
+            b.iter_batched_ref(
+                || solver.clone(),
+                |solver| {
+                    let changes = solver.tick(&mut scene, &tunings, VISITS, SEED, 1);
+                    assert!(changes.is_empty(), "a settled pond moved");
+                    assert_eq!(
+                        solver.load().carried,
+                        carried - VISITS,
+                        "visited more than the budget"
+                    );
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_settled,
     bench_spreading,
     bench_relevelling,
-    bench_sinks
+    bench_sinks,
+    bench_backlog
 );
 criterion_main!(benches);
