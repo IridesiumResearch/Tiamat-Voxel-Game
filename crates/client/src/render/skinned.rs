@@ -52,6 +52,17 @@ pub struct Figure {
     pub offset: [f32; 3],
     /// Which way it faces, in radians.
     pub yaw: f32,
+    /// How far its nose is raised, in radians; negative is nosing down. Life
+    /// ask 20. **Only a mod's model ever sets it**: the engine's humanoid, a
+    /// rider and a model block pass `0.0`, because a player's pitch is where
+    /// they look and not how they stand. A mod that wants a level creature
+    /// never sets its pitch, which defaults to zero.
+    pub pitch: f32,
+    /// What [`Self::pitch`] turns about: the height above the feet of the
+    /// middle of the collider, in cells (a collider's height is in cells, as
+    /// is model space). A body pitched a quarter turn up then lies against the
+    /// face it climbs instead of pivoting off its feet. Ignored at pitch zero.
+    pub pivot: f32,
     /// The server's state tag, which picks the clip.
     pub anim: u8,
     /// Seconds into that clip.
@@ -88,13 +99,42 @@ pub struct Figure {
 /// no block light, which is what every figure was lit as before Life ask 19.
 pub const OPEN_SKY: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
+impl Figure {
+    /// The pivot a collider of `height` cells turns about: its middle (Life
+    /// ask 20). `None` is a body with no collider, which turns about its feet.
+    #[must_use]
+    pub fn pivot_of(collider: Option<[f32; 2]>) -> f32 {
+        collider.map_or(0.0, |size| size[1] * 0.5)
+    }
+
+    /// Model space (cells, posed) to camera-relative blocks, for one point:
+    /// the transform `skinned.wgsl`'s `place` applies, in `glam`, so that the
+    /// held-item code and the tests have it too.
+    ///
+    /// Life ask 20: `Ry(yaw) * Rx(-pitch)` about `(0, pivot, 0)`. Pitch is
+    /// applied before yaw, in the model's own frame, so "nose" stays the
+    /// model's `+Z` however it is facing. The sign is the camera's: pitch
+    /// `+π/2` is looking straight up, which turns `+Z` onto `+Y`.
+    #[must_use]
+    pub fn placement_matrix(&self) -> glam::Mat4 {
+        use glam::{Mat4, Vec3};
+        let pivot = Vec3::new(0.0, self.pivot, 0.0);
+        Mat4::from_translation(Vec3::from(self.offset))
+            * Mat4::from_rotation_y(self.yaw)
+            * Mat4::from_scale(Vec3::splat(1.0 / 3.0))
+            * Mat4::from_translation(pivot)
+            * Mat4::from_rotation_x(-self.pitch)
+            * Mat4::from_translation(-pivot)
+    }
+}
+
 /// One instance, as the shader reads it.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
     offset: [f32; 4],
-    /// Heading in x, the palette's first matrix in y (bit-cast from `u32`).
-    /// Two spare, because a vertex attribute is a `vec4` either way.
+    /// Heading in x, the palette's first matrix in y (bit-cast from `u32`),
+    /// pitch in z and the height it turns about in w, in cells (Life ask 20).
     placement: [f32; 4],
     /// [`Figure::light`], as it is.
     light: [f32; 4],
@@ -359,7 +399,7 @@ impl Skinned {
                 // than sixteen million matrices a conversion would start
                 // rounding, and a palette index that rounds draws somebody
                 // else's arm.
-                placement: [figure.yaw, f32::from_bits(base), 0.0, 0.0],
+                placement: [figure.yaw, f32::from_bits(base), figure.pitch, figure.pivot],
                 light: figure.light,
             });
         }
@@ -753,4 +793,78 @@ pub fn shadow_pipeline(
             multiview_mask: None,
             cache: None,
         })
+}
+
+#[cfg(test)]
+mod pitch_tests {
+    use super::*;
+    use glam::Vec3;
+
+    fn figure(pitch: f32, collider: Option<[f32; 2]>) -> Figure {
+        Figure {
+            offset: [10.0, 20.0, 30.0],
+            yaw: 0.0,
+            pitch,
+            pivot: Figure::pivot_of(collider),
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+            light: OPEN_SKY,
+        }
+    }
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-4
+    }
+
+    #[test]
+    fn pitch_up_a_quarter_turn_points_the_nose_at_plus_y() {
+        // Life ask 20. One block tall is three cells; the middle is 1.5.
+        let tall = Some([1.8, 3.0]);
+        let f = figure(std::f32::consts::FRAC_PI_2, tall);
+        let matrix = f.placement_matrix();
+        let feet = Vec3::from(f.offset);
+        // The nose: model +Z, one block out, at the pivot height.
+        let nose = matrix.transform_point3(Vec3::new(0.0, 1.5, 3.0));
+        assert!(
+            close(nose, feet + Vec3::new(0.0, 0.5 + 1.0, 0.0)),
+            "nose {nose:?}"
+        );
+        // And the same sign as the camera: forward at pitch p has y = sin p.
+        let camera = crate::camera::Camera {
+            pitch: std::f32::consts::FRAC_PI_2 - 0.01,
+            ..crate::camera::Camera::default()
+        };
+        assert!(camera.forward().y > 0.99);
+        // The middle of the collider does not move.
+        let middle = matrix.transform_point3(Vec3::new(0.0, 1.5, 0.0));
+        assert!(close(middle, feet + Vec3::new(0.0, 0.5, 0.0)));
+        // The head goes back as the nose comes up, so the feet swing forward
+        // to the nose's old side of the middle.
+        let sole = matrix.transform_point3(Vec3::ZERO);
+        assert!(
+            close(sole, feet + Vec3::new(0.0, 0.5, 0.5)),
+            "sole {sole:?}"
+        );
+    }
+
+    #[test]
+    fn pitch_is_applied_before_yaw() {
+        // Facing +x (yaw pi/2), nose up is still straight up.
+        let mut f = figure(std::f32::consts::FRAC_PI_2, Some([1.8, 3.0]));
+        f.yaw = std::f32::consts::FRAC_PI_2;
+        let nose = f
+            .placement_matrix()
+            .transform_point3(Vec3::new(0.0, 1.5, 3.0));
+        assert!(close(nose, Vec3::from(f.offset) + Vec3::new(0.0, 1.5, 0.0)));
+    }
+
+    #[test]
+    fn a_level_figure_is_placed_as_it_always_was() {
+        let f = figure(0.0, Some([1.8, 5.4]));
+        let point = Vec3::new(1.0, 2.0, 3.0);
+        let want = Vec3::from(f.offset) + point / 3.0;
+        assert!(close(f.placement_matrix().transform_point3(point), want));
+        assert!((Figure::pivot_of(None)).abs() < f32::EPSILON);
+    }
 }

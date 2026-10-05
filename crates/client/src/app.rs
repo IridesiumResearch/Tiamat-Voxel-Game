@@ -3143,6 +3143,8 @@ impl App {
             let figure = crate::render::skinned::Figure {
                 offset: self.camera.position.offset_to(feet),
                 yaw: pose.yaw,
+                pitch: 0.0,
+                pivot: 0.0,
                 anim: pose.anim,
                 phase: now.as_secs_f32() + (id % 977) as f32 * 0.037,
                 carrying: [entity.hands[0].is_some(), entity.hands[1].is_some()],
@@ -5658,6 +5660,8 @@ impl App {
             // not simply read back off the entity stream — converted, because
             // the two count from different directions.
             yaw: figure_yaw(self.camera.yaw),
+            pitch: 0.0,
+            pivot: 0.0,
             anim: self.gait(),
             phase: self.since_start.elapsed().as_secs_f32(),
             carrying: [
@@ -6342,6 +6346,17 @@ impl App {
             let figure = crate::render::skinned::Figure {
                 offset: self.camera.position.offset_to(feet),
                 yaw,
+                // Life ask 20: a mod's model is tipped by its pitch about the
+                // middle of its collider; the engine's humanoid never is — a
+                // player's pitch is where they look, not how they stand — and
+                // neither is the mount a rider sits on, which the rider's own
+                // look would otherwise tip.
+                pitch: if own || ridden.is_some_and(|(mount, _)| mount == id) {
+                    0.0
+                } else {
+                    pose.pitch
+                },
+                pivot: crate::render::skinned::Figure::pivot_of(entity.collider),
                 anim: pose.anim,
                 // **Each figure keeps its own clock**, offset by its id. Two
                 // hundred mobs sharing one march in step, which reads as a
@@ -6416,6 +6431,8 @@ impl App {
                         // cells across fills its block.
                         offset: [corner.x + lx + 0.5, corner.y + ly, corner.z + lz + 0.5],
                         yaw: 0.0,
+                        pitch: 0.0,
+                        pivot: 0.0,
                         anim: tiamat_core::ent::AnimTag::IDLE.0,
                         phase: 0.0,
                         carrying: [false, false],

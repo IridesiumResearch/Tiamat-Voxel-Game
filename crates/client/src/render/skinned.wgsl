@@ -92,7 +92,7 @@ struct VertexIn {
     // Per-instance: where the figure's feet are, camera-relative, in blocks.
     @location(5) offset: vec4<f32>,
     // Per-instance: heading in radians (x), where this figure's palette starts
-    // (y, as a bit-cast u32). Two spare.
+    // (y, as a bit-cast u32), pitch (z) and the pivot height in cells (w).
     @location(6) placement: vec4<f32>,
     // Per-instance: the light where the figure stands. How much sky reaches
     // it (x), then the block light on it (y, z, w), each 0..1.
@@ -143,8 +143,21 @@ fn skin_normal(input: VertexIn, base: u32) -> vec3<f32> {
 // offset. The rotation is here rather than baked into the palette because a
 // heading changes every frame and a palette does not — a figure standing still
 // and turning would otherwise rebuild eleven matrices to change one angle.
-fn place(local: vec3<f32>, yaw: f32, offset: vec3<f32>) -> vec3<f32> {
-    let blocks = local / 3.0;
+fn place(local: vec3<f32>, yaw: f32, pitch: f32, pivot: f32, offset: vec3<f32>) -> vec3<f32> {
+    // Life ask 20: tipped about the middle of the collider first, in the
+    // model's own frame, so the nose is +Z however the figure is facing.
+    // `Rx(-pitch)`: positive pitch is looking up, which turns +Z onto +Y. A
+    // pitch of zero is the identity exactly (sin 0 = 0, cos 0 = 1), so every
+    // figure that never pitches is placed bit for bit as it was.
+    let sp = sin(pitch);
+    let cp = cos(pitch);
+    let about = local - vec3<f32>(0.0, pivot, 0.0);
+    let tipped = vec3<f32>(
+        about.x,
+        about.y * cp + about.z * sp,
+        -about.y * sp + about.z * cp,
+    ) + vec3<f32>(0.0, pivot, 0.0);
+    let blocks = tipped / 3.0;
     let s = sin(yaw);
     let c = cos(yaw);
     let turned = vec3<f32>(
@@ -161,14 +174,18 @@ fn vertex_main(input: VertexIn) -> VertexOut {
     let yaw = input.placement.x;
 
     let posed = skin(input, base).xyz;
-    let world = place(posed, yaw, input.offset.xyz);
+    let world = place(posed, yaw, input.placement.z, input.placement.w, input.offset.xyz);
 
     var out: VertexOut;
     out.clip = globals.view_projection * vec4<f32>(world, 1.0);
     // The normal is turned by the same heading. Not skinned-and-then-rotated by
     // a normal matrix: every transform here is a rotation and a translation, so
     // the inverse transpose is the rotation itself.
-    let n = skin_normal(input, base);
+    let n0 = skin_normal(input, base);
+    // Tipped by the pitch as the position is (Life ask 20), then turned.
+    let sp = sin(input.placement.z);
+    let cp = cos(input.placement.z);
+    let n = vec3<f32>(n0.x, n0.y * cp + n0.z * sp, -n0.y * sp + n0.z * cp);
     let s = sin(yaw);
     let c = cos(yaw);
     out.normal = normalize(vec3<f32>(n.x * c + n.z * s, n.y, -n.x * s + n.z * c));
@@ -183,7 +200,13 @@ fn vertex_main(input: VertexIn) -> VertexOut {
 fn vertex_shadow(input: VertexIn) -> @builtin(position) vec4<f32> {
     let base = bitcast<u32>(input.placement.y);
     let posed = skin(input, base).xyz;
-    let world = place(posed, input.placement.x, input.offset.xyz);
+    let world = place(
+        posed,
+        input.placement.x,
+        input.placement.z,
+        input.placement.w,
+        input.offset.xyz,
+    );
     return cascade.view_projection * vec4<f32>(world, 1.0);
 }
 

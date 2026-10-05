@@ -3228,6 +3228,8 @@ fn a_figure_on_screen_does_not_take_the_terrains_shadows_with_it() {
     renderer.set_entities(vec![client::render::skinned::Figure {
         offset: [-8.0, -32.0, -8.0],
         yaw: 0.0,
+        pitch: 0.0,
+        pivot: 0.0,
         anim: 0,
         phase: 0.0,
         carrying: [false; 2],
@@ -3721,6 +3723,8 @@ fn player_at(offset: [f32; 3]) -> client::render::skinned::Figure {
     client::render::skinned::Figure {
         offset,
         yaw: 0.0,
+        pitch: 0.0,
+        pivot: 0.0,
         anim: 0,
         phase: 0.0,
         carrying: [false; 2],
@@ -5011,6 +5015,8 @@ fn an_entity_is_drawn_where_the_server_put_it() {
     renderer.set_entities(vec![client::render::skinned::Figure {
         offset: [ahead.x * 2.0, ahead.y * 2.0 - 1.0, ahead.z * 2.0],
         yaw: 0.0,
+        pitch: 0.0,
+        pivot: 0.0,
         anim: 0,
         phase: 0.0,
         carrying: [false; 2],
@@ -5086,6 +5092,8 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
         vec![client::render::skinned::Figure {
             offset: [ahead.x * 2.0, ahead.y * 2.0 - 1.0, ahead.z * 2.0],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5185,6 +5193,8 @@ fn a_mods_model_casts_a_shadow_like_the_engines_own_rig() {
         vec![client::render::skinned::Figure {
             offset: [0.0, -10.0, 6.0],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5243,6 +5253,8 @@ fn a_hundred_entities_all_reach_the_instance_buffer() {
             client::render::skinned::Figure {
                 offset: [ahead.x * along, ahead.y * along - 1.0, ahead.z * along],
                 yaw: index as f32 * 0.1,
+                pitch: 0.0,
+                pivot: 0.0,
                 // Every clip the rig ships, so a crowd exercises all of them.
                 anim: (index % 6) as u8,
                 phase: index as f32 * 0.05,
@@ -5291,6 +5303,8 @@ fn a_figure_is_posed_by_its_clip_rather_than_drawn_at_rest() {
         renderer.set_entities(vec![client::render::skinned::Figure {
             offset,
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim,
             phase,
             carrying: [false; 2],
@@ -5349,6 +5363,8 @@ fn a_figure_is_lit_by_the_light_where_it_stands() {
             renderer.set_entities(vec![client::render::skinned::Figure {
                 offset,
                 yaw: 0.0,
+                pitch: 0.0,
+                pivot: 0.0,
                 anim: 0,
                 phase: 0.0,
                 carrying: [false; 2],
@@ -5498,6 +5514,8 @@ fn a_figure_in_the_frame_does_not_move_the_milk() {
     renderer.set_entities(vec![client::render::skinned::Figure {
         offset: [-forward.x * 12.0, -forward.y * 12.0, -forward.z * 12.0],
         yaw: 0.0,
+        pitch: 0.0,
+        pivot: 0.0,
         anim: 1,
         phase: 0.25,
         carrying: [false; 2],
@@ -10433,6 +10451,8 @@ fn brazier_frame(gpu: Gpu, centre: BlockValue, model: bool) -> Image {
                     client::render::skinned::Figure {
                         offset: [corner.x + x + 0.5, corner.y + y, corner.z + z + 0.5],
                         yaw: 0.0,
+                        pitch: 0.0,
+                        pivot: 0.0,
                         anim: 0,
                         phase: 0.0,
                         carrying: [false; 2],
@@ -10497,5 +10517,84 @@ fn a_model_block_is_drawn_as_its_model_and_its_cells_are_not() {
     assert!(
         pixels_beyond(&air, &stone, 4) > 0.003,
         "the control (a plain stone block there) should differ from the bare floor"
+    );
+}
+
+/// The bounding box `(min_x, min_y, max_x, max_y)` of every pixel of `image`
+/// that differs from `background`, or `None` if none does.
+fn changed_bounds(image: &Image, background: &Image) -> Option<(u32, u32, u32, u32)> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if image.pixel(x, y) != background.pixel(x, y) {
+                let (x0, y0, x1, y1) = bounds.unwrap_or((x, y, x, y));
+                bounds = Some((x0.min(x), y0.min(y), x1.max(x), y1.max(y)));
+            }
+        }
+    }
+    bounds
+}
+
+#[test]
+fn a_mods_model_is_turned_by_its_pitch_about_the_middle_of_its_collider() {
+    // **Life ask 20.** A spider pitched nose up a wall was drawn level, its
+    // legs sticking out of the face. Measured as a bounding box against the
+    // bare sky, which is the one thing here that depends on nothing but the
+    // figure: seen from the side, a body tipped a quarter turn is wide where it
+    // was tall and low where it was high.
+    let Some(gpu) = gpu() else { return };
+    let mut renderer = prepare(gpu, &[], RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let mut camera = Camera {
+        position: Position::from_world(40.0, 10.0, 24.0),
+        ..Camera::default()
+    };
+    // Looking along -x, so a figure facing +z (yaw 0) is seen from its side.
+    camera.look(std::f32::consts::FRAC_PI_2, 0.0);
+    renderer.add_model("zoo:climber", tiamat_core::model::humanoid(), 1.0);
+    let ahead = camera.forward();
+    let background = target.capture(&mut renderer, &camera).expect("capture");
+
+    let mut bounds = |pitch: f32| {
+        let collider = Some([1.8, 5.4]);
+        let figure = client::render::skinned::Figure {
+            offset: [ahead.x * 5.0, -0.9, ahead.z * 5.0],
+            yaw: 0.0,
+            pitch,
+            pivot: client::render::skinned::Figure::pivot_of(collider),
+            anim: 0,
+            phase: 0.0,
+            carrying: [false; 2],
+            light: client::render::skinned::OPEN_SKY,
+        };
+        renderer.set_model_figures([("zoo:climber".to_owned(), vec![figure])].into());
+        let image = target.capture(&mut renderer, &camera).expect("capture");
+        let found = changed_bounds(&image, &background).expect("the figure is in frame");
+        (image, found)
+    };
+    let (level, (lx0, ly0, lx1, ly1)) = bounds(0.0);
+    let (tipped, (tx0, ty0, tx1, ty1)) = bounds(std::f32::consts::FRAC_PI_2);
+
+    assert_ne!(level.rgba, tipped.rgba, "pitch never reached the figure");
+    let (level_wide, level_high) = (lx1 - lx0, ly1 - ly0);
+    let (tipped_wide, tipped_high) = (tx1 - tx0, ty1 - ty0);
+    assert!(
+        tipped_wide > level_wide * 2,
+        "a body tipped a quarter turn should stretch along the way it faces: \
+         {level_wide} px wide level, {tipped_wide} tipped"
+    );
+    assert!(
+        tipped_high * 2 < level_high,
+        "a body tipped a quarter turn should stand lower: {level_high} px high \
+         level, {tipped_high} tipped"
+    );
+    // About the middle, not the feet: the level body's feet are at its bottom
+    // edge and its middle is half way up; the tipped one is centred on that
+    // middle rather than lying along the ground from the feet.
+    let middle = (ly0 + ly1) / 2;
+    let tipped_middle = (ty0 + ty1) / 2;
+    assert!(
+        middle.abs_diff(tipped_middle) <= level_high / 8,
+        "the body moved off its middle: {middle} level, {tipped_middle} tipped"
     );
 }

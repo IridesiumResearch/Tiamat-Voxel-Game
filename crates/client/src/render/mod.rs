@@ -3589,11 +3589,10 @@ pub fn held_boxes(
 ) -> Vec<Prop> {
     use glam::Mat4;
 
-    let placed = Mat4::from_translation(glam::Vec3::from(figure.offset))
-        * Mat4::from_rotation_y(figure.yaw)
-        // The rig is built in cells and the world is in blocks — the division
-        // `place()` does in the shader, done here for the same geometry.
-        * Mat4::from_scale(glam::Vec3::splat(1.0 / 3.0))
+    // The rig is built in cells and the world is in blocks — the division
+    // `place()` does in the shader, done here for the same geometry, with the
+    // pitch of Life ask 20 (zero for every figure that holds anything).
+    let placed = figure.placement_matrix()
         * Mat4::from_cols_array(joint)
         * Mat4::from_translation(glam::Vec3::from(HELD_GRIP));
 
@@ -5519,6 +5518,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [12.0, -3.0, 40.0],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5556,6 +5557,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [12.0, -3.0, 40.0],
             yaw: std::f32::consts::FRAC_PI_2,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5594,6 +5597,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [0.0; 3],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5632,6 +5637,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [0.0; 3],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5697,6 +5704,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [0.0; 3],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5768,6 +5777,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [0.0; 3],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
@@ -5809,6 +5820,8 @@ mod tests {
         let figure = skinned::Figure {
             offset: [0.0; 3],
             yaw: 0.0,
+            pitch: 0.0,
+            pivot: 0.0,
             anim: 0,
             phase: 0.0,
             carrying: [false; 2],
