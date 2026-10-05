@@ -12,10 +12,40 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: none. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W33, filed 2026-10-05. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
+
+## W33. Rain vanishes in front of the sky (2026-10-05)
+
+**Seen.** The designer: "rain renders on top of the clouds but does not
+render on top of the sky. It vanishes as it passes over the sky." A drop is
+drawn where something solid or the cloud deck is behind it, and gone where
+only sky is.
+
+**What it looks like from here, unconfirmed.** The particle pipeline tests
+depth but does not write it (`particle.rs`, `depth_write_enabled: false`),
+so a particle drawn over the sky leaves the far plane's depth behind it.
+The composite fogs from depth (`graph.rs`, the note on the fluid pipeline:
+"a surface that leaves the sky's depth behind it is fogged to sky and
+lost"), so in Beautiful a drop over the sky is fogged to the sky's colour
+and disappears, while one over the deck, which writes a nearer depth,
+survives. The fluid pass met exactly this and writes depth for it. Whether
+Classic and Simple show it too is not known here.
+
+**Why the mod cannot.** Precipitation is the client's own emitter
+(`set_precipitation`), drawn by the particle pass; nothing a mod sends
+changes how it is composited.
+
+**Ask.** Particles seen against the sky in every lighting mode: drawn after
+the composite's fog, or kept out of it (a mark the composite reads, as the
+sky and the deck have), rather than given a depth, since a translucent drop
+should not hide what is behind it. Their own distance fog, if wanted, from
+their own depth in their own shader. Gate: heavy rain looked at against
+open sky, against the deck and against a hillside shows the same drops in
+all three, in all three lighting modes; snow the same; the rainbow and the
+stars still sit behind them.
 ## W32. A light floor on the sky modifier, for night-sight (2026-10-05): LANDED 2026-10-05 (engine daf73304), awaiting the eye
 
 **Seen.** Magic's Wx-M1 asked Weather for a layered sky overlay so its
