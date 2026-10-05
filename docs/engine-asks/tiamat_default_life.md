@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-09-30: none.** 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-05: 20**, a creature drawn at its pitch. 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
@@ -41,6 +41,33 @@ camera-facing row centred over an entity's head that FOLLOWS it, latest-state
 per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
+
+## 20. A creature is drawn level, whatever its pitch (2026-10-05): OPEN
+
+**Seen.** A spider climbs walls now (mobs.lua, `climbs`): walking into one,
+it goes up the face and over the top. The mod pitches it nose up the wall
+with `game.set_entity(id, { pitch = math.pi / 2 })` while it climbs, and
+back to 0 over the top. It is drawn level all the same: a spider on a
+wall is a spider standing on nothing, its legs sticking out of the face,
+rising.
+
+**Why the mod cannot fix it.** A creature's figure is placed by its yaw
+alone. `crates/client/src/render/skinned.rs` hands the shader
+`placement: [figure.yaw, base, 0, 0]`, and `render/mod.rs` builds the
+figure's matrix from `Mat4::from_rotation_y(figure.yaw)`. The entity's
+`pitch` is kept (`ent::component::Transform.pitch`) and replicated as an
+`i8`, and is used for `facing`, but never reaches the figure. A mod has no
+other hand on how a model is turned.
+
+**Smallest change.** Turn a mod creature's figure by its pitch as well as
+its yaw: `from_rotation_y(yaw) * from_rotation_x(-pitch)`, about the
+middle of its collider, so a body pitched a quarter turn up lies against
+the face it climbs rather than pivoting off its feet. The pitch is already
+on the wire. A player's own figure (and a rider) would want to stay level,
+so it could be mod creatures only, or a flag on `register_model` /
+`spawn_entity` (`pitches = true`), which would also suit a bird diving or
+a fish nosing down. Collision is untouched: the box stays upright, which
+is right for a body that is only pressed against a wall.
 
 ## 19. A creature is lit as if it stood in the open, wherever it is (2026-09-29): LANDED 2026-09-29 (engine 847a908), awaiting the eye
 
