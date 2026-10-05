@@ -17,8 +17,23 @@ Started 2026-09-29, scaffolded by the engine session from what the
 designer's two-path design and the sibling mods had already fixed
 (`docs/brief.md` in that repo).
 
-**Open as of 2026-09-30: none.** E-S1 and E-S2 landed 2026-09-30 (gravity
-awaits the feel); E-S3 answered below.
+**Open as of 2026-10-05: E-S4.** E-S1 and E-S2 landed 2026-09-30;
+E-S3 answered below.
+
+## E-S4, the domain on place and dig events — open, asked 2026-10-05
+
+*Wanted:* `domain` on the place event (`register_on_place`) and the dig
+events (`register_on_dig_start`, `register_on_dig_complete`), as the use
+event already carries it. *Why:* a block placed or dug off the overworld
+cannot be told from one at the same coordinates in the overworld. A mod
+has to keep each player's domain from `register_on_player_move` and trust
+that the move was heard first. This mod does (`tds.domain_of`). Craft does
+not, so a station placed on a world at a star, or in the Deep, is named
+as if it stood in the overworld (sibling ask C-S8): a terraformer's frame
+does not know it is on a body, and two frames, one in each domain at the
+same coordinates, would share one box. *Stands in:* this mod's own
+`domain_of` for its own records. *Smallest change:* the field, filled
+where the use event's is.
 
 ## E-S3, actions that fire (2026-09-29): ANSWERED 2026-09-30, nothing to build
 
