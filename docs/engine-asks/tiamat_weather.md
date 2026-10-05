@@ -12,9 +12,36 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: none. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W32, filed 2026-10-05. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
+
+## W32. A light floor on the sky modifier, for night-sight (2026-10-05)
+
+**Seen.** Magic's Wx-M1 asked Weather for a layered sky overlay so its
+night-sight elixir and Luna talisman can brighten the night; until then
+night-sight "glows instead of brightening" (a few particles round the
+drinker). Weather answered it on 2026-09-30: `add_overlay(player, source,
+spec)` composes other mods' modifiers with the weather's
+(`exports-contract.md`). But the modifier's `intensity` MULTIPLIES the
+keyframe's, clamped 0..2, and `core_sky` puts midnight at 0.08 — so the
+most any overlay can make of midnight is 0.16, which still reads as night.
+And a cave has no sun to scale, so no modifier lights one at all.
+
+**Why the mod cannot.** Weather composes modifiers; it cannot add light the
+modifier has no field for. The renderer's `ambient` (the floor under the
+darkest place, `render/mod.rs`) is the client's own.
+
+**Ask.** A floor beside the multiplier on `set_sky_modifier`: `light_floor`
+0..1, the least the frame is lit at, sky-lit or not — the sun term raised to
+at least `light_floor` where the sky reaches, and the renderer's ambient
+floor raised to it where it does not, so night-sight is night-sight in a
+cave too. Presentation only, per player, eased like the rest; 0, the default,
+changes nothing. Weather would then take `light_floor` in `add_overlay` and
+send the HIGHEST any overlay asks (a floor is a floor, not a product).
+Gate: at midnight with `light_floor = 0.5`, an open field and a cave are
+both lit at about half of noon, colours kept; at noon it changes nothing;
+`nil` puts the night back.
 
 ## W31. No stars in Beautiful (2026-10-01): LANDED 2026-10-01 (engine 1235f34), awaiting the eye
 
