@@ -5266,12 +5266,14 @@ impl App {
         let floor = self.weather.modifier.light_floor();
         let moment = crate::sky::lit_at_least(moment, floor);
         self.renderer.set_light_floor(floor);
+        // The light's direction, which is the moon's at night; the sun's own
+        // goes to the rainbow below, which stands opposite the SUN and is
+        // hidden while it is down.
         self.renderer
-            .set_sun(moment.intensity, moment.sun, moment.sun_direction);
+            .set_sun(moment.intensity, moment.sun, moment.light_direction);
         self.renderer.set_stars(moment.stars, self.sky.turn());
-        // Only a strength: the renderer puts the bow opposite the sun it was
-        // just handed, and hides it while that sun is too high or down.
-        self.renderer.set_rainbow(self.weather.rainbow.current());
+        self.renderer
+            .set_rainbow(self.weather.rainbow.current(), moment.sun_direction);
         // The deck drifts and evolves on frame time for the same reason the
         // clock above does: it is presentation, and charter rule 4 exempts it.
         self.renderer.advance_clouds(dt);
@@ -6548,11 +6550,18 @@ impl App {
         // it is, and "where is the sun" is the question somebody looking at
         // shadows is actually asking.
         let down = self.sky.sun_direction()[1];
+        // Whichever body is lighting the world: the moon, the sun's antipode,
+        // once the sun is down.
+        let (body, up) = if down > 0.0 {
+            ("moon", down)
+        } else {
+            ("sun", -down)
+        };
         format!(
-            "{:02}:{:02} · sun {:.0}% up, {:.0}% bright{}",
+            "{:02}:{:02} · {body} {:.0}% up, {:.0}% bright{}",
             minutes / 60,
             minutes % 60,
-            -down * 100.0,
+            up * 100.0,
             self.renderer.sun_intensity() * 100.0,
             if self.time_override { " · LOCAL" } else { "" }
         )

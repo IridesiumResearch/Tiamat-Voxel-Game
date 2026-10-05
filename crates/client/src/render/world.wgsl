@@ -48,6 +48,9 @@ struct Globals {
     sway_any: u32,
     // The remaining padding the Rust side spells out is implicit here: WGSL
     // aligns a vec4 to 16 bytes, so this lands at offset 112 either way.
+    // Sun colour in xyz, a mod's light floor (weather W32) in w: the least
+    // the frame is lit at anywhere, sky-lit or not. `ambient` below is the
+    // cave floor the other shaders read, already raised to it.
     sun_colour: vec4<f32>,
     // Sky colour in xyz, fog's far distance in w.
     sky_colour: vec4<f32>,
@@ -797,6 +800,12 @@ fn luma(colour: vec3<f32>) -> f32 {
 // every wall of one orientation flip from lit to unlit on a single frame.
 const SOFT_TERMINATOR: f32 = 0.35;
 
+// The floor under a sealed cave, as a fraction of full light — the same
+// number `render::AMBIENT_FLOOR` carries for the other shaders. A pure black
+// cave is not atmospheric, it is unplayable; this is presentation only, and
+// the stored light really is zero down there.
+const CAVE_FLOOR: f32 = 0.03;
+
 // What mode 2 keeps of the ambient floor a mod asked for.
 //
 // **Underground, and only underground.** Reported from the window: "the ambient
@@ -906,7 +915,17 @@ fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     // every outdoor surface washes the world out. The sky is the floor the sun
     // is measured against, so full sun is exactly full sun.
     let sky_reach = input.sun * globals.sun_intensity;
-    let direct = sky_reach * globals.sun_colour.rgb * shadow * cloud_shade(input.world);
+    // **The directional light fades out over its last few degrees above the
+    // horizon**, whichever body it is. The light's direction is the sun's by
+    // day and the moon's by night (`Sky::light_direction`), and the two meet
+    // at the horizon: with no fade, the swap would turn every wall facing one
+    // azimuth off and every wall facing the opposite one on in a single
+    // frame. Faded, both contribute nothing at the crossing and the handover
+    // is invisible. It also ends a light that stood below the horizon lighting
+    // the walls that faced its azimuth, which was never anything a sun does.
+    let above = -globals.sun_direction.y;
+    let risen = smoothstep(0.0, HORIZON_FADE, above);
+    let direct = sky_reach * globals.sun_colour.rgb * shadow * cloud_shade(input.world) * risen;
     let skylight = sky_reach * sky_hue * SKY_FLOOR;
     let daylight = max(direct, skylight);
 
@@ -977,10 +996,26 @@ fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     //
     // Anything that SHOULD brighten with the day is daylight above, gated by
     // the stored sunlight channel, and a sealed cave has none of that.
-    var floor_level = globals.ambient;
+    //
+    // **And it is a CAVE's floor: where the sky reaches, the sky is the
+    // floor.** Scaled by how much of the sky does not reach the surface, as
+    // `skinned.wgsl` scales a figure's. Applied to every surface it stood
+    // above the night's own skylight (0.3 of an intensity of 0.08 is less
+    // than 0.03), so every outdoor surface at night sat at the same level
+    // whichever way it faced and whatever stood in the moon's way — reported
+    // from the window as Beautiful's night looking "washed out" and "flat"
+    // (2026-10-05). Under the open sky at night a surface now has the sky's
+    // share and the moon's, and nothing else; in a sealed cave it has exactly
+    // the floor it had.
+    //
+    // A mod's light floor (weather W32, `sun_colour.w`) is the exception and
+    // applies everywhere: it is "the least the frame is lit at, sky-lit or
+    // not", and night-sight on a shaded wall is still night-sight.
+    var cave_floor = CAVE_FLOOR;
     if (globals.lighting_mode == 1u) {
-        floor_level = floor_level * CLASSIC_AMBIENT;
+        cave_floor = cave_floor * CLASSIC_AMBIENT;
     }
+    let floor_level = max(cave_floor * (1.0 - clamp(input.sun, 0.0, 1.0)), globals.sun_colour.w);
     let ambient = sky_hue * floor_level;
     let shaded = max(lit, ambient) * input.shade;
 
@@ -1004,6 +1039,14 @@ fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     let neutral = sky_hue * luma(shaded) * AO_NEUTRAL;
     return mix(neutral, shaded, input.occlusion);
 }
+
+// How high the light has to stand, as the sine of its elevation, before its
+// directional term is at full strength: it fades in from nothing at the
+// horizon over this. A tenth is about six degrees — a minute or two of a
+// forty-minute day each side of sunrise and sunset, while the keyframes have
+// already dimmed the sun to a fraction of noon, so the long shadows of the
+// golden hour are untouched and only the handover to the moon is softened.
+const HORIZON_FADE: f32 = 0.1;
 
 // How wide the band is, in `dot(normal, sunward)`, over which a face turns from
 // facing the sun to facing away.

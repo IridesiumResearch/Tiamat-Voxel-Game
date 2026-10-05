@@ -693,6 +693,9 @@ pub struct Moment {
     /// Shadow maps need this and colour alone cannot supply it. See
     /// [`Sky::sun_direction`] for the arc it walks and what is fixed about it.
     pub sun_direction: [f32; 3],
+    /// Which way the light that shades the world travels: the sun's by day,
+    /// the moon's — the sun's antipode — by night. See [`Sky::light_direction`].
+    pub light_direction: [f32; 3],
     /// How much of the star catalog shows, `0.0..=1.0`. Zero is none, and
     /// is what a sky that never mentioned stars gets.
     pub stars: f32,
@@ -847,6 +850,7 @@ impl Sky {
                 // than nowhere: straight down would make every shadow a
                 // vertical smear and every vertical face unlit.
                 sun_direction: NOON,
+                light_direction: NOON,
                 stars: 0.0,
                 // Ungraded, and it matters that this is exact rather than
                 // near-identity: mode 3 skips the LUT entirely for this value,
@@ -890,6 +894,7 @@ impl Sky {
             sun: mix(before.sun, after.sun, blend),
             intensity: before.intensity + (after.intensity - before.intensity) * blend,
             sun_direction: self.sun_direction(),
+            light_direction: self.light_direction(),
             // Sanitised like the grade: a peer's NaN would be a sky of stars
             // at noon, or none at midnight, with nothing to say why.
             stars: {
@@ -936,6 +941,33 @@ impl Sky {
         let height = angle.sin();
         let east = angle.cos();
         normalise([east, -height, TILT])
+    }
+
+    /// Which way the light that shades the world travels, normalised.
+    ///
+    /// The sun's direction while the sun is up, and **the moon's — the sun's
+    /// antipode — once it has set.** Until 2026-10-05 the sun's direction was
+    /// handed on through the night as well: below the horizon it lit nothing
+    /// a face could turn toward, so every surface outdoors sat at the ambient
+    /// floor and the night had no relief — reported from the window as
+    /// Beautiful's night looking "washed out" and "flat". A moon opposite the
+    /// sun lights one side of everything with the keyframe's night `sun`
+    /// colour, which is what that colour was always meant to be, and the
+    /// shadows follow it. The handover at the horizon is continuous because
+    /// the shader fades the directional term out over the last few degrees
+    /// above it (`world.wgsl`'s `HORIZON_FADE`): at the crossing both lights
+    /// contribute nothing, so swapping one for the other changes nothing.
+    ///
+    /// Always points downward (or level at the crossing): light arrives from
+    /// above, whichever body it comes from.
+    #[must_use]
+    pub fn light_direction(&self) -> [f32; 3] {
+        let sun = self.sun_direction();
+        if sun[1] <= 0.0 {
+            sun
+        } else {
+            [-sun[0], -sun[1], -sun[2]]
+        }
     }
 }
 
@@ -1227,6 +1259,53 @@ mod tests {
             sky.sun_direction()[1] > 0.9,
             "at midnight the sun is under the world, so its light travels upward"
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the light IS the sun by day and exactly its negation by night; nothing is computed in between"
+    )]
+    fn the_light_is_the_sun_by_day_and_its_antipode_by_night() {
+        // 2026-10-05: a night lit from where the sun was had no relief. The
+        // moon stands opposite the sun; the light always arrives from above;
+        // at the horizon the two are the same level ray and the shader's fade
+        // makes the swap invisible.
+        let mut sky = Sky::new(24_000, frames(), HERE);
+        sky.set_time(0.5);
+        assert_eq!(
+            sky.light_direction(),
+            sky.sun_direction(),
+            "at noon the light is the sun"
+        );
+        sky.set_time(0.0);
+        let sun = sky.sun_direction();
+        let light = sky.light_direction();
+        assert!(
+            sun[1] > 0.0,
+            "at midnight the sun is below the world: {sun:?}"
+        );
+        assert!(
+            light[1] < 0.0,
+            "at midnight the light still comes from above: {light:?}"
+        );
+        assert_eq!(
+            light,
+            [-sun[0], -sun[1], -sun[2]],
+            "the moon is the sun's antipode"
+        );
+        for crossing in [0.25_f32, 0.75] {
+            for side in [-0.001_f32, 0.001] {
+                sky.set_time(crossing + side);
+                let light = sky.light_direction();
+                assert!(
+                    light[1] <= 0.0 && light[1] > -0.02,
+                    "at {crossing}{side:+} the light should graze the horizon: {light:?}"
+                );
+            }
+        }
+        // And a world with no day keeps its noon.
+        assert_eq!(Sky::none().light_direction(), NOON);
     }
 
     #[test]

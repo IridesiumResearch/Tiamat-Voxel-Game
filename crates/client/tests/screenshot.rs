@@ -3089,6 +3089,101 @@ fn a_wall_throws_a_shadow_dark_enough_to_see() {
 }
 
 #[test]
+fn the_moon_casts_a_shadow_at_night_and_the_handover_at_the_horizon_is_seamless() {
+    // **Reported from the window, 2026-10-05: Beautiful's night "washed out"
+    // and "flat".** The sun's direction was handed on through the night, and
+    // below the horizon it lit nothing a face could turn toward, so every
+    // surface outdoors sat at the ambient floor. The light is the moon's at
+    // night now — the sun's antipode, with the keyframe's night `sun` colour
+    // — and it casts shadows like the sun does: the same floor measured with
+    // the moon on either side of the wall, as the daytime shadow test does.
+    //
+    // And the swap is seamless: a light half a degree above one horizon and a
+    // light half a degree above the opposite one draw the same frame, because
+    // the directional term fades out over the last few degrees (`HORIZON_FADE`),
+    // while the same two lights ten degrees up draw frames that differ — so
+    // the fade is doing the softening and not the darkness.
+    let Some(gpu) = gpu() else { return };
+    let chunks = wall_scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let mut camera = Camera {
+        position: Position::from_world(20.0, 40.0, 24.0),
+        ..Camera::default()
+    };
+    camera.look(0.0, -1.5);
+    // Far fog, so the sky's colour is not mixed into what is measured.
+    renderer.set_sky([0.02, 0.03, 0.08], 10_000.0);
+    let moonlight = [0.35, 0.45, 0.80];
+
+    let floor = |frame: &Image| {
+        let mut sum = 0.0;
+        let mut n = 0.0;
+        for y in (HEIGHT / 4)..(HEIGHT * 3 / 4) {
+            for x in (WIDTH * 3 / 5)..(WIDTH * 9 / 10) {
+                let p = frame.pixel(x, y).expect("pixel");
+                sum += (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / (3.0 * 255.0);
+                n += 1.0;
+            }
+        }
+        sum / n
+    };
+    // The moon at about 30 degrees, west of the wall and then east of it.
+    renderer.set_sun(0.08, moonlight, [-0.80, -0.45, 0.0]);
+    let shadowed = floor(&target.capture(&mut renderer, &camera).expect("capture"));
+    renderer.set_sun(0.08, moonlight, [0.80, -0.45, 0.0]);
+    let lit = floor(&target.capture(&mut renderer, &camera).expect("capture"));
+    println!("moonlit floor {lit:.4}, in the wall's moon shadow {shadowed:.4}");
+    assert!(lit > 0.0, "a moonlit floor is black");
+    assert!(
+        shadowed < 0.85 * lit,
+        "the wall's moon shadow is {shadowed:.4} against the moonlit floor's {lit:.4}: the \
+         night has no relief"
+    );
+
+    // The handover. `difference` is the mean absolute difference per channel,
+    // in display units, between two frames.
+    let difference = |a: &Image, b: &Image| {
+        let mut sum = 0.0;
+        let mut n = 0.0;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let (p, q) = (a.pixel(x, y).expect("pixel"), b.pixel(x, y).expect("pixel"));
+                for c in 0..3 {
+                    sum += (f32::from(p[c]) - f32::from(q[c])).abs();
+                    n += 1.0;
+                }
+            }
+        }
+        sum / n
+    };
+    // `sun_behind` turned about: the same elevation, from the east or the
+    // west rather than from behind the camera.
+    let from = |elevation: f32, east: f32| {
+        let [_, down, along] = sun_behind(elevation);
+        [east * along, down, 0.0]
+    };
+    let mut at = |elevation: f32, east: f32| {
+        renderer.set_sun(0.3, [1.0, 0.8, 0.6], from(elevation, east));
+        target.capture(&mut renderer, &camera).expect("capture")
+    };
+    let grazing = difference(&at(0.5, 1.0), &at(0.5, -1.0));
+    let risen = difference(&at(10.0, 1.0), &at(10.0, -1.0));
+    println!("swap at half a degree differs by {grazing:.3}; at ten degrees by {risen:.3}");
+    assert!(
+        grazing < 1.0,
+        "swapping the light from one horizon to the other changed the frame by {grazing:.3} \
+         per channel: the handover would pop"
+    );
+    assert!(
+        risen > 4.0 * grazing.max(0.25),
+        "two lights ten degrees up on opposite sides differ by only {risen:.3}, so the fade is \
+         hiding more than the horizon"
+    );
+}
+
+#[test]
 fn a_blob_shadow_darkens_the_ground_in_every_lighting_mode() {
     // **Reported from the window: no shadow under the player from a light
     // block**, and a request for "a generic floating ambient occlusion shadow
@@ -10097,12 +10192,21 @@ impl Bow {
 }
 
 /// The frame with the rainbow at `intensity` and then at none, same camera.
-fn bow_of(renderer: &mut Renderer, target: &Offscreen, camera: &Camera, intensity: f32) -> Bow {
-    renderer.set_rainbow(0.0);
+///
+/// `sun` is where the SUN is, which the bow stands opposite — handed with the
+/// strength, since the renderer's light may be the moon's at night.
+fn bow_of(
+    renderer: &mut Renderer,
+    target: &Offscreen,
+    camera: &Camera,
+    intensity: f32,
+    sun: [f32; 3],
+) -> Bow {
+    renderer.set_rainbow(0.0, sun);
     let without = target.capture(renderer, camera).expect("capture");
-    renderer.set_rainbow(intensity);
+    renderer.set_rainbow(intensity, sun);
     let with = target.capture(renderer, camera).expect("capture");
-    renderer.set_rainbow(0.0);
+    renderer.set_rainbow(0.0, sun);
     Bow::between(&with, &without)
 }
 
@@ -10176,7 +10280,13 @@ fn a_rainbow_is_an_arc_opposite_the_sun_red_outside_and_gone_when_the_sun_is_hig
         renderer.set_sun(1.0, [1.0, 1.0, 1.0], sun_behind(15.0));
 
         // Facing away from the sun: the bow is ahead.
-        let bow = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        let bow = bow_of(
+            &mut renderer,
+            &target,
+            &rainbow_camera(0.0),
+            1.0,
+            sun_behind(15.0),
+        );
         let lit = bow.lit(6);
         println!("{label}: {} lit pixels", lit.len());
         assert!(
@@ -10221,11 +10331,18 @@ fn a_rainbow_is_an_arc_opposite_the_sun_red_outside_and_gone_when_the_sun_is_hig
             &target,
             &rainbow_camera(std::f32::consts::PI),
             1.0,
+            sun_behind(15.0),
         );
         assert_eq!(behind.lit(1).len(), 0, "{label}: a bow on the sun's side");
 
         // Half the strength is about half the light.
-        let half = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 0.5);
+        let half = bow_of(
+            &mut renderer,
+            &target,
+            &rainbow_camera(0.0),
+            0.5,
+            sun_behind(15.0),
+        );
         let full_peak = bow.at(WIDTH / 2, red_row)[0].max(1);
         let half_peak = half.at(WIDTH / 2, red_row)[0];
         assert!(
@@ -10236,10 +10353,22 @@ fn a_rainbow_is_an_arc_opposite_the_sun_red_outside_and_gone_when_the_sun_is_hig
         // The sun at 45 degrees, where the bow has sunk under the horizon,
         // and at night: nothing.
         renderer.set_sun(1.0, [1.0, 1.0, 1.0], sun_behind(45.0));
-        let high = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        let high = bow_of(
+            &mut renderer,
+            &target,
+            &rainbow_camera(0.0),
+            1.0,
+            sun_behind(45.0),
+        );
         assert_eq!(high.lit(1).len(), 0, "{label}: a bow with the sun at 45");
         night(&mut renderer);
-        let dark = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        let dark = bow_of(
+            &mut renderer,
+            &target,
+            &rainbow_camera(0.0),
+            1.0,
+            [0.0, 1.0, 0.0],
+        );
         assert_eq!(dark.lit(1).len(), 0, "{label}: a bow at night");
         renderer.set_sky(client::render::sky_colour(), 3000.0);
     }
@@ -10262,7 +10391,13 @@ fn a_hill_in_front_of_the_rainbow_hides_it() {
             renderer.set_clouds(clear_deck(quality));
         }
         renderer.set_sun(1.0, [1.0, 1.0, 1.0], sun_behind(15.0));
-        let bow = bow_of(&mut renderer, &target, &rainbow_camera(0.0), 1.0);
+        let bow = bow_of(
+            &mut renderer,
+            &target,
+            &rainbow_camera(0.0),
+            1.0,
+            sun_behind(15.0),
+        );
         // The wall covers thirty degrees either side, which is columns 62 to
         // 258 of the frame; well inside that, nothing is added anywhere.
         let behind_wall = bow

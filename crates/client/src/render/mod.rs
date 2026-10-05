@@ -1048,9 +1048,16 @@ pub struct Renderer {
     light_floor: f32,
     /// The sun's colour now.
     sun_colour: [f32; 4],
-    /// Which way its light travels, for the cascades. Set by the sky with the
+    /// Which way the light that shades the world travels, for the cascades,
+    /// the facing test, the cloud shade and the sky's glow: the sun by day
+    /// and the moon by night (`Sky::light_direction`). Set by the sky with the
     /// colour, and pointing sensibly downward until one arrives.
     sun_direction: [f32; 3],
+    /// Where the SUN is, whether or not it is the light — for the rainbow,
+    /// which stands opposite the sun and is hidden while the sun is down. Fed
+    /// the light's direction instead it would stand opposite the moon at
+    /// night in full daytime colour.
+    rainbow_sun: [f32; 3],
     /// How much of the star catalog shows now, `0.0..=1.0`, and how far the
     /// stars have wheeled, as `(cos, sin)` of the day's turn.
     stars: (f32, (f32, f32)),
@@ -1267,6 +1274,7 @@ impl Renderer {
             light_floor: 0.0,
             sun_colour: [1.0, 1.0, 1.0, 1.0],
             sun_direction: NOON,
+            rainbow_sun: NOON,
             stars: (0.0, (1.0, 0.0)),
             rainbow: 0.0,
             sky_colour: sky_colour(),
@@ -1360,17 +1368,18 @@ impl Renderer {
     /// A strength and no more: the bow is drawn round the point opposite the
     /// sun [`Self::set_sun`] last gave, and as much of it as that sun allows
     /// — none with the sun down or past 42 degrees up. See [`rainbow`].
-    pub fn set_rainbow(&mut self, intensity: f32) {
+    pub fn set_rainbow(&mut self, intensity: f32, sun_direction: [f32; 3]) {
         self.rainbow = if intensity.is_finite() {
             intensity.clamp(0.0, 1.0)
         } else {
             0.0
         };
+        self.rainbow_sun = sun_direction;
     }
 
     /// The rainbow this frame draws, from the strength and the sun.
     fn rainbow_uniform(&self) -> rainbow::Uniform {
-        rainbow::Uniform::new(self.rainbow, self.sun_direction)
+        rainbow::Uniform::new(self.rainbow, self.rainbow_sun)
     }
 
     /// Gives the sky the star catalog for a world's seed.
@@ -2508,7 +2517,14 @@ impl Renderer {
             tint_any: self.tints.any,
             sway_any: self.tints.swaying,
             _pad: [0; 1],
-            sun_colour: self.sun_colour,
+            // `w` carries a mod's light floor (weather W32) on its own, for
+            // the world shader's two floors — see `world.wgsl`'s `lighting`.
+            sun_colour: [
+                self.sun_colour[0],
+                self.sun_colour[1],
+                self.sun_colour[2],
+                self.light_floor,
+            ],
             // Fog's far distance rides in the sky colour's unused fourth
             // component rather than costing another sixteen bytes of padding.
             sky_colour: [

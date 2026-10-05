@@ -54,13 +54,19 @@ game.register_sky{
         -- players spend indoors, and the moon is doing something.
         --
         -- The grade is what makes moonlight read as moonlight: the eye loses
-        -- colour in the dark, so night is desaturated and cool, and opened up a
-        -- little so the shapes are still legible at an intensity of 0.08.
+        -- colour in the dark, so night is desaturated and cool. The `sun`
+        -- colour here IS the moonlight — the client lights the night from the
+        -- moon, opposite the sun, so one side of everything takes this colour
+        -- and the other falls to the sky's. A little more contrast than the
+        -- day, not less, and no lift: the lift and the flattening were here to
+        -- make a night with no directional light legible, and the designer
+        -- read the result as "washed out" (2026-10-05). With the moon doing
+        -- that work the grade only has to keep the night cool and dark.
         { time = 0.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08, stars = 1.0,
-          grade = { exposure = 1.15, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 0.95 } },
+          grade = { exposure = 1.0, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 1.08 } },
         -- The hour before dawn, still blue.
         { time = 0.20, sky = {0.05, 0.07, 0.15}, sun = {0.40, 0.45, 0.75}, intensity = 0.10, stars = 0.9,
-          grade = { exposure = 1.12, saturation = 0.60, tint = {0.94, 0.97, 1.10}, contrast = 0.96 } },
+          grade = { exposure = 1.0, saturation = 0.60, tint = {0.94, 0.97, 1.10}, contrast = 1.06 } },
         -- Sunrise, warm and low.
         { time = 0.27, sky = {0.85, 0.50, 0.35}, sun = {1.00, 0.65, 0.40}, intensity = 0.55, stars = 0.0,
           grade = { saturation = 1.10, tint = {1.05, 1.00, 0.95}, contrast = 1.05 } },
@@ -78,12 +84,12 @@ game.register_sky{
           grade = { saturation = 1.15, tint = {1.07, 1.00, 0.94}, contrast = 1.06 } },
         -- Dusk falling.
         { time = 0.80, sky = {0.15, 0.12, 0.25}, sun = {0.55, 0.45, 0.70}, intensity = 0.18, stars = 0.7,
-          grade = { exposure = 1.08, saturation = 0.75, tint = {0.97, 0.98, 1.08}, contrast = 0.98 } },
+          grade = { exposure = 1.0, saturation = 0.75, tint = {0.97, 0.98, 1.08}, contrast = 1.03 } },
         -- And back to midnight. **The last keyframe must restate the first's
         -- colours** — and its grade, for the same reason — or the day ends on a
         -- hard cut back to 0.00 at the moment the clock wraps.
         { time = 1.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08, stars = 1.0,
-          grade = { exposure = 1.15, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 0.95 } },
+          grade = { exposure = 1.0, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 1.08 } },
     },
 }
 
