@@ -17,10 +17,10 @@ Started 2026-09-29, scaffolded by the engine session from what the
 designer's two-path design and the sibling mods had already fixed
 (`docs/brief.md` in that repo).
 
-**Open as of 2026-10-05: E-S4.** E-S1 and E-S2 landed 2026-09-30;
-E-S3 answered below.
+**Open as of 2026-10-05: none.** E-S4 landed 2026-10-05; E-S1 and E-S2
+landed 2026-09-30; E-S3 answered below.
 
-## E-S4, the domain on place and dig events — open, asked 2026-10-05
+## E-S4, the domain on place and dig events (2026-10-05): LANDED 2026-10-05 (engine e1becf0a), awaiting the eye
 
 *Wanted:* `domain` on the place event (`register_on_place`) and the dig
 events (`register_on_dig_start`, `register_on_dig_complete`), as the use
@@ -34,6 +34,17 @@ does not know it is on a body, and two frames, one in each domain at the
 same coordinates, would share one box. *Stands in:* this mod's own
 `domain_of` for its own records. *Smallest change:* the field, filled
 where the use event's is.
+
+**Landed.** Exactly the smallest change: `domain` on the place event and
+on both dig events, filled on the server from the space the player is
+acting in — the same value the use event carries, and the same one the edit
+is applied to. No wire change (hooks run on the server). Stubs and
+AGENTS.md say to key placed things on the domain and the coordinates
+together and to read them back with `game.get_block{ ..., domain = e.domain
+}`. Science can drop `tds.domain_of` for place and dig; Craft (C-S8) can
+name a station by `e.domain` without keeping a map of its own. [H]: a
+terraformer's frame placed on a body knows it is on the body; two frames at
+one set of coordinates in two spaces are two frames.
 
 ## E-S3, actions that fire (2026-09-29): ANSWERED 2026-09-30, nothing to build
 
