@@ -62,10 +62,14 @@ game.register_sky{
         -- make a night with no directional light legible, and the designer
         -- read the result as "washed out" (2026-10-05). With the moon doing
         -- that work the grade only has to keep the night cool and dark.
-        { time = 0.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08, stars = 1.0,
+        -- Intensity 0.095, not 0.08: the designer's eye on the moonlit night
+        -- said "good, if a tad too dark", and brighter moonlight keeps the
+        -- lit-to-shaded ratio where a brighter grade would lift the shadows
+        -- too.
+        { time = 0.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.095, stars = 1.0,
           grade = { exposure = 1.0, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 1.08 } },
         -- The hour before dawn, still blue.
-        { time = 0.20, sky = {0.05, 0.07, 0.15}, sun = {0.40, 0.45, 0.75}, intensity = 0.10, stars = 0.9,
+        { time = 0.20, sky = {0.05, 0.07, 0.15}, sun = {0.40, 0.45, 0.75}, intensity = 0.11, stars = 0.9,
           grade = { exposure = 1.0, saturation = 0.60, tint = {0.94, 0.97, 1.10}, contrast = 1.06 } },
         -- Sunrise, warm and low.
         { time = 0.27, sky = {0.85, 0.50, 0.35}, sun = {1.00, 0.65, 0.40}, intensity = 0.55, stars = 0.0,
@@ -88,7 +92,7 @@ game.register_sky{
         -- And back to midnight. **The last keyframe must restate the first's
         -- colours** — and its grade, for the same reason — or the day ends on a
         -- hard cut back to 0.00 at the moment the clock wraps.
-        { time = 1.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.08, stars = 1.0,
+        { time = 1.00, sky = {0.02, 0.03, 0.08}, sun = {0.35, 0.45, 0.80}, intensity = 0.095, stars = 1.0,
           grade = { exposure = 1.0, saturation = 0.55, tint = {0.92, 0.96, 1.12}, contrast = 1.08 } },
     },
 }
