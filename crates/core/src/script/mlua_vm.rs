@@ -3723,6 +3723,8 @@ impl ScriptVm for MluaVm {
 
     fn place(&mut self, event: &crate::script::PlaceEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.player).and_then(|table| {
+            // The space, as the use event carries it (Science ask E-S4).
+            table.set("domain", event.domain.as_str())?;
             table.set("x", event.block.x)?;
             table.set("y", event.block.y)?;
             table.set("z", event.block.z)?;
@@ -7199,6 +7201,8 @@ impl MluaVm {
     fn dig_event_table(&self, event: &crate::script::DigEvent) -> Option<Table> {
         self.hook_event(event.player)
             .and_then(|table| {
+                // The space, as the use event carries it (Science ask E-S4).
+                table.set("domain", event.domain.as_str())?;
                 table.set("x", event.target.x)?;
                 table.set("y", event.target.y)?;
                 table.set("z", event.target.z)?;
@@ -15300,9 +15304,60 @@ mod tests {
         assert_eq!(watcher.get::<i32>("seen").expect("seen"), 1);
     }
 
+    #[test]
+    fn a_place_and_a_dig_say_which_space_they_are_in() {
+        // Science ask E-S4: a block placed or dug on a body at a star is not
+        // the block at the same coordinates in the overworld, and a mod had to
+        // keep each player's space from the move hook and trust the order.
+        // The three hooks carry `domain` as the use event always has.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "deep",
+            "where = {}
+             game.register_on_place(function(e) where.place = e.domain end)
+             game.register_on_dig_start(function(e) where.start = e.domain end)
+             game.register_on_dig_complete(function(e) where.done = e.domain end)",
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        let on_a_body = |domain: &str| crate::script::PlaceEvent {
+            domain: domain.to_owned(),
+            ..a_place()
+        };
+        assert!(vm.place(&on_a_body("science:mars")).allowed);
+        let dig = crate::script::DigEvent {
+            domain: "science:the_deep".to_owned(),
+            ..a_dig()
+        };
+        assert!(vm.dig_start(&dig).allowed);
+        assert!(vm.dig_complete(&dig).allowed);
+        let where_: Table = vm
+            .environment("deep")
+            .expect("env")
+            .get("where")
+            .expect("where");
+        assert_eq!(
+            where_.get::<String>("place").expect("place"),
+            "science:mars"
+        );
+        assert_eq!(
+            where_.get::<String>("start").expect("start"),
+            "science:the_deep"
+        );
+        assert_eq!(
+            where_.get::<String>("done").expect("done"),
+            "science:the_deep"
+        );
+        // And the overworld says so by name.
+        assert!(vm.place(&a_place()).allowed);
+        assert_eq!(where_.get::<String>("place").expect("place"), "overworld");
+    }
+
     fn a_dig() -> crate::script::DigEvent {
         crate::script::DigEvent {
             player: [0xAB; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
             target: crate::coords::SubNodePos::new(3, 4, 5),
             material: MaterialId(7),
             brush: Brush::SubNode,
@@ -15313,6 +15368,7 @@ mod tests {
     fn a_place() -> crate::script::PlaceEvent {
         crate::script::PlaceEvent {
             player: [0xCD; 32],
+            domain: crate::domain::OVERWORLD.to_owned(),
             block: crate::coords::BlockPos::new(1, 2, 3),
             material: MaterialId(7),
             occupancy: 0b111,

@@ -194,6 +194,14 @@ for a mod that wants the block's state then. And a tools mod's `default` hand
 wins over the engine's reference `core_tools:hand` whatever the ids, so it need
 not `conflicts` the fixture out of the set to be the hand.
 
+**Every place, dig and use event says which space it is in** (`e.domain`:
+`"overworld"`, or a domain's id). A block placed on a body at a star is not
+the block at the same coordinates in the overworld, so a mod that records
+placed things — a station, a frame, a box — keys them on the domain and the
+coordinates together, and reads the block back with `game.get_block{ x, y,
+z, domain = e.domain }`. Keeping each player's domain from the move hook and
+trusting the order was the workaround; the field is the fix.
+
 **Right-clicking a block with nothing to place is `register_on_use`**, not a
 cancelled dig. Picking fruit, opening a door, pulling a lever: the event has the
 cell, what it is made of and what is in the hand, `game.get_block` works inside

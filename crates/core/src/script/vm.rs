@@ -952,6 +952,11 @@ pub struct DigEvent {
     /// Who is digging, as the canonical player UUID (charter rule 13 — never
     /// the display name). 32 bytes, because it is a BLAKE3 of the root key.
     pub player: [u8; 32],
+    /// The space the dig is in (Science ask E-S4): a block dug on a body at
+    /// a star is not the block at the same coordinates in the overworld, and
+    /// a mod keeping each player's space from the move hook had to trust it
+    /// heard the move first. As the use event carries it.
+    pub domain: String,
     /// The cell under their crosshair.
     pub target: SubNodePos,
     /// What is there.
@@ -970,6 +975,10 @@ pub struct DigEvent {
 pub struct PlaceEvent {
     /// Who is placing.
     pub player: [u8; 32],
+    /// The space the block is placed in (Science ask E-S4), as the use event
+    /// carries it: two frames at one set of coordinates in two spaces are two
+    /// frames.
+    pub domain: String,
     /// The block that would be written.
     pub block: BlockPos,
     /// What it would be made of.

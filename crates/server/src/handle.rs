@@ -4129,6 +4129,7 @@ impl ServerHandle {
                                 let (returned, verdict) = sight.lending(world, || {
                                     source.may_start_dig(&tiamat_core::script::DigEvent {
                                         player: *uuid.as_bytes(),
+                                        domain: digging_in.clone(),
                                         target,
                                         material,
                                         brush,
@@ -4181,6 +4182,7 @@ impl ServerHandle {
                                 let (returned, verdict) = sight.lending(world, || {
                                     source.may_dig(&tiamat_core::script::DigEvent {
                                         player: *uuid.as_bytes(),
+                                        domain: digging_in.clone(),
                                         target,
                                         material,
                                         brush,
@@ -4650,6 +4652,7 @@ impl ServerHandle {
                             let (returned, verdict) = sight.lending(world, || {
                                 source.may_place(&tiamat_core::script::PlaceEvent {
                                     player: *request.actor.as_bytes(),
+                                    domain: building_in.clone(),
                                     block: plan.block,
                                     material: as_registered,
                                     occupancy: plan.occupancy,

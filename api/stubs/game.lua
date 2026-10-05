@@ -3382,15 +3382,17 @@ function game.set_block(position, block, occupancy, options) end
 
 ---A dig about to happen.
 ---@class Tiamat.DigEvent
+---@field domain string The space the dig is in — `"overworld"`, or a domain's id — as the use event carries it. A block dug on a body at a star is not the block at the same coordinates in the overworld; key anything per place on this with the coordinates, not on the coordinates alone.
 ---@field player string Who is digging, as 64 hex characters. This is the canonical player UUID — key any per-player state on it, never on the display name, which a player can change and which is not unique across servers.
 ---@field x integer Sub-node cell being dug. These are CELL coordinates, three per block on each axis, so the block is `x // 3`.
 ---@field y integer
 ---@field z integer
 ---@field material integer Numeric id of what is there. Compare against `game.get_block_id("yourmod:something")`.
----@field brush string `"block"` for the whole block, `"subnode"` for the single cell.
+---@field brush string `"block"` for the whole block, `"subnode"` for the single cell, `"whole"` for a block of a `whole` material, which comes off in one piece whatever the tool (Sub-Node Contract §7.5).
 
 ---A placement about to happen.
 ---@class Tiamat.PlaceEvent
+---@field domain string The space the block is placed in — `"overworld"`, or a domain's id — as the use event carries it. Two frames at one set of coordinates in two spaces are two frames: record a placed thing by its domain and its coordinates together.
 ---@field player string Who is placing, as 64 hex characters.
 ---@field x integer The BLOCK being written — block coordinates, not cells.
 ---@field y integer
