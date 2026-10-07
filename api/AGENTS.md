@@ -14,6 +14,43 @@ does — and `scripts/check-stubs.sh` fails the engine's build if a `game.*`
 function exists that it does not document. **It cannot fall behind the engine.**
 If something is not in there, it does not exist; do not invent it.
 
+## What changed since engine 0.3.0
+
+If the copy of this file in your mod is older than this list, re-vendor
+`api/` from the engine's `main` and read the sections named here. Each item
+is a mechanism a mod may now use; none of them changes a mod that ignores it.
+
+- **Blocks drawn as models, and blocks dug whole** (2026-10-02).
+  `register_block{ model = "<your model id>", shape = {...} }` draws a
+  registered glTF in place of the block's cells; `whole = true` makes any
+  block one piece: dug whole by any tool, placed as its shape, paid 27 either
+  way. A campfire, a brazier, an anvil, a station. See "A campfire is a
+  `model` block, and it is `whole`" below.
+- **Ground that is not a full block** (2026-10-07). A thing placed against
+  the top of a block under three quarters full goes into that block and
+  stands on the first full block beneath — a whole material's model clips
+  through the ground cells, loose material fills the gaps. Nothing to do: it
+  is how placement works now. Sub-Node Contract §7.6.
+- **`[[setting]]` in `mod.toml`** (2026-10-07). A player setting declared in
+  the manifest shows under your mod on the start screen's Mods tab, before any
+  world is open; `register_setting` stays for the rest. Never both for one id.
+  See "Your mod's own options".
+- **`domain` on the place and dig events** (2026-10-05). `e.domain` says which
+  space a block was placed or dug in; key placed things on it with the
+  coordinates. See the hooks paragraph.
+- **`light_floor` on `set_sky_modifier`** (2026-10-05). The least the frame is
+  lit at, in the open and underground: night-sight. A mod composing overlays
+  sends the highest floor.
+- **A creature turns by its pitch** (2026-10-05). `set_entity(id, { pitch })`
+  on a mod's own model tips it about the middle of its collider; a climbing
+  spider lies on its wall. Players and mounts stay level.
+- **`stars` on `set_sky_modifier`, `bottom` on a chunk's fog** (2026-10-02).
+  A modifier may name how much of the star catalog shows; a surface fog may
+  stop above a cave.
+- **The moon** (2026-10-05). The night is lit from opposite the sun, in the
+  keyframe's night `sun` colour, with shadows; a sky's night keyframes are
+  the moonlight, and no longer need a lifted grade to be legible.
+
 ---
 
 ## What a mod is
