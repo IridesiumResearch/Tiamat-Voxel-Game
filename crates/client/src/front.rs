@@ -199,40 +199,87 @@ impl Front {
         chosen
     }
 
-    /// Draws the enabled mods' world options under the seed box.
+    /// Draws one mod's world options, folded under its row on the Mods tab.
     ///
-    /// **Only for mods that are on**, because an option for a mod that will
-    /// not load is a question with no one to answer it — and only here, on
-    /// creation, because these are fixed once the world exists.
-    fn world_option_rows(&mut self, ui: &mut egui::Ui) {
-        let mut chosen = std::mem::take(&mut self.world_options);
-        for listing in self.catalogue.mods.iter().filter(|listing| listing.enabled) {
-            for option in &listing.world_options {
-                let id = option.qualified(&listing.id);
-                let picked = chosen.entry(id.clone()).or_insert(option.default);
-                ui.horizontal(|ui| {
-                    if option.is_toggle() {
-                        let mut on = *picked != 0;
-                        ui.checkbox(&mut on, &option.name)
-                            .on_hover_text(&option.description);
-                        *picked = u32::from(on);
-                    } else {
-                        ui.label(&option.name).on_hover_text(&option.description);
-                        let index = usize::try_from(picked.saturating_sub(1)).unwrap_or(0);
-                        let showing = option.options.get(index).map_or("", String::as_str);
-                        egui::ComboBox::from_id_salt(&id)
-                            .selected_text(showing)
-                            .show_ui(ui, |ui| {
-                                for (at, text) in option.options.iter().enumerate() {
-                                    let one_based = u32::try_from(at + 1).unwrap_or(1);
-                                    ui.selectable_value(picked, one_based, text);
-                                }
-                            });
+    /// **Under the mod, not under the seed box** (Science ask E-S5, UI ask 20:
+    /// the designer, 2026-10-07). With eight mods each declaring a few, one
+    /// flat run under the seed did not say whose each option was; here each
+    /// mod's sit in a closed dropdown of their own, as the settings page folds
+    /// its player settings. **Only for a mod that is on**, because an option
+    /// for a mod that will not load is a question with no one to answer it.
+    ///
+    /// **And only answerable for a world that does not exist yet.** The
+    /// answers are fixed when a world is made and kept in the world itself,
+    /// which this screen cannot read; for an existing world the dropdown
+    /// names the options and says so, rather than drawing controls whose
+    /// values would be a guess.
+    fn world_option_rows(
+        ui: &mut egui::Ui,
+        listing: &crate::launcher::Listing,
+        chosen: &mut std::collections::BTreeMap<String, u32>,
+        new_world: bool,
+    ) {
+        if listing.world_options.is_empty() || !listing.enabled {
+            return;
+        }
+        let count = listing.world_options.len();
+        let title = format!(
+            "World options · {count} choice{}",
+            if count == 1 { "" } else { "s" }
+        );
+        ui.indent(("world-options", &listing.id), |ui| {
+            egui::CollapsingHeader::new(title)
+                .id_salt(("world-options", &listing.id))
+                .default_open(false)
+                .show(ui, |ui| {
+                    if !new_world {
+                        crate::theme::secondary(
+                            ui,
+                            "Fixed when this world was made. A new world asks again.",
+                        );
+                    }
+                    for option in &listing.world_options {
+                        let id = option.qualified(&listing.id);
+                        if !new_world {
+                            ui.label(&option.name).on_hover_text(&option.description);
+                            continue;
+                        }
+                        let picked = chosen.entry(id.clone()).or_insert(option.default);
+                        ui.horizontal(|ui| {
+                            if option.is_toggle() {
+                                let mut on = *picked != 0;
+                                ui.checkbox(&mut on, &option.name)
+                                    .on_hover_text(&option.description);
+                                *picked = u32::from(on);
+                            } else {
+                                ui.label(&option.name).on_hover_text(&option.description);
+                                let index = usize::try_from(picked.saturating_sub(1)).unwrap_or(0);
+                                let showing = option.options.get(index).map_or("", String::as_str);
+                                egui::ComboBox::from_id_salt(&id)
+                                    .selected_text(showing)
+                                    .show_ui(ui, |ui| {
+                                        for (at, text) in option.options.iter().enumerate() {
+                                            let one_based = u32::try_from(at + 1).unwrap_or(1);
+                                            ui.selectable_value(picked, one_based, text);
+                                        }
+                                    });
+                            }
+                        });
+                        if !option.description.is_empty() {
+                            ui.indent(&id, |ui| crate::theme::secondary(ui, &option.description));
+                        }
                     }
                 });
-            }
-        }
-        self.world_options = chosen;
+        });
+    }
+
+    /// Whether the Play tab would make a NEW world: no existing local world is
+    /// selected, so the mods' world options are still open questions.
+    fn making_a_new_world(&self) -> bool {
+        !self
+            .selected
+            .and_then(|index| self.library.entries.get(index))
+            .is_some_and(crate::launcher::Entry::is_local)
     }
 
     /// Draws a frame and returns what the player asked for.
@@ -481,8 +528,20 @@ impl Front {
                      one. Only used when the world is NEW — an existing world keeps its own.",
             );
         });
-        // The mods' own choices about a world, beside the engine's one.
-        self.world_option_rows(ui);
+        // The mods' own choices about a world are on the Mods tab, under
+        // each mod (Science ask E-S5); said here, beside the engine's one
+        // choice, so a player making a world knows where to look first.
+        if self
+            .catalogue
+            .mods
+            .iter()
+            .any(|listing| listing.enabled && !listing.world_options.is_empty())
+        {
+            crate::theme::secondary(
+                ui,
+                "The mods' own choices for a new world are on the Mods tab, under each mod.",
+            );
+        }
         ui.horizontal(|ui| {
             ui.label("Server");
             ui.text_edit_singleline(&mut self.address);
@@ -527,6 +586,8 @@ impl Front {
             changed = true;
         }
         ui.separator();
+        let new_world = self.making_a_new_world();
+        let mut chosen = std::mem::take(&mut self.world_options);
         {
             if self.catalogue.mods.is_empty() {
                 ui.label("No mods installed. A client with none can still join servers.");
@@ -538,6 +599,7 @@ impl Front {
                 .filter(|listing| !listing.reference)
             {
                 changed |= listing_row(ui, listing);
+                Self::world_option_rows(ui, listing, &mut chosen, new_world);
             }
             // **The engine's own mods, folded away.** Reference mods are
             // fixtures that prove a mechanism, not content to rely on: they
@@ -561,10 +623,12 @@ impl Front {
                             .filter(|listing| listing.reference)
                         {
                             changed |= listing_row(ui, listing);
+                            Self::world_option_rows(ui, listing, &mut chosen, new_world);
                         }
                     });
             }
         }
+        self.world_options = chosen;
         // Reported from the window: unticking a mod did nothing — the world
         // still had it. The screen holds its OWN catalogue and the window
         // starts worlds from the one it kept, so a tick had to be carried back
