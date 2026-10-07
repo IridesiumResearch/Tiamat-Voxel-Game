@@ -29,6 +29,50 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
+## 20. A mod's settings under its name on the Mods tab (2026-10-07, from the designer)
+
+**Wanted.** On the pre-game menu's Mods tab, each mod's own settings under
+its row: what it lets a player choose, where they choose which mods to run,
+before any world is open. Today the tab is a box, a name and a description a
+mod, and nothing a mod offers can be set there.
+
+**Why a mod cannot do it.** The start screen is the client's own, drawn
+before any server exists, and no mod's Lua runs on it (AGENTS.md, "A look for
+the engine's own screens"). What it can know about a mod is its `mod.toml`.
+So:
+
+- **World options** (`[[world_option]]`) are already known there, and drawn,
+  but under the seed box (`front.rs`, `world_option_rows`), apart from the
+  mod they belong to.
+- **Player settings** (`game.register_setting`) are declared in Lua, so the
+  start screen cannot know they exist. Their answers are already the
+  client's, per world (`launcher::Entry::settings`), and can only be changed
+  in game.
+
+**Smallest change, in two parts.**
+
+1. *World options under their mod.* Draw each enabled mod's world options
+   indented under its row on the Mods tab, from the same `self.world_options`
+   the seed box edits, so there is one answer and two places to see it (or
+   move them there outright). For a selected existing world they show its
+   stored answers, read-only, with "fixed for this world"; for a new world
+   they are editable. Nothing in the manifest or the protocol changes.
+2. *Player settings declared in the manifest.* `[[setting]]` in `mod.toml`,
+   the same fields `[[world_option]]` has (`id`, `name`, `description`,
+   `options`, `default`), and the same meaning `register_setting` has: a
+   checkbox without `options`, a dropdown with them, answered per world and
+   per server. The Mods tab draws them under the mod for the selected world
+   (into that `Entry`'s `settings`) or the new one, and `game.setting` answers
+   them in game exactly as it answers a registered one. `register_setting`
+   stays; one id declared in both is refused at load, so a mod has one
+   declaration. A remote server's settings could show what the client was
+   told on its last join, if that is worth caching.
+
+Part 1 alone answers "my world's options are under my mod"; part 2 is what
+"settings" means to a player. This mod declares neither today, so nothing
+here waits on it; it is asked for the mods that do (Weather registers a
+setting today) and for every mod that will.
+
 ## 19. A dialog cannot be built from another mod's exported widgets (2026-09-30): LANDED 2026-09-30 (engine 71bf067)
 
 Relayed by the designer from this mod's work on Magic's U-M2: "the
