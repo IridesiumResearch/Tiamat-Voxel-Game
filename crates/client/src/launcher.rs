@@ -307,6 +307,11 @@ pub struct Listing {
     /// `tiamat_core::modload::WorldOption`. Drawn beside the seed box, and
     /// only for mods that are on.
     pub world_options: Vec<tiamat_core::modload::WorldOption>,
+    /// The player settings it declares in `mod.toml` (`[[setting]]`, UI ask
+    /// 20), which the Mods tab shows under its row. The start screen runs no
+    /// Lua, so a setting only `register_setting` knows about is not here and
+    /// appears on the in-game page instead.
+    pub settings: Vec<tiamat_core::modload::ManifestSetting>,
     /// How it wants the engine's own screens to look, if it says — see
     /// `tiamat_core::modload::Theme`.
     pub theme: Option<tiamat_core::modload::Theme>,
@@ -376,6 +381,7 @@ impl Catalogue {
                 name: discovered.manifest.name,
                 description: discovered.manifest.description,
                 world_options: discovered.manifest.world_options,
+                settings: discovered.manifest.settings,
                 theme: discovered.manifest.theme,
                 dir: discovered.dir,
             })

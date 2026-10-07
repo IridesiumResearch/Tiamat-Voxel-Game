@@ -3784,6 +3784,12 @@ function game.register_action(spec) end
 ---rather than refused, because a mod that fails to load teaches nobody
 ---anything.
 ---
+---**To have the start screen show it under your mod on the Mods tab, declare it
+---as a `[[setting]]` in `mod.toml` instead** (same fields as `[[world_option]]`;
+---a choice's `default` is one-based there). The start screen runs no Lua. One
+---declaration per id: doing both is an error at load. `game.setting` answers
+---either alike.
+---
 ---**An answer arrives with a PLAYER, so a setting cannot shape a world.**
 ---Worldgen has already happened by the time anybody joins — for chunks
 ---generated before the first player, it happened with nobody to ask — so a

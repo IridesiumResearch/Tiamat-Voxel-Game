@@ -3336,6 +3336,43 @@ impl ScriptVm for MluaVm {
         }
     }
 
+    fn declare_manifest_settings(
+        &mut self,
+        mod_id: &str,
+        settings: &[crate::modload::ManifestSetting],
+    ) {
+        let Ok(registry) = self.lua.named_registry_value::<Table>("tiamat.settings") else {
+            return;
+        };
+        for setting in settings {
+            // The same entry shape `register_setting` builds, with the
+            // manifest's one-based choice default converted to the zero-based
+            // index a setting holds. `manifest` marks it for the duplicate
+            // check in the registrar.
+            let built = (|| -> mlua::Result<Table> {
+                let entry = self.lua.create_table()?;
+                entry.set("id", setting.qualified(mod_id))?;
+                entry.set("mod_id", mod_id)?;
+                entry.set("name", setting.name.as_str())?;
+                entry.set("description", setting.description.as_str())?;
+                entry.set("default", setting.default_index())?;
+                entry.set("manifest", true)?;
+                let list = self.lua.create_table()?;
+                for option in &setting.options {
+                    list.push(option.as_str())?;
+                }
+                entry.set("options", list)?;
+                Ok(entry)
+            })();
+            match built.and_then(|entry| registry.push(entry)) {
+                Ok(()) => {}
+                Err(err) => {
+                    tracing::error!(%mod_id, id = %setting.id, "could not record a manifest setting: {err}");
+                }
+            }
+        }
+    }
+
     fn set_world_options(&mut self, options: &[(String, crate::modload::WorldOptionValue)]) {
         // One registry table, read by `game.world_option` at call time, so
         // installing before any mod has a `game` table — which is when the
@@ -4377,6 +4414,13 @@ impl ScriptVm for MluaVm {
         registry
             .sequence_values::<Table>()
             .filter_map(Result::ok)
+            // A manifest `[[setting]]` is recorded before its mod's Lua runs,
+            // so a mod that then failed to load would still be offering a
+            // setting for content that is not there. Dropped (UI ask 20).
+            .filter(|entry| {
+                !(entry.get::<bool>("manifest").unwrap_or(false)
+                    && self.is_faulted(&entry.get::<String>("mod_id").unwrap_or_default()))
+            })
             .filter_map(|entry| {
                 Some(super::vm::Setting {
                     id: entry.get("id").ok()?,
@@ -6215,11 +6259,27 @@ impl MluaVm {
                          `options` out for a checkbox, or give at least two"
                     )));
                 }
+                let qualified = qualify_id(&owner, &id).map_err(mlua::Error::external)?;
+                // UI ask 20: one declaration per id. A manifest `[[setting]]`
+                // is already in the table when `init.lua` runs, so finding
+                // one here means the mod declared it twice.
+                let existing: Table = lua.named_registry_value("tiamat.settings")?;
+                if existing
+                    .sequence_values::<Table>()
+                    .filter_map(Result::ok)
+                    .any(|found| {
+                        found.get::<bool>("manifest").unwrap_or(false)
+                            && found
+                                .get::<String>("id")
+                                .is_ok_and(|have| have == qualified)
+                    })
+                {
+                    return Err(mlua::Error::external(format!(
+                        "{qualified} is declared in mod.toml; declare a setting once"
+                    )));
+                }
                 let entry = lua.create_table()?;
-                entry.set(
-                    "id",
-                    qualify_id(&owner, &id).map_err(mlua::Error::external)?,
-                )?;
+                entry.set("id", qualified)?;
                 entry.set("mod_id", owner.clone())?;
                 // Falls back to the id rather than to nothing: a setting with
                 // no label is a row a player cannot identify, and the id is at

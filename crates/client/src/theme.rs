@@ -534,6 +534,7 @@ mod tests {
         let parsed: tiamat_core::modload::ModManifest =
             toml::from_str(&manifest).expect("a manifest");
         crate::launcher::Listing {
+            settings: Vec::new(),
             id: id.to_owned(),
             name: id.to_owned(),
             description: String::new(),

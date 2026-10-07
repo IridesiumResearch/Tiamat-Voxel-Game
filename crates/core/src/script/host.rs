@@ -192,6 +192,15 @@ impl<V: ScriptVm> ModHost<V> {
             // What this mod may read from — see `game.exports`.
             vm.note_reference(&entry.id, entry.reference);
             vm.note_dependencies(&entry.id, &entry.after);
+            // UI ask 20: a manifest's `[[setting]]`s are registered before the
+            // mod's Lua runs, so `game.setting` answers during load and a
+            // `register_setting` of the same id is caught as a duplicate.
+            if let Some(found) = discovered
+                .iter()
+                .find(|found| found.manifest.id == entry.id)
+            {
+                vm.declare_manifest_settings(&entry.id, &found.manifest.settings);
+            }
             if let Err(err) = vm.load_mod(&entry.id, &source, &entry.dir) {
                 tracing::error!(
                     mod_id = %entry.id,

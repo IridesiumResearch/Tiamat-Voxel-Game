@@ -391,6 +391,50 @@ fn a_mod_that_fails_to_load_is_disabled_while_the_rest_keep_working() {
 }
 
 #[test]
+fn a_manifest_setting_is_registered_like_a_lua_one_and_declaring_both_is_refused() {
+    // UI ask 20 part 2: `[[setting]]` is the route the start screen can read;
+    // the VM must answer it exactly as it answers `register_setting`, and one
+    // id declared both ways is an error that names the mod and the id.
+    let root = scratch("manifest-settings");
+    write_mod(
+        &root,
+        "alpha",
+        "[[setting]]\nid = \"size\"\nname = \"Size\"\noptions = [\"s\", \"m\", \"l\"]\ndefault = 2\n\
+         [[setting]]\nid = \"flag\"\nname = \"Flag\"\ndefault = 1\n",
+        "game.register_setting{ id = 'lua_side', name = 'Lua', default = 1 }",
+    );
+    write_mod(
+        &root,
+        "beta",
+        "[[setting]]\nid = \"twice\"\nname = \"Twice\"\n",
+        "game.register_setting{ id = 'twice', name = 'Again' }",
+    );
+    let host = host_for(&root);
+
+    let settings = host.vm().registered_settings();
+    let alpha: Vec<_> = settings.iter().filter(|s| s.mod_id == "alpha").collect();
+    assert_eq!(alpha.len(), 3, "{settings:?}");
+    let size = alpha.iter().find(|s| s.id == "alpha:size").expect("size");
+    assert_eq!(size.options, ["s", "m", "l"]);
+    assert_eq!(size.default, 1, "a one-based 2 is the zero-based index 1");
+    let flag = alpha.iter().find(|s| s.id == "alpha:flag").expect("flag");
+    assert!(flag.options.is_empty());
+    assert_eq!(flag.default, 1);
+
+    assert_eq!(host.failed().len(), 1, "{:?}", host.failed());
+    assert_eq!(host.failed()[0].0, "beta");
+    let message = format!("{:?}", host.failed()[0].1);
+    assert!(
+        message.contains("beta:twice is declared in mod.toml; declare a setting once"),
+        "{message}"
+    );
+    assert!(
+        settings.iter().all(|s| s.mod_id != "beta"),
+        "a mod that failed to load offers no settings: {settings:?}"
+    );
+}
+
+#[test]
 fn a_mod_that_faults_during_generation_is_disabled_and_the_world_keeps_working() {
     // The acceptance criterion. A mod that throws inside its generation
     // callback must not take the server with it.

@@ -1671,6 +1671,21 @@ pub trait ScriptVm: Sized {
     /// Qualified ids, resolved values: what is not in the list answers `nil`.
     fn set_world_options(&mut self, _options: &[(String, crate::modload::WorldOptionValue)]) {}
 
+    /// Registers the settings a mod declared in its manifest (`[[setting]]`,
+    /// UI ask 20) exactly as if its Lua had called `game.register_setting`,
+    /// so `game.setting`, the `ModSettings` table and the answers a player
+    /// sends all treat the two routes alike.
+    ///
+    /// **Called by the loader just before that mod's `init.lua`**, so a mod
+    /// may read its own setting while it loads, and a `register_setting` for
+    /// an id already declared here is refused (one declaration per id).
+    fn declare_manifest_settings(
+        &mut self,
+        _mod_id: &str,
+        _settings: &[crate::modload::ManifestSetting],
+    ) {
+    }
+
     /// Runs every registered `on_tick` callback once.
     ///
     /// `dt_ticks` is how many simulation steps this call covers — normally 1,

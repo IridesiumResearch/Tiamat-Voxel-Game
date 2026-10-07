@@ -388,34 +388,124 @@ impl WorldOption {
 
     /// Checks one declaration.
     fn validate(&self, mod_id: &str) -> Result<(), ManifestError> {
-        let bad = |reason: &str| ManifestError::BadWorldOption {
-            id: mod_id.to_owned(),
-            option: self.id.clone(),
-            reason: reason.to_owned(),
-        };
-        if !is_valid_id(&self.id) {
-            return Err(bad(
-                "ids must be lowercase, start with a letter, and contain only letters, digits \
-                 and underscores",
-            ));
-        }
-        if self.name.trim().is_empty() {
-            return Err(bad("it needs a `name` for the screen to show"));
-        }
-        if self.options.iter().any(|option| option.trim().is_empty()) {
-            return Err(bad("an option's text cannot be empty"));
-        }
-        if self.is_toggle() {
-            if self.default > 1 {
-                return Err(bad("a toggle's `default` is 0 or 1"));
+        check_option_fields(&self.id, &self.name, &self.options, self.default).map_err(|reason| {
+            ManifestError::BadWorldOption {
+                id: mod_id.to_owned(),
+                option: self.id.clone(),
+                reason: reason.to_owned(),
             }
-        } else if self.default == 0 || self.default as usize > self.options.len() {
-            return Err(bad(
-                "`default` is a one-based index into `options`, so it must be at least 1 and \
-                 at most their count",
-            ));
+        })
+    }
+}
+
+/// The checks `[[world_option]]` and `[[setting]]` share, because the two are
+/// the same declaration with a different answer-holder (UI ask 20): an id the
+/// engine can key on, a name for the screen, options that say something, and
+/// a default that lands inside them.
+fn check_option_fields(
+    id: &str,
+    name: &str,
+    options: &[String],
+    default: u32,
+) -> Result<(), &'static str> {
+    if !is_valid_id(id) {
+        return Err(
+            "ids must be lowercase, start with a letter, and contain only letters, digits \
+             and underscores",
+        );
+    }
+    if name.trim().is_empty() {
+        return Err("it needs a `name` for the screen to show");
+    }
+    if options.iter().any(|option| option.trim().is_empty()) {
+        return Err("an option's text cannot be empty");
+    }
+    if options.is_empty() {
+        if default > 1 {
+            return Err("a toggle's `default` is 0 or 1");
         }
-        Ok(())
+    } else if default == 0 || default as usize > options.len() {
+        return Err(
+            "`default` is a one-based index into `options`, so it must be at least 1 and \
+             at most their count",
+        );
+    }
+    Ok(())
+}
+
+/// A player setting a mod declares in `mod.toml` (UI ask 20, part 2).
+///
+/// The fields and the meaning are `game.register_setting`'s: a checkbox when
+/// `options` is empty (value 0/1), a dropdown otherwise (value an index into
+/// `options`), answered per player per world. It exists because **the start
+/// screen runs no Lua**: only a manifest can tell it, before any world is
+/// open, which settings a mod has to put under its row on the Mods tab.
+///
+/// ```toml
+/// [[setting]]
+/// id = "compact_hud"
+/// name = "Compact HUD"
+/// description = "Smaller readouts."
+/// options = ["off", "small", "tiny"]
+/// default = 1
+/// ```
+///
+/// `default` follows the `[[world_option]]` convention, ONE-BASED for a
+/// choice; [`Self::default_index`] converts to the zero-based index a
+/// `SettingDef` and `game.setting` use. A setting id is declared here OR with
+/// `register_setting`, never both; the server refuses the mod that does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSetting {
+    /// Unqualified id, `snake_case`. Qualified against the mod as `mod:id`.
+    pub id: String,
+    /// What the screen calls it.
+    pub name: String,
+    /// One line under it.
+    #[serde(default)]
+    pub description: String,
+    /// The choices, or none for a toggle.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// `0`/`1` for a toggle, a one-based index for a choice.
+    #[serde(default = "WorldOption::default_default")]
+    pub default: u32,
+}
+
+impl ManifestSetting {
+    /// Whether this is a checkbox rather than a dropdown.
+    #[must_use]
+    pub fn is_toggle(&self) -> bool {
+        self.options.is_empty()
+    }
+
+    /// The id as it is stored and asked for: `mod:id`.
+    #[must_use]
+    pub fn qualified(&self, mod_id: &str) -> String {
+        format!("{mod_id}:{}", self.id)
+    }
+
+    /// The default as the value a setting holds: 0/1 for a toggle, a
+    /// ZERO-based index for a choice (the manifest's one-based `default`
+    /// converted, clamped into range).
+    #[must_use]
+    pub fn default_index(&self) -> u32 {
+        if self.is_toggle() {
+            u32::from(self.default != 0)
+        } else {
+            self.default.saturating_sub(1)
+        }
+    }
+
+    /// Checks one declaration.
+    fn validate(&self, mod_id: &str) -> Result<(), ManifestError> {
+        check_option_fields(&self.id, &self.name, &self.options, self.default).map_err(|reason| {
+            ManifestError::BadSetting {
+                id: mod_id.to_owned(),
+                setting: self.id.clone(),
+                reason: reason.to_owned(),
+            }
+        })
     }
 }
 
@@ -488,6 +578,11 @@ pub struct ModManifest {
     #[serde(default, rename = "world_option")]
     pub world_options: Vec<WorldOption>,
 
+    /// Player settings the start screen can show under this mod (UI ask 20).
+    /// See [`ManifestSetting`].
+    #[serde(default, rename = "setting")]
+    pub settings: Vec<ManifestSetting>,
+
     /// How this mod wants the engine's own screens to look. See [`Theme`].
     #[serde(default)]
     pub theme: Option<Theme>,
@@ -551,6 +646,17 @@ pub enum ManifestError {
         id: String,
         /// The option's own id, or what it had for one.
         option: String,
+        /// What is wrong with it.
+        reason: String,
+    },
+
+    /// A `[[setting]]` is malformed.
+    #[error("mod `{id}` declares setting `{setting}` wrongly: {reason}")]
+    BadSetting {
+        /// The mod.
+        id: String,
+        /// The setting's own id, or what it had for one.
+        setting: String,
         /// What is wrong with it.
         reason: String,
     },
@@ -688,6 +794,18 @@ impl ModManifest {
                 return Err(ManifestError::BadWorldOption {
                     id: self.id.clone(),
                     option: option.id.clone(),
+                    reason: "declared twice".to_owned(),
+                });
+            }
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for setting in &self.settings {
+            setting.validate(&self.id)?;
+            if !seen.insert(setting.id.as_str()) {
+                return Err(ManifestError::BadSetting {
+                    id: self.id.clone(),
+                    setting: setting.id.clone(),
                     reason: "declared twice".to_owned(),
                 });
             }
@@ -1012,6 +1130,73 @@ name = "Rivers"
                 "{reason} should be refused"
             );
         }
+    }
+
+    #[test]
+    fn a_setting_parses_converts_its_default_and_is_checked() {
+        // UI ask 20 part 2: `[[setting]]` is `[[world_option]]`'s shape, so a
+        // choice's default is one-based in the file and zero-based as a value.
+        let manifest: ModManifest = toml::from_str(
+            r#"
+id = "hud"
+name = "Hud"
+version = "1.0.0"
+
+[[setting]]
+id = "size"
+name = "Size"
+options = ["small", "big", "huge"]
+default = 2
+
+[[setting]]
+id = "compact"
+name = "Compact"
+default = 0
+"#,
+        )
+        .expect("parses");
+        assert_eq!(manifest.settings.len(), 2);
+        let size = &manifest.settings[0];
+        assert!(!size.is_toggle());
+        assert_eq!(size.qualified("hud"), "hud:size");
+        assert_eq!(size.default_index(), 1);
+        let compact = &manifest.settings[1];
+        assert!(compact.is_toggle());
+        assert_eq!(compact.default_index(), 0);
+
+        for (body, reason) in [
+            ("id = \"Size\"\nname = \"x\"", "capitals"),
+            (
+                "id = \"size\"\nname = \"x\"\noptions = [\"a\"]\ndefault = 0",
+                "a zero default",
+            ),
+            (
+                "id = \"size\"\nname = \"x\"\noptions = [\"a\"]\ndefault = 2",
+                "a default past the end",
+            ),
+            ("id = \"size\"\nname = \"x\"\ndefault = 2", "a toggle of 2"),
+            (
+                "id = \"size\"\nname = \"x\"\noptions = [\"a\", \" \"]",
+                "an empty option",
+            ),
+            ("id = \"size\"\nname = \"\"", "an empty name"),
+        ] {
+            let text =
+                format!("id = \"m\"\nname = \"m\"\nversion = \"1.0.0\"\n[[setting]]\n{body}\n");
+            let manifest: ModManifest = toml::from_str(&text).expect("parses");
+            assert!(
+                matches!(
+                    manifest.validate(&std::env::temp_dir()),
+                    Err(ManifestError::BadSetting { .. })
+                ),
+                "{reason} should be refused"
+            );
+        }
+
+        // An unknown field is an error, as everywhere in the manifest.
+        let unknown = "id = \"m\"\nname = \"m\"\nversion = \"1.0.0\"\n\
+                       [[setting]]\nid = \"a\"\nname = \"a\"\nbogus = 1\n";
+        assert!(toml::from_str::<ModManifest>(unknown).is_err());
     }
 
     #[test]

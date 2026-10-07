@@ -13,3 +13,13 @@ license = "GPL-3.0-only"
 # that declares it replaces this one, and the client lists it apart. See
 # game/README.md.
 reference = true
+
+# A player setting declared in the manifest (UI ask 20), so the start screen
+# can show it under this mod's row before any world is open. It is the same
+# thing `game.register_setting` makes; a mod declares it one way or the other,
+# never both. The Lua reads it with `game.setting`.
+[[setting]]
+id = "show_cost"
+name = "Show the cost of a cut"
+description = "The units one chiselled item costs, under the shape editor."
+default = 1

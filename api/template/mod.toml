@@ -15,3 +15,20 @@ license = "{{LICENSE}}"
 #     depends = ["some_world >=0.2, <1"]
 # Mods this one cannot run beside:
 #     conflicts = ["another_mod"]
+# A choice the player makes, shown under this mod on the start screen's Mods
+# tab and on the in-game settings page (read it with game.setting). Declare it
+# here OR with game.register_setting, never both. A toggle has no `options`;
+# with them `default` is a ONE-BASED index into them.
+# [[setting]]
+# id = "compact"
+# name = "Compact display"
+# description = "Smaller readouts."
+# default = 0
+#
+# A choice made once, when a world is made, and fixed for its life (it can
+# shape terrain; read it with game.world_option):
+# [[world_option]]
+# id = "biome"
+# name = "Biome"
+# options = ["spindle", "savanna", "taiga"]
+# default = 1

@@ -1236,7 +1236,16 @@ impl Client {
         // world — and with no world there is nothing in it, so the menu would
         // be drawn over whatever the last frame left behind.
         clear(&surface.gpu, &view);
-        let (action, ticked) = draw_front(surface, &mut self.config, &view);
+        let (action, ticked, answered) = draw_front(surface, &mut self.config, &view);
+        // UI ask 20: a setting answered on the Mods tab belongs to that
+        // world's row, exactly as an in-game answer does; stored and saved
+        // here so it survives leaving the screen without opening the world.
+        if let Some((name, values)) = answered {
+            self.library.set_settings(&name, values);
+            if let Err(err) = self.library.save(&self.data.join("worlds.toml")) {
+                tracing::warn!(%err, "could not save a mod's settings for this world");
+            }
+        }
         // **Carried back before the action is acted on.** `Action::Open` is in
         // the same frame as the tick that changed the set, and a world started
         // from the old catalogue is exactly the report: unticking a mod left
@@ -1278,7 +1287,8 @@ impl Client {
                 name,
                 seed,
                 world_options,
-            } => self.create(&name, lan, seed, world_options),
+                settings,
+            } => self.create(&name, lan, seed, world_options, settings),
             client::front::Action::Remember(entry) => {
                 self.library.add(*entry);
                 self.save_library();
@@ -1349,6 +1359,10 @@ impl Client {
         lan: bool,
         seed: Option<u64>,
         world_options: Vec<(String, String)>,
+        // The Mods tab's answers to `[[setting]]`s before the world existed
+        // (UI ask 20): they become the new entry's settings, which `connect`
+        // seeds the in-game table from.
+        settings: std::collections::BTreeMap<String, u32>,
     ) -> bool {
         let entry = client::launcher::Entry {
             name: name.to_owned(),
@@ -1356,7 +1370,7 @@ impl Client {
                 path: unused_world_directory(&self.data, name),
             },
             mods: self.catalogue.enabled(),
-            settings: std::collections::BTreeMap::default(),
+            settings,
             last_played: client::launcher::now_seconds(),
         };
         self.open(&entry, lan, seed, world_options)
@@ -2518,6 +2532,9 @@ fn register_atlas(surface: &mut Surface) {
     ));
 }
 
+/// A world's name and its settings answers, as changed on the Mods tab.
+type AnsweredSettings = (String, std::collections::BTreeMap<String, u32>);
+
 /// Draws the front screen, and reports what the player asked for.
 ///
 /// The same egui plumbing the HUD uses, minus everything about a world: no
@@ -2525,12 +2542,17 @@ fn register_atlas(surface: &mut Surface) {
 /// nothing to save when it is over.
 ///
 /// Returns the mod selection too, when it changed, because the screen edits a
-/// copy and the window is what starts worlds from it.
+/// copy and the window is what starts worlds from it. Likewise the settings a
+/// world's answers changed on the Mods tab (UI ask 20).
 fn draw_front(
     surface: &mut Surface,
     config: &mut Config,
     view: &wgpu::TextureView,
-) -> (client::front::Action, Option<client::launcher::Catalogue>) {
+) -> (
+    client::front::Action,
+    Option<client::launcher::Catalogue>,
+    Option<AnsweredSettings>,
+) {
     // **Before the input is taken, not inside the frame.** `egui_winit` turns
     // a click into points using the zoom factor as it stands when the input is
     // read, and `paint_egui` turns points back into pixels using it as it
@@ -2542,6 +2564,7 @@ fn draw_front(
     let mut action = client::front::Action::None;
     let mut dirty = false;
     let mut catalogue = None;
+    let mut answered = None;
     let output = surface.egui.run_ui(raw, |root| {
         if let Stage::Front(front) = &mut surface.stage {
             let context = root.ctx().clone();
@@ -2550,6 +2573,7 @@ fn draw_front(
             if front.take_catalogue_dirty() {
                 catalogue = Some(front.catalogue.clone());
             }
+            answered = front.take_answered_settings();
         }
     });
     // **Written when it changes, not when the screen closes.** There is no
@@ -2563,7 +2587,7 @@ fn draw_front(
         .egui_state
         .handle_platform_output(&surface.window, output.platform_output);
     paint_egui(surface, output.shapes, output.textures_delta, view);
-    (action, catalogue)
+    (action, catalogue, answered)
 }
 
 /// Draws the HUD over the frame that has just been rendered.

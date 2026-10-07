@@ -57,6 +57,10 @@ pub enum Action {
         /// the world file says what it was made with. See
         /// `tiamat_core::modload::WorldOption`.
         world_options: Vec<(String, String)>,
+        /// The answers given on the Mods tab before the world existed, by
+        /// qualified id (UI ask 20): they become the new world's
+        /// `Entry::settings`, so they are what is sent on first join.
+        settings: std::collections::BTreeMap<String, u32>,
     },
     /// Keep this entry in the list. A server somebody typed an address for.
     ///
@@ -72,6 +76,17 @@ pub enum Action {
     Forget(String),
     /// Close the window.
     Quit,
+}
+
+/// Where the Mods tab's setting answers are written; see
+/// [`Front::set_setting_answer`].
+enum SettingsTarget {
+    /// The selected local world, by index into the library.
+    Entry(usize),
+    /// No local world selected: a new world's pending answers.
+    Pending,
+    /// A selected server: nothing is shown or recorded.
+    Server,
 }
 
 /// The front screen.
@@ -121,6 +136,14 @@ pub struct Front {
     /// choice belongs to the world it makes, and the next world starts from
     /// the defaults exactly as the seed box starts empty.
     pub world_options: std::collections::BTreeMap<String, u32>,
+    /// Answers to the mods' `[[setting]]`s given while no existing local
+    /// world is selected, by qualified id, in a setting's own terms (`0`/`1`,
+    /// or a zero-based index). Carried into the new world's `Entry` by
+    /// [`Action::Create`]. UI ask 20.
+    pub pending_settings: std::collections::BTreeMap<String, u32>,
+    /// The local world whose `Entry::settings` changed on the Mods tab since
+    /// the window last asked; see [`Front::take_answered_settings`].
+    answered: Option<String>,
     /// The look the installed mods ask this screen to wear, read off the local
     /// disk because there is no server yet — see [`crate::theme::Local`].
     dress: crate::theme::Local,
@@ -164,7 +187,140 @@ impl Front {
             scale_draft: None,
             host_on_lan: false,
             world_options: std::collections::BTreeMap::new(),
+            pending_settings: std::collections::BTreeMap::new(),
+            answered: None,
         }
+    }
+
+    /// Where a Mods-tab answer to a `[[setting]]` goes: the selected local
+    /// world's entry, the pending map of a world not yet made, or nowhere for
+    /// a selected server, whose settings the screen does not show.
+    fn settings_target(&self) -> SettingsTarget {
+        match self
+            .selected
+            .and_then(|at| Some((at, self.library.entries.get(at)?)))
+        {
+            Some((at, entry)) if entry.is_local() => SettingsTarget::Entry(at),
+            Some(_) => SettingsTarget::Server,
+            None => SettingsTarget::Pending,
+        }
+    }
+
+    /// The answers the Mods tab is editing now, or none for a server.
+    fn current_answers(&self) -> Option<&std::collections::BTreeMap<String, u32>> {
+        match self.settings_target() {
+            SettingsTarget::Entry(at) => self.library.entries.get(at).map(|entry| &entry.settings),
+            SettingsTarget::Pending => Some(&self.pending_settings),
+            SettingsTarget::Server => None,
+        }
+    }
+
+    /// Records the player's answer to a mod setting (UI ask 20, part 2).
+    ///
+    /// **The value written is the one sent on join**: the world's
+    /// `Entry::settings` is what `App::adopt_setting_values` seeds the
+    /// in-game table from, keyed by qualified id, in the setting's own terms.
+    /// For a world that does not exist yet it waits in `pending_settings` and
+    /// [`Action::Create`] carries it into the new entry. Returns whether
+    /// anything was recorded (a selected server records nothing).
+    pub fn set_setting_answer(&mut self, id: &str, value: u32) -> bool {
+        match self.settings_target() {
+            SettingsTarget::Entry(at) => {
+                let Some(entry) = self.library.entries.get_mut(at) else {
+                    return false;
+                };
+                entry.settings.insert(id.to_owned(), value);
+                // The window owns the library that is written; hand it back.
+                self.answered = Some(entry.name.clone());
+                true
+            }
+            SettingsTarget::Pending => {
+                self.pending_settings.insert(id.to_owned(), value);
+                true
+            }
+            SettingsTarget::Server => false,
+        }
+    }
+
+    /// The world whose answers changed and what they are now, once per
+    /// change, so the window can store them in its library and save. The
+    /// screen holds a COPY of the library, as with [`Front::take_catalogue_dirty`].
+    pub fn take_answered_settings(
+        &mut self,
+    ) -> Option<(String, std::collections::BTreeMap<String, u32>)> {
+        let name = self.answered.take()?;
+        let entry = self
+            .library
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)?;
+        Some((name, entry.settings.clone()))
+    }
+
+    /// Draws one mod's `[[setting]]`s in a closed dropdown under its row and
+    /// returns `(qualified id, new value)` for each one the player changed.
+    ///
+    /// Separate from the world-options dropdown, because the two have
+    /// different lifetimes: a world option is fixed when the world is made, a
+    /// setting is a player's answer and editable at any time. Only for a mod
+    /// that is on. `answers` is read, never written; the caller applies the
+    /// changes through [`Front::set_setting_answer`].
+    fn setting_rows(
+        ui: &mut egui::Ui,
+        listing: &crate::launcher::Listing,
+        answers: &std::collections::BTreeMap<String, u32>,
+    ) -> Vec<(String, u32)> {
+        let mut changes = Vec::new();
+        if listing.settings.is_empty() || !listing.enabled {
+            return changes;
+        }
+        ui.indent(("settings", &listing.id), |ui| {
+            egui::CollapsingHeader::new(format!("Settings · {}", listing.settings.len()))
+                .id_salt(("settings", &listing.id))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for setting in &listing.settings {
+                        let id = setting.qualified(&listing.id);
+                        let was = answers
+                            .get(&id)
+                            .copied()
+                            .unwrap_or_else(|| setting.default_index());
+                        let mut now = was;
+                        ui.horizontal(|ui| {
+                            if setting.is_toggle() {
+                                let mut on = was != 0;
+                                ui.checkbox(&mut on, &setting.name)
+                                    .on_hover_text(&setting.description);
+                                now = u32::from(on);
+                            } else {
+                                ui.label(&setting.name).on_hover_text(&setting.description);
+                                // Clamped like `game.setting`: an answer past a
+                                // shortened list shows the last option.
+                                let last = setting.options.len().saturating_sub(1);
+                                let showing = setting
+                                    .options
+                                    .get((was as usize).min(last))
+                                    .map_or("", String::as_str);
+                                egui::ComboBox::from_id_salt(&id)
+                                    .selected_text(showing)
+                                    .show_ui(ui, |ui| {
+                                        for (at, text) in setting.options.iter().enumerate() {
+                                            let at = u32::try_from(at).unwrap_or(0);
+                                            ui.selectable_value(&mut now, at, text);
+                                        }
+                                    });
+                            }
+                        });
+                        if !setting.description.is_empty() {
+                            ui.indent(&id, |ui| crate::theme::secondary(ui, &setting.description));
+                        }
+                        if now != was {
+                            changes.push((id, now));
+                        }
+                    }
+                });
+        });
+        changes
     }
 
     /// What a world made now would be made with: every enabled mod's world
@@ -507,6 +663,7 @@ impl Front {
                     name,
                     seed: crate::launcher::seed_from(&self.seed),
                     world_options: self.chosen_world_options(),
+                    settings: self.pending_settings.clone(),
                 };
             }
         });
@@ -588,6 +745,11 @@ impl Front {
         ui.separator();
         let new_world = self.making_a_new_world();
         let mut chosen = std::mem::take(&mut self.world_options);
+        // UI ask 20 part 2: the answers being edited (the selected local
+        // world's, or a new world's), read once; changes come back as a list
+        // and are applied after the loop, so drawing never borrows the screen.
+        let answers = self.current_answers().cloned();
+        let mut answered: Vec<(String, u32)> = Vec::new();
         {
             if self.catalogue.mods.is_empty() {
                 ui.label("No mods installed. A client with none can still join servers.");
@@ -600,6 +762,9 @@ impl Front {
             {
                 changed |= listing_row(ui, listing);
                 Self::world_option_rows(ui, listing, &mut chosen, new_world);
+                if let Some(answers) = &answers {
+                    answered.extend(Self::setting_rows(ui, listing, answers));
+                }
             }
             // **The engine's own mods, folded away.** Reference mods are
             // fixtures that prove a mechanism, not content to rely on: they
@@ -624,11 +789,31 @@ impl Front {
                         {
                             changed |= listing_row(ui, listing);
                             Self::world_option_rows(ui, listing, &mut chosen, new_world);
+                            if let Some(answers) = &answers {
+                                answered.extend(Self::setting_rows(ui, listing, answers));
+                            }
                         }
                     });
             }
         }
         self.world_options = chosen;
+        for (id, value) in answered {
+            self.set_setting_answer(&id, value);
+        }
+        // A server's mods and settings arrive when it is joined (and the
+        // in-game settings page has them); the start screen has no table.
+        if answers.is_none()
+            && self
+                .catalogue
+                .mods
+                .iter()
+                .any(|listing| listing.enabled && !listing.settings.is_empty())
+        {
+            crate::theme::secondary(
+                ui,
+                "A server's own settings are on the in-game settings page once you join.",
+            );
+        }
         // Reported from the window: unticking a mod did nothing — the world
         // still had it. The screen holds its OWN catalogue and the window
         // starts worlds from the one it kept, so a tick had to be carried back
@@ -1118,6 +1303,7 @@ mod tests {
 
     fn listing(id: &str) -> crate::launcher::Listing {
         crate::launcher::Listing {
+            settings: Vec::new(),
             world_options: Vec::new(),
             id: id.to_owned(),
             name: id.to_owned(),
@@ -1260,6 +1446,51 @@ mod tests {
         assert_eq!(screen.remember_typed(), Action::None);
         assert!(screen.library.entries.is_empty());
         assert!(screen.notice.is_some());
+    }
+
+    #[test]
+    fn a_mods_tab_setting_answer_lands_where_join_will_read_it() {
+        // UI ask 20 part 2: the value the Mods tab writes must be the one the
+        // world sends on join — its `Entry::settings`, keyed by qualified id —
+        // or, for a world not yet made, the pending map `Action::Create`
+        // carries into the new entry. A server records nothing.
+        let mut screen = front(vec![
+            world("Old", &[]),
+            Entry {
+                kind: Kind::Remote {
+                    address: "example.com:4433".to_owned(),
+                },
+                ..world("Far", &[])
+            },
+        ]);
+
+        // A local world selected: its entry takes the answer, and the window
+        // is told which world to store it under.
+        screen.selected = Some(0);
+        assert!(screen.set_setting_answer("hud:size", 2));
+        assert_eq!(screen.library.entries[0].settings["hud:size"], 2);
+        assert_eq!(
+            screen.take_answered_settings(),
+            Some((
+                "Old".to_owned(),
+                std::collections::BTreeMap::from([("hud:size".to_owned(), 2)])
+            ))
+        );
+        assert_eq!(screen.take_answered_settings(), None, "reported once");
+        assert!(screen.pending_settings.is_empty());
+
+        // A server selected: nothing is recorded anywhere.
+        screen.selected = Some(1);
+        assert!(!screen.set_setting_answer("hud:size", 1));
+        assert!(screen.library.entries[1].settings.is_empty());
+        assert!(screen.pending_settings.is_empty());
+
+        // Nothing selected: a new world, so the answer waits to be carried.
+        screen.selected = None;
+        assert!(screen.set_setting_answer("hud:compact", 1));
+        assert_eq!(screen.pending_settings["hud:compact"], 1);
+        assert_eq!(screen.take_answered_settings(), None);
+        assert!(screen.library.entries[0].settings.contains_key("hud:size"));
     }
 
     #[test]

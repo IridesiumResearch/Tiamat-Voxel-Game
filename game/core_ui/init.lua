@@ -194,6 +194,9 @@ local function shapes_tab(player)
     local mask = cut[player] or 0x7FFFFFF
     local material = list[pick] and list[pick].material or 1
     local cost = cells(mask)
+    -- Declared as a `[[setting]]` in mod.toml (UI ask 20), answered per player:
+    -- a boolean, true until the player says otherwise.
+    local show_cost = game.setting(player, "core_ui:show_cost") ~= false
 
     local children = {
         { type = "label", text = "Shape crafting" },
@@ -231,7 +234,7 @@ local function shapes_tab(player)
             type = "label",
             text = cost == 0
                 and "Chiselled away to nothing — right-click to start again."
-                or ("One of these costs " .. cost .. " units."),
+                or (show_cost and ("One of these costs " .. cost .. " units.") or ""),
         }
     end
     children[#children + 1] = {

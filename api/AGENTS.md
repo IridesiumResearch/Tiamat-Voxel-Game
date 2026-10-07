@@ -531,6 +531,27 @@ a boolean or the chosen STRING — never the raw index — so comparing against
 `"unfair"` keeps working when you insert an option above it, and it answers your
 declared default for a player who has never touched it.
 
+**Declare it in `mod.toml` if the start screen should show it.** The start
+screen runs no Lua, so a setting only `register_setting` knows about appears on
+the in-game settings page but not under your mod on the Mods tab. The same
+setting as a `[[setting]]` shows in both, with the same fields as
+`[[world_option]]` (`id`, `name`, `description`, `options`, `default`):
+
+```toml
+[[setting]]
+id = "difficulty"
+name = "How hard the mimics hit"
+options = ["gentle", "ordinary", "unfair"]
+default = 2        # ONE-BASED here, like [[world_option]]: "ordinary"
+```
+
+One declaration per id: a `register_setting` for an id `mod.toml` already
+declares fails your mod's load ("`my_mod:difficulty` is declared in mod.toml;
+declare a setting once"). `game.setting(uuid, "my_mod:difficulty")` answers the
+same either way. Note the one difference of convention: `register_setting`'s
+`default` is a zero-based index, a manifest's is one-based (a toggle is 0 or 1
+in both).
+
 **Answers belong to the world, not to the machine.** A player's choices are
 remembered per world and per server, so they are still there when they come
 back to that server and do not follow them into the next one. That is the same
