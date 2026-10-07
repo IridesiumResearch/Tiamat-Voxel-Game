@@ -97,18 +97,22 @@ pub struct Placement {
     pub units: u32,
 }
 
-/// What placing a `whole` material would write: its shape, into an empty
-/// block, for a whole block's units (Sub-Node Contract §7.5).
+/// What placing a `whole` material would write: the air cells of its shape,
+/// for a whole block's units (Sub-Node Contract §7.5).
 ///
 /// The brush is not consulted, as it is not for a cut: the material's shape is
 /// the material's, and a whole thing is placed whole or not at all. `filled`
-/// is what the target block already holds; anything at all in it refuses the
-/// placement, because a whole material never shares a block.
+/// is what the target block already holds. **A cell of the shape that is
+/// already ground stays ground** (§7.5, §7.6): a campfire set down in a carved
+/// slope stands among the slope's cells, its model clipping through them,
+/// which is what the designer asked for in place of a campfire floating a
+/// block above them. Only a shape with no air cell at all is refused. The
+/// caller still refuses a block that holds another whole material.
 ///
 /// # Errors
 ///
 /// [`Refusal::NothingHeld`] if fewer than a block's units are held, or
-/// [`Refusal::Occupied`] if the block is not empty.
+/// [`Refusal::Occupied`] if no cell of the shape is air.
 pub fn plan_whole(
     target: SubNodePos,
     held: u32,
@@ -118,14 +122,54 @@ pub fn plan_whole(
     if held < crate::UNITS_PER_BLOCK {
         return Err(Refusal::NothingHeld);
     }
-    if filled & crate::block::OCCUPANCY_FULL != 0 {
+    let occupancy = shape & !filled & crate::block::OCCUPANCY_FULL;
+    if occupancy == 0 {
         return Err(Refusal::Occupied);
     }
     Ok(Placement {
         block: target.block(),
-        occupancy: shape & crate::block::OCCUPANCY_FULL,
+        occupancy,
         units: crate::UNITS_PER_BLOCK,
     })
+}
+
+/// How many of a block's 27 cells make it ground to place on: three quarters,
+/// rounded up (Sub-Node Contract §7.6).
+pub const GROUND_CELLS: u32 = 21;
+
+/// Whether a block holding `filled` is ground — a floor to place ON — rather
+/// than a partial block to place INTO (Sub-Node Contract §7.6).
+#[must_use]
+pub const fn is_ground(filled: u32) -> bool {
+    (filled & crate::block::OCCUPANCY_FULL).count_ones() >= GROUND_CELLS
+}
+
+/// Where a placement aimed across `face` from `asked` lands (Sub-Node Contract
+/// §7.6): `asked` itself, unless the face is a TOP face and the block under it
+/// is not ground, in which case the cell across the face — inside that block —
+/// is where the thing goes, so it stands on the first full block beneath
+/// rather than floating over a partial one. `filled_under` is what the block
+/// under the face holds, read by the caller only when the question arises.
+#[must_use]
+pub fn landing(
+    asked: SubNodePos,
+    face: [i8; 3],
+    filled_under: impl FnOnce(BlockPos) -> u32,
+) -> SubNodePos {
+    if face != [0, 1, 0] {
+        return asked;
+    }
+    let under = SubNodePos::new(asked.x, asked.y - 1, asked.z);
+    if under.block() == asked.block() {
+        // Aimed at a cell inside the block's own top: the placement is already
+        // into the partial block, as a chisel's would be.
+        return asked;
+    }
+    if is_ground(filled_under(under.block())) {
+        asked
+    } else {
+        under
+    }
 }
 
 /// Works out what placing into `target` with `brush` would write, given what is
@@ -979,9 +1023,10 @@ mod tests {
     }
 
     #[test]
-    fn a_whole_material_places_its_shape_into_an_empty_block_for_a_whole_blocks_units() {
-        // Contract §7.5: the shape as declared, 27 units whatever it occupies,
-        // and never into a block that holds anything.
+    fn a_whole_material_places_the_air_cells_of_its_shape_for_a_whole_blocks_units() {
+        // Contract §7.5: the shape as declared, 27 units whatever it occupies;
+        // among ground cells it takes the air ones and leaves the ground
+        // (§7.6), and only a shape with no air at all is refused.
         let bottom: u32 = (0..9).map(|i| 1 << i).sum();
         let placed = plan_whole(cell(4, 1, 2), 27, bottom, 0).expect("held a whole one");
         assert_eq!(placed.block, cell(4, 1, 2).block());
@@ -995,10 +1040,23 @@ mod tests {
             plan_whole(cell(0, 0, 0), 26, bottom, 0),
             Err(Refusal::NothingHeld)
         );
-        // One cell in the block, even one the shape would not touch, refuses.
+        // Ground in a cell the shape would not touch: the shape goes in whole.
         let top_corner = 1 << 26;
         assert_eq!(
-            plan_whole(cell(0, 0, 0), 27, bottom, top_corner),
+            plan_whole(cell(0, 0, 0), 27, bottom, top_corner)
+                .expect("room")
+                .occupancy,
+            bottom
+        );
+        // Ground in some of the shape's cells: those stay ground, the rest is
+        // written, and the whole block's units are paid all the same.
+        let two_of_them = 0b11;
+        let among = plan_whole(cell(0, 0, 0), 27, bottom, two_of_them).expect("room");
+        assert_eq!(among.occupancy, bottom & !two_of_them);
+        assert_eq!(among.units, UNITS_PER_BLOCK);
+        // No air in the shape at all: nowhere to stand.
+        assert_eq!(
+            plan_whole(cell(0, 0, 0), 27, bottom, bottom),
             Err(Refusal::Occupied)
         );
         // Bits above the 27 are not cells.
@@ -1008,6 +1066,32 @@ mod tests {
                 .units,
             UNITS_PER_BLOCK
         );
+    }
+
+    #[test]
+    fn a_placement_on_a_partial_top_lands_in_the_partial_block_and_on_ground_above_it() {
+        // Contract §7.6: three quarters full is ground; less is a block to
+        // place into, standing on the first full block beneath.
+        assert!(is_ground(crate::block::OCCUPANCY_FULL));
+        assert!(is_ground((1 << 21) - 1), "21 cells is ground");
+        assert!(!is_ground((1 << 20) - 1), "20 cells is not");
+        // Aimed at the top face of a block whose top cell sits at y = 2: the
+        // asked cell is in the block above.
+        let asked = cell(4, 3, 4);
+        let under = cell(4, 2, 4);
+        assert_ne!(asked.block(), under.block());
+        // Over ground: as asked. Over a partial block: into it.
+        assert_eq!(
+            landing(asked, [0, 1, 0], |_| crate::block::OCCUPANCY_FULL),
+            asked
+        );
+        assert_eq!(landing(asked, [0, 1, 0], |_| 0b111), under);
+        // A side face is never redirected, whatever is behind it.
+        assert_eq!(landing(asked, [1, 0, 0], |_| 0), asked);
+        assert_eq!(landing(asked, [0, -1, 0], |_| 0), asked);
+        // Aimed at a cell inside a partial block's own top: already into it.
+        let inside = cell(4, 1, 4);
+        assert_eq!(landing(inside, [0, 1, 0], |_| 0), inside);
     }
 
     #[test]

@@ -851,32 +851,43 @@ an anvil, a crafted machine are the same case: things a player picks up and
 puts down, not stuff a chisel takes a corner off.
 
 - **Dug as one, by any brush.** A sub-node brush aimed at a cell of a whole
-  material digs the block, not the cell. The dig's hardness is the block's
-  (§2's block rule, which for a block of one material is that material's
-  `hardness`; the sub-node share does not apply), and when it completes
-  **every cell of the block goes in one edit**, never in `crumble_order` bites
-  — a whole material is never left half standing, because half of it is not a
+  material digs the whole of it, not the cell. The dig's hardness is the
+  material's own (the sub-node share does not apply), and when it completes
+  **every cell of it goes in one tick**, never in `crumble_order` bites — a
+  whole material is never left half standing, because half of it is not a
   thing. The dig hooks see one dig of one block.
 - **Pays whole.** Breaking it yields 27 units of itself, or its `drops` table
   in full, however many cells its shape occupies (§9).
-- **Placed as its shape, into an empty block, all or nothing.** Whatever brush
-  is held, loose material of a whole material fills the material's **shape**
-  (below) and costs 27 units; if any of the block's 27 cells is not air the
-  placement is `Refusal::Occupied`. The shape is written as declared — not
-  turned to face the player, not tipped against a wall. §7.1's `oriented` is
-  for cuts, which are a player's own; a whole material's shape is the
-  material's, and its model (§8.6) is drawn the same way up.
-- **Nothing is written into its cells.** A block holding a whole material
-  accepts no placement into its empty cells (`Refusal::Whole`: "that is one
-  piece"), and no merge write — a §7.4 merge naming a cell of such a block is a
-  mod error, logged, and the write is skipped. It never shares a block with
-  another material, from either side: a sub-node write OF a whole material — a
-  brush's single cell, a §5 sub-node worldgen write, a merge — is refused the
-  same way. Block-resolution writes write its shape: a placement,
-  `game.set_block`, a stamped plan, and a generator's `set_block` and
-  `set_world`. A generator's AREA fills (`fill_density`, cover, the palette, a
-  scattered schematic) are terrain and take a material as named, a full cube;
-  a schematic that wants a whole material's shape carries the cells itself.
+- **Placed as its shape, into the air of a block, for a whole block's units.**
+  Whatever brush is held, loose material of a whole material fills the
+  material's **shape** (below) and costs 27 units. The shape's cells that are
+  air are written; **a cell of the shape that already holds ground stays
+  ground**, and the model (§8.6) is drawn whole over it — a campfire set down
+  on a chiselled slope stands in the slope's block among its cells, clipping
+  through them, rather than floating a block above (§7.6; the designer,
+  2026-10-07). Only when no cell of the shape is air is the placement
+  `Refusal::Occupied`. The shape is written as declared — not turned to face
+  the player, not tipped against a wall. §7.1's `oriented` is for cuts, which
+  are a player's own; a whole material's shape is the material's, and its
+  model is drawn the same way up.
+- **Nothing is written into its block afterwards.** A block holding a whole
+  material accepts no placement into its empty cells (`Refusal::Whole`: "that
+  is one piece") — not a chisel's cell, not loose material topping up the
+  ground beside it — and no merge write: a §7.4 merge naming a cell of such a
+  block is a mod error, logged, and the write is skipped. Two whole materials
+  never share a block. A sub-node write OF a whole material — a brush's single
+  cell, a §5 sub-node worldgen write, a merge — is refused the same way.
+  Block-resolution writes write its shape: a placement, `game.set_block`, a
+  stamped plan, and a generator's `set_block` and `set_world`. A generator's
+  AREA fills (`fill_density`, cover, the palette, a scattered schematic) are
+  terrain and take a material as named, a full cube; a schematic that wants a
+  whole material's shape carries the cells itself.
+- **Its cells are its own, and the ground's are the ground's.** A dig of the
+  whole material takes every cell OF IT in one tick and none of the ground
+  beside it; a dig aimed at the ground in the same block — a chisel's cell, or
+  a block brush crumbling the block — takes ground cells only and leaves the
+  whole material standing, so a block brush never chips a campfire apart cell
+  by cell for one unit each after it was paid for whole.
 - **Its cells are ordinary cells.** Collision (§2), lighting (§3) and fluid
   (§4) ask the same per-cell questions they ask of any `Partial` block: a shape
   with empty cells holds fluid in them, lets light through them, and is stood
@@ -891,9 +902,44 @@ chisel could take apart would be a cut, and a cut is carried as a cut (§9.1),
 not registered as a material.
 
 Implemented by `dig::Brush::Whole` (chosen when the dig is set, from the
-material under the aim), `place::plan` for the shape and the refusals, and the
-block-resolution write paths' shape lookup; `BlockRules::whole`/`shape` carry
-the declaration and `MaterialDef::whole` tells the client to outline the block.
+material under the aim), `place::plan_whole` for the shape and the refusals, and
+the block-resolution write paths' shape lookup; `BlockRules::whole`/`shape` carry
+the declaration and `MaterialDef::whole` tells the client to outline the
+material's cells.
+
+### 7.6 Ground that is not a full block
+
+(Added 2026-10-07, the designer.) Sub-node terrain means the top of the
+ground is very often a block that is only partly full — a carved slope, a
+chiselled floor, the last layer of a hill — and a placement aimed at its top
+face used to land in the block above it, standing a campfire or a torch two
+thirds of a block in the air over the cells it was pointed at.
+
+**A block three quarters full or more is ground; a block less full is not.**
+Placing against the top face of a block holding at least 21 of its 27 cells
+puts the thing in the block above, as against any floor. Against the top face
+of a block holding fewer, the thing is placed **into that block's own space**,
+standing on the first full block beneath:
+
+- a whole material (§7.5) takes the air cells of its shape there and its model
+  clips through the ground cells that remain — a torch stands on the full
+  block under a thin layer of gravel, a campfire sits in a shallow dip;
+- loose material with a block brush fills that block's gaps (§7.1's gap
+  fill), rather than starting a floating block above them;
+- a sub-node brush is not redirected: a chisel's cell goes exactly where it was
+  pointed, which is what a chisel is for;
+- a cut (§9.1) is not redirected either: it needs every one of its cells in
+  air, and a crafted stair on a half-dug floor lands where it was aimed, as
+  before, for the player to fill the gaps under it first.
+
+The threshold is on the AIMED block only, one step: a thing set down in a
+block whose floor is itself a partial block stands on that partial block, as
+anything placed by a chisel there would. The client aims as it always did
+(the cell across the face it points at); the server decides where that lands,
+as charter rule 2 has it.
+
+Implemented by `place::is_ground` (the threshold) and the placement's target
+choice in the server's placement loop.
 
 ---
 

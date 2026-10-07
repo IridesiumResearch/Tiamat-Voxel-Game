@@ -4026,19 +4026,28 @@ impl ServerHandle {
                             // So a block brush asks the BLOCK what it is made
                             // of and stops when the block is empty; a chisel
                             // asks its one cell, as it always did.
+                            // A whole material is dug by the cell under the
+                            // aim, as a chisel is: the block may also hold the
+                            // ground it stands in (Contract §7.5, §7.6), and
+                            // the ground is not what is being dug. A block
+                            // brush reads the block, leaving out any whole
+                            // material standing in it — that is dug by itself
+                            // or not at all.
                             let material = match brush {
-                                tiamat_core::dig::Brush::SubNode => world
+                                tiamat_core::dig::Brush::SubNode
+                                | tiamat_core::dig::Brush::Whole => world
                                     .subnode(&digging_in, target, &mut source)
                                     .unwrap_or(tiamat_core::MaterialId::AIR),
-                                tiamat_core::dig::Brush::Block | tiamat_core::dig::Brush::Whole => {
-                                    world
-                                        .block_cells(&digging_in, target.block(), &mut source)
-                                        .ok()
-                                        .and_then(|cells| {
-                                            cells.into_iter().find(|material| !material.is_air())
+                                tiamat_core::dig::Brush::Block => world
+                                    .block_cells(&digging_in, target.block(), &mut source)
+                                    .ok()
+                                    .and_then(|cells| {
+                                        cells.into_iter().find(|material| {
+                                            !material.is_air()
+                                                && shared.whole_shape(*material).is_none()
                                         })
-                                        .unwrap_or(tiamat_core::MaterialId::AIR)
-                                }
+                                    })
+                                    .unwrap_or(tiamat_core::MaterialId::AIR),
                             };
                             if material.is_air() {
                                 // Whatever they aimed at is already gone —
@@ -4082,10 +4091,18 @@ impl ServerHandle {
                                 // A whole material is a block of one material,
                                 // so the blend is its own hardness; the sub-node
                                 // share never applies to it (Contract §7.5).
-                                tiamat_core::dig::Brush::Block | tiamat_core::dig::Brush::Whole => {
-                                    let cells = world
-                                        .block_cells(&digging_in, target.block(), &mut source)
-                                        .unwrap_or(tiamat_core::block::EMPTY_CELLS);
+                                tiamat_core::dig::Brush::Whole => {
+                                    shared.block_hardness_of(&tiamat_core::block::BlockView::Uniform(
+                                        material,
+                                    ))
+                                }
+                                tiamat_core::dig::Brush::Block => {
+                                    let cells = ground_cells_of(
+                                        world
+                                            .block_cells(&digging_in, target.block(), &mut source)
+                                            .unwrap_or(tiamat_core::block::EMPTY_CELLS),
+                                        |each| shared.whole_shape(each).is_some(),
+                                    );
                                     shared.block_hardness_of(&tiamat_core::block::BlockView::Mixed(
                                         &cells,
                                     ))
@@ -4106,6 +4123,7 @@ impl ServerHandle {
                                             .iter()
                                             .filter(|material| {
                                                 **material != tiamat_core::MaterialId::AIR
+                                                    && shared.whole_shape(**material).is_none()
                                             })
                                             .count()
                                     })
@@ -4231,13 +4249,16 @@ impl ServerHandle {
                                         material: tiamat_core::MaterialId::AIR.0,
                                     }]
                                 }
-                                // The whole block, in one edit (Contract §7.5).
-                                tiamat_core::dig::Brush::Whole => {
-                                    vec![tiamat_core::proto::Edit::Block {
-                                        pos: target.block(),
-                                        material: tiamat_core::MaterialId::AIR.0,
-                                    }]
-                                }
+                                // Every cell of the whole material, in one
+                                // tick, and none of the ground it may stand
+                                // among (Contract §7.5, §7.6).
+                                tiamat_core::dig::Brush::Whole => whole_bites(
+                                    &mut world,
+                                    &mut source,
+                                    &digging_in,
+                                    target.block(),
+                                    material,
+                                ),
                                 // **The block comes apart in a fixed random
                                 // order**, seeded by its own position so every
                                 // client sees the same shape at the same moment
@@ -4269,6 +4290,7 @@ impl ServerHandle {
                                         target.block(),
                                         chips,
                                         toward,
+                                        |each| shared.whole_shape(each).is_some(),
                                     )
                                 }
                             };
@@ -4314,6 +4336,12 @@ impl ServerHandle {
                             // overworld would dig a hole under somebody who is
                             // nowhere near it.
                             let where_they_are = shared.player_domain(&uuid);
+                            // A whole material's yield is paid ONCE for the
+                            // tick its cells come off in, however many edits
+                            // that takes — one cell among the ground's is one
+                            // edit each, and each paid a whole block before
+                            // this flag existed (ten cells, 270 units).
+                            let mut whole_paid = false;
                             for edit in edits {
                                 match world.apply(&where_they_are, &edit, &mut source) {
                                     Ok((_, removed)) => {
@@ -4332,7 +4360,14 @@ impl ServerHandle {
                                         // dig, paid as the block comes apart —
                                         // or, for a whole material, paid in
                                         // full for the one edit it comes off in.
-                                        let removed = whole_yield.clone().unwrap_or(removed);
+                                        let removed = match &whole_yield {
+                                            Some(all) if !whole_paid => {
+                                                whole_paid = true;
+                                                all.clone()
+                                            }
+                                            Some(_) => Vec::new(),
+                                            None => removed,
+                                        };
                                         let paid = shared.yield_of(&uuid, removed);
                                         shared.credit(uuid, paid);
                                         shared.broadcast_in(
@@ -4439,13 +4474,66 @@ impl ServerHandle {
                             // client that knows nothing about shapes sends.
                             let shape = claim.shape;
 
+                            // **What a block already holds**, as a mask of
+                            // occupied cells, IN THE DOMAIN THE PLAYER IS IN.
+                            //
+                            // This read `OVERWORLD` until 2026-09-06, while
+                            // every other line in the placement path used
+                            // `building_in`. In any other space the mask came
+                            // back describing terrain from somewhere else, and
+                            // `place::plan` refused a block brush wherever the
+                            // OVERWORLD happened to be solid at those
+                            // coordinates — which for the reference generator
+                            // is everything below y = 0.
+                            //
+                            // Reported from the window: in a mod's domain with
+                            // hills either side of zero, nothing could be
+                            // placed on half the terrain and digging was fine.
+                            // Digging never asks this question.
+                            let contents = |at: tiamat_core::BlockPos,
+                                                domain: &str,
+                                                world: &mut crate::world::World,
+                                                source: &mut dyn crate::world::ChunkSource| {
+                                world.block_cells(domain, at, source).map_or(0, |cells| {
+                                    let mut mask = 0;
+                                    for (index, cell) in cells.iter().enumerate() {
+                                        if !cell.is_air() {
+                                            mask |= 1 << index;
+                                        }
+                                    }
+                                    mask
+                                })
+                            };
+
+                            // **Ground that is not a full block** (Sub-Node
+                            // Contract §7.6, the designer 2026-10-07): a thing
+                            // placed against the top of a block less than
+                            // three quarters full goes INTO that block, to
+                            // stand on the first full block beneath, rather
+                            // than floating a block above its few cells. For
+                            // a whole material and for loose material with a
+                            // block brush; a chisel's cell and a cut land
+                            // where they were aimed, for the reasons the
+                            // contract gives.
+                            let redirects = claim.cells.is_none()
+                                && claim.shape.is_none()
+                                && (shared.whole_shape(material).is_some()
+                                    || brush != tiamat_core::dig::Brush::SubNode);
+                            let target = if redirects {
+                                tiamat_core::place::landing(request.target, request.face, |under| {
+                                    contents(under, &building_in, &mut world, &mut source)
+                                })
+                            } else {
+                                request.target
+                            };
+
                             // **Turned to face whoever placed it**, and toward
                             // their feet against a wall — reported from the
                             // window, and the reason a cut has a front at all.
                             // The charge below matches on the AUTHORED shape,
                             // which is what the player is carrying; only the
                             // geometry turns.
-                            let block = request.target.block();
+                            let block = target.block();
                             let toward = shared
                                 .player_eye(&request.actor)
                                 .map_or([0.0, 1.0], |(origin, eye)| {
@@ -4487,36 +4575,6 @@ impl ServerHandle {
                                 tiamat_core::place::oriented_cells(cells, request.face, toward)
                             });
 
-                            // **What a block already holds**, as a mask of
-                            // occupied cells, IN THE DOMAIN THE PLAYER IS IN.
-                            //
-                            // This read `OVERWORLD` until 2026-09-06, while
-                            // every other line in the placement path used
-                            // `building_in`. In any other space the mask came
-                            // back describing terrain from somewhere else, and
-                            // `place::plan` refused a block brush wherever the
-                            // OVERWORLD happened to be solid at those
-                            // coordinates — which for the reference generator
-                            // is everything below y = 0.
-                            //
-                            // Reported from the window: in a mod's domain with
-                            // hills either side of zero, nothing could be
-                            // placed on half the terrain and digging was fine.
-                            // Digging never asks this question.
-                            let contents = |at: tiamat_core::BlockPos,
-                                                domain: &str,
-                                                world: &mut crate::world::World,
-                                                source: &mut dyn crate::world::ChunkSource| {
-                                world.block_cells(domain, at, source).map_or(0, |cells| {
-                                    let mut mask = 0;
-                                    for (index, cell) in cells.iter().enumerate() {
-                                        if !cell.is_air() {
-                                            mask |= 1 << index;
-                                        }
-                                    }
-                                    mask
-                                })
-                            };
 
                             // **A block brush tops up whatever it is aimed
                             // at**, Sub-Node Contract §7.1. It used to top up
@@ -4531,7 +4589,6 @@ impl ServerHandle {
                             // Nothing is displaced by this. The per-cell air
                             // check below is what keeps a placement additive,
                             // and it is unchanged.
-                            let target = request.target;
                             let filled =
                                 contents(target.block(), &building_in, &mut world, &mut source);
 
@@ -7068,6 +7125,68 @@ impl tiamat_core::particle::Access for Sprayer {
 /// `toward` points from the block to whoever is digging it, so the face they
 /// are looking at comes away first and what is left is resting against the far
 /// side — see [`tiamat_core::dig::crumble_order`].
+/// `cells` with every cell of a whole material made air: what a block brush
+/// sees of a block a campfire stands in (Sub-Node Contract §7.5, §7.6) — the
+/// ground, and not the thing paid for whole.
+fn ground_cells_of(
+    mut cells: tiamat_core::block::Cells,
+    is_whole: impl Fn(tiamat_core::MaterialId) -> bool,
+) -> tiamat_core::block::Cells {
+    for cell in &mut cells {
+        if !cell.is_air() && is_whole(*cell) {
+            *cell = tiamat_core::MaterialId::AIR;
+        }
+    }
+    cells
+}
+
+/// The edits that take every cell of `material` out of `block` in one tick
+/// (Sub-Node Contract §7.5): the block itself to air when it holds nothing
+/// else, and each of the material's cells otherwise, so the ground the thing
+/// stood among stays exactly as it was.
+fn whole_bites(
+    world: &mut crate::world::World,
+    source: &mut dyn crate::world::ChunkSource,
+    domain: &str,
+    block: tiamat_core::BlockPos,
+    material: tiamat_core::MaterialId,
+) -> Vec<tiamat_core::proto::Edit> {
+    let Ok(cells) = world.block_cells(domain, block, source) else {
+        return Vec::new();
+    };
+    if cells.iter().all(|cell| cell.is_air() || *cell == material) {
+        return vec![tiamat_core::proto::Edit::Block {
+            pos: block,
+            material: tiamat_core::MaterialId::AIR.0,
+        }];
+    }
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| **cell == material)
+        .map(|(slot, _)| tiamat_core::proto::Edit::SubNode {
+            pos: cell_of(block, slot),
+            material: tiamat_core::MaterialId::AIR.0,
+        })
+        .collect()
+}
+
+/// The world cell at `slot` of `block`, in `subnode_index` order.
+fn cell_of(block: tiamat_core::BlockPos, slot: usize) -> tiamat_core::SubNodePos {
+    let (dx, dy, dz) = tiamat_core::block::subnode_offset(slot);
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "three, and sub-node offsets of 0, 1 or 2"
+    )]
+    let span = tiamat_core::SUBNODES_PER_AXIS as i32;
+    #[expect(clippy::cast_possible_wrap, reason = "a sub-node offset is 0, 1 or 2")]
+    tiamat_core::SubNodePos::new(
+        block.x * span + dx as i32,
+        block.y * span + dy as i32,
+        block.z * span + dz as i32,
+    )
+}
+
 fn crumble_bites(
     world: &mut crate::world::World,
     source: &mut dyn crate::world::ChunkSource,
@@ -7075,6 +7194,7 @@ fn crumble_bites(
     block: tiamat_core::BlockPos,
     count: u32,
     toward: [f64; 3],
+    is_whole: impl Fn(tiamat_core::MaterialId) -> bool,
 ) -> Vec<tiamat_core::proto::Edit> {
     // **The digger's domain, not the overworld's.** These cells decide WHICH
     // sub-nodes to take out, and the caller applies the result to the domain
@@ -7092,7 +7212,14 @@ fn crumble_bites(
             break;
         }
         let slot = usize::from(index);
-        if cells.get(slot).copied() == Some(tiamat_core::MaterialId::AIR) {
+        // Air, or a whole material standing in the block — a campfire among
+        // the ground's cells is dug by itself, never crumbled with the ground
+        // (Contract §7.5).
+        if cells
+            .get(slot)
+            .copied()
+            .is_none_or(|cell| cell.is_air() || is_whole(cell))
+        {
             continue;
         }
         let (dx, dy, dz) = tiamat_core::block::subnode_offset(slot);

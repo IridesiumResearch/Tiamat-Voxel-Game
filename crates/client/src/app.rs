@@ -2631,7 +2631,25 @@ impl App {
             return Vec::new();
         };
 
-        outline_of(&self.store, cell, self.locks_onto(cell))
+        // A whole material among the ground's cells (Contract §7.6) outlines
+        // its own cells and not the ground's: the dig takes it alone. A block
+        // brush on the ground there outlines the ground alone, for the same
+        // reason the other way round.
+        let whole_set = &self.block_models.whole;
+        let only = self
+            .store
+            .get(cell.block().chunk())
+            .and_then(|chunk| chunk.get_subnode(cell))
+            .filter(|material| whole_set.contains(&material.get()));
+        outline_of(
+            &self.store,
+            cell,
+            self.locks_onto(cell),
+            |material| match only {
+                Some(this) => material == this,
+                None => !whole_set.contains(&material.get()),
+            },
+        )
     }
 
     /// Hands the current selection to the renderer, camera-relative.
@@ -7096,6 +7114,7 @@ fn outline_of(
     store: &crate::world::ChunkStore,
     cell: tiamat_core::SubNodePos,
     block_wide: bool,
+    counts: impl Fn(tiamat_core::MaterialId) -> bool,
 ) -> Vec<tiamat_core::SubNodePos> {
     if !block_wide {
         return vec![cell];
@@ -7111,7 +7130,7 @@ fn outline_of(
         .filter(|at| {
             chunk
                 .get_subnode(*at)
-                .is_some_and(|material| !material.is_air())
+                .is_some_and(|material| !material.is_air() && counts(material))
         })
         .collect();
     if occupied.is_empty() {
@@ -7317,7 +7336,7 @@ mod tests {
         let brazier_cell = BlockPos::new(1, 0, 0).subnode(0, 0, 0);
         let stone_cell = BlockPos::new(3, 0, 0).subnode(0, 0, 0);
         // The chisel is a sub-node brush: block_wide = false from the tool.
-        let chisel = |cell| outline_of(&store, cell, is_whole_cell(&store, &whole, cell));
+        let chisel = |cell| outline_of(&store, cell, is_whole_cell(&store, &whole, cell), |_| true);
         assert_eq!(
             chisel(brazier_cell).len(),
             3,

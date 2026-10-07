@@ -1338,10 +1338,17 @@ game.register_block{
 A model block is **whole** without saying so: any tool digs the block, not the
 cell — a chisel included — in the block's own `hardness`, it comes off in one
 piece and pays a whole block's units (27, or your `drops` table in full) however
-many cells its shape has; placing it writes the shape into an EMPTY block and
-costs 27 units whatever brush is held; and nothing is ever written into its
-block — a chisel cannot fill in a campfire, and a `set_block` with a mask or a
-merge naming one is refused and logged. `whole = true` alone, with no model,
+many cells its shape has; placing it writes the air cells of its shape and
+costs 27 units whatever brush is held — on a chiselled slope it stands among
+the slope's cells, the model clipping through them, because **a block under
+three quarters full is not ground**: placing against its top puts the thing
+INTO that block, standing on the first full block beneath, rather than
+floating a block above (Contract §7.6; the same rule fills a thin floor's gaps
+with loose material instead of starting a block over it); and nothing is ever
+written into its block afterwards — a chisel cannot fill in a campfire, and a
+`set_block` with a mask or a merge naming one is refused and logged. Dug, it
+comes up alone and the ground it stood among stays; a block brush on that
+ground takes the ground and leaves it. `whole = true` alone, with no model,
 gives a cube-looking block the same one-piece behaviour. `shape` needs one or
 the other: a registered shape a chisel could take apart would be a cut, and a
 cut is carried, not registered.
