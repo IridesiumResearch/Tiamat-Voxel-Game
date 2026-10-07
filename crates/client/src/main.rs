@@ -1110,6 +1110,15 @@ impl Client {
         // So the HUD reports the mode in force rather than the flag that asked
         // for one. See `configure_surface`.
         app.set_present_mode(present_mode);
+        // What the installed mods are called, for the settings screen's
+        // dropdowns: a mod's options fold under its name there, and the
+        // server sends only ids.
+        app.set_mod_names(
+            self.catalogue
+                .mods
+                .iter()
+                .map(|listing| (listing.id.clone(), listing.name.clone())),
+        );
         // The environment belongs to the binary, not to `App`: a library
         // reading it would be process-global state a caller cannot control,
         // which is a poor thing for tests and a worse one for an embedded
@@ -2175,6 +2184,60 @@ fn draw_menu(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dressi
     }
 }
 
+/// A mod's settings grouped by the mod that asked, in the order they arrived.
+///
+/// The table arrives sorted by mod already (the server builds it that way), so
+/// this is a grouping and not a sort; done here so the screen can fold each
+/// group under one heading rather than watch for the owner changing.
+fn settings_by_mod(
+    settings: &[tiamat_core::proto::SettingDef],
+) -> Vec<(&str, Vec<&tiamat_core::proto::SettingDef>)> {
+    let mut groups: Vec<(&str, Vec<&tiamat_core::proto::SettingDef>)> = Vec::new();
+    for def in settings {
+        match groups.iter_mut().find(|(id, _)| *id == def.mod_id.as_str()) {
+            Some((_, defs)) => defs.push(def),
+            None => groups.push((def.mod_id.as_str(), vec![def])),
+        }
+    }
+    groups
+}
+
+/// One of a mod's options: a checkbox or a dropdown, and its line of help.
+fn draw_mod_setting(app: &mut App, ui: &mut egui::Ui, def: &tiamat_core::proto::SettingDef) {
+    let current = app.mod_setting(def);
+    match def.kind {
+        tiamat_core::proto::SettingKind::Toggle => {
+            let mut on = current != 0;
+            if ui.checkbox(&mut on, &def.name).changed() {
+                app.set_mod_setting(&def.id, u32::from(on));
+            }
+        }
+        tiamat_core::proto::SettingKind::Choice => {
+            let index = (current as usize).min(def.options.len().saturating_sub(1));
+            let shown = def
+                .options
+                .get(index)
+                .map_or_else(String::new, Clone::clone);
+            ui.horizontal(|ui| {
+                ui.label(&def.name);
+                egui::ComboBox::from_id_salt(&def.id)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (n, option) in def.options.iter().enumerate() {
+                            let mut picked = index == n;
+                            if ui.selectable_value(&mut picked, true, option).clicked() {
+                                app.set_mod_setting(&def.id, u32::try_from(n).unwrap_or(0));
+                            }
+                        }
+                    });
+            });
+        }
+    }
+    if !def.description.is_empty() {
+        ui.indent(&def.id, |ui| client::theme::secondary(ui, &def.description));
+    }
+}
+
 fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dressing) {
     // Collected before the panel runs, because drawing borrows the registry
     // and the buttons need `&mut App` to act.
@@ -2265,54 +2328,33 @@ fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dr
                 // Grouped by the mod that asked, because "Compact hotbar" means
                 // nothing without knowing who offers it, and two mods may
                 // reasonably offer the same thing.
+                // **One dropdown per mod, closed.** The designer, 2026-10-07:
+                // with eight mods each offering options, a flat run of them
+                // under one heading was the mods writing their settings all
+                // over the page. Each mod's options now fold under the mod's
+                // own name, so the page lists the mods and a player opens the
+                // one they mean.
                 let settings = app.mod_settings().to_vec();
                 if !settings.is_empty() {
                     ui.heading("mods");
-                    let mut owner: Option<String> = None;
-                    for def in &settings {
-                        if owner.as_deref() != Some(def.mod_id.as_str()) {
-                            client::theme::secondary(ui, &def.mod_id);
-                            owner = Some(def.mod_id.clone());
-                        }
-                        let current = app.mod_setting(def);
-                        match def.kind {
-                            tiamat_core::proto::SettingKind::Toggle => {
-                                let mut on = current != 0;
-                                if ui.checkbox(&mut on, &def.name).changed() {
-                                    app.set_mod_setting(&def.id, u32::from(on));
-                                }
+                    for (mod_id, defs) in settings_by_mod(&settings) {
+                        let title = app.mod_name(mod_id).to_owned();
+                        let count = defs.len();
+                        let header = egui::CollapsingHeader::new(title)
+                            .id_salt(("mod-settings", mod_id))
+                            .default_open(false);
+                        header.show(ui, |ui| {
+                            client::theme::secondary(
+                                ui,
+                                format!(
+                                    "{mod_id} · {count} option{}",
+                                    if count == 1 { "" } else { "s" }
+                                ),
+                            );
+                            for def in defs {
+                                draw_mod_setting(app, ui, def);
                             }
-                            tiamat_core::proto::SettingKind::Choice => {
-                                let index =
-                                    (current as usize).min(def.options.len().saturating_sub(1));
-                                let shown = def
-                                    .options
-                                    .get(index)
-                                    .map_or_else(String::new, Clone::clone);
-                                ui.horizontal(|ui| {
-                                    ui.label(&def.name);
-                                    egui::ComboBox::from_id_salt(&def.id)
-                                        .selected_text(shown)
-                                        .show_ui(ui, |ui| {
-                                            for (n, option) in def.options.iter().enumerate() {
-                                                let mut picked = index == n;
-                                                if ui
-                                                    .selectable_value(&mut picked, true, option)
-                                                    .clicked()
-                                                {
-                                                    app.set_mod_setting(
-                                                        &def.id,
-                                                        u32::try_from(n).unwrap_or(0),
-                                                    );
-                                                }
-                                            }
-                                        });
-                                });
-                            }
-                        }
-                        if !def.description.is_empty() {
-                            ui.indent(&def.id, |ui| client::theme::secondary(ui, &def.description));
-                        }
+                        });
                     }
                     ui.separator();
                 }
@@ -2939,6 +2981,41 @@ fn window_icon() -> Option<winit::window::Icon> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mods_options_fold_under_its_own_heading_in_the_order_they_arrived() {
+        // The settings page lists mods, each a dropdown of its own options
+        // (the designer, 2026-10-07). Grouped by the mod that asked, first
+        // appearance first, and a mod's options stay together even if the
+        // table ever interleaved them.
+        let def = |mod_id: &str, id: &str| tiamat_core::proto::SettingDef {
+            mod_id: mod_id.to_owned(),
+            id: id.to_owned(),
+            name: id.to_owned(),
+            description: String::new(),
+            kind: tiamat_core::proto::SettingKind::Toggle,
+            options: Vec::new(),
+            default: 0,
+        };
+        let table = [
+            def("ui", "ui:compact"),
+            def("ui", "ui:tooltips"),
+            def("weather", "weather:flash"),
+            def("ui", "ui:late"),
+        ];
+        let groups = super::settings_by_mod(&table);
+        let shape: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|(id, defs)| (*id, defs.iter().map(|def| def.id.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("ui", vec!["ui:compact", "ui:tooltips", "ui:late"]),
+                ("weather", vec!["weather:flash"]),
+            ]
+        );
+        assert!(super::settings_by_mod(&[]).is_empty());
+    }
 
     #[test]
     fn a_new_world_never_opens_a_forgotten_one() {

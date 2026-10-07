@@ -978,6 +978,15 @@ struct ModSettings {
     /// As declared. Empty until the table arrives on join, and empty for ever
     /// on a server whose mods offer none, which is most of them.
     declared: Vec<tiamat_core::proto::SettingDef>,
+    /// What each mod is called, by id, from the mods installed here.
+    ///
+    /// A setting arrives attributed to a mod ID, and the settings screen
+    /// folds each mod's options under a heading of its own — which wants the
+    /// name the player knows the mod by, not `tiamat_default_ui`. The server
+    /// sends no names; the local catalogue has them for every mod installed
+    /// here, which in singleplayer is every mod there is. A mod a server runs
+    /// that is not installed here shows its id.
+    names: std::collections::BTreeMap<String, String>,
     /// The player's answers, by qualified id, for the world they are in.
     ///
     /// Seeded from the world's own record before the connection opens, so the
@@ -2788,6 +2797,21 @@ impl App {
     #[must_use]
     pub fn mod_settings(&self) -> &[tiamat_core::proto::SettingDef] {
         &self.mod_settings.declared
+    }
+
+    /// Tells the settings screen what the installed mods are called.
+    pub fn set_mod_names(&mut self, names: impl IntoIterator<Item = (String, String)>) {
+        self.mod_settings.names = names.into_iter().collect();
+    }
+
+    /// What the settings screen calls a mod: its name where it is installed
+    /// here, its id otherwise.
+    #[must_use]
+    pub fn mod_name<'a>(&'a self, mod_id: &'a str) -> &'a str {
+        self.mod_settings
+            .names
+            .get(mod_id)
+            .map_or(mod_id, String::as_str)
     }
 
     /// What the player has answered for one setting, or the mod's default.
