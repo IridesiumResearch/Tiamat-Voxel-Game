@@ -29,7 +29,30 @@ rectangle rather than a bottom band (a HUD saying "keep clear of the bottom
 right, 150 by 360"), with sheets narrowing before they overlap it. The mod
 cannot move a sheet itself.
 
-## 20. A mod's settings under its name on the Mods tab (2026-10-07, from the designer)
+## 20. A mod's settings under its name on the Mods tab (2026-10-07, from the designer): LANDED 2026-10-07 (engine c65269b7), awaiting the eye
+
+**Landed.** In two parts. Part 1 (`befe1921`, by the lead): each enabled mod's
+world options sit in a closed "World options" dropdown under its row on the
+Mods tab. Part 2 (`c65269b7`): `[[setting]]` in `mod.toml`, with
+`[[world_option]]`'s fields (`id`, `name`, `description`, `options`,
+`default`; a choice's `default` is one-based in the file, as for world
+options, and zero-based as the value) and `register_setting`'s meaning. Each
+enabled mod shows a second closed dropdown, "Settings . N", whose answers
+edit the selected local world's `Entry::settings` (or a pending map carried
+into a new world's entry), which is what is sent on join and what
+`game.setting` answers. A selected server shows nothing there; its table
+arrives on join. The server registers a manifest setting with the VM before
+the mod's `init.lua`, so the `ModSettings` table, `SetSetting` and
+`game.setting` treat it exactly like a registered one; no protocol change.
+
+*What the mod should do:* declare `[[setting]]` in `mod.toml` for anything the
+start screen should show; keep `register_setting` for the rest; never both
+(one id declared both ways fails the mod's load, naming the id).
+
+*[H]:* on the Mods tab each mod shows its world options and its settings
+under its row; a setting changed there is what `game.setting` answers in the
+world (try `core_ui:show_cost`, under the reference mods).
+
 
 **Wanted.** On the pre-game menu's Mods tab, each mod's own settings under
 its row: what it lets a player choose, where they choose which mods to run,

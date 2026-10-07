@@ -17,10 +17,17 @@ Started 2026-09-29, scaffolded by the engine session from what the
 designer's two-path design and the sibling mods had already fixed
 (`docs/brief.md` in that repo).
 
-**Open as of 2026-10-07: E-S5.** E-S4 landed 2026-10-05; E-S1 and E-S2
-landed 2026-09-30; E-S3 answered below.
+**Open as of 2026-10-07: nothing.** E-S5 landed 2026-10-07; E-S4 landed
+2026-10-05; E-S1 and E-S2 landed 2026-09-30; E-S3 answered below.
 
-## E-S5, a mod's world options under its own entry on the Mods tab — open, asked 2026-10-07
+## E-S5, a mod's world options under its own entry on the Mods tab: LANDED 2026-10-07 (engine befe1921), awaiting the eye
+
+*Landed:* part 1 of UI ask 20 answers it (`befe1921`): each enabled mod's
+`[[world_option]]`s are in a closed dropdown under its row on the Mods tab,
+and nothing is left under the seed box but a line saying where they went.
+Part 2 (`c65269b7`) adds `[[setting]]` to `mod.toml`, so a player setting can sit
+there too; this mod keeps its two world options as they are.
+
 
 *Wanted:* the start screen draws a mod's `[[world_option]]`s under that
 mod's own entry on the Mods tab (`listing_row` in `front.rs`), folded as
