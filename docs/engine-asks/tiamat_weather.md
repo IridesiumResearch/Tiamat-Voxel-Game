@@ -12,12 +12,12 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W33, filed 2026-10-05. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 
-## W33. Rain vanishes in front of the sky (2026-10-05)
+## W33. Rain vanishes in front of the sky (2026-10-05): LANDED 2026-10-07 (engine 9d248a3a), awaiting the eye
 
 **Seen.** The designer: "rain renders on top of the clouds but does not
 render on top of the sky. It vanishes as it passes over the sky." A drop is
@@ -46,6 +46,32 @@ their own depth in their own shader. Gate: heavy rain looked at against
 open sky, against the deck and against a hillside shows the same drops in
 all three, in all three lighting modes; snow the same; the rainbow and the
 stars still sit behind them.
+
+**Landed.** Your diagnosis was right: in Beautiful a drop over open sky left
+the far plane's depth behind it and the composite fogged it to the sky's
+colour. The composite is now two passes, a fog pass (scene to a new float
+`fogged` target: place fog, distance fog, bow, stars) and a finish pass (bloom,
+exposure, tonemap, grade). The particles, and the lightning, which had the same
+fault, are drawn between them, into the fogged frame, tested against the
+scene's depth and fogged by their own distance in their own shader exactly as
+in Classic and Simple (the "post chain fogs" convention in the particle shader
+is retired). Bloom is extracted after them, so an ember still glows. Stars
+and the bow are added in the fog pass, so they sit behind the rain. One
+change to know: exposure now exposes the fog and the sky as well as the scene
+(it used to leave the fog colour alone); every keyframe's exposure is 1.0, so
+nothing moves. The composite's sun-halo tint is not reproduced on drops, which
+are near. **For the mod:** nothing.
+
+Screenshot tests on the software rasteriser: a field of drops across a frame
+with a wall, open sky and a dense deck changes 0.42 / 0.41 / 0.50 of the sky,
+deck and wall regions in Beautiful (the sky was 0.000 before), the same
+order as Classic and Simple; a very bright particle still haloes in Beautiful;
+an opaque drop hides the star behind it.
+
+[H] Heavy rain looked at against open sky, the deck and a hillside shows the
+same drops in all three lighting modes; snow the same; a lightning bolt over
+open sky shows in Beautiful; the stars and the rainbow still sit behind the
+rain.
 ## W32. A light floor on the sky modifier, for night-sight (2026-10-05): LANDED 2026-10-05 (engine daf73304), awaiting the eye
 
 **Seen.** Magic's Wx-M1 asked Weather for a layered sky overlay so its
