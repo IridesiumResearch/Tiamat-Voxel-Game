@@ -10821,3 +10821,263 @@ fn a_mods_model_is_turned_by_its_pitch_about_the_middle_of_its_collider() {
         "the body moved off its middle: {middle} level, {tipped_middle} tipped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Weather ask W33: rain in front of the sky.
+
+/// A grid of opaque red drops spread across the whole frame at `ahead` blocks
+/// from the camera, camera-relative as `set_particles` wants them.
+fn rain_across_the_frame(camera: &Camera, ahead: f32) -> Vec<client::render::particle::Sprite> {
+    let aspect = WIDTH as f32 / HEIGHT as f32;
+    let inverse = camera.view_projection(aspect).inverse();
+    let mut sprites = Vec::new();
+    for column in 0..48 {
+        for row in 0..36 {
+            let ndc_x = (column as f32 + 0.5) / 48.0 * 2.0 - 1.0;
+            let ndc_y = (row as f32 + 0.5) / 36.0 * 2.0 - 1.0;
+            let far = inverse * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+            let direction = (far.truncate() / far.w).normalize();
+            sprites.push(client::render::particle::Sprite {
+                centre: (direction * ahead).to_array(),
+                size: 0.3,
+                colour: [1.0, 0.0, 0.0, 1.0],
+                texture: None,
+                sky: 1.0,
+            });
+        }
+    }
+    sprites
+}
+
+/// Pixels of `rows` whose colour moved by more than `threshold` between two
+/// frames, among those `in_region` picks, and how many it picked.
+fn changed_in(
+    wet: &Image,
+    dry: &Image,
+    threshold: u8,
+    in_region: impl Fn(u32, u32) -> bool,
+) -> (usize, usize) {
+    let (mut changed, mut counted) = (0, 0);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if !in_region(x, y) {
+                continue;
+            }
+            let (Some(a), Some(b)) = (wet.pixel(x, y), dry.pixel(x, y)) else {
+                continue;
+            };
+            counted += 1;
+            if (0..3).any(|c| a[c].abs_diff(b[c]) > threshold) {
+                changed += 1;
+            }
+        }
+    }
+    (changed, counted)
+}
+
+#[test]
+fn rain_is_seen_against_the_sky_the_deck_and_a_hill_alike_in_every_lighting_mode() {
+    // **Weather ask W33: "rain renders on top of the clouds but does not
+    // render on top of the sky."** Mode 3 drew particles into the scene and
+    // then fogged every pixel from the scene's depth; a drop over open sky
+    // leaves the far plane's depth behind it (particles test depth and do not
+    // write it), so the fog took it for sky and painted it out, while one
+    // over the cloud deck or a wall survived. Measured on this scene (share of
+    // each region a field of drops changed), BEFORE the fix, in Beautiful:
+    // sky 0.000, deck 0.414, hill 0.500; Simple and Classic sky 0.457, deck
+    // 0.39 to 0.41, hill 0.39 to 0.50. AFTER: Beautiful sky 0.415, deck
+    // 0.414, hill 0.500 (the numbers print with --nocapture).
+    //
+    // The view: a wall (the hill) in the lower part, open sky above it, and
+    // a dense deck overhead. The regions are found from the dry frames
+    // themselves: the hill is the rows well below the wall's top edge, the
+    // deck is whatever the deck changed, and the sky is the rest above the
+    // edge.
+    let Some(gpu) = gpu() else { return };
+    let chunks = wall_scene();
+    let mut camera = Camera {
+        position: Position::from_world(4.0, 10.0, 24.0),
+        ..Camera::default()
+    };
+    camera.look(-std::f32::consts::FRAC_PI_2, 0.5);
+    let edge = on_screen(&camera, [16.0, 16.0, 24.0]).1;
+    let rain = rain_across_the_frame(&camera, 10.0);
+
+    for mode in MODES {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
+        upload(&mut renderer, &chunks);
+        // A game's view distance, so the fog is real.
+        renderer.set_sky(client::render::sky_colour(), 256.0);
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let (with, without) =
+            with_and_without(&mut renderer, &target, &camera, sky_of(0.9, 0.0, 0.0, 0.0));
+        // `with_and_without` leaves the deck off; put it back for the wet frame.
+        let dry = with;
+        renderer.set_clouds(client::render::clouds::Deck {
+            layer: Some(low_deck()),
+            clouds: Some(sky_of(0.9, 0.0, 0.0, 0.0)),
+            quality: client::render::clouds::Quality::Medium,
+            seed: 4242,
+        });
+        renderer.set_particles(&rain);
+        let wet = target.capture(&mut renderer, &camera).expect("capture");
+
+        let above = |y: u32| (y as f32) < edge - 25.0;
+        let deck = |x: u32, y: u32| above(y) && is_cloud(&dry, &without, x, y);
+        let regions: [(&str, (usize, usize)); 3] = [
+            (
+                "sky",
+                changed_in(&wet, &dry, 40, |x, y| above(y) && !deck(x, y)),
+            ),
+            ("deck", changed_in(&wet, &dry, 40, deck)),
+            (
+                "hill",
+                changed_in(&wet, &dry, 40, |_, y| (y as f32) > edge + 25.0),
+            ),
+        ];
+        let shares: Vec<f32> = regions
+            .iter()
+            .map(|(_, (changed, counted))| *changed as f32 / (*counted).max(1) as f32)
+            .collect();
+        println!(
+            "{mode:?}: changed share sky {:.3} ({} px), deck {:.3} ({} px), hill {:.3} ({} px)",
+            shares[0], regions[0].1.1, shares[1], regions[1].1.1, shares[2], regions[2].1.1
+        );
+        let best = shares.iter().copied().fold(0.0, f32::max);
+        for ((name, (_, counted)), share) in regions.iter().zip(&shares) {
+            assert!(
+                *counted > 1500,
+                "in {mode:?} the {name} region is only {counted} pixels: the view does not hold it"
+            );
+            assert!(
+                *share > 0.05,
+                "in {mode:?} the rain barely shows over the {name} ({share:.3})"
+            );
+            assert!(
+                *share >= best * 0.5,
+                "in {mode:?} the rain shows over the {name} at {share:.3} against {best:.3} over \
+                 the best region: it is being lost against one background"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bright_particle_still_blooms_in_beautiful() {
+    // Weather ask W33 moved bloom after the particles: they are drawn into the
+    // fogged frame, and the threshold reads that. An ember brighter than white
+    // (the scene is float) must still glow past its own disc in Beautiful, and
+    // in Classic, which has no bloom, must not.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut camera = viewpoint();
+    camera.look(0.0, 1.6);
+    let ahead = camera.forward() * 6.0;
+    let ember = client::render::particle::Sprite {
+        centre: ahead.to_array(),
+        size: 0.5,
+        colour: [12.0, 12.0, 12.0, 1.0],
+        texture: None,
+        sky: 1.0,
+    };
+    let (cx, cy) = (WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0);
+    let rise = |mode: LightingMode| {
+        let mut renderer = prepare(gpu.clone(), &chunks, RenderMode::Textured);
+        renderer.set_lighting_mode(mode);
+        upload(&mut renderer, &chunks);
+        night(&mut renderer);
+        let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+        let dark = target.capture(&mut renderer, &camera).expect("capture");
+        renderer.set_particles(&[ember]);
+        let lit = target.capture(&mut renderer, &camera).expect("capture");
+        // The ring between the disc's edge (about seven pixels out) and a
+        // blur's reach: only bloom can brighten it.
+        let mut best = 0u8;
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+                let d = (dx * dx + dy * dy).sqrt();
+                if !(10.0..18.0).contains(&d) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (lit.pixel(x, y), dark.pixel(x, y)) {
+                    best = best.max(a[0].saturating_sub(b[0]));
+                }
+            }
+        }
+        best
+    };
+    let bloomed = rise(LightingMode::Beautiful);
+    let flat = rise(LightingMode::Classic);
+    println!("halo rise: Beautiful {bloomed}, Classic {flat}");
+    assert!(
+        bloomed >= 6,
+        "a very bright particle has no halo in Beautiful ({bloomed})"
+    );
+    assert!(
+        flat <= 1,
+        "Classic has a halo ({flat}) with no bloom to make it"
+    );
+}
+
+#[test]
+fn the_stars_sit_behind_the_rain() {
+    // Weather ask W33: the stars are added in the fog pass and the drops after
+    // it, so an opaque drop over a star hides the star. Found, not assumed: the
+    // star nearest the middle of the frame, an opaque dark drop on exactly its
+    // direction, and the star's pixel must stop being bright.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Beautiful);
+    upload(&mut renderer, &chunks);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    night(&mut renderer);
+    renderer.set_sky([0.0; 3], 200.0);
+    let seed = 11;
+    renderer.set_star_catalog(seed);
+    renderer.set_observer(tiamat_core::sky::world_position(seed));
+    renderer.set_stars(1.0, tiamat_core::sky::turn(0.3));
+    let mut camera = viewpoint();
+    camera.look(0.0, 1.6);
+    let sky = target.capture(&mut renderer, &camera).expect("capture");
+
+    let bright = |p: [u8; 4]| p[0].max(p[1]).max(p[2]) >= 120;
+    let mut star = None;
+    let mut nearest = f32::MAX;
+    for y in 40..HEIGHT * 3 / 4 {
+        for x in 40..WIDTH - 40 {
+            if sky.pixel(x, y).is_some_and(bright) {
+                let (dx, dy) = (x as f32 - 160.0, y as f32 - 90.0);
+                let d = dx * dx + dy * dy;
+                if d < nearest {
+                    nearest = d;
+                    star = Some((x, y));
+                }
+            }
+        }
+    }
+    let (x, y) = star.expect("a star somewhere in the middle of the sky");
+
+    let aspect = WIDTH as f32 / HEIGHT as f32;
+    let ndc = (
+        (x as f32 + 0.5) / WIDTH as f32 * 2.0 - 1.0,
+        1.0 - (y as f32 + 0.5) / HEIGHT as f32 * 2.0,
+    );
+    let far = camera.view_projection(aspect).inverse() * glam::Vec4::new(ndc.0, ndc.1, 1.0, 1.0);
+    let direction = (far.truncate() / far.w).normalize();
+    renderer.set_particles(&[client::render::particle::Sprite {
+        centre: (direction * 6.0).to_array(),
+        size: 1.5,
+        colour: [0.0, 0.0, 0.0, 1.0],
+        texture: None,
+        sky: 1.0,
+    }]);
+    let covered = target.capture(&mut renderer, &camera).expect("capture");
+    let under = covered.pixel(x, y).expect("pixel");
+    assert!(
+        !bright(under),
+        "the star at ({x}, {y}) shows through an opaque drop in front of it: {under:?}"
+    );
+}

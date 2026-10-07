@@ -41,8 +41,10 @@
 // A bolt is a light, not a surface: nothing here reads the sun or the block
 // light, and in modes 1 and 2 nothing fogs it — a bolt seen through the haze
 // at the end of the view is the one thing in the haze that is not the haze's
-// colour. Mode 3's composite fogs the frame from depth after this pass, as it
-// does everything drawn into the scene.
+// colour. Nor in mode 3: a bolt writes no depth, so over open sky the
+// composite's depth fog would have taken it for sky and painted it out, the
+// same fault as a drop of rain (weather ask W33). Mode 3 draws it after that
+// fog, into the fogged frame, and before the bloom so it still glows.
 
 struct View {
     view_projection: mat4x4<f32>,

@@ -29,8 +29,12 @@ struct View {
     // The camera's up in xyz, and the fog curve's exponent in w.
     up: vec4<f32>,
     // The sky's colour in xyz; in w, where the fog is total straight up or
-    // down when this pass fogs (modes 1 and 2), and negative when the post
-    // chain does (mode 3).
+    // down. Positive in every lighting mode since weather ask W33: mode 3's
+    // composite fogs from the scene's depth and painted out a drop over open
+    // sky, so mode 3 draws particles after its fog and they fog themselves here,
+    // by their own distance. The composite's sun-scattering halo tint is not
+    // reproduced: it tints the far sky and a drop is near. Negative still means
+    // "do not fog" (tests).
     sky: vec4<f32>,
     // What the fog fades towards where no sky reaches, in xyz — weather ask
     // W29; w unused.

@@ -1850,7 +1850,7 @@ impl Renderer {
                 fog_end: self.fog_end,
                 fog_up: self.fog_up,
                 fog_curve: self.fog_curve,
-                fogs: self.post.is_none(),
+                fogs: true,
                 cave_fog: self.cave_fog,
             },
         );
@@ -2843,9 +2843,63 @@ impl Renderer {
                     pixel_angle.max(1e-6),
                 ],
             },
-            self.place_fog.buffer(),
-            self.clouds.star_buffers(),
+            graph::Buffers {
+                fog: self.place_fog.buffer(),
+                stars: self.clouds.star_buffers(),
+            },
+            |encoder, fogged, depth| self.draw_air_after_fog(encoder, fogged, depth),
         );
+    }
+
+    /// Particles then lightning in the world pass, for the modes with no post
+    /// chain — weather ask W33 (mode 3 draws them after its fog instead).
+    fn draw_air_in_world_pass(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.post.is_none() {
+            self.particles.draw(pass, false);
+            self.lightning.draw(pass, false);
+        }
+    }
+
+    /// Draws the particles and then the lightning into mode 3's FOGGED frame —
+    /// weather ask W33.
+    ///
+    /// The colour is loaded, not cleared (the fog pass just wrote it), and the
+    /// scene's depth is attached read-only so a hill still hides the rain
+    /// behind it. The pipelines are the scene-format pair the world pass would
+    /// have used: `fogged` shares the scene's float format. The particles fog
+    /// themselves by their own reach, as in modes 1 and 2, and nothing here is
+    /// exposed: `finish_main` exposes the whole frame afterwards.
+    fn draw_air_after_fog(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        fogged: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+    ) {
+        if self.particles.count() == 0 && self.lightning.count() == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("air-after-fog"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: fogged,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: None,
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.particles.draw(&mut pass, true);
+        self.lightning.draw(&mut pass, true);
     }
 
     /// Where the world pass draws, and with which pipelines.
@@ -3415,21 +3469,26 @@ impl Renderer {
 
             // Particles last of the blended things: they are in front of the
             // water as often as behind it, and unsorted either way.
-            self.particles.draw(&mut pass, self.post.is_some());
-
+            //
+            // **Not in mode 3** (weather ask W33): the post chain fogs from the
+            // scene's depth, and a drop over open sky leaves the far plane's
+            // depth behind it, so the fog painted it out. There they, and the
+            // lightning after them, are drawn by `run_post`'s hook once the fog
+            // has been laid — see `draw_air_after_fog`.
+            //
             // Lightning after them — weather ask W26. Additive, so it is the
             // same over the water and the particles in whichever order they
             // landed, and tested against the terrain's depth so a hill hides
-            // the part of a bolt behind it; before the post chain, so mode 3
-            // fogs and blooms it with the rest of the scene.
-            self.lightning.draw(&mut pass, self.post.is_some());
+            // the part of a bolt behind it.
+            self.draw_air_in_world_pass(&mut pass);
 
             self.draw_overlays(&mut pass, pass_targets.selection);
         }
 
         // The post chain, if this mode has one. It reads the scene texture the
         // pass above just wrote and lands on `target`, so from outside the
-        // renderer a frame looks the same in every mode.
+        // renderer a frame looks the same in every mode. In mode 3 it also
+        // draws the particles and the lightning, between its fog and its bloom.
         self.run_post(&mut encoder, target, view_projection, camera.fov_y);
 
         self.draw_hands(&mut encoder, target);

@@ -462,9 +462,25 @@ fn graded(colour: vec3<f32>) -> vec3<f32> {
     return textureSample(grade_lut, source_sampler, uvw).rgb;
 }
 
-// The last pass: scene plus bloom, fogged, exposed, tonemapped and graded.
+// The fog pass: the scene fogged from its depth, with the sky's bow and stars
+// painted over it, UNEXPOSED and unbloomed — weather ask W33.
+//
+// **Why the composite is two passes.** It used to fog, expose and tonemap in
+// one, and the particles were drawn before it, into the scene. A drop over open
+// sky leaves the far plane's depth behind it (particles test depth and do not
+// write it), so the fog here took it for sky and painted it out, while one over
+// the cloud deck or a hill survived. Now the particles are drawn AFTER this
+// pass, into its output, fogged by their own distance in their own shader, as
+// they are in modes 1 and 2; bloom is extracted after them so an ember still
+// glows; and `finish_main` exposes, tonemaps and grades the lot.
+//
+// **Exposure now exposes the fog and the sky too.** Before, `lit` was exposed
+// and the fog colour was not, so an exposure other than 1 darkened the scene
+// toward an unexposed fog. Exposing the finished fogged frame is what an
+// exposure is. Every keyframe's exposure is 1.0 as of 2026-10-06, so nothing
+// visible changes today.
 @fragment
-fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
+fn fog_main(input: VertexOut) -> @location(0) vec4<f32> {
     let source_texel = textureSample(source, source_sampler, input.uv);
     let scene = source_texel.rgb;
     // **A cloud pixel is not fogged as terrain** (weather ask W15). The cloud
@@ -482,11 +498,8 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // `CAVE_MARK` at none, so the fog below can be the cave's where the sky is
     // not. The sky and a cloud read as fully sky-lit, which they are.
     let sky_light = 1.0 - clamp((source_texel.a - SKY_MARK) / (CAVE_MARK - SKY_MARK), 0.0, 1.0);
-    let glow = textureSample(bloom, source_sampler, input.uv).rgb;
-    // Added rather than mixed: bloom is light that scattered on its way to the
-    // eye, so it arrives IN ADDITION to what the surface sent. Mixing would
-    // dim the surface to make room for its own glow.
-    let lit = (scene + glow * post.intensity) * post.exposure;
+    // Unexposed and unbloomed: `finish_main` adds the glow and exposes.
+    let lit = scene;
 
     // Fog here rather than in the world shader, for mode 3 only. Doing it from
     // depth is what lets it reach the sky and take the sun's colour with it;
@@ -522,15 +535,29 @@ fn composite_main(input: VertexOut) -> @location(0) vec4<f32> {
     // nothing was drawn in front of and the deck did not mark as cloud, so
     // terrain and cloud stand in front of it as they do in modes 1 and 2.
     // After the fog, because the fog has just painted the sky over with its
-    // own colour, and the bow painted with it would be gone; exposed as the
-    // scene is, and additive, so the sky shows through it.
+    // own colour, and the bow painted with it would be gone; unexposed, as
+    // everything here is until `finish_main`, and additive, so the sky shows through it.
     let at_sky_depth = textureLoad(scene_depth, vec2<i32>(input.clip.xy), 0) >= 1.0;
     let open_sky = select(0.0, 1.0 - is_cloud, at_sky_depth);
-    let bowed = fogged + rainbow_along(view_ray(input.uv)) * post.exposure * open_sky;
+    let bowed = fogged + rainbow_along(view_ray(input.uv)) * open_sky;
     // **And the stars, behind the bow** (weather ask W31): the same pixels,
     // for the same reason. Without this Beautiful had no night sky at all.
     let starred = bowed
-        + stars_along(view_ray(input.uv), post.stars.w) * STAR_HEADROOM * post.exposure * open_sky;
+        + stars_along(view_ray(input.uv), post.stars.w) * STAR_HEADROOM * open_sky;
+
+    return vec4<f32>(starred, source_texel.a);
+}
+
+// The last pass: the fogged frame (particles and lightning already over it) plus
+// bloom, exposed, tonemapped and graded — weather ask W33.
+@fragment
+fn finish_main(input: VertexOut) -> @location(0) vec4<f32> {
+    let fogged = textureSample(source, source_sampler, input.uv).rgb;
+    let glow = textureSample(bloom, source_sampler, input.uv).rgb;
+    // Added rather than mixed: bloom is light that scattered on its way to the
+    // eye, so it arrives IN ADDITION to what the surface sent. Mixing would
+    // dim the surface to make room for its own glow.
+    let starred = (fogged + glow * post.intensity) * post.exposure;
 
     // Graded last, on the display-referred result. The table's domain is 0..1
     // and this is where the frame first lives in it: grading before the tonemap

@@ -110,6 +110,16 @@ struct Uniforms {
     stars: [f32; 4],
 }
 
+/// The shared buffers the passes read besides their own uniforms: the place
+/// fog's grid, and the star catalog's bins and list.
+#[derive(Clone, Copy)]
+pub struct Buffers<'a> {
+    /// The place fog's grid.
+    pub fog: &'a wgpu::Buffer,
+    /// The star catalog's bins and list.
+    pub stars: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+}
+
 /// What the frame's sky is doing, as the composite needs it.
 ///
 /// Passed in per frame rather than stored: the renderer owns these and they
@@ -428,6 +438,11 @@ fn world_pipeline_for(
 pub struct Post {
     /// The scene, in float, before anything is done to it.
     scene: Target,
+    /// The scene after the fog and before the exposure and tonemap, which the
+    /// particles and lightning are drawn into — weather ask W33. Same format and
+    /// size as `scene`, so the particle pipelines built for the scene's format
+    /// draw into it unchanged.
+    fogged: Target,
     /// Its depth buffer. Mode 3 cannot share the renderer's, which is sized to
     /// the swapchain and cleared by the direct path.
     depth: wgpu::TextureView,
@@ -439,11 +454,16 @@ pub struct Post {
     /// output format, and are built once rather than per frame.
     threshold: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
+    /// Fog, bow and stars over the scene, unexposed: scene in, `fogged` out
+    /// — weather ask W33.
+    fog: wgpu::RenderPipeline,
+    /// Fogged frame plus bloom, exposed, tonemapped, graded: `fogged` in,
+    /// the frame's target out.
     composite: wgpu::RenderPipeline,
     /// A uniform buffer per pass. Separate buffers rather than one with dynamic
     /// offsets: four passes is not enough traffic to be worth the alignment
     /// rules, and a wrong offset is an invisible bug rather than a loud one.
-    uniforms: [wgpu::Buffer; 4],
+    uniforms: [wgpu::Buffer; 5],
     /// A 1x1 black texture, bound as `bloom` in the passes that have no bloom
     /// to read. A binding cannot be left empty, and binding the target being
     /// written would be a read-write hazard the validator rejects.
@@ -549,6 +569,7 @@ impl Post {
 
         Self {
             scene: Target::new(gpu, "post-scene", width, height, HDR_FORMAT),
+            fogged: Target::new(gpu, "post-fogged", width, height, HDR_FORMAT),
             depth: super::make_sampled_depth(gpu, width.max(1), height.max(1)),
             bloom: [
                 Target::new(gpu, "post-bloom-a", bloom_width, bloom_height, HDR_FORMAT),
@@ -560,12 +581,14 @@ impl Post {
             // built against what the window takes rather than what this client
             // would have chosen. Everything before it is an offscreen target
             // whose format is ours.
-            composite: build("post-composite", "composite_main", gpu.surface_format()),
+            fog: build("post-fog", "fog_main", HDR_FORMAT),
+            composite: build("post-composite", "finish_main", gpu.surface_format()),
             uniforms: [
                 uniform("post-threshold-uniforms"),
                 uniform("post-blur-h-uniforms"),
                 uniform("post-blur-v-uniforms"),
                 uniform("post-composite-uniforms"),
+                uniform("post-fog-uniforms"),
             ],
             world: world_pipeline_for(gpu, world_shader, world_layout, shadows.as_ref(), mode),
             // **Writing depth, and only here.** The composite fogs from the
@@ -704,6 +727,7 @@ impl Post {
     #[must_use]
     pub fn bytes(&self) -> u64 {
         self.scene.bytes
+            + self.fogged.bytes
             + self.bloom[0].bytes
             + self.bloom[1].bytes
             + super::grade::BYTES
@@ -725,18 +749,27 @@ impl Post {
         self.grading.bake(gpu, grade)
     }
 
-    /// Runs threshold, blur, blur, composite — scene in, `target` out.
+    /// Runs fog, `between`, threshold, blur, blur, composite — scene in,
+    /// `target` out.
     ///
     /// The order is the whole graph. Each pass names what it reads and what it
     /// writes, and nothing else in the renderer needs to know the chain exists.
+    ///
+    /// **`between` is weather ask W33's hook:** it runs once the scene has been
+    /// fogged and before bloom is extracted, and is handed the fogged texture
+    /// (to draw into, colour loaded not cleared) and the scene's depth (to test
+    /// against, read-only). The particles and the lightning are drawn there:
+    /// after the fog, so a drop over open sky is not fogged out of existence by
+    /// the far plane's depth it left behind; before the bloom, so an ember
+    /// still glows; before the exposure and tonemap, so they need no factor.
     pub fn run(
         &self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         frame: &Frame,
-        fog: &wgpu::Buffer,
-        stars: (&wgpu::Buffer, &wgpu::Buffer),
+        buffers: Buffers<'_>,
+        between: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, &wgpu::TextureView),
     ) {
         let full_texel = [1.0 / self.size.0 as f32, 1.0 / self.size.1 as f32];
         // The BLOOM buffer's texel, not the frame's. Stepping a blur by a
@@ -747,57 +780,74 @@ impl Post {
             1.0 / self.bloom[0].height as f32,
         ];
 
-        // The chain, in order: bright parts out of the scene, blurred across,
-        // blurred down, then added back over the scene and tonemapped. Adding
-        // a pass — Task 11's reflections, say — is adding an entry here.
         self.write(gpu, 0, full_texel, [BLOOM_CUTOFF, BLOOM_KNEE], frame);
         self.write(gpu, 1, bloom_texel, [1.0, 0.0], frame);
         self.write(gpu, 2, bloom_texel, [0.0, 1.0], frame);
         self.write(gpu, 3, full_texel, [0.0, 0.0], frame);
+        self.write(gpu, 4, full_texel, [0.0, 0.0], frame);
 
-        for step in [
-            Step {
-                label: "post-threshold",
-                pipeline: &self.threshold,
-                slot: 0,
-                source: &self.scene.view,
-                bloom: None,
-                target: &self.bloom[0].view,
-                fog,
-                stars,
-            },
-            Step {
-                label: "post-blur-h",
-                pipeline: &self.blur,
-                slot: 1,
-                source: &self.bloom[0].view,
-                bloom: None,
-                target: &self.bloom[1].view,
-                fog,
-                stars,
-            },
-            Step {
-                label: "post-blur-v",
-                pipeline: &self.blur,
-                slot: 2,
-                source: &self.bloom[1].view,
-                bloom: None,
-                target: &self.bloom[0].view,
-                fog,
-                stars,
-            },
-            Step {
-                label: "post-composite",
-                pipeline: &self.composite,
-                slot: 3,
-                source: &self.scene.view,
-                bloom: Some(&self.bloom[0].view),
+        let Buffers { fog, stars } = buffers;
+        let step = |label, pipeline, slot, source, bloom, target| Step {
+            label,
+            pipeline,
+            slot,
+            source,
+            bloom,
+            target,
+            fog,
+            stars,
+        };
+        self.step(
+            gpu,
+            encoder,
+            &step(
+                "post-fog",
+                &self.fog,
+                4,
+                &self.scene.view,
+                None,
+                &self.fogged.view,
+            ),
+        );
+        between(encoder, &self.fogged.view, &self.depth);
+        // Bloom comes from the FOGGED frame with the particles in it: a far
+        // lamp lost in haze blooms less, which is right, and a bright spark
+        // blooms as it did when it was drawn into the scene.
+        for s in [
+            step(
+                "post-threshold",
+                &self.threshold,
+                0,
+                &self.fogged.view,
+                None,
+                &self.bloom[0].view,
+            ),
+            step(
+                "post-blur-h",
+                &self.blur,
+                1,
+                &self.bloom[0].view,
+                None,
+                &self.bloom[1].view,
+            ),
+            step(
+                "post-blur-v",
+                &self.blur,
+                2,
+                &self.bloom[1].view,
+                None,
+                &self.bloom[0].view,
+            ),
+            step(
+                "post-composite",
+                &self.composite,
+                3,
+                &self.fogged.view,
+                Some(&self.bloom[0].view),
                 target,
-                fog,
-                stars,
-            },
+            ),
         ] {
-            self.step(gpu, encoder, &step);
+            self.step(gpu, encoder, &s);
         }
     }
 

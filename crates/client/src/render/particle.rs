@@ -69,8 +69,11 @@ pub struct Frame {
     pub fog_up: f32,
     /// The fog curve's exponent.
     pub fog_curve: f32,
-    /// Whether this pass fogs particles, which is every mode without a post
-    /// chain; mode 3 fogs from depth after the fact.
+    /// Whether this pass fogs particles: always, in every mode (weather ask
+    /// W33). Mode 3 used to leave it to the post chain, which fogs from the
+    /// scene's depth and so painted out any drop drawn over open sky; mode 3
+    /// now draws particles after that fog, so they fog themselves by their own
+    /// distance. Kept as a field so a test can still ask for an unfogged pass.
     pub fogs: bool,
     /// What the fog fades towards where no sky reaches — weather ask W29.
     pub cave_fog: [f32; 3],
@@ -317,8 +320,8 @@ impl Pass {
                 frame.sky[0],
                 frame.sky[1],
                 frame.sky[2],
-                // The vertical reach when this pass fogs, and a negative
-                // number when the post chain does: one slot, two facts.
+                // The vertical reach when this pass fogs (always, since weather
+                // ask W33), and a negative number to ask for no fog at all.
                 if frame.fogs { frame.fog_up } else { -1.0 },
             ],
             cave_fog: [frame.cave_fog[0], frame.cave_fog[1], frame.cave_fog[2], 0.0],
