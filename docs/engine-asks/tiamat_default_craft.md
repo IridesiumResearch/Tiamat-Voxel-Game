@@ -20,7 +20,58 @@ history stays; all six landed the same day (engine c83fbc9). Asks 8 and 9
 added 2026-09-28 from the mod's sheet and landed the same day (engine
 cbbbc5e). Ask 10 added 2026-09-28 and landed the same day (engine
 7cf1c73). Ask 11 added 2026-09-28 and landed the same day (engine
-f2cbc36). Nothing is open.
+f2cbc36). Ask 12 added 2026-10-07 and landed the next day (engine
+671f5763). Nothing is open.
+
+## 12. Swapping a whole material standing in a thin floor (2026-10-07): LANDED 2026-10-08 (engine 671f5763)
+
+**From the engine, 2026-10-08.** As the smallest change asked: `game.set_block(pos,
+"<whole>")` on a block a whole material stands in replaces THAT material and
+keeps the ground. The tick resolves the write against the block, as it
+resolves a merge: the standing one's cells the new shape does not reuse go
+to air, the new shape takes the air (`place::writes`, cell by cell since the
+ground is another material), and the ground cells are untouched. Lighting a
+campfire, putting a fire out, a torch burning out in a thin floor: the floor
+stays, in every mode. Sub-Node Contract §7.5, "Swapped in place, the ground
+staying"; `whole_blocks.rs` swaps a brazier for an anvil and back in a
+nine-cell floor and checks every cell. Two edges, both in the contract: a
+block with no whole material standing in it is still REPLACED by
+`set_block` (so a mod that wants to set a campfire INTO a thin floor from
+code, as a player's placement would, should ask — the explicit `{ swap =
+true }` form was not needed for this ask and was not built); and a shape
+with no cell free once the old material is gone writes nothing, logged.
+`util.lua`'s `name_at` is the right reading of the block afterwards: it is
+still mixed.
+
+
+**Seen.** Since engine 071a7978 a whole material placed on a thin floor goes
+INTO the floor's block and shares it with the floor's cells (Sub-Node
+Contract §7.6) — a campfire laid on snow, a torch stood in a sliver of
+earth. This mod then changes what the thing is, in place: a laid campfire
+is lit (`unlit_campfire` → `campfire_lit`), a fire goes out, a torch burns
+out (`torch` → `spent_torch`). Each is `game.set_block(pos, "<whole>")`, and
+`queue_seed` makes that a `Seed::Replace` of the whole material's shape —
+the WHOLE block is replaced, so the floor's cells in it are erased. Units
+destroyed by a fire catching, which charter rule 5 forbids. There is no
+other way to write it: a merge into a block holding a whole material is
+refused (§7.5), a masked write of one is refused, and a whole material may
+not be written as part of its shape.
+
+**Why the mod cannot.** Reading the floor's cells first and writing them
+back after is refused for the same reason (nothing is written into a whole
+material's block afterwards); giving the floor's units to somebody instead
+is not putting them back.
+
+**Smallest change.** `game.set_block(pos, whole)` on a block that holds a
+whole material replaces THAT material's cells with the new one's shape, and
+keeps the ground cells (§7.6's "air cells of its shape" again, against the
+block as it is less the old whole material) — the same rule the placement
+already follows. Or an explicit form, `game.set_block(pos, whole, nil, {
+swap = true })`, if a plain replace should stay a replace.
+
+**Stands in.** A fire lit, put out or a torch burned out in a thin floor
+loses that block's floor cells. Recognising the fire there is this mod's,
+and done: a mixed block is read by its cells (`util.lua`'s `name_at`).
 
 ## 11. The blocks carrying a tag (2026-09-28): LANDED 2026-09-28 (engine f2cbc36)
 
