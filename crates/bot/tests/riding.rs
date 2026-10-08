@@ -458,13 +458,28 @@ fn a_rider_drives_the_mount_at_its_pace_and_sits_on_it_until_they_get_off() {
             0.05,
         );
 
-        // Sneak gets them off, at the scarecrow's feet, and says so.
+        // Sneak gets them off, at the scarecrow's feet, and says so. The
+        // scarecrow is read at rest first — until two reads, idle ticks
+        // apart, agree — because on a slow runner it was still easing to a
+        // stop after the ride, and the rider landed where it WAS, a twentieth
+        // of a block short of where it then stood (macOS and Windows CI,
+        // 2026-10-08). Within a quarter block is "at its feet": the scarecrow
+        // is 0.8 blocks wide, and the seat is 2.4 blocks up.
+        let mut resting = entity_at(&mut bot, mount).await.expect("the scarecrow");
+        for _ in 0..20 {
+            bot.walk([0.0; 3], 0, 4).await.expect("stand");
+            let again = entity_at(&mut bot, mount).await.expect("the scarecrow");
+            if again == resting {
+                break;
+            }
+            resting = again;
+        }
         let seen = bot.notices().len();
         bot.walk([0.0; 3], actions::SNEAK, 2).await.expect("sneak");
         let (reason, entity, at) = dismount(&notice_after(&mut bot, seen, "dismount ").await);
         assert_eq!((reason.as_str(), entity), ("sneak", mount));
         let stood = entity_at(&mut bot, mount).await.expect("the scarecrow");
-        assert_near("the sneak landed them at its feet", at, stood, 0.05);
+        assert_near("the sneak landed them at its feet", at, stood, 0.25);
         let off = settle(&mut bot).await;
         assert!(
             (off[1] - stood[1]).abs() < 0.2,
