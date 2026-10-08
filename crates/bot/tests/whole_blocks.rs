@@ -318,6 +318,43 @@ fn cells_seen(bot: &Bot, pos: BlockPos) -> [u16; 27] {
     cells
 }
 
+/// A block as it should read, cell by cell, from the masks of what is in it:
+/// `layers` are (material, mask), a later layer over an earlier one, and a
+/// cell in none is air.
+fn layout(layers: &[(u16, u32)]) -> [u16; 27] {
+    let mut cells = [0u16; 27];
+    for (material, mask) in layers {
+        for (slot, cell) in cells.iter_mut().enumerate() {
+            if mask & (1 << slot) != 0 {
+                *cell = *material;
+            }
+        }
+    }
+    cells
+}
+
+/// Waits until every cell of `pos` reads as `want`, and says which cell is
+/// wrong if it never does.
+///
+/// **The whole layout, not a cell of it.** A mixed block is written one
+/// `SubNode` delta per cell, and a check that ran once the first of them had
+/// arrived read the rest as still air — a bowl cell of the brazier, on a
+/// Windows runner slow enough to pump an inventory update between two of
+/// the deltas. Waiting for the layout is waiting for the last of them.
+async fn expect_cells(bot: &mut Bot, pos: BlockPos, want: [u16; 27], what: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while cells_seen(bot, pos) != want {
+        if tokio::time::Instant::now() >= deadline {
+            let cells = cells_seen(bot, pos);
+            for (slot, cell) in cells.iter().enumerate() {
+                assert_eq!(*cell, want[slot], "{what}: cell {slot}");
+            }
+            panic!("{what}: never saw the layout");
+        }
+        let _ = bot.await_inventory(Duration::from_millis(100)).await;
+    }
+}
+
 /// Puts a brazier where a player would stand it in a floor one cell thick at
 /// `floor` — dug up whole from a seeded block, then placed against the floor's
 /// top with the block brush (Contract §7.6) — and checks what the block holds:
@@ -364,24 +401,16 @@ async fn brazier_standing_in_a_thin_floor(
     bot.place_shape_against(asked, brazier, 0, [0, 1, 0])
         .await
         .expect("ask to place");
-    wait_for(bot, "the brazier among the floor", |bot| {
-        let cells = cells_seen(bot, floor);
-        cells[tiamat_core::block::subnode_index(1, 1, 1)] == brazier
-            && cells[tiamat_core::block::subnode_index(0, 0, 0)] == white
-    })
+    expect_cells(
+        bot,
+        floor,
+        layout(&[
+            (white, thin_floor()),
+            (brazier, brazier_shape() & !thin_floor()),
+        ]),
+        "the brazier among the floor",
+    )
     .await;
-    let cells = cells_seen(bot, floor);
-    let expected = brazier_shape() & !thin_floor();
-    for (slot, cell) in cells.iter().enumerate() {
-        let want = if expected & (1 << slot) != 0 {
-            brazier
-        } else if thin_floor() & (1 << slot) != 0 {
-            white
-        } else {
-            0
-        };
-        assert_eq!(*cell, want, "cell {slot}");
-    }
     assert!(
         cells_seen(bot, BlockPos::new(floor.x, floor.y + 1, floor.z))
             .iter()
@@ -423,20 +452,13 @@ fn a_brazier_set_on_a_thin_floor_stands_in_it_and_comes_up_alone() {
                 "the brazier never came up"
             );
         }
-        wait_for(&mut bot, "the floor alone", |bot| {
-            let cells = cells_seen(bot, floor);
-            cells.iter().all(|cell| *cell != brazier)
-        })
+        expect_cells(
+            &mut bot,
+            floor,
+            layout(&[(white, thin_floor())]),
+            "the floor alone after the dig",
+        )
         .await;
-        let cells = cells_seen(&bot, floor);
-        for (slot, cell) in cells.iter().enumerate() {
-            let want = if thin_floor() & (1 << slot) != 0 {
-                white
-            } else {
-                0
-            };
-            assert_eq!(*cell, want, "after the dig, cell {slot}");
-        }
         assert_eq!(bot.units_of(brazier), UNITS_PER_BLOCK, "a whole block paid");
         bot.disconnect().await;
     });
@@ -560,41 +582,30 @@ fn a_whole_block_written_where_one_stands_in_a_thin_floor_keeps_the_floor() {
         // no `shape`, so it is a whole-block write — the form that replaced
         // the block outright.
         assert!(server.seed_block(floor, anvil), "seed queue full");
-        wait_for(&mut bot, "the anvil in the brazier's place", |bot| {
-            let cells = cells_seen(bot, floor);
-            cells.iter().all(|cell| *cell != brazier) && cells.contains(&anvil)
-        })
+        expect_cells(
+            &mut bot,
+            floor,
+            layout(&[
+                (anvil, tiamat_core::block::OCCUPANCY_FULL),
+                (white, thin_floor()),
+            ]),
+            "the anvil in the brazier's place, the floor kept",
+        )
         .await;
-        let cells = cells_seen(&bot, floor);
-        for (slot, cell) in cells.iter().enumerate() {
-            let want = if thin_floor() & (1 << slot) != 0 {
-                white
-            } else {
-                anvil
-            };
-            assert_eq!(*cell, want, "after the swap, cell {slot}");
-        }
 
         // And back to a shaped one: the anvil's cells the brazier's shape does
         // not reuse go to air, the floor's nine still stay.
         assert!(server.seed_block(floor, brazier), "seed queue full");
-        wait_for(&mut bot, "the brazier back in the anvil's place", |bot| {
-            let cells = cells_seen(bot, floor);
-            cells.iter().all(|cell| *cell != anvil)
-                && cells[tiamat_core::block::subnode_index(1, 1, 1)] == brazier
-        })
+        expect_cells(
+            &mut bot,
+            floor,
+            layout(&[
+                (white, thin_floor()),
+                (brazier, brazier_shape() & !thin_floor()),
+            ]),
+            "the brazier back in the anvil's place, the floor kept",
+        )
         .await;
-        let cells = cells_seen(&bot, floor);
-        for (slot, cell) in cells.iter().enumerate() {
-            let want = if thin_floor() & (1 << slot) != 0 {
-                white
-            } else if brazier_shape() & (1 << slot) != 0 {
-                brazier
-            } else {
-                0
-            };
-            assert_eq!(*cell, want, "after the swap back, cell {slot}");
-        }
 
         // Where no ground shares the block, a replace is still a replace: a
         // seeded anvil, written over as a brazier, is exactly the brazier's
