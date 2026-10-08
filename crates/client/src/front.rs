@@ -364,11 +364,12 @@ impl Front {
     /// its player settings. **Only for a mod that is on**, because an option
     /// for a mod that will not load is a question with no one to answer it.
     ///
-    /// **And only answerable for a world that does not exist yet.** The
-    /// answers are fixed when a world is made and kept in the world itself,
-    /// which this screen cannot read; for an existing world the dropdown
-    /// names the options and says so, rather than drawing controls whose
-    /// values would be a guess.
+    /// **Answerable at any time, for the NEXT new world.** The answers are
+    /// fixed when a world is made and kept in the world itself, which this
+    /// screen cannot read; so with an existing world selected the controls
+    /// still show and edit what the next new world will get, and say so —
+    /// the designer, 2026-10-08, in place of the read-only listing that
+    /// stood here, which read as the options being locked.
     fn world_option_rows(
         ui: &mut egui::Ui,
         listing: &crate::launcher::Listing,
@@ -391,15 +392,11 @@ impl Front {
                     if !new_world {
                         crate::theme::secondary(
                             ui,
-                            "Fixed when this world was made. A new world asks again.",
+                            "These changes will only take effect on new worlds.",
                         );
                     }
                     for option in &listing.world_options {
                         let id = option.qualified(&listing.id);
-                        if !new_world {
-                            ui.label(&option.name).on_hover_text(&option.description);
-                            continue;
-                        }
                         let picked = chosen.entry(id.clone()).or_insert(option.default);
                         ui.horizontal(|ui| {
                             if option.is_toggle() {
