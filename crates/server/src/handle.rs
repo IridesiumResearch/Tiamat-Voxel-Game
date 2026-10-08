@@ -4699,8 +4699,13 @@ impl ServerHandle {
                                                 !cell.is_air() && shared.whole_shape(*cell).is_some()
                                             })
                                         });
+                                    // **The mods hear it first.** Refused below unless
+                                    // a mod makes an action of it — a torch held to a
+                                    // campfire lights it (Craft) — so the air and body
+                                    // checks, moot for a placement that will not be
+                                    // written, are skipped.
                                     if holds_whole {
-                                        return Err(tiamat_core::place::Refusal::Whole);
+                                        return Ok((plan, true));
                                     }
                                     // Air only, judged cell by cell. Placing
                                     // into occupied space would have to decide
@@ -4740,11 +4745,11 @@ impl ServerHandle {
                                     ) {
                                         return Err(tiamat_core::place::Refusal::InsideAPlayer);
                                     }
-                                    Ok(plan)
+                                    Ok((plan, false))
                                 });
 
-                            let plan = match outcome {
-                                Ok(plan) => plan,
+                            let (plan, into_whole) = match outcome {
+                                Ok(planned) => planned,
                                 Err(refusal) => {
                                     shared.tell(&request.actor, refusal.to_string());
                                     continue;
@@ -4803,6 +4808,17 @@ impl ServerHandle {
                                 if let Some(notice) = verdict.notice("you cannot build there") {
                                     shared.tell(&request.actor, notice.to_owned());
                                 }
+                                continue;
+                            }
+                            // **Nothing is written into a whole material's
+                            // block** (Contract §7.5): heard by the mods above,
+                            // and refused here when none of them made an
+                            // action of it.
+                            if into_whole {
+                                shared.tell(
+                                    &request.actor,
+                                    tiamat_core::place::Refusal::Whole.to_string(),
+                                );
                                 continue;
                             }
 

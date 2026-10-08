@@ -1397,3 +1397,93 @@ fn a_mod_told_of_a_sweep_can_refuse_it_and_the_floor_stays() {
 
     assert!(server.stop());
 }
+
+#[test]
+fn a_placement_into_a_whole_block_reaches_the_mods_before_the_refusal() {
+    // Contract §7.5: nothing is written into a whole material's block, but
+    // the mods hear the attempt first, so a torch held to a laid campfire
+    // lights it (Craft). Here the hook makes an action of a block of ground
+    // laid against a stump — "lit" — and nothing is written; without a hook
+    // the same placement is refused as one piece.
+    let server = start(
+        "torch-to-campfire",
+        write_warden(
+            "torch-to-campfire",
+            "game.register_block{ id = \"stump\", whole = true,\n\
+             \x20   shape = { \"### ### ###\", \"... ... ...\", \"... ... ...\" } }\n\
+             game.register_on_place(function(e)\n\
+             \x20   local at = game.get_block{ x = e.x, y = e.y, z = e.z }\n\
+             \x20   if at and game.block_of(at.material) == \"warden:stump\" then return \"lit\" end\n\
+             end)",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let stump = material_named(&bot, "warden:stump");
+        let ground = material_named(&bot, "warden:ground");
+
+        // A stump standing at ground level, and a block of ground in hand.
+        let fire = BlockPos::new(2, 0, 0);
+        assert!(server.seed_block(fire, stump), "seed queue full");
+        let seen_at = |bot: &Bot, at: BlockPos, material: u16| {
+            bot.received().iter().any(|message| {
+                matches!(
+                    message,
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::Partial { pos, material: got, .. },
+                        ..
+                    } if *pos == at && *got == material
+                )
+            })
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seen_at(&bot, fire, stump) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the stump never landed"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        let quarry = BlockPos::new(-2, -1, 0);
+        assert!(
+            dig_and_see(&mut bot, &server, quarry, ground).await,
+            "digging ground should work"
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while bot.units_of(ground) < 27 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the ground never came up"
+            );
+            let _ = bot.await_inventory(Duration::from_millis(200)).await;
+        }
+
+        // Ground placed against the stump's top: the hook hears it, says
+        // "lit", and the stump's block is untouched.
+        bot.hold_brush("block").await.expect("hold the block brush");
+        let asked = SubNodePos::new(fire.x * 3 + 1, fire.y * 3 + 1, fire.z * 3 + 1);
+        bot.place_shape_against(asked, ground, 0, [0, 1, 0])
+            .await
+            .expect("ask to place");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), bot.recv()).await;
+        assert!(
+            bot.notices().iter().any(|text| text == "lit"),
+            "the hook never heard the placement; notices {:?}",
+            bot.notices()
+        );
+        assert!(
+            !bot.notices().iter().any(|text| text.contains("one piece")),
+            "the engine refused before the mod could act; notices {:?}",
+            bot.notices()
+        );
+        assert!(
+            !seen_at(&bot, fire, ground) && bot.cells_broken(fire) == 0,
+            "something was written into the stump's block"
+        );
+        assert_eq!(bot.units_of(ground), 27, "the player was charged");
+    });
+
+    assert!(server.stop());
+}

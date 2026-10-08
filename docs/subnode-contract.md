@@ -884,7 +884,13 @@ puts down, not stuff a chisel takes a corner off.
   AREA fills (`fill_density`, cover, the palette, a scattered schematic) are
   terrain and take a material as named, a full cube; a schematic that wants a
   whole material's shape carries the cells itself. The one write into a block
-  a whole material stands in is the next bullet's.
+  a whole material stands in is the next bullet's. **The mods hear the
+  attempt first**: a placement aimed into a whole material's block is given
+  to `on_place` BEFORE the refusal, so a mod can make an action of it — a
+  torch held to a laid campfire lights it (Craft) — and a placement no mod
+  handles is refused as "one piece" as before. (The designer, 2026-10-08:
+  the torch stopped lighting fires the day the ground rule put the torch's
+  placement into the campfire's block, where the refusal came first.)
 - **Swapped in place, the ground staying.** (Added 2026-10-08, Craft ask 12.)
   A block-resolution write of a whole material — `game.set_block(pos,
   "campfire_lit")` on the block the unlit one stands in, a stamped plan's
