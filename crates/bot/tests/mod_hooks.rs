@@ -1487,3 +1487,123 @@ fn a_placement_into_a_whole_block_reaches_the_mods_before_the_refusal() {
 
     assert!(server.stop());
 }
+
+#[test]
+fn a_whole_block_that_does_not_sweep_stands_among_a_thin_floors_cells() {
+    // Contract §7.6, Craft ask 14: a whole block registered `sweeps = false`
+    // — a torch — laid on a floor one cell thick does not sweep the floor;
+    // it takes the air cells of its shape among the floor's, and the floor
+    // stays. A peg whose shape is the centre column: its bottom cell is the
+    // floor's and stays ground, its two upper cells are written.
+    let server = start(
+        "peg-in-thin-floor",
+        write_warden(
+            "peg-in-thin-floor",
+            "game.register_block{ id = \"peg\", whole = true, sweeps = false,\n\
+             \x20   shape = { \"... .#. ...\", \"... .#. ...\", \"... .#. ...\" } }",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let peg = material_named(&bot, "warden:peg");
+        let ground = material_named(&bot, "warden:ground");
+        let seen_at = |bot: &Bot, at: BlockPos, material: u16| {
+            bot.received().iter().any(|message| {
+                matches!(
+                    message,
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::Partial { pos, material: got, .. },
+                        ..
+                    } if *pos == at && *got == material
+                )
+            })
+        };
+
+        // A peg in hand: seeded whole, dug whole by the hand at its foot.
+        let source = BlockPos::new(2, 0, 0);
+        assert!(server.seed_block(source, peg), "seed queue full");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seen_at(&bot, source, peg) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the peg never landed"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        let foot = SubNodePos::new(source.x * 3 + 1, source.y * 3, source.z * 3 + 1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while bot.units_of(peg) < 27 {
+            bot.start_dig(foot).await.expect("start dig");
+            let _ = bot.await_inventory(Duration::from_secs(2)).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the peg never came up"
+            );
+        }
+
+        // A floor one cell thick, and the peg laid on it.
+        let floor = BlockPos::new(-2, 0, 0);
+        let bottom: u32 = (0..3)
+            .flat_map(|x| (0..3).map(move |z| 1 << tiamat_core::block::subnode_index(x, 0, z)))
+            .sum();
+        assert!(
+            server.seed_partial(floor, ground, bottom),
+            "seed queue full"
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seen_at(&bot, floor, ground) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the floor never landed"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        bot.hold_brush("block").await.expect("hold the block brush");
+        let asked = SubNodePos::new(floor.x * 3 + 1, floor.y * 3 + 1, floor.z * 3 + 1);
+        bot.place_shape_against(asked, peg, 0, [0, 1, 0])
+            .await
+            .expect("ask to place");
+
+        // The peg's two upper cells arrive one edit each, among the floor;
+        // nothing of the floor goes, and nothing replaces the block.
+        let cell_written = |bot: &Bot, at: SubNodePos| {
+            bot.received().iter().any(|message| {
+                matches!(
+                    message,
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::SubNode { pos, material },
+                        ..
+                    } if *pos == at && *material == peg
+                )
+            })
+        };
+        let middle = SubNodePos::new(floor.x * 3 + 1, floor.y * 3 + 1, floor.z * 3 + 1);
+        let top = SubNodePos::new(floor.x * 3 + 1, floor.y * 3 + 2, floor.z * 3 + 1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !(cell_written(&bot, middle) && cell_written(&bot, top)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the peg never stood in the floor; notices {:?}",
+                bot.notices()
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        assert!(
+            !seen_at(&bot, floor, peg) && bot.cells_broken(floor) == 0,
+            "the floor was swept or replaced"
+        );
+        // The debit arrives on its own message, after the deltas.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while bot.units_of(peg) != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a whole block's units were not paid: {} left",
+                bot.units_of(peg)
+            );
+            let _ = bot.await_inventory(Duration::from_millis(200)).await;
+        }
+    });
+
+    assert!(server.stop());
+}

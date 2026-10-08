@@ -40,6 +40,69 @@ on `e.swept` (and `game.get_block` on `e.x, e.y, e.z` still reads the
 block as it stands, cards included). The designer's words for the refusal
 are exactly "level this ground".
 
+## 14. A small whole thing that clips into the ground instead of sweeping it (2026-10-08): LANDED 2026-10-08 (engine, the commit after 8f20397a)
+
+**From the engine, 2026-10-08.** As asked: `register_block{ sweeps = false
+}` on a `whole` block. Set down on a partial block with no node in its top
+layer it stands among the block's cells — `plan_whole`'s `shape & !filled`,
+the model clipping through the ground, as on a side face — and "this is not
+flat ground" when no cell of its shape is air there. The field is refused on
+a block that is not `whole`. `e.swept` is false for such a placement. Bot
+test in `mod_hooks.rs` (a peg among a thin floor, the floor intact).
+
+
+**Seen.** Since engine fc25ba71 a whole block laid on a partial block with no
+node in its top layer SWEEPS that block — its remains destroyed — and stands
+at its bottom (Sub-Node Contract §7.6). Right for a campfire or a station,
+which want level ground. Wrong for a torch: the designer, 2026-10-08,
+"torches should not break ground when they are placed, they should just clip
+into it" — stood in a thin floor among the floor's cells, as §7.6 had it
+before the sweep.
+
+**Why the mod cannot.** It can refuse a sweep (`e.swept`) but not change
+where a placement lands or what it writes; and it cannot write a torch among
+ground cells itself — a `set_block` of a whole material replaces the block
+(only a whole one standing there is swapped, ask 12) and a merge of one is
+refused.
+
+**Smallest change.** A `register_block` field on a whole block — `sweeps =
+false`, say — under which a placement that would sweep instead takes the air
+cells of the shape among the block's cells (the `plan_whole` arithmetic,
+`shape & !filled`), the model clipping through the ground, as on a side face;
+refused, as there, when no cell of the shape is air.
+
+**Stands in.** A torch that would sweep anything but plants is refused, "A
+torch wants firm ground." It stands in grass, and on full blocks as ever.
+
+## 13. A whole block placed on top of another whole block (2026-10-08): LANDED 2026-10-08 (engine 8f20397a)
+
+**From the engine, 2026-10-08.** The second of the two ways offered: a
+placement aimed into a block holding a whole material is given to
+`on_place` BEFORE the "one piece" refusal, so this mod's torch handler
+hears it, lights the fire, returns `""`, and the player is told nothing;
+a placement no mod handles is refused as before. Not the first way (the
+block above): a torch set down a block above a laid fire would float two
+thirds of a block in the air. Contract §7.5. Bot test in `mod_hooks.rs`.
+
+
+**Seen.** Holding a torch, right-clicking the TOP of a laid campfire answers
+"that is one piece; it goes down whole or not at all", and the fire is not
+lit. The campfire's block is not ground (§7.6: no node in its top layer), so
+the torch is aimed INTO the campfire's own block, and a block holding a whole
+material refuses it (`Refusal::Whole`) before any mod is asked. This mod
+lights a fire by hearing the torch's placement (`register_on_place`, reading
+`game.looking_at`), so it never hears this one. The fire's side works.
+
+**Why the mod cannot.** The refusal comes before `on_place`, and holding a
+placeable stack makes the control a placement, never a use.
+
+**Smallest change.** Against the top face of a block that holds a whole
+material, a placement goes in the block above (a whole block is ground to
+what is put on it) — then `on_place` hears it, as at the side. Or: ask
+`on_place` before refusing, so a mod may handle it with `""`.
+
+**Stands in.** A fire is lit with a torch from its side, or with a striker.
+
 ## 12. Swapping a whole material standing in a thin floor (2026-10-07): LANDED 2026-10-08 (engine 671f5763)
 
 **From the engine, 2026-10-08.** As the smallest change asked: `game.set_block(pos,

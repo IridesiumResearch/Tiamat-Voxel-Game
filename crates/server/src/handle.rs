@@ -2245,6 +2245,16 @@ impl ServerHandle {
             .filter(|rules| rules.billboard || rules.billboard_cross)
             .filter_map(|rules| runtime_of(&rules.block))
             .collect();
+        // The whole materials that stand among thin ground's cells rather
+        // than sweeping them (Contract §7.6; Craft ask 14).
+        let no_sweep: std::collections::BTreeSet<tiamat_core::MaterialId> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rules| rules.whole && !rules.sweeps)
+            .filter_map(|rules| runtime_of(&rules.block))
+            .collect();
         let drop_rules = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_block_rules())
@@ -2769,6 +2779,7 @@ impl ServerHandle {
             drop_rules,
             whole,
             cards,
+            no_sweep,
             material_ids,
             main_slots,
         });
@@ -4567,6 +4578,12 @@ impl ServerHandle {
                             } else {
                                 (request.target, false)
                             };
+                            // A whole material registered `sweeps = false` — a torch —
+                            // stands among a thin block's cells instead (§7.6, Craft
+                            // ask 14): the target stays, the sweep does not happen, and
+                            // the plan takes the air cells of its shape as on a side
+                            // face.
+                            let swept = swept && shared.sweeps(material);
 
                             // **Turned to face whoever placed it**, and toward
                             // their feet against a wall — reported from the

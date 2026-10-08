@@ -4239,6 +4239,10 @@ impl ScriptVm for MluaVm {
                             .as_ref()
                             .and_then(|entry| entry.get::<Option<u32>>("shape").ok().flatten())
                             .unwrap_or(crate::block::OCCUPANCY_FULL),
+                        sweeps: entry
+                            .as_ref()
+                            .and_then(|entry| entry.get::<Option<bool>>("sweeps").ok().flatten())
+                            .unwrap_or(true),
                         model: entry
                             .as_ref()
                             .and_then(|entry| entry.get::<Option<String>>("model").ok().flatten()),
@@ -9885,6 +9889,17 @@ fn copy_whole(owner: &str, id: &str, spec: &Table, entry: &Table) -> mlua::Resul
     };
     let whole = spec.get::<Option<bool>>("whole")?.unwrap_or(false) || model.is_some();
     entry.set("whole", whole)?;
+    // Whether, set down on thin ground, it sweeps the ground or stands among
+    // its cells (Contract §7.6; Craft ask 14). Only a whole material is ever
+    // asked, so the field is refused on anything else rather than ignored.
+    if let Some(sweeps) = spec.get::<Option<bool>>("sweeps")? {
+        if !whole {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): `sweeps` is for a `whole` block (Sub-Node Contract §7.6)"
+            )));
+        }
+        entry.set("sweeps", sweeps)?;
+    }
     if let Some(model) = model {
         entry.set("model", model)?;
     }
@@ -11376,7 +11391,7 @@ const FLUID_FIELDS: [&str; 9] = [
 /// accepted them would be an API promising behaviour nothing implements.
 const ITEM_FIELDS: [&str; 4] = ["id", "name", "texture", "description"];
 
-const BLOCK_FIELDS: [&str; 23] = [
+const BLOCK_FIELDS: [&str; 24] = [
     "id",
     "name",
     "drops",
@@ -11398,6 +11413,7 @@ const BLOCK_FIELDS: [&str; 23] = [
     "washes_away",
     "light_falloff",
     "whole",
+    "sweeps",
     "shape",
     "model",
 ];
@@ -15052,6 +15068,35 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_block_sweeps_thin_ground_unless_it_says_not() {
+        // Contract §7.6, Craft ask 14: a torch stands among a thin floor's
+        // cells where a campfire sweeps them. Read back the way the server
+        // reads it.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "camp",
+            "game.register_block{ id = 'fire', whole = true }\n\
+             game.register_block{ id = 'torch', whole = true, sweeps = false }\n\
+             game.register_block{ id = 'lamp', whole = true, sweeps = true }",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        let sweeps = |name: &str| {
+            vm.registered_block_rules()
+                .into_iter()
+                .find(|rules| rules.block == name)
+                .map_or_else(|| panic!("{name} was not registered"), |rules| rules.sweeps)
+        };
+        assert!(
+            sweeps("camp:fire"),
+            "a whole block sweeps unless it says not"
+        );
+        assert!(!sweeps("camp:torch"));
+        assert!(sweeps("camp:lamp"));
+    }
+
+    #[test]
     fn a_shape_needs_whole_and_a_model_has_no_faces() {
         // A shape a chisel could take apart is a cut (§7.5 and §9.1); a model
         // has no faces for the face flags to apply to (§8.6); a shape is three
@@ -15087,6 +15132,11 @@ mod tests {
         refused(
             "game.register_block{ id = 'fire', whole = true, shape = { '####x####', '.........', '.........' } }",
             "`#` or `.`",
+        );
+        // `sweeps` is a whole block's question (§7.6, Craft ask 14).
+        refused(
+            "game.register_block{ id = 'peg', sweeps = false }",
+            "is for a `whole` block",
         );
         refused(
             "game.register_block{ id = 'fire', whole = true, shape = { '.........', '.........', '.........' } }",

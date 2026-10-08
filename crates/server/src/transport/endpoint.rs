@@ -446,6 +446,10 @@ pub struct Shared {
     /// placement into its block replaces it (§7.6; the designer, 2026-10-08:
     /// nothing is built on grass).
     pub cards: std::collections::BTreeSet<tiamat_core::MaterialId>,
+    /// The whole materials registered `sweeps = false` — a torch — which
+    /// stand among a thin block's cells rather than sweeping them (Contract
+    /// §7.6; Craft ask 14).
+    pub no_sweep: std::collections::BTreeSet<tiamat_core::MaterialId>,
     /// Every registered material by name, to its runtime id — what a dig
     /// hook's `drops` answer is resolved with, at the moment it is given, and
     /// what an inventory holds.
@@ -1707,6 +1711,13 @@ impl Shared {
     #[must_use]
     pub fn is_card(&self, material: tiamat_core::MaterialId) -> bool {
         self.cards.contains(&material)
+    }
+
+    /// Whether a whole material sweeps thin ground it is set down on, or
+    /// stands among its cells (Sub-Node Contract §7.6).
+    #[must_use]
+    pub fn sweeps(&self, material: tiamat_core::MaterialId) -> bool {
+        !self.no_sweep.contains(&material)
     }
 
     /// Makes a player's dig a dig of the whole block (Contract §7.5), on the
@@ -4525,6 +4536,7 @@ mod tests {
             drop_rules: std::collections::BTreeMap::new(),
             whole: std::collections::BTreeMap::new(),
             cards: std::collections::BTreeSet::new(),
+            no_sweep: std::collections::BTreeSet::new(),
             material_ids: std::collections::BTreeMap::new(),
             main_slots: None,
         }

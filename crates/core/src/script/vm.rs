@@ -398,6 +398,13 @@ pub struct BlockRules {
     /// unless the mod declared a `shape`, which it may only for a `whole`
     /// material (Contract §7.5).
     pub shape: u32,
+    /// Whether a `whole` material set down on a partial block with no node
+    /// in its top layer SWEEPS that block — its remains destroyed, the shape
+    /// laid whole at its bottom (Contract §7.6). `true` unless the mod said
+    /// `sweeps = false`: then it stands among the block's cells instead,
+    /// taking the air cells of its shape, the model clipping through the
+    /// ground, as on a side face — a torch (Craft ask 14).
+    pub sweeps: bool,
     /// The registered model the client draws in place of its cells, if any.
     ///
     /// A model id as `register_model` qualified it. Sub-Node Contract §8.6:

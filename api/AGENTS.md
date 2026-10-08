@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **`sweeps = false` on a whole block** (2026-10-08). A `whole` block set
+  down on thin ground sweeps it by default; `sweeps = false` makes it stand
+  among the ground's cells instead, its model clipping through — a torch.
+  Sub-Node Contract §7.6.
 - **`e.swept` on the place event** (2026-10-08). `true` when the placement
   destroys what the block holds — a `whole` block laid on a partial block
   with no top node, or grass cards. A mod gating what a bare hand may clear

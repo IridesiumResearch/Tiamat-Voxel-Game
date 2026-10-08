@@ -954,7 +954,12 @@ standing on the first full block beneath:
   on the block beneath. The sweep is the one place the engine removes units
   without paying them out; charter rule 5's conservation yields to the
   designer here, and nothing is gained by it, so nothing is exploited. A
-  block holding another whole material is never swept (`Refusal::Whole`);
+  block holding another whole material is never swept (`Refusal::Whole`).
+  A whole material registered **`sweeps = false`** — a torch, a sign; Craft
+  ask 14 — never sweeps: set down on such a block it stands among the
+  block's cells, taking the air cells of its shape, the model clipping
+  through the ground as on a side face, and "this is not flat ground" when
+  no cell of its shape is air there;
 - **nothing is built on grass** (the designer, 2026-10-08): a card (§8.4, a
   `billboard` material) is neither ground nor in the way. A block of cards
   is not ground to anything — a placement against its top lands where the
