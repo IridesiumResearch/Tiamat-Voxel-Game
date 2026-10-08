@@ -955,7 +955,15 @@ standing on the first full block beneath:
   cards are — and the cards in the block a placement writes into are gone,
   as the sweep's remains are: the cells written over take their place and
   the rest go to air, and a block of nothing but cards is simply replaced.
-  A chisel's cell is a placement too, and takes the tuft with it;
+  A chisel's cell is a placement too, and takes the tuft with it.
+- **A sweep is said to the mods.** `on_place` sees `swept = true` for a
+  placement that destroys what the block holds — the sweep above, or the
+  cards — and is asked BEFORE anything is written, so a mod that lets a bare
+  hand clear only loose ground refuses the rest in its own words (Craft:
+  "Level this ground"; the designer, 2026-10-08) and the remains stay. The
+  engine does not know what a hand may dig; that rule is a mod's, and the
+  flag is what it needs to apply it without inferring a sweep from the units
+  and the cell count, which a full-shape whole material defeats;
 - loose material with a block brush fills that block's gaps (§7.1's gap
   fill), rather than starting a floating block above them;
 - a sub-node brush is not redirected: a chisel's cell goes exactly where it was

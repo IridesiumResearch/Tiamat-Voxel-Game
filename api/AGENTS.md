@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **`e.swept` on the place event** (2026-10-08). `true` when the placement
+  destroys what the block holds — a `whole` block laid on a partial block
+  with no top node, or grass cards. A mod gating what a bare hand may clear
+  refuses here with its own words; the remains stay. See "Your hooks".
 - **Nothing is built on grass** (2026-10-08). A `billboard` block — a grass
   card — is neither ground nor in the way: a placement against it lands
   where the card is and the card is gone. Nothing to do. Sub-Node Contract

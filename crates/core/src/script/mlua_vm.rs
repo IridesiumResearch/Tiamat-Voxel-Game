@@ -3768,6 +3768,10 @@ impl ScriptVm for MluaVm {
             table.set("material", event.material.0)?;
             table.set("occupancy", event.occupancy)?;
             table.set("units", event.units)?;
+            // A sweep, said outright (Contract §7.6): what the block holds
+            // goes, and a mod that lets a hand clear only some ground
+            // refuses the rest.
+            table.set("swept", event.swept)?;
             // A cut of several materials, cell by cell as it would land
             // (Sub-Node Contract §9.1): what a veto needs to judge "no oak in
             // the chapel" by, and what `material` alone cannot say.
@@ -15434,7 +15438,35 @@ mod tests {
             occupancy: 0b111,
             units: 3,
             cells: None,
+            swept: false,
         }
+    }
+
+    #[test]
+    fn a_sweep_is_told_to_the_veto_outright() {
+        // Contract §7.6: a placement that destroys what the block holds says
+        // so, and a mod that lets a hand clear only loose ground refuses the
+        // rest in its own words — the designer's, 2026-10-08.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "level",
+            "game.register_on_place(function(event)\n\
+                 if event.swept then return 'level this ground' end\n\
+             end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        let verdict = vm.place(&crate::script::PlaceEvent {
+            swept: true,
+            ..a_place()
+        });
+        assert!(!verdict.allowed, "the sweep went unrefused");
+        assert_eq!(verdict.reason.as_deref(), Some("level this ground"));
+        assert!(
+            vm.place(&a_place()).allowed,
+            "a placement that sweeps nothing is untouched"
+        );
     }
 
     #[test]

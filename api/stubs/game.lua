@@ -3409,6 +3409,7 @@ function game.set_block(position, block, occupancy, options) end
 ---@field material integer What it would be made of.
 ---@field occupancy integer Bitmask of which of the block's 27 cells would be filled.
 ---@field units integer How many units it would cost, which is the number of set bits in `occupancy`.
+---@field swept boolean Whether the placement SWEEPS the block (Sub-Node Contract §7.6): what the block holds that it does not write over is destroyed — a `whole` block laid on a partial block with no node in its top layer, or the grass cards in a block. The rule that decides what a bare hand may clear is a mod's: refuse here with your own words ("Level this ground") when the block holds what the hand could not dig. `game.get_block` on `x, y, z` still reads the block as it stands.
 ---@field cells integer[]|nil For a cut of several materials, each cell's material as it would land — turned to face the player as the placement turns it — 27 numeric ids with `0` for empty; `material` is then the lowest of them. Absent for anything else.
 
 ---The place control landing on a block with nothing to place.

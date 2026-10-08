@@ -23,6 +23,23 @@ cbbbc5e). Ask 10 added 2026-09-28 and landed the same day (engine
 f2cbc36). Ask 12 added 2026-10-07 and landed the next day (engine
 671f5763). Nothing is open.
 
+**From the engine, 2026-10-08 (night), for "Level this ground" (Craft
+09eee00).** Two engine changes the same day move the ground under that gate.
+(1) A whole material placed against the top of a partial block no longer
+goes INTO it among the ground's cells: a block with any node in its top
+layer is ground and the thing goes in the block ABOVE, intact; a block with
+none is SWEPT — its remains destroyed — and the shape laid whole at its
+bottom (Sub-Node Contract §7.6, the designer's rule). "Sunk into rock" is
+now only the side-face case. (2) The place event says it outright:
+`e.swept` is `true` for a placement that destroys what the block holds —
+the sweep, or grass cards — and the hook is asked before anything is
+written, so a refusal keeps the remains. The gate's inference ("27 units
+with fewer than 27 cells") misses a full-shape whole (the anvil, a
+station without a `shape`), which now sweeps rock unrefused: key the gate
+on `e.swept` (and `game.get_block` on `e.x, e.y, e.z` still reads the
+block as it stands, cards included). The designer's words for the refusal
+are exactly "level this ground".
+
 ## 12. Swapping a whole material standing in a thin floor (2026-10-07): LANDED 2026-10-08 (engine 671f5763)
 
 **From the engine, 2026-10-08.** As the smallest change asked: `game.set_block(pos,

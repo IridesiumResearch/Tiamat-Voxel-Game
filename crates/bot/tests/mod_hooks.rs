@@ -1292,3 +1292,108 @@ fn the_reference_mods_register_no_vetoes() {
 
     assert!(server.stop());
 }
+
+#[test]
+fn a_mod_told_of_a_sweep_can_refuse_it_and_the_floor_stays() {
+    // Contract §7.6: a whole block laid on a floor one cell thick sweeps the
+    // floor — unless a mod's `on_place` refuses, which it can because the
+    // event says `swept`; then nothing is written and nothing is charged.
+    // The rule that a bare hand may clear only loose ground is Craft's; this
+    // proves the flag and the ordering it relies on.
+    let server = start(
+        "level-this-ground",
+        write_warden(
+            "level-this-ground",
+            "game.register_block{ id = \"stump\", whole = true,\n\
+             \x20   shape = { \"### ### ###\", \"... ... ...\", \"... ... ...\" } }\n\
+             game.register_on_place(function(e)\n\
+             \x20   if e.swept then return \"level this ground\" end\n\
+             end)",
+        ),
+    );
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        let stump = material_named(&bot, "warden:stump");
+        let ground = material_named(&bot, "warden:ground");
+
+        // A stump in hand: seeded whole, dug whole by the hand.
+        let source = BlockPos::new(2, 0, 0);
+        assert!(server.seed_block(source, stump), "seed queue full");
+        let seen_at = |bot: &Bot, at: BlockPos, material: u16| {
+            bot.received().iter().any(|message| {
+                matches!(
+                    message,
+                    tiamat_core::proto::ServerMessage::BlockDelta {
+                        edit: tiamat_core::proto::Edit::Partial { pos, material: got, .. },
+                        ..
+                    } if *pos == at && *got == material
+                )
+            })
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seen_at(&bot, source, stump) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the stump never landed"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        // Aimed at a cell OF the stump — its layer is the bottom one, and
+        // the block's centre is air — so the hand's dig becomes a dig of the
+        // whole (Contract §7.5).
+        let foot = SubNodePos::new(source.x * 3 + 1, source.y * 3, source.z * 3 + 1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while bot.units_of(stump) < 27 {
+            bot.start_dig(foot).await.expect("start dig");
+            let _ = bot.await_inventory(Duration::from_secs(2)).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the stump never came up"
+            );
+        }
+
+        // A floor one cell thick, of the ground a mod may protect.
+        let floor = BlockPos::new(-2, 0, 0);
+        let bottom: u32 = (0..3)
+            .flat_map(|x| (0..3).map(move |z| 1 << tiamat_core::block::subnode_index(x, 0, z)))
+            .sum();
+        assert!(
+            server.seed_partial(floor, ground, bottom),
+            "seed queue full"
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seen_at(&bot, floor, ground) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the floor never landed"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+
+        // The stump laid on it: a sweep, which the mod refuses.
+        bot.hold_brush("block").await.expect("hold the block brush");
+        let asked = SubNodePos::new(floor.x * 3 + 1, floor.y * 3 + 1, floor.z * 3 + 1);
+        bot.place_shape_against(asked, stump, 0, [0, 1, 0])
+            .await
+            .expect("ask to place");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), bot.recv()).await;
+        assert!(
+            bot.notices().iter().any(|text| text == "level this ground"),
+            "the refusal was not the mod's words; notices {:?}",
+            bot.notices()
+        );
+        assert!(
+            !seen_at(&bot, floor, stump) && bot.cells_broken(floor) == 0,
+            "the refused sweep wrote something: the floor was touched"
+        );
+        assert_eq!(
+            bot.units_of(stump),
+            27,
+            "a refused placement charged the player"
+        );
+    });
+
+    assert!(server.stop());
+}

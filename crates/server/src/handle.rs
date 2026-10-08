@@ -4766,6 +4766,15 @@ impl ServerHandle {
                             // Lent the world, as the dig hook is: a veto that
                             // cannot look at where it is being asked about is
                             // deciding blind.
+                            // Whether this placement destroys what the block
+                            // holds — the sweep, or the cards in it (Contract
+                            // §7.6) — said to the hook outright.
+                            let sweeps = swept
+                                || world
+                                    .block_cells(&building_in, plan.block, &mut source)
+                                    .is_ok_and(|cells| {
+                                        cells.iter().any(|cell| !cell.is_air() && shared.is_card(*cell))
+                                    });
                             let (returned, verdict) = sight.lending(world, || {
                                 source.may_place(&tiamat_core::script::PlaceEvent {
                                     player: *request.actor.as_bytes(),
@@ -4775,6 +4784,7 @@ impl ServerHandle {
                                     occupancy: plan.occupancy,
                                     units: plan.units,
                                     cells: placed_cells,
+                                    swept: sweeps,
                                 })
                             });
                             world = returned;

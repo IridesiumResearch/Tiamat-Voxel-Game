@@ -992,6 +992,14 @@ pub struct PlaceEvent {
     /// anything else, whose one material is [`Self::material`]. With cells,
     /// `material` is the lowest of them.
     pub cells: Option<crate::block::Cells>,
+    /// Whether the placement SWEEPS the block (Sub-Node Contract §7.6): what
+    /// the block holds that the placement does not write over is destroyed —
+    /// a whole material laid on a partial block with no node in its top
+    /// layer, or the cards (grass) in a block. Said outright, because the
+    /// rule that decides what a hand may clear is a mod's — Craft's "Level
+    /// this ground" — and it should not have to infer a sweep from the units
+    /// and the cell count, which a full-shape whole material defeats.
+    pub swept: bool,
 }
 
 /// The place control pressed with nothing to place.
