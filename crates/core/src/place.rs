@@ -82,6 +82,14 @@ pub enum Refusal {
     /// material goes down whole or not at all.
     #[error("that is one piece; it goes down whole or not at all")]
     Whole,
+
+    /// A whole material with no air cell of its shape where it was aimed:
+    /// written into a block by a side face that already holds ground in
+    /// every cell the shape wants (Sub-Node Contract §7.5). Against a top
+    /// face the block is swept or placed on instead (§7.6), so this is the
+    /// side-face case only. The designer's words, 2026-10-08.
+    #[error("this is not flat ground")]
+    NotFlat,
 }
 
 /// What a placement would write.
@@ -112,7 +120,7 @@ pub struct Placement {
 /// # Errors
 ///
 /// [`Refusal::NothingHeld`] if fewer than a block's units are held, or
-/// [`Refusal::Occupied`] if no cell of the shape is air.
+/// [`Refusal::NotFlat`] if no cell of the shape is air.
 pub fn plan_whole(
     target: SubNodePos,
     held: u32,
@@ -124,13 +132,38 @@ pub fn plan_whole(
     }
     let occupancy = shape & !filled & crate::block::OCCUPANCY_FULL;
     if occupancy == 0 {
-        return Err(Refusal::Occupied);
+        return Err(Refusal::NotFlat);
     }
     Ok(Placement {
         block: target.block(),
         occupancy,
         units: crate::UNITS_PER_BLOCK,
     })
+}
+
+/// The nine cells of a block's top layer, `y = 2`.
+pub const TOP_LAYER: u32 = {
+    let mut mask = 0u32;
+    let mut x = 0;
+    while x < 3 {
+        let mut z = 0;
+        while z < 3 {
+            mask |= 1 << crate::block::subnode_index(x, 2, z);
+            z += 1;
+        }
+        x += 1;
+    }
+    mask
+};
+
+/// Whether a block holding `filled` is ground to a WHOLE material (Sub-Node
+/// Contract §7.6; the designer, 2026-10-08): full, or with any node in its
+/// top layer to stand on. A block with none — a thin floor, a layer of snow
+/// — is swept instead: see [`landing_by`] and the server's placement.
+#[must_use]
+pub const fn whole_ground(filled: u32) -> bool {
+    let filled = filled & crate::block::OCCUPANCY_FULL;
+    filled == crate::block::OCCUPANCY_FULL || filled & TOP_LAYER != 0
 }
 
 /// How many of a block's 27 cells make it ground to place on: three quarters,
@@ -169,6 +202,40 @@ pub fn landing(
         asked
     } else {
         under
+    }
+}
+
+/// Where a WHOLE material placed across `face` from `asked` goes, and whether
+/// the block it goes into is to be swept (Sub-Node Contract §7.6; the
+/// designer, 2026-10-08).
+///
+/// Against a top face the block UNDER the face decides, wherever the asked
+/// cell fell — in the block above it, or inside it across a low cell's top:
+/// a block that is ground to a whole material ([`whole_ground`]: full, or
+/// any node in its top layer) puts the thing in the block above it, intact;
+/// a block with no top node is swept — its remaining cells destroyed — and
+/// the thing is laid whole at its bottom, standing on the block beneath. Any
+/// other face: `asked`, not swept, and the shape takes the air cells it finds
+/// there ([`plan_whole`]).
+#[must_use]
+pub fn whole_landing(
+    asked: SubNodePos,
+    face: [i8; 3],
+    filled_under: impl FnOnce(BlockPos) -> u32,
+) -> (SubNodePos, bool) {
+    if face != [0, 1, 0] {
+        return (asked, false);
+    }
+    let under = SubNodePos::new(asked.x, asked.y - 1, asked.z);
+    let block = under.block();
+    if whole_ground(filled_under(block)) {
+        let side = crate::SUBNODES_PER_AXIS as i32;
+        (
+            SubNodePos::new(block.x * side + 1, (block.y + 1) * side, block.z * side + 1),
+            false,
+        )
+    } else {
+        (under, true)
     }
 }
 
@@ -1058,11 +1125,13 @@ mod tests {
         let among = plan_whole(cell(0, 0, 0), 27, bottom, two_of_them).expect("room");
         assert_eq!(among.occupancy, bottom & !two_of_them);
         assert_eq!(among.units, UNITS_PER_BLOCK);
-        // No air in the shape at all: nowhere to stand.
+        // No air in the shape at all: nowhere to stand, in the designer's
+        // words.
         assert_eq!(
             plan_whole(cell(0, 0, 0), 27, bottom, bottom),
-            Err(Refusal::Occupied)
+            Err(Refusal::NotFlat)
         );
+        assert_eq!(Refusal::NotFlat.to_string(), "this is not flat ground");
         // Bits above the 27 are not cells.
         assert_eq!(
             plan_whole(cell(0, 0, 0), 27, bottom, 1 << 30)
@@ -1096,6 +1165,65 @@ mod tests {
         // Aimed at a cell inside a partial block's own top: already into it.
         let inside = cell(4, 1, 4);
         assert_eq!(landing(inside, [0, 1, 0], |_| 0), inside);
+    }
+
+    #[test]
+    fn a_whole_material_sees_a_top_node_as_ground_and_sweeps_a_block_without_one() {
+        // Contract §7.6, the designer 2026-10-08: to a whole material a block
+        // with any node in its top layer is ground, and the thing goes in the
+        // block above it; a block with none is where it goes, swept.
+        let top_layer: u32 = (0..3)
+            .flat_map(|x| (0..3).map(move |z| 1 << crate::block::subnode_index(x, 2, z)))
+            .sum();
+        assert_eq!(TOP_LAYER, top_layer);
+        assert_eq!(TOP_LAYER.count_ones(), 9);
+        let bottom_two: u32 = (0..3)
+            .flat_map(|x| {
+                (0..2).flat_map(move |y| {
+                    (0..3).map(move |z| 1 << crate::block::subnode_index(x, y, z))
+                })
+            })
+            .sum();
+        assert!(whole_ground(crate::block::OCCUPANCY_FULL));
+        let one_top = 1 << crate::block::subnode_index(1, 2, 1);
+        assert!(whole_ground(one_top), "one top node is a node to stand on");
+        assert!(
+            !whole_ground(bottom_two),
+            "eighteen cells with nothing on top are not"
+        );
+        assert!(
+            !is_ground(bottom_two | one_top) && whole_ground(bottom_two | one_top),
+            "loose material's three-quarters threshold is its own"
+        );
+
+        // Aimed at the top face of a block whose top cell sits at y = 2: the
+        // asked cell is in the block above, and that is where it goes.
+        let asked = cell(4, 3, 4);
+        let under = cell(4, 2, 4);
+        assert_eq!(
+            whole_landing(asked, [0, 1, 0], |_| crate::block::OCCUPANCY_FULL),
+            (cell(4, 3, 4), false)
+        );
+        // No top node: swept, and into it.
+        assert_eq!(
+            whole_landing(asked, [0, 1, 0], |_| bottom_two),
+            (under, true)
+        );
+        // Aimed across a LOW cell's top, inside a thin floor's own block —
+        // where a client's aim lands on a floor one cell thick: the block
+        // under the face is that block, and it has no top node: swept.
+        let inside = cell(4, 1, 4);
+        assert_eq!(
+            whole_landing(inside, [0, 1, 0], |_| 0b111),
+            (cell(4, 0, 4), true)
+        );
+        // The same aim with a node on top elsewhere in the block: ground, so
+        // the thing goes in the block above, whole.
+        let (landed, swept) = whole_landing(inside, [0, 1, 0], |_| 0b111 | one_top);
+        assert_eq!(landed.block(), cell(4, 3, 4).block());
+        assert!(!swept);
+        // A side face is never swept, whatever is behind it.
+        assert_eq!(whole_landing(asked, [1, 0, 0], |_| 0), (asked, false));
     }
 
     #[test]

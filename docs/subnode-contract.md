@@ -858,16 +858,18 @@ puts down, not stuff a chisel takes a corner off.
   thing. The dig hooks see one dig of one block.
 - **Pays whole.** Breaking it yields 27 units of itself, or its `drops` table
   in full, however many cells its shape occupies (§9).
-- **Placed as its shape, into the air of a block, for a whole block's units.**
-  Whatever brush is held, loose material of a whole material fills the
-  material's **shape** (below) and costs 27 units. The shape's cells that are
-  air are written; **a cell of the shape that already holds ground stays
-  ground**, and the model (§8.6) is drawn whole over it — a campfire set down
-  on a chiselled slope stands in the slope's block among its cells, clipping
-  through them, rather than floating a block above (§7.6; the designer,
-  2026-10-07). Only when no cell of the shape is air is the placement
-  `Refusal::Occupied`. The shape is written as declared — not turned to face
-  the player, not tipped against a wall. §7.1's `oriented` is for cuts, which
+- **Placed as its shape, intact, for a whole block's units.** Whatever brush
+  is held, loose material of a whole material fills the material's **shape**
+  (below) and costs 27 units. Set down on ground (§7.6: a full block, or any
+  node in the top layer) it goes in the block above, whole. Set down on a
+  partial block with no node in its top layer, that block's remains are
+  **swept** — destroyed — and the shape is written whole at its bottom
+  (§7.6; the designer, 2026-10-08). Written into a block by any other face,
+  the shape's cells that are air are taken and **a cell of the shape that
+  already holds ground stays ground**, the model (§8.6) drawn whole over it;
+  only when no cell of the shape is air is the placement refused, as
+  `Refusal::NotFlat`: "this is not flat ground". The shape is written as
+  declared — not turned to face the player, not tipped against a wall. §7.1's `oriented` is for cuts, which
   are a player's own; a whole material's shape is the material's, and its
   model is drawn the same way up.
 - **Nothing is written into its block afterwards.** A block holding a whole
@@ -936,9 +938,17 @@ puts the thing in the block above, as against any floor. Against the top face
 of a block holding fewer, the thing is placed **into that block's own space**,
 standing on the first full block beneath:
 
-- a whole material (§7.5) takes the air cells of its shape there and its model
-  clips through the ground cells that remain — a torch stands on the full
-  block under a thin layer of gravel, a campfire sits in a shallow dip;
+- a whole material (§7.5) sees ground its own way (the designer, 2026-10-08,
+  replacing the first rule, under which it stood among the ground's cells
+  and a one-layer campfire on a one-layer floor had nowhere to go): a block
+  with **any node in its top layer** is ground to it, and the thing goes in
+  the block above, intact, standing on that node; a block with **none** — a
+  thin floor, a layer of snow — is **swept**: its remaining cells are
+  destroyed and the shape is written whole at the block's bottom, standing
+  on the block beneath. The sweep is the one place the engine removes units
+  without paying them out; charter rule 5's conservation yields to the
+  designer here, and nothing is gained by it, so nothing is exploited. A
+  block holding another whole material is never swept (`Refusal::Whole`);
 - loose material with a block brush fills that block's gaps (§7.1's gap
   fill), rather than starting a floating block above them;
 - a sub-node brush is not redirected: a chisel's cell goes exactly where it was
@@ -953,8 +963,11 @@ anything placed by a chisel there would. The client aims as it always did
 (the cell across the face it points at); the server decides where that lands,
 as charter rule 2 has it.
 
-Implemented by `place::is_ground` (the threshold) and the placement's target
-choice in the server's placement loop.
+Implemented by `place::is_ground` (the three-quarters threshold, loose
+material's), `place::whole_ground` and `place::whole_landing` (a whole
+material's ground and where it lands, with the sweep) and the placement's
+target choice in the server's placement loop, which plans and writes a sweep
+as into an empty block.
 
 ### 7.7 Digging a block that is not full
 

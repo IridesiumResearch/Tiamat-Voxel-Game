@@ -4523,16 +4523,35 @@ impl ServerHandle {
                             // block brush; a chisel's cell and a cut land
                             // where they were aimed, for the reasons the
                             // contract gives.
+                            let whole = shared.whole_shape(material).is_some();
                             let redirects = claim.cells.is_none()
                                 && claim.shape.is_none()
-                                && (shared.whole_shape(material).is_some()
-                                    || brush != tiamat_core::dig::Brush::SubNode);
-                            let target = if redirects {
-                                tiamat_core::place::landing(request.target, request.face, |under| {
-                                    contents(under, &building_in, &mut world, &mut source)
-                                })
+                                && (whole || brush != tiamat_core::dig::Brush::SubNode);
+                            // **A whole material has its own idea of ground**
+                            // (§7.6, the designer 2026-10-08): any node in the
+                            // top layer of the block under the face is one to
+                            // stand on, so the thing goes in the block above,
+                            // intact; a block with none is SWEPT — its remains
+                            // destroyed — and the thing is laid whole at its
+                            // bottom, on the block beneath. Loose material
+                            // keeps the three-quarters rule and fills the gaps.
+                            let (target, swept) = if redirects && whole {
+                                tiamat_core::place::whole_landing(
+                                    request.target,
+                                    request.face,
+                                    |under| contents(under, &building_in, &mut world, &mut source),
+                                )
+                            } else if redirects {
+                                (
+                                    tiamat_core::place::landing(
+                                        request.target,
+                                        request.face,
+                                        |under| contents(under, &building_in, &mut world, &mut source),
+                                    ),
+                                    false,
+                                )
                             } else {
-                                request.target
+                                (request.target, false)
                             };
 
                             // **Turned to face whoever placed it**, and toward
@@ -4597,8 +4616,23 @@ impl ServerHandle {
                             // Nothing is displaced by this. The per-cell air
                             // check below is what keeps a placement additive,
                             // and it is unchanged.
-                            let filled =
-                                contents(target.block(), &building_in, &mut world, &mut source);
+                            let filled = if swept {
+                                // The remains go; the shape is planned and
+                                // written as into an empty block, and the
+                                // write below is a replace. This is the one
+                                // place the engine removes units without
+                                // paying them out, by the designer's decision
+                                // (Contract §7.6); nothing is gained by it.
+                                let remains =
+                                    contents(target.block(), &building_in, &mut world, &mut source);
+                                debug!(
+                                    cells = remains.count_ones(),
+                                    "sweeping a partial block's remains to lay a whole material"
+                                );
+                                0
+                            } else {
+                                contents(target.block(), &building_in, &mut world, &mut source)
+                            };
 
                             // A cut of several materials is planned whole, its
                             // own cells whatever the brush, and never trimmed
@@ -4661,8 +4695,10 @@ impl ServerHandle {
                                     // hole (charter rule 5). Per cell rather
                                     // than per block is what lets a chisel fill
                                     // the gaps in a block it carved.
-                                    let occupied = tiamat_core::place::occupied_cells(&plan)
-                                        .any(|cell| {
+                                    // A sweep writes over the remains on
+                                    // purpose; everything else is additive.
+                                    let occupied = !swept
+                                        && tiamat_core::place::occupied_cells(&plan).any(|cell| {
                                             i32::try_from(cell[0]).is_ok_and(|x| {
                                                 let (Ok(y), Ok(z)) = (
                                                     i32::try_from(cell[1]),
