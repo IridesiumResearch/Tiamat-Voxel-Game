@@ -441,6 +441,11 @@ pub struct Shared {
     /// dug as one, placed as this mask into an empty block, never written
     /// into. Every other material is loose, as every material was.
     pub whole: std::collections::BTreeMap<tiamat_core::MaterialId, u32>,
+    /// The billboard materials — grass cards (Sub-Node Contract §8.4) — by
+    /// runtime id. To a placement a card is neither ground nor in the way: a
+    /// placement into its block replaces it (§7.6; the designer, 2026-10-08:
+    /// nothing is built on grass).
+    pub cards: std::collections::BTreeSet<tiamat_core::MaterialId>,
     /// Every registered material by name, to its runtime id — what a dig
     /// hook's `drops` answer is resolved with, at the moment it is given, and
     /// what an inventory holds.
@@ -1695,6 +1700,13 @@ impl Shared {
     #[must_use]
     pub fn whole_shape(&self, material: tiamat_core::MaterialId) -> Option<u32> {
         self.whole.get(&material).copied()
+    }
+
+    /// Whether a material is a card — grass — which a placement replaces
+    /// (Sub-Node Contract §7.6).
+    #[must_use]
+    pub fn is_card(&self, material: tiamat_core::MaterialId) -> bool {
+        self.cards.contains(&material)
     }
 
     /// Makes a player's dig a dig of the whole block (Contract §7.5), on the
@@ -4512,6 +4524,7 @@ mod tests {
             tool_speeds: std::collections::BTreeMap::new(),
             drop_rules: std::collections::BTreeMap::new(),
             whole: std::collections::BTreeMap::new(),
+            cards: std::collections::BTreeSet::new(),
             material_ids: std::collections::BTreeMap::new(),
             main_slots: None,
         }

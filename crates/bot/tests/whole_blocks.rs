@@ -683,3 +683,82 @@ fn a_whole_block_written_where_one_stands_beside_a_thin_wall_keeps_the_wall() {
     });
     assert!(server.stop(), "clean shutdown");
 }
+
+#[test]
+fn nothing_is_built_on_grass_a_placement_lands_where_the_tuft_was() {
+    // Contract §7.6 (the designer, 2026-10-08): a card is neither ground nor
+    // in the way. A whole material and loose material with the block brush,
+    // each placed against the top of a tuft, land where the tuft was, and the
+    // tuft is gone; nothing floats in the block above it.
+    let server = start("built-on-grass");
+    block_on(async {
+        let mut bot = join(&server).await;
+        let (brazier, white) = brazier_in_hand(&mut bot, &server).await;
+        let tuft = wire_id(&bot, "core:tuft");
+
+        let grass = BlockPos::new(2, 1, 1);
+        assert!(server.seed_block(grass, tuft));
+        wait_for(&mut bot, "the tuft", |bot| {
+            cells_seen(bot, grass).iter().all(|cell| *cell == tuft)
+        })
+        .await;
+        bot.hold_brush("block").await.expect("hold the block brush");
+        let asked = SubNodePos::new(grass.x * 3 + 1, grass.y * 3 + 3, grass.z * 3 + 1);
+        bot.place_shape_against(asked, brazier, 0, [0, 1, 0])
+            .await
+            .expect("ask to place");
+        expect_cells(
+            &mut bot,
+            grass,
+            layout(&[(brazier, brazier_shape())]),
+            "the brazier where the tuft was",
+        )
+        .await;
+        assert!(
+            cells_seen(&bot, BlockPos::new(grass.x, grass.y + 1, grass.z))
+                .iter()
+                .all(|cell| *cell == 0),
+            "nothing floated above the grass"
+        );
+        wait_for(&mut bot, "27 units spent", |bot| bot.units_of(brazier) == 0).await;
+
+        // Loose material: a block of white dug up, then placed against
+        // another tuft with the block brush: a block of white where it was.
+        let quarry = BlockPos::new(2, 1, 0);
+        assert!(server.seed_block(quarry, white));
+        bot.expect_block(quarry, white, Duration::from_secs(10))
+            .await
+            .expect("seeded");
+        bot.dig_block(quarry).await.expect("dig");
+        wait_for(&mut bot, "a block of white in hand", |bot| {
+            bot.units_of(white) >= UNITS_PER_BLOCK
+        })
+        .await;
+        let lawn = BlockPos::new(2, 1, 2);
+        assert!(server.seed_block(lawn, tuft));
+        wait_for(&mut bot, "the second tuft", |bot| {
+            cells_seen(bot, lawn).iter().all(|cell| *cell == tuft)
+        })
+        .await;
+        bot.hold_brush("block").await.expect("hold the block brush");
+        let asked = SubNodePos::new(lawn.x * 3 + 1, lawn.y * 3 + 3, lawn.z * 3 + 1);
+        bot.place_shape_against(asked, white, 0, [0, 1, 0])
+            .await
+            .expect("ask to place");
+        expect_cells(
+            &mut bot,
+            lawn,
+            [white; 27],
+            "a block of white where the second tuft was",
+        )
+        .await;
+        assert!(
+            cells_seen(&bot, BlockPos::new(lawn.x, lawn.y + 1, lawn.z))
+                .iter()
+                .all(|cell| *cell == 0),
+            "nothing floated above the second tuft"
+        );
+        bot.disconnect().await;
+    });
+    assert!(server.stop(), "clean shutdown");
+}

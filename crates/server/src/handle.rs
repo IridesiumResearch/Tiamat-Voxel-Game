@@ -2236,6 +2236,15 @@ impl ServerHandle {
             .filter(|rules| rules.whole)
             .filter_map(|rules| Some((runtime_of(&rules.block)?, rules.shape)))
             .collect();
+        // The cards — grass — a placement replaces (Contract §7.6).
+        let cards: std::collections::BTreeSet<tiamat_core::MaterialId> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_block_rules())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rules| rules.billboard || rules.billboard_cross)
+            .filter_map(|rules| runtime_of(&rules.block))
+            .collect();
         let drop_rules = host
             .as_ref()
             .map(|loaded| loaded.vm().registered_block_rules())
@@ -2759,6 +2768,7 @@ impl ServerHandle {
             tool_speeds,
             drop_rules,
             whole,
+            cards,
             material_ids,
             main_slots,
         });
@@ -4502,10 +4512,14 @@ impl ServerHandle {
                                                 domain: &str,
                                                 world: &mut crate::world::World,
                                                 source: &mut dyn crate::world::ChunkSource| {
+                                // A card — grass — is neither ground nor in
+                                // the way (Contract §7.6): not counted here,
+                                // not in the air check, and replaced by the
+                                // write.
                                 world.block_cells(domain, at, source).map_or(0, |cells| {
                                     let mut mask = 0;
                                     for (index, cell) in cells.iter().enumerate() {
-                                        if !cell.is_air() {
+                                        if !cell.is_air() && !shared.is_card(*cell) {
                                             mask |= 1 << index;
                                         }
                                     }
@@ -4712,7 +4726,9 @@ impl ServerHandle {
                                                         tiamat_core::SubNodePos::new(x, y, z),
                                                         &mut source,
                                                     )
-                                                    .is_ok_and(|found| !found.is_air())
+                                                    .is_ok_and(|found| {
+                                                        !found.is_air() && !shared.is_card(found)
+                                                    })
                                             })
                                         });
                                     if occupied {
@@ -4871,17 +4887,42 @@ impl ServerHandle {
                                             })
                                             .collect()
                                     }
-                                    None => vec![(
-                                        material,
-                                        cells,
-                                        tiamat_core::place::writes(
+                                    None => {
+                                        // **Nothing is built on grass** (Contract
+                                        // §7.6): the cards in the block go — the
+                                        // ones the placement does not write over,
+                                        // to air first — and with no ground
+                                        // beside them the write is a replace.
+                                        let cards = existing.iter().enumerate().fold(
+                                            0u32,
+                                            |mask, (index, cell)| {
+                                                if !cell.is_air() && shared.is_card(*cell) {
+                                                    mask | (1 << index)
+                                                } else {
+                                                    mask
+                                                }
+                                            },
+                                        );
+                                        let mut edits = Vec::new();
+                                        if filled != 0 {
+                                            edits.extend(
+                                                (0..tiamat_core::block::SUBNODES_PER_BLOCK)
+                                                    .filter(|index| cards & !cells & (1 << index) != 0)
+                                                    .map(|index| tiamat_core::proto::Edit::SubNode {
+                                                        pos: tiamat_core::place::cell_pos(plan.block, index),
+                                                        material: tiamat_core::MaterialId::AIR.0,
+                                                    }),
+                                            );
+                                        }
+                                        edits.extend(tiamat_core::place::writes(
                                             plan.block,
                                             cells,
                                             material.get(),
                                             filled,
                                             same,
-                                        ),
-                                    )],
+                                        ));
+                                        vec![(material, cells, edits)]
+                                    }
                                 };
 
                             // Counted, because a per-cell write is several

@@ -297,12 +297,6 @@ const FLAT_DAYLIGHT: crate::shade::Uniform =
 /// How far behind the player the third-person camera sits, in blocks.
 const THIRD_PERSON_DISTANCE: f64 = 4.0;
 
-/// How many chat lines the client keeps.
-///
-/// A session on a busy server would otherwise hold every line anybody said for
-/// as long as it ran. Enough to scroll back through a conversation.
-const MAX_CHAT_LINES: usize = 200;
-
 /// How many of the player's slots the number keys reach.
 ///
 /// **The engine's number, not a mod's.** Charter rule 11 puts key bindings
@@ -1020,12 +1014,13 @@ pub struct App {
     /// message is: sending happens on the network side, and the renderer runs
     /// inside a frame.
     dialog_events: Vec<crate::dialog::Raised>,
-    /// Chat lines received, newest last.
+    /// Chat lines received, newest last, each with when it fades
+    /// (`crate::chat`).
     ///
     /// Engine-native, because moderation and RCON depend on chat existing
     /// whatever mods a server runs — a chat that arrived with a mod would be a
     /// chat an operator could not rely on.
-    chat: std::collections::VecDeque<String>,
+    chat: crate::chat::ChatLog,
     /// Whether the chat input line is open and taking keys.
     chat_open: bool,
     /// How many materials the atlas holds a texture for.
@@ -1500,7 +1495,7 @@ impl App {
             sounds: Vec::new(),
             dialogs: std::collections::BTreeMap::new(),
             views: std::collections::BTreeMap::new(),
-            chat: std::collections::VecDeque::new(),
+            chat: crate::chat::ChatLog::default(),
             chat_open: false,
             textured: 0,
             entering: None,
@@ -3317,21 +3312,24 @@ impl App {
             .collect();
     }
 
-    /// Records a chat line, keeping the most recent [`MAX_CHAT_LINES`].
-    ///
-    /// A bounded deque rather than a growing list: a session lasting hours on a
-    /// busy server would otherwise hold every line anybody said.
+    /// Records a chat line, keeping the most recent `crate::chat::MAX_LINES`
+    /// and hurrying the older lines off the closed box (`crate::chat`).
     fn say(&mut self, text: String) {
         tracing::info!("{text}");
-        self.chat.push_back(text);
-        while self.chat.len() > MAX_CHAT_LINES {
-            self.chat.pop_front();
-        }
+        self.chat.say(text, std::time::Instant::now());
     }
 
-    /// The chat lines to show, oldest first.
+    /// The chat history, oldest first: what the open box shows.
     pub fn chat(&self) -> impl Iterator<Item = &str> {
-        self.chat.iter().map(String::as_str)
+        self.chat.all()
+    }
+
+    /// The lines still on screen with the box closed, oldest first, each
+    /// with how visible it is — a notice fades soon after a newer one and is
+    /// gone once faded (the designer, 2026-10-08).
+    #[must_use]
+    pub fn chat_fading(&self) -> Vec<(&str, f32)> {
+        self.chat.fading(std::time::Instant::now())
     }
 
     /// How many materials this client knows about.

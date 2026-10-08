@@ -189,7 +189,20 @@ game.register_block{
     textures = { all = "textures/white.png" },
 }
 
-game.log("registered core:brazier (a model block) and core:anvil (a whole block)")
+-- A billboard — a tuft of grass, drawn as a card (Contract §8.4) — so the
+-- rule that nothing is built on grass (§7.6) is checked from the outside:
+-- a placement against it lands where the tuft is, and the tuft is gone.
+game.register_block{
+    id = "tuft",
+    name = "Tuft",
+    description = "Grass, as a card. Build on it and it is gone.",
+    billboard = true,
+    passable = true,
+    hardness = 0.1,
+    textures = { all = "textures/white.png" },
+}
+
+game.log("registered core:brazier (a model block), core:anvil (a whole block) and core:tuft (a card)")
 
 
 -- The engine's movement cues, given a noise.

@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **Nothing is built on grass** (2026-10-08). A `billboard` block — a grass
+  card — is neither ground nor in the way: a placement against it lands
+  where the card is and the card is gone. Nothing to do. Sub-Node Contract
+  §7.6.
 - **A whole block set on a thin floor sweeps the floor** (2026-10-08). On a
   partial block with no node in its top layer, a `whole` block's placement
   destroys that block's remains and lays the thing whole at its bottom; with

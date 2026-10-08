@@ -39,6 +39,7 @@ pub mod app;
 pub mod audio;
 pub mod cache;
 pub mod camera;
+pub mod chat;
 pub mod config;
 pub mod cut;
 pub mod dialog;

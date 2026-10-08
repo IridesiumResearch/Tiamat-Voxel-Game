@@ -949,6 +949,13 @@ standing on the first full block beneath:
   without paying them out; charter rule 5's conservation yields to the
   designer here, and nothing is gained by it, so nothing is exploited. A
   block holding another whole material is never swept (`Refusal::Whole`);
+- **nothing is built on grass** (the designer, 2026-10-08): a card (§8.4, a
+  `billboard` material) is neither ground nor in the way. A block of cards
+  is not ground to anything — a placement against its top lands where the
+  cards are — and the cards in the block a placement writes into are gone,
+  as the sweep's remains are: the cells written over take their place and
+  the rest go to air, and a block of nothing but cards is simply replaced.
+  A chisel's cell is a placement too, and takes the tuft with it;
 - loose material with a block brush fills that block's gaps (§7.1's gap
   fill), rather than starting a floating block above them;
 - a sub-node brush is not redirected: a chisel's cell goes exactly where it was
@@ -1163,7 +1170,8 @@ thick forest dark and the edge of a thin one dappled.
 
 **Collision (§2) is unchanged.** Leaves are solid, like glass. Whether a player
 can walk through foliage is a mod's opinion about its own blocks, and the engine
-has no view.
+has no view. (A `billboard` material — §8.4 — is the exception the placement
+rules make: nothing is built on grass, §7.6.)
 
 **A material is one or the other, never both.** `register_block` refuses a block
 declaring `transparent` and `cutout` together rather than picking one, because

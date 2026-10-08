@@ -2019,8 +2019,17 @@ fn paint_hud_command(
 /// Deliberately not a `core::ui` dialog. A dialog belongs to a mod and can be
 /// closed by one; chat cannot be, so it is drawn by the client directly.
 fn draw_chat(app: &mut App, ctx: &egui::Context) {
-    let lines: Vec<String> = app.chat().map(ToOwned::to_owned).collect();
     let open = app.chat_open();
+    // Open, the history; closed, only what is still fading in, each line as
+    // visible as it still is (`client::chat`).
+    let lines: Vec<(String, f32)> = if open {
+        app.chat().map(|line| (line.to_owned(), 1.0)).collect()
+    } else {
+        app.chat_fading()
+            .into_iter()
+            .map(|(line, alpha)| (line.to_owned(), alpha))
+            .collect()
+    };
     if lines.is_empty() && !open {
         return;
     }
@@ -2044,8 +2053,11 @@ fn draw_chat(app: &mut App, ctx: &egui::Context) {
                         .max_height(220.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            for line in lines.iter().skip(skip) {
-                                ui.label(egui::RichText::new(line).color(egui::Color32::WHITE));
+                            for (line, alpha) in lines.iter().skip(skip) {
+                                ui.label(
+                                    egui::RichText::new(line)
+                                        .color(egui::Color32::WHITE.gamma_multiply(*alpha)),
+                                );
                             }
                         });
                     if !open {
