@@ -220,15 +220,16 @@ impl Dig {
     /// because only it can see the block. A `SubNode` brush passes 1 and gets
     /// exactly the old behaviour: one chip, at the end.
     ///
-    /// The total time is unchanged, so a block takes as long to clear as it
-    /// always did. What changed is that the time is now spent visibly.
+    /// The time is spent visibly, and for a block brush it is the share of
+    /// a full block's time that the block's fill was when the dig began
+    /// (Sub-Node Contract §7.7).
     ///
     /// Returns `0` on a tick where nothing is due, and never more than `cells`
     /// in total across a dig: a caller that keeps advancing a finished dig gets
     /// `0`, because the material is already paid out.
     pub fn advance(&mut self, hardness: f32, speed: f32, cells: u32) -> u32 {
-        self.needed = ticks_to_break(hardness, speed);
         if cells == 0 {
+            self.needed = ticks_to_break(hardness, speed);
             return 0;
         }
         // The plan, fixed the first time this target is seen. `cells` is what
@@ -238,6 +239,19 @@ impl Dig {
             self.total = cells;
         }
         let cells = self.total;
+        // **A block brush pays for the block that is there** (Sub-Node
+        // Contract §7.7; the designer, 2026-10-08). `hardness` is a FULL
+        // block's — the blend, for a mixture — and a block a third full takes
+        // a third of it. Against the count captured at the start, like the
+        // plan and for the same reason: the block empties as the dig eats it,
+        // and a time measured against what is left would shrink under the dig
+        // and finish it early. A chisel's cell and a whole material (§7.5)
+        // are priced by their caller and pass 1.
+        let hardness = match self.brush {
+            Brush::Block => hardness * (cells as f32 / crate::block::SUBNODES_PER_BLOCK as f32),
+            Brush::SubNode | Brush::Whole => hardness,
+        };
+        self.needed = ticks_to_break(hardness, speed);
         if self.chipped >= cells {
             return 0;
         }
@@ -454,6 +468,68 @@ mod tests {
         // The number a mod author is predicting when they write `hardness`.
         assert_eq!(ticks_to_break(1.0, 1.0), 20);
         assert_eq!(ticks_to_break(2.0, 1.0), 40);
+    }
+
+    /// Ticks to finish a fresh dig, feeding it what is left each tick as the
+    /// server does.
+    fn ticks_to_finish(brush: Brush, hardness: f32, cells: u32) -> u32 {
+        let mut dig = Dig::start(CELL, brush);
+        let mut left = cells;
+        let mut ticks = 0;
+        while !dig.is_done() {
+            left -= dig.advance(hardness, 1.0, left);
+            ticks += 1;
+            assert!(ticks <= 100, "the dig never finished");
+        }
+        ticks
+    }
+
+    #[test]
+    fn a_block_brush_pays_for_the_cells_that_are_there() {
+        // The designer, 2026-10-08: a block a quarter full takes a quarter of
+        // the time, not a full block's (Sub-Node Contract §7.7). A full block
+        // is the hardness, exactly as before.
+        assert_eq!(ticks_to_finish(Brush::Block, 1.0, 27), 20);
+        assert_eq!(
+            ticks_to_finish(Brush::Block, 1.0, 9),
+            7,
+            "a third of a block is a third of twenty ticks, rounded up"
+        );
+        assert_eq!(
+            ticks_to_finish(Brush::Block, 1.0, 1),
+            1,
+            "the last cell of a block is a twenty-seventh of a second: one tick"
+        );
+        let half = ticks_to_finish(Brush::Block, 1.0, 14);
+        assert!(
+            (10..=11).contains(&half),
+            "fourteen cells took {half} ticks"
+        );
+    }
+
+    #[test]
+    fn the_share_is_of_the_block_as_the_dig_began() {
+        // The block empties as the dig eats it. Measured against what is
+        // left, the time would shrink under the dig and it would finish
+        // early; the plan's count is what the share is taken against.
+        let mut dig = Dig::start(CELL, Brush::Block);
+        let mut left = 27;
+        let mut ticks = 0;
+        while !dig.is_done() {
+            left -= dig.advance(1.0, 1.0, left);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 20, "a full block at one second took {ticks} ticks");
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_chisel_and_a_whole_material_are_not_discounted() {
+        // Each passes one cell and is priced by its caller: a chisel's cell
+        // at the sub-node share, a whole material at its own hardness (§7.5).
+        for brush in [Brush::SubNode, Brush::Whole] {
+            assert_eq!(ticks_to_finish(brush, 1.0, 1), 20, "{brush:?}");
+        }
     }
 
     #[test]

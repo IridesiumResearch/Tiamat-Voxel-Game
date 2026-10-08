@@ -169,13 +169,14 @@ pub fn subnode_hardness(material: MaterialId, of: impl Fn(MaterialId) -> Resista
 /// zero — though the dig loop never asks, because it stops on an air target
 /// first.
 ///
-/// **How full the block is does not enter into it.** A stone block with twenty
-/// cells already chiselled away takes exactly as long to finish as a whole one,
-/// because what is being measured is how the material resists a tool and not how
-/// much of it there is. Making a half-mined block quicker to finish is a
-/// progression decision, and progression is a mod's business (charter rule 1) —
-/// the engine's job is to make the composition legible, which is what
-/// `dominance` does.
+/// **How full the block is does not enter into it here.** This is the time for
+/// a FULL block of the mixture — how the material resists a tool, not how much
+/// of it there is. The block brush's dig then pays the share of the block that
+/// is actually there ([`super::Dig::advance`], Sub-Node Contract §7.7): a stone
+/// block with twenty cells already chiselled away finishes in seven
+/// twenty-sevenths of this. The two are kept apart because this is read from
+/// the block as it stands, every tick, and the block empties as the dig eats
+/// it; the share is taken once, at the start, where the dig keeps its plan.
 #[must_use]
 pub fn block_hardness(view: &BlockView<'_>, of: impl Fn(MaterialId) -> Resistance) -> f32 {
     // A uniform or partial block is one material, so the blend is the identity
@@ -381,8 +382,10 @@ mod tests {
 
     #[test]
     fn how_much_of_a_block_is_left_does_not_change_its_hardness() {
-        // Documented behaviour, and the one a future progression mod is most
-        // likely to want changed — so it is pinned rather than incidental.
+        // The blend is a FULL block's time whatever is left of the block;
+        // how much is left is the dig's business, not this function's
+        // (`Dig::advance`, Sub-Node Contract §7.7) — pinned so the two stay
+        // apart, because this is read every tick from a block that empties.
         let full = blend(&even(DIRT, STONE));
         let mut thinned = even(DIRT, STONE);
         for (index, cell) in thinned.iter_mut().enumerate() {

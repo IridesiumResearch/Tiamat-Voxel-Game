@@ -442,7 +442,7 @@ function Stream:next_bool() end
 ---@field id string Required. Namespaced with your mod id automatically.
 ---@field name string? Display name.
 ---@field description string? One-line description.
----@field hardness number? Seconds to break with a bare hand. Default 0.75. Must not be negative. One SUB-NODE of it costs a thirteen-and-a-half-th of this, so chiselling a block out cell by cell takes twice as long as smashing it whole.
+---@field hardness number? Seconds to break a FULL block with a bare hand. Default 0.75. Must not be negative. A block brush pays for what is there: a block a third full takes a third of this (Sub-Node Contract §7.7). One SUB-NODE of it costs a thirteen-and-a-half-th of this whatever the block holds, so chiselling a block out cell by cell takes twice as long as smashing it whole.
 ---@field dominance number? How strongly this material imposes its hardness on a block it is only part of. Default 1.0. Must be positive. See below.
 ---@field drops table<string, integer>? Overrides what breaking it yields: block id to UNITS PER FULL BLOCK (27 to a block); a dig that takes part of a block pays that share, as the block comes apart. Omit for the ordinary rule — the block drops itself, 27 units whole or one per occupied sub-node. Bare ids are namespaced with your mod id; a namespaced id may be ANY mod's block (a drop names a block, it does not register one). A name nobody registered is logged and left out. `{}` drops nothing.
 ---@field tags string[]? Arbitrary tags for other mods to match on.

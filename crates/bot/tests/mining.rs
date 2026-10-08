@@ -805,3 +805,91 @@ fn a_bot_that_has_just_jumped_digs_from_the_ground_and_not_from_the_air() {
     });
     server.stop();
 }
+
+/// Ticks the server spent on a dig of `pos`, counted as `DigProgress`
+/// messages for its target: one arrives per tick a dig runs, so this measures
+/// the server's work and not the wall clock (see `dig_and_count_ticks` in
+/// `mod_hooks.rs` for why that matters on a slow runner). `cells` is how many
+/// the block holds, which is when the dig is over.
+async fn count_dig_ticks(
+    bot: &mut Bot,
+    pos: BlockPos,
+    cells: usize,
+    patience: Duration,
+) -> Option<usize> {
+    let target = SubNodePos::new(pos.x * 3 + 1, pos.y * 3 + 1, pos.z * 3 + 1);
+    let since = bot.received().len();
+    bot.start_dig(target).await.expect("start dig");
+
+    let deadline = tokio::time::Instant::now() + patience;
+    while tokio::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(50), bot.recv()).await;
+        if bot.cells_broken(pos) >= cells {
+            let ticks = bot
+                .received()
+                .iter()
+                .skip(since)
+                .filter(|message| {
+                    matches!(
+                        message,
+                        tiamat_core::proto::ServerMessage::DigProgress { target: t, .. }
+                            if *t == target
+                    )
+                })
+                .count();
+            return Some(ticks);
+        }
+    }
+    None
+}
+
+#[test]
+fn a_part_full_block_digs_in_part_of_the_time() {
+    // Sub-Node Contract §7.7 (the designer, 2026-10-08): a block brush pays
+    // for the block that is there. Nine cells of twenty-seven, same material,
+    // same hand: a third of the ticks, give or take the rounding up — and
+    // certainly not the full block's.
+    let server = start_with_mods("part-full-dig");
+    let stone = stone();
+
+    block_on(async {
+        let mut bot = join(&server).await;
+        // A wall-clock ceiling only; the comparison is on ticks.
+        let patience = Duration::from_secs(8);
+
+        let full = BlockPos::new(2, -1, 0);
+        assert!(server.seed_block(full, stone), "seed queue full");
+        bot.expect_block(full, stone, Duration::from_secs(10))
+            .await
+            .expect("the full block should land");
+        let full_ticks = count_dig_ticks(&mut bot, full, 27, patience)
+            .await
+            .expect("the full block should come apart");
+
+        let third = BlockPos::new(-2, -1, 0);
+        let nine_cells: u32 = 0x1FF;
+        assert!(
+            server.seed_partial(third, stone, nine_cells),
+            "seed queue full"
+        );
+        bot.expect_partial(third, stone, 9, Duration::from_secs(10))
+            .await
+            .expect("the part-full block should land");
+        let third_ticks = count_dig_ticks(&mut bot, third, 9, patience)
+            .await
+            .expect("the part-full block should come apart");
+
+        assert!(
+            third_ticks * 2 < full_ticks,
+            "nine cells of twenty-seven should dig in about a third of the ticks: \
+             part-full {third_ticks}, full {full_ticks}"
+        );
+        assert!(
+            third_ticks * 4 >= full_ticks,
+            "nine cells should still cost about a third, not nothing: \
+             part-full {third_ticks}, full {full_ticks}"
+        );
+    });
+
+    assert!(server.stop());
+}

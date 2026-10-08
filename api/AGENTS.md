@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A part-full block digs in part of the time** (2026-10-08). A block
+  brush's dig takes `hardness` scaled by how full the block was when the dig
+  began: a block a third full, a third of the time. A chisel's cell and a
+  `whole` block are priced as before. Nothing to do. Sub-Node Contract §7.7.
 - **Blocks drawn as models, and blocks dug whole** (2026-10-02).
   `register_block{ model = "<your model id>", shape = {...} }` draws a
   registered glTF in place of the block's cells; `whole = true` makes any

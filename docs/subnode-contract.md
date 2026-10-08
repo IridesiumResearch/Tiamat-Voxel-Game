@@ -941,6 +941,36 @@ as charter rule 2 has it.
 Implemented by `place::is_ground` (the threshold) and the placement's target
 choice in the server's placement loop.
 
+### 7.7 Digging a block that is not full
+
+(Added 2026-10-08, the designer.) **A block brush pays for the block that is
+there.** The dig's time is the material's `hardness` — a full block's, blended
+over a mixture as `dig::hardness` has it — scaled by how full the block was
+when the dig began, in cells of 27: a block a quarter full takes a quarter of
+a full block's time, and the last three cells of a block go in three
+twenty-sevenths of it. A full block is unchanged.
+
+- The share is of the block **as the dig starts**, like the count of cells
+  the dig plans to take: the block empties as the dig eats it, and a time
+  measured against what is left would shrink under the dig and finish it
+  early.
+- A sub-node brush is not scaled: a chisel's cell costs a
+  thirteen-and-a-half-th of its material whatever the block around it holds,
+  so chiselling a block out still costs twice smashing it, and the one cell
+  left in a block is cheaper with the block brush (a twenty-seventh) than
+  with the chisel — the coarse tool's whole point.
+- A whole material (§7.5) is not scaled: it is one thing and costs its own
+  `hardness` whatever its shape's cell count, as placing it costs a whole
+  block's units. The ground sharing its block (§7.6) is not in a dig of it,
+  and a block brush's dig of that ground leaves the whole material out of
+  both the share and the count.
+- A mixture blends first and scales after: the blend says what a full block
+  of it would cost, the share says how much of one is there.
+
+Implemented by `dig::Dig::advance` (the share, for `Brush::Block` only,
+against the dig's captured total) over `dig::hardness::block_hardness` (the
+blend).
+
 ---
 
 ## 8. Rendering — sub-node resolution, binary greedy meshing
