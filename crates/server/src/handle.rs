@@ -3390,7 +3390,15 @@ impl ServerHandle {
                             // same implementation a player's placement uses, so
                             // the two cannot drift apart.
                             let edits = match seed {
-                                crate::transport::endpoint::Seed::Replace(edit) => vec![edit],
+                                // A whole material written where one stands
+                                // is swapped, the ground staying (Contract
+                                // §7.5; Craft ask 12). Read against the
+                                // block here, for the same reason a merge is.
+                                crate::transport::endpoint::Seed::Replace(edit) => {
+                                    swap_or_replace(&mut world, &mut source, &seeded_in, edit, |m| {
+                                        shared.whole_shape(m)
+                                    })
+                                }
                                 crate::transport::endpoint::Seed::Merge {
                                     pos,
                                     material,
@@ -7138,6 +7146,83 @@ fn ground_cells_of(
         }
     }
     cells
+}
+
+/// What a mod's block-resolution write of a whole material becomes where a
+/// whole material already stands (Sub-Node Contract §7.5, "swapped in place";
+/// Craft ask 12): the one standing there goes, the new one's shape takes the
+/// air that leaves and the air there was, and the ground cells sharing the
+/// block — the thin floor a campfire was set into (§7.6) — stay exactly as
+/// they were. A fire lit, a fire gone out, a torch burnt out, each a
+/// `set_block` of one whole material over another, no longer erases the
+/// floor's units. Anywhere else the write is applied as it stands: a block
+/// with no whole material in it, or no ground beside the one there, is
+/// replaced, as `set_block` always has.
+fn swap_or_replace(
+    world: &mut crate::world::World,
+    source: &mut dyn crate::world::ChunkSource,
+    domain: &str,
+    edit: tiamat_core::proto::Edit,
+    whole_shape: impl Fn(tiamat_core::MaterialId) -> Option<u32>,
+) -> Vec<tiamat_core::proto::Edit> {
+    use tiamat_core::proto::Edit;
+    let (pos, material, shape) = match &edit {
+        Edit::Block { pos, material } => (*pos, *material, tiamat_core::block::OCCUPANCY_FULL),
+        Edit::Partial {
+            pos,
+            material,
+            occupancy,
+        } => (*pos, *material, *occupancy),
+        Edit::SubNode { .. } => return vec![edit],
+    };
+    if whole_shape(tiamat_core::MaterialId(material)).is_none() {
+        return vec![edit];
+    }
+    let Ok(held) = world.block_cells(domain, pos, source) else {
+        return vec![edit];
+    };
+    let (mut ground, mut standing) = (0u32, 0u32);
+    for (index, cell) in held.iter().enumerate() {
+        if cell.is_air() {
+            continue;
+        }
+        if whole_shape(*cell).is_some() {
+            standing |= 1 << index;
+        } else {
+            ground |= 1 << index;
+        }
+    }
+    if standing == 0 || ground == 0 {
+        // Nothing to swap, or nothing to keep: a replace is a replace.
+        return vec![edit];
+    }
+    let shape = shape & tiamat_core::block::OCCUPANCY_FULL;
+    let room = shape & !ground;
+    if room == 0 {
+        warn!(
+            x = pos.x,
+            y = pos.y,
+            z = pos.z,
+            material,
+            "a mod wrote a whole material over one standing in ground that fills every cell of              its shape; nothing was written (Sub-Node Contract §7.5)"
+        );
+        return Vec::new();
+    }
+    // The standing one's cells the new shape does not reuse go to air first,
+    // so the block never holds two whole materials; then the shape is written
+    // into the air the way a player's placement writes it, cell by cell
+    // because the ground is another material.
+    let mut edits: Vec<Edit> = (0..tiamat_core::block::SUBNODES_PER_BLOCK)
+        .filter(|index| standing & !shape & (1 << index) != 0)
+        .map(|index| Edit::SubNode {
+            pos: tiamat_core::place::cell_pos(pos, index),
+            material: tiamat_core::MaterialId::AIR.0,
+        })
+        .collect();
+    edits.extend(tiamat_core::place::writes(
+        pos, room, material, ground, false,
+    ));
+    edits
 }
 
 /// The edits that take every cell of `material` out of `block` in one tick

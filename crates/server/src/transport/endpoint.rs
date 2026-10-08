@@ -851,7 +851,9 @@ pub fn intent_from_wire(
 /// **A merge cannot be an `Edit` yet.** What edits it becomes depends on what
 /// the block already holds — Sub-Node Contract §7.4 — and the queue is filled
 /// from a mod callback, where the world is lent out and cannot be read. So the
-/// intent travels and the tick resolves it.
+/// intent travels and the tick resolves it. A `Replace` of a whole material is
+/// read against the block there too: where a whole material already stands,
+/// it swaps that one and keeps the ground (§7.5, Craft ask 12).
 #[derive(Debug)]
 pub enum Seed {
     /// Apply this edit as it stands.

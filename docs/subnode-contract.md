@@ -881,7 +881,21 @@ puts down, not stuff a chisel takes a corner off.
   stamped plan, and a generator's `set_block` and `set_world`. A generator's
   AREA fills (`fill_density`, cover, the palette, a scattered schematic) are
   terrain and take a material as named, a full cube; a schematic that wants a
-  whole material's shape carries the cells itself.
+  whole material's shape carries the cells itself. The one write into a block
+  a whole material stands in is the next bullet's.
+- **Swapped in place, the ground staying.** (Added 2026-10-08, Craft ask 12.)
+  A block-resolution write of a whole material — `game.set_block(pos,
+  "campfire_lit")` on the block the unlit one stands in, a stamped plan's
+  block — where a whole material already stands replaces the whole material,
+  not the block: the standing one's cells go, the new one's shape takes the
+  air that leaves and the air there was (§7.6's rule, against the block less
+  the old one), and the ground cells sharing the block stay as they were. A
+  fire lit, a fire gone out, a torch burnt out, in a thin floor, keep the
+  floor's units, which a replace erased (charter rule 5). Where no whole
+  material stands, or no ground shares the block, the write replaces the
+  block as any `set_block` does; a shape with no cell free once the old one
+  is gone writes nothing, logged. Two whole materials still never share a
+  block.
 - **Its cells are its own, and the ground's are the ground's.** A dig of the
   whole material takes every cell OF IT in one tick and none of the ground
   beside it; a dig aimed at the ground in the same block — a chisel's cell, or
@@ -902,8 +916,9 @@ chisel could take apart would be a cut, and a cut is carried as a cut (§9.1),
 not registered as a material.
 
 Implemented by `dig::Brush::Whole` (chosen when the dig is set, from the
-material under the aim), `place::plan_whole` for the shape and the refusals, and
-the block-resolution write paths' shape lookup; `BlockRules::whole`/`shape` carry
+material under the aim), `place::plan_whole` for the shape and the refusals,
+the block-resolution write paths' shape lookup and the server's
+`swap_or_replace` where a mod's write meets a standing whole material; `BlockRules::whole`/`shape` carry
 the declaration and `MaterialDef::whole` tells the client to outline the
 material's cells.
 

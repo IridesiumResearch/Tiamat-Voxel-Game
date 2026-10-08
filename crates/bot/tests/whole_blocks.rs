@@ -318,6 +318,80 @@ fn cells_seen(bot: &Bot, pos: BlockPos) -> [u16; 27] {
     cells
 }
 
+/// Puts a brazier where a player would stand it in a floor one cell thick at
+/// `floor` — dug up whole from a seeded block, then placed against the floor's
+/// top with the block brush (Contract §7.6) — and checks what the block holds:
+/// the brazier's stem and bowl, the floor's nine cells. Returns the brazier's
+/// and the floor's wire ids. The setup two tests share.
+async fn brazier_standing_in_a_thin_floor(
+    bot: &mut Bot,
+    server: &ServerHandle,
+    floor: BlockPos,
+) -> (u16, u16) {
+    let brazier = wire_id(bot, "core:brazier");
+    let white = wire_id(bot, "core:white");
+
+    // A brazier in hand, dug up whole.
+    let source = BlockPos::new(2, 1, 0);
+    assert!(server.seed_block(source, brazier));
+    wait_for(bot, "the seeded brazier", |bot| {
+        partial_seen(bot, source, brazier).is_some()
+    })
+    .await;
+    chisel_until_gone(
+        bot,
+        SubNodePos::new(source.x * 3 + 1, source.y * 3, source.z * 3 + 1),
+    )
+    .await;
+    wait_for(bot, "a brazier in hand", |bot| {
+        bot.units_of(brazier) >= UNITS_PER_BLOCK
+    })
+    .await;
+
+    // A floor one cell thick at (2, 1, 1): nine cells of white.
+    assert!(server.seed_partial(floor, white, thin_floor()));
+    wait_for(bot, "the thin floor", |bot| {
+        partial_seen(bot, floor, white) == Some(thin_floor())
+    })
+    .await;
+
+    // Placed against the top of the floor's top cell — the cell asked for
+    // is in the block ABOVE, as a client's would be — the brazier lands
+    // in the floor's block: its stem and bowl, with the foot's cells
+    // staying the floor's.
+    bot.hold_brush("block").await.expect("hold the block brush");
+    let asked = SubNodePos::new(floor.x * 3 + 1, floor.y * 3 + 3, floor.z * 3 + 1);
+    bot.place_shape_against(asked, brazier, 0, [0, 1, 0])
+        .await
+        .expect("ask to place");
+    wait_for(bot, "the brazier among the floor", |bot| {
+        let cells = cells_seen(bot, floor);
+        cells[tiamat_core::block::subnode_index(1, 1, 1)] == brazier
+            && cells[tiamat_core::block::subnode_index(0, 0, 0)] == white
+    })
+    .await;
+    let cells = cells_seen(bot, floor);
+    let expected = brazier_shape() & !thin_floor();
+    for (slot, cell) in cells.iter().enumerate() {
+        let want = if expected & (1 << slot) != 0 {
+            brazier
+        } else if thin_floor() & (1 << slot) != 0 {
+            white
+        } else {
+            0
+        };
+        assert_eq!(*cell, want, "cell {slot}");
+    }
+    assert!(
+        cells_seen(bot, BlockPos::new(floor.x, floor.y + 1, floor.z))
+            .iter()
+            .all(|cell| *cell == 0),
+        "nothing floated into the block above"
+    );
+    wait_for(bot, "27 units spent", |bot| bot.units_of(brazier) == 0).await;
+    (brazier, white)
+}
+
 #[test]
 fn a_brazier_set_on_a_thin_floor_stands_in_it_and_comes_up_alone() {
     // Contract §7.6: a block a third full is not ground. Placed against its
@@ -328,68 +402,8 @@ fn a_brazier_set_on_a_thin_floor_stands_in_it_and_comes_up_alone() {
     let server = start("brazier-on-thin-floor");
     block_on(async {
         let mut bot = join(&server).await;
-        let brazier = wire_id(&bot, "core:brazier");
-        let white = wire_id(&bot, "core:white");
-
-        // A brazier in hand, dug up whole.
-        let source = BlockPos::new(2, 1, 0);
-        assert!(server.seed_block(source, brazier));
-        wait_for(&mut bot, "the seeded brazier", |bot| {
-            partial_seen(bot, source, brazier).is_some()
-        })
-        .await;
-        chisel_until_gone(
-            &mut bot,
-            SubNodePos::new(source.x * 3 + 1, source.y * 3, source.z * 3 + 1),
-        )
-        .await;
-        wait_for(&mut bot, "a brazier in hand", |bot| {
-            bot.units_of(brazier) >= UNITS_PER_BLOCK
-        })
-        .await;
-
-        // A floor one cell thick at (2, 1, 1): nine cells of white.
         let floor = BlockPos::new(2, 1, 1);
-        assert!(server.seed_partial(floor, white, thin_floor()));
-        wait_for(&mut bot, "the thin floor", |bot| {
-            partial_seen(bot, floor, white) == Some(thin_floor())
-        })
-        .await;
-
-        // Placed against the top of the floor's top cell — the cell asked for
-        // is in the block ABOVE, as a client's would be — the brazier lands
-        // in the floor's block: its stem and bowl, with the foot's cells
-        // staying the floor's.
-        bot.hold_brush("block").await.expect("hold the block brush");
-        let asked = SubNodePos::new(floor.x * 3 + 1, floor.y * 3 + 3, floor.z * 3 + 1);
-        bot.place_shape_against(asked, brazier, 0, [0, 1, 0])
-            .await
-            .expect("ask to place");
-        wait_for(&mut bot, "the brazier among the floor", |bot| {
-            let cells = cells_seen(bot, floor);
-            cells[tiamat_core::block::subnode_index(1, 1, 1)] == brazier
-                && cells[tiamat_core::block::subnode_index(0, 0, 0)] == white
-        })
-        .await;
-        let cells = cells_seen(&bot, floor);
-        let expected = brazier_shape() & !thin_floor();
-        for (slot, cell) in cells.iter().enumerate() {
-            let want = if expected & (1 << slot) != 0 {
-                brazier
-            } else if thin_floor() & (1 << slot) != 0 {
-                white
-            } else {
-                0
-            };
-            assert_eq!(*cell, want, "cell {slot}");
-        }
-        assert!(
-            cells_seen(&bot, BlockPos::new(floor.x, floor.y + 1, floor.z))
-                .iter()
-                .all(|cell| *cell == 0),
-            "nothing floated into the block above"
-        );
-        wait_for(&mut bot, "27 units spent", |bot| bot.units_of(brazier) == 0).await;
+        let (brazier, white) = brazier_standing_in_a_thin_floor(&mut bot, &server, floor).await;
 
         // Dug with the chisel at its stem: the brazier's cells go, in one tick,
         // for 27 units; the floor's nine stay.
@@ -524,6 +538,82 @@ fn an_anvil_is_whole_without_a_model() {
         })
         .await;
         assert_eq!(bot.units_of(anvil), UNITS_PER_BLOCK);
+        bot.disconnect().await;
+    });
+    assert!(server.stop(), "clean shutdown");
+}
+
+#[test]
+fn a_whole_block_written_where_one_stands_in_a_thin_floor_keeps_the_floor() {
+    // Craft ask 12 (2026-10-07), Contract §7.5 "swapped in place": a mod's
+    // `set_block` of a whole material on the block another stands in — a
+    // campfire lit, a torch burnt out — replaces the thing, not the block.
+    // The floor's cells stay; the write used to erase them (charter rule 5).
+    let server = start("brazier-swapped-in-thin-floor");
+    block_on(async {
+        let mut bot = join(&server).await;
+        let floor = BlockPos::new(2, 1, 1);
+        let (brazier, white) = brazier_standing_in_a_thin_floor(&mut bot, &server, floor).await;
+        let anvil = wire_id(&bot, "core:anvil");
+
+        // `game.set_block(floor, "core:anvil")` is this queue. The anvil has
+        // no `shape`, so it is a whole-block write — the form that replaced
+        // the block outright.
+        assert!(server.seed_block(floor, anvil), "seed queue full");
+        wait_for(&mut bot, "the anvil in the brazier's place", |bot| {
+            let cells = cells_seen(bot, floor);
+            cells.iter().all(|cell| *cell != brazier) && cells.contains(&anvil)
+        })
+        .await;
+        let cells = cells_seen(&bot, floor);
+        for (slot, cell) in cells.iter().enumerate() {
+            let want = if thin_floor() & (1 << slot) != 0 {
+                white
+            } else {
+                anvil
+            };
+            assert_eq!(*cell, want, "after the swap, cell {slot}");
+        }
+
+        // And back to a shaped one: the anvil's cells the brazier's shape does
+        // not reuse go to air, the floor's nine still stay.
+        assert!(server.seed_block(floor, brazier), "seed queue full");
+        wait_for(&mut bot, "the brazier back in the anvil's place", |bot| {
+            let cells = cells_seen(bot, floor);
+            cells.iter().all(|cell| *cell != anvil)
+                && cells[tiamat_core::block::subnode_index(1, 1, 1)] == brazier
+        })
+        .await;
+        let cells = cells_seen(&bot, floor);
+        for (slot, cell) in cells.iter().enumerate() {
+            let want = if thin_floor() & (1 << slot) != 0 {
+                white
+            } else if brazier_shape() & (1 << slot) != 0 {
+                brazier
+            } else {
+                0
+            };
+            assert_eq!(*cell, want, "after the swap back, cell {slot}");
+        }
+
+        // Where no ground shares the block, a replace is still a replace: a
+        // seeded anvil, written over as a brazier, is exactly the brazier's
+        // shape, one partial edit, and nothing of the anvil.
+        let bare = BlockPos::new(2, 1, 3);
+        assert!(server.seed_block(bare, anvil), "seed queue full");
+        wait_for(&mut bot, "the bare anvil", |bot| {
+            cells_seen(bot, bare).iter().all(|cell| *cell == anvil)
+        })
+        .await;
+        assert!(server.seed_block(bare, brazier), "seed queue full");
+        wait_for(&mut bot, "the brazier replacing the anvil", |bot| {
+            partial_seen(bot, bare, brazier) == Some(brazier_shape())
+        })
+        .await;
+        assert!(
+            cells_seen(&bot, bare).iter().all(|cell| *cell != anvil),
+            "nothing of the anvil stayed"
+        );
         bot.disconnect().await;
     });
     assert!(server.stop(), "clean shutdown");

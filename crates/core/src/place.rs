@@ -644,7 +644,11 @@ pub fn edit_units(edit: &crate::proto::Edit) -> u32 {
 }
 
 /// Where a block's `index`th cell is in the world.
-fn cell_pos(pos: BlockPos, index: usize) -> SubNodePos {
+/// The cell at `index` (`x + 3*y + 9*z`, [`crate::block::subnode_index`]) of
+/// block `pos`, as a position: the one place the index is turned back into
+/// coordinates for an edit.
+#[must_use]
+pub fn cell_pos(pos: BlockPos, index: usize) -> SubNodePos {
     let (x, y, z) = subnode_offset(index);
     let base = |v: i32, o: u32| v * SUBNODES_PER_AXIS as i32 + o as i32;
     SubNodePos::new(base(pos.x, x), base(pos.y, y), base(pos.z, z))

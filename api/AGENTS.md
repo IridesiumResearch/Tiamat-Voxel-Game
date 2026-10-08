@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A whole block swapped where one stands** (2026-10-08). `set_block` of a
+  `whole` block on the block another stands in — a campfire lit, a torch burnt
+  out — replaces the thing and keeps the ground cells it was set into. Nothing
+  to do. Sub-Node Contract §7.5.
 - **A part-full block digs in part of the time** (2026-10-08). A block
   brush's dig takes `hardness` scaled by how full the block was when the dig
   began: a block a third full, a third of the time. A chisel's cell and a
@@ -1406,9 +1410,11 @@ the slope's cells, the model clipping through them, because **a block under
 three quarters full is not ground**: placing against its top puts the thing
 INTO that block, standing on the first full block beneath, rather than
 floating a block above (Contract §7.6; the same rule fills a thin floor's gaps
-with loose material instead of starting a block over it); and nothing is ever
+with loose material instead of starting a block over it); and nothing is
 written into its block afterwards — a chisel cannot fill in a campfire, and a
-`set_block` with a mask or a merge naming one is refused and logged. Dug, it
+`set_block` with a mask or a merge naming one is refused and logged — except a
+`set_block` of another whole block, which swaps it in place and keeps the
+ground it was set into (a campfire lit, a torch burnt out). Dug, it
 comes up alone and the ground it stood among stays; a block brush on that
 ground takes the ground and leaves it. `whole = true` alone, with no model,
 gives a cube-looking block the same one-piece behaviour. `shape` needs one or
