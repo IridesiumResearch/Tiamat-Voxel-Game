@@ -20,6 +20,11 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A model block's slot shows the model, a grass card shows the card**
+  (2026-10-08). A `model` block is drawn in a slot as its model in its own
+  skin, from the same angle as a cube, once both have arrived; a `billboard`
+  block is drawn flat, like an item. Nothing to do; `textures` is still what
+  shows until the model lands.
 - **A whole block swapped where one stands** (2026-10-08). `set_block` of a
   `whole` block on the block another stands in — a campfire lit, a torch burnt
   out — replaces the thing and keeps the ground cells it was set into. Nothing

@@ -52,6 +52,118 @@ pub struct Icons<'a> {
     /// The engine's own name table, so a mod does not have to send names it
     /// already registered a second time to label its own inventory.
     names: Option<&'a std::collections::BTreeMap<u16, String>>,
+    /// Billboard materials (Contract §8.4): a grass card is a picture.
+    cards: Option<&'a std::collections::BTreeSet<u16>>,
+    /// Model materials (Contract §8.6) whose icon has been built.
+    models: Option<&'a ModelIcons>,
+}
+
+/// A model material's slot picture: its triangles, projected the way a
+/// block's faces are, in a unit square, wearing the model's own skin.
+#[derive(Debug, Clone)]
+pub struct ModelIcon {
+    /// Positions in `0..=1` of a unit square, `uv` on the skin, colour the
+    /// face's shade; far triangles first.
+    pub mesh: egui::Mesh,
+}
+
+/// Model icons by material.
+pub type ModelIcons = std::collections::BTreeMap<u16, ModelIcon>;
+
+/// `model` with every position scaled by `scale`, as the renderer scales its
+/// own copy when a model arrives.
+#[must_use]
+pub fn scaled(model: &tiamat_core::model::Model, scale: f32) -> tiamat_core::model::Model {
+    let mut model = model.clone();
+    if (scale - 1.0).abs() > f32::EPSILON {
+        for vertex in &mut model.vertices {
+            for axis in &mut vertex.position {
+                *axis *= scale;
+            }
+        }
+    }
+    model
+}
+
+/// The picture of a model, skinned with `texture`.
+///
+/// # The same view as a cube
+///
+/// Model space is cells with the origin at the block's bottom centre, as the
+/// world draws a model block, so a point goes through the shape editor's
+/// projection at `(x + 1.5, y, z + 1.5)` and a model three cells across sits
+/// in a slot exactly where a cube does — the designer, 2026-10-08: a campfire
+/// in a slot is the campfire, not a cube wearing its icon.
+///
+/// That projection looks down the `(1, 1, 1)` diagonal. A triangle whose
+/// normal faces away from it is left out, and the rest are ordered by the
+/// `x + y + z` of their corners, far first, which draws a model without a
+/// depth buffer. The shade is the cube's — top full, right 0.78, front 0.6 —
+/// read off the normal, so a flat-topped model matches the block beside it.
+#[must_use]
+pub fn model_icon(model: &tiamat_core::model::Model, texture: egui::TextureId) -> ModelIcon {
+    let unit = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0));
+    let vertex = |index: &u32| {
+        usize::try_from(*index)
+            .ok()
+            .and_then(|i| model.vertices.get(i))
+    };
+    let mut faces = Vec::new();
+    for tri in model.indices.chunks_exact(3) {
+        let (Some(a), Some(b), Some(c)) = (vertex(&tri[0]), vertex(&tri[1]), vertex(&tri[2]))
+        else {
+            continue;
+        };
+        let edge = |p: [f32; 3], q: [f32; 3]| [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        let (u, v) = (edge(a.position, b.position), edge(a.position, c.position));
+        let normal = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        if normal[0] + normal[1] + normal[2] <= 0.0 {
+            continue;
+        }
+        let depth: f32 = [a, b, c]
+            .iter()
+            .map(|corner| corner.position.iter().sum::<f32>())
+            .sum();
+        faces.push((depth, [a, b, c], shade_of(normal)));
+    }
+    faces.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut mesh = egui::Mesh::with_texture(texture);
+    for (_, corners, colour) in faces {
+        let Ok(base) = u32::try_from(mesh.vertices.len()) else {
+            break;
+        };
+        for corner in corners {
+            let [x, y, z] = corner.position;
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: crate::shape_view::project(unit, x + 1.5, y, z + 1.5),
+                uv: egui::pos2(corner.uv[0], corner.uv[1]),
+                color: colour,
+            });
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+    }
+    ModelIcon { mesh }
+}
+
+/// A face's shade from its normal: the cube's three — top 1.0, right 0.78,
+/// front 0.6 — and in between for the rest.
+fn shade_of(normal: [f32; 3]) -> egui::Color32 {
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    if length <= 0.0 {
+        return egui::Color32::WHITE;
+    }
+    let (nx, ny) = (normal[0] / length, normal[1] / length);
+    let factor = (0.6 + 0.4 * ny.max(0.0) + 0.18 * nx.max(0.0)).min(1.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a shade in 0.6..=1.0, scaled into a byte"
+    )]
+    egui::Color32::from_gray((factor * 255.0).clamp(0.0, 255.0) as u8)
 }
 
 impl<'a> Icons<'a> {
@@ -63,7 +175,36 @@ impl<'a> Icons<'a> {
             tiles,
             items: None,
             names: None,
+            cards: None,
+            models: None,
         }
+    }
+
+    /// Billboard materials, drawn flat like an item (Contract §8.4).
+    #[must_use]
+    pub const fn with_cards(mut self, cards: &'a std::collections::BTreeSet<u16>) -> Self {
+        self.cards = Some(cards);
+        self
+    }
+
+    /// The model icons built so far, drawn in place of a cube (Contract §8.6).
+    #[must_use]
+    pub const fn with_models(mut self, models: &'a ModelIcons) -> Self {
+        self.models = Some(models);
+        self
+    }
+
+    /// Whether a material is a billboard: a grass card.
+    #[must_use]
+    pub fn is_card(&self, material: u16) -> bool {
+        self.cards.is_some_and(|cards| cards.contains(&material))
+    }
+
+    /// The built icon of a model material, if it is one and both its model
+    /// and its skin have arrived.
+    #[must_use]
+    pub fn model_of(&self, material: u16) -> Option<&'a ModelIcon> {
+        self.models?.get(&material)
     }
 
     /// The same, told which materials are items.
@@ -156,8 +297,19 @@ impl<'a> Icons<'a> {
         // sword wrapped around three faces at three angles, which is what a
         // player sees and cannot unsee. Flat, filling the slot, the way every
         // game that has both draws them.
-        if self.is_item(material) {
+        // A grass card is a picture too (the designer, 2026-10-08): the
+        // world draws it as a card, and a cube of it is three cards at three
+        // angles.
+        if self.is_item(material) || self.is_card(material) {
             self.paint_flat(painter, rect, material);
+            return;
+        }
+        // A model block is its model, once the model and its skin are here;
+        // until then the cube its texture gives, as before.
+        if let Some(icon) = self.model_of(material)
+            && !icon.mesh.is_empty()
+        {
+            Self::paint_model(painter, rect, icon);
             return;
         }
         if shape == 0 || shape == tiamat_core::inventory::Shape::ALL {
@@ -204,6 +356,17 @@ impl<'a> Icons<'a> {
             let corners = crate::shape_view::block_corners(area, face);
             crate::dialog::paint_cell_face(painter, corners, *self, material, face);
         }
+    }
+
+    /// Draws a model material's picture into the square of `rect`.
+    pub fn paint_model(painter: &egui::Painter, rect: egui::Rect, icon: &ModelIcon) {
+        let area = square(rect);
+        let mut mesh = icon.mesh.clone();
+        for vertex in &mut mesh.vertices {
+            vertex.pos =
+                area.min + egui::vec2(vertex.pos.x * area.width(), vertex.pos.y * area.height());
+        }
+        painter.add(egui::Shape::mesh(mesh));
     }
 
     /// Draws a mask's cells, whatever the mask is.
@@ -558,6 +721,154 @@ mod tests {
         assert!(
             icons.of(u16::MAX).is_some(),
             "an id past the table falls back to the placeholder tile, not to nothing"
+        );
+    }
+
+    #[test]
+    fn a_grass_card_is_a_picture_like_an_item() {
+        // The designer, 2026-10-08: a billboard material (Contract §8.4) in a
+        // slot is its card, flat, and not a cube wearing it on three faces.
+        let tiles = atlas().tiles_only();
+        // `painted_stack` paints material 1; the argument is the shape.
+        let cards: std::collections::BTreeSet<u16> = [1u16].into_iter().collect();
+        let corners = |drawn: Vec<egui::epaint::Primitive>| {
+            drawn
+                .iter()
+                .map(|primitive| match primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum::<usize>()
+        };
+        let card = corners(painted_stack(
+            Icons::new(Some(egui::TextureId::User(3)), Some(&tiles)).with_cards(&cards),
+            0,
+        ));
+        assert!(card <= 4, "a card drew {card} vertices, more than one quad");
+        let block = corners(painted_stack(
+            Icons::new(Some(egui::TextureId::User(3)), Some(&tiles)),
+            0,
+        ));
+        assert!(
+            block >= 12,
+            "not a card, the same material is a cube: {block}"
+        );
+    }
+
+    /// A quad, as two triangles wound so its normal is `cross(b - a, c - a)`.
+    fn quad(corners: [[f32; 3]; 4], indices: [u32; 6]) -> tiamat_core::model::Model {
+        let vertex = |position: [f32; 3]| tiamat_core::model::Vertex {
+            position,
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.5],
+            joints: [0; 4],
+            weights: [0.0; 4],
+        };
+        tiamat_core::model::Model {
+            vertices: corners.iter().map(|corner| vertex(*corner)).collect(),
+            indices: indices.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    const LID: [[f32; 3]; 4] = [
+        [-1.5, 3.0, -1.5],
+        [1.5, 3.0, -1.5],
+        [1.5, 3.0, 1.5],
+        [-1.5, 3.0, 1.5],
+    ];
+
+    #[test]
+    fn a_model_icon_keeps_the_faces_that_look_at_the_viewer_and_shades_them_like_a_cube() {
+        // A lid across the top of the block wound to face up, and the same
+        // lid wound to face down: the slot looks from above, so only the
+        // first is drawn, at a cube's top shade, inside the unit square.
+        let mut model = quad(LID, [0, 2, 1, 0, 3, 2]);
+        model.indices.extend([0, 1, 2, 0, 2, 3]);
+        let icon = model_icon(&model, egui::TextureId::User(21));
+        assert_eq!(icon.mesh.indices.len(), 6, "two triangles face the viewer");
+        assert_eq!(icon.mesh.texture_id, egui::TextureId::User(21));
+        for vertex in &icon.mesh.vertices {
+            assert!(
+                (0.0..=1.0).contains(&vertex.pos.x) && (0.0..=1.0).contains(&vertex.pos.y),
+                "a corner of the lid left the unit square: {:?}",
+                vertex.pos
+            );
+            assert_eq!(vertex.color, egui::Color32::WHITE, "the top is lit in full");
+        }
+
+        // The front face, +z, is the cube's darkest: 0.6.
+        let front = quad(
+            [
+                [-1.5, 0.0, 1.5],
+                [1.5, 0.0, 1.5],
+                [1.5, 3.0, 1.5],
+                [-1.5, 3.0, 1.5],
+            ],
+            [0, 1, 2, 0, 2, 3],
+        );
+        let icon = model_icon(&front, egui::TextureId::User(21));
+        assert_eq!(icon.mesh.indices.len(), 6);
+        assert_eq!(icon.mesh.vertices[0].color, egui::Color32::from_gray(153));
+    }
+
+    #[test]
+    fn a_model_icon_draws_the_far_faces_first() {
+        // A floor at the bottom of the block and a lid at the top, both
+        // facing up: the floor is farther down the view diagonal and comes
+        // first, so the lid paints over it, which is what a depth buffer
+        // would have decided.
+        let mut model = quad(LID, [0, 2, 1, 0, 3, 2]);
+        let floor = quad(
+            [
+                [-1.5, 0.0, -1.5],
+                [1.5, 0.0, -1.5],
+                [1.5, 0.0, 1.5],
+                [-1.5, 0.0, 1.5],
+            ],
+            [0, 2, 1, 0, 3, 2],
+        );
+        model.vertices.extend(floor.vertices);
+        model
+            .indices
+            .extend(floor.indices.iter().map(|index| index + 4));
+        let icon = model_icon(&model, egui::TextureId::User(21));
+        assert_eq!(icon.mesh.indices.len(), 12);
+        // On screen, down is +y: the floor's corner sits lower than the lid's.
+        assert!(
+            icon.mesh.vertices[0].pos.y > icon.mesh.vertices[6].pos.y,
+            "the first triangle drawn should be the floor"
+        );
+    }
+
+    #[test]
+    fn a_model_material_is_drawn_as_its_model_with_its_own_skin() {
+        let tiles = atlas().tiles_only();
+        let mut icons_by_material = ModelIcons::new();
+        // `painted_stack` paints material 1; the argument is the shape.
+        icons_by_material.insert(
+            1,
+            model_icon(&quad(LID, [0, 2, 1, 0, 3, 2]), egui::TextureId::User(21)),
+        );
+        let drawn = painted_stack(
+            Icons::new(Some(egui::TextureId::User(3)), Some(&tiles))
+                .with_models(&icons_by_material),
+            0,
+        );
+        assert!(
+            drawn.iter().any(|primitive| matches!(
+                primitive,
+                egui::epaint::Primitive::Mesh(mesh)
+                    if mesh.texture_id == egui::TextureId::User(21) && mesh.vertices.len() == 6
+            )),
+            "the slot should carry the model's two triangles in the model's skin"
+        );
+        assert!(
+            !drawn.iter().any(|primitive| matches!(
+                primitive,
+                egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == egui::TextureId::User(3)
+            )),
+            "and nothing of the cube its texture would have made"
         );
     }
 }

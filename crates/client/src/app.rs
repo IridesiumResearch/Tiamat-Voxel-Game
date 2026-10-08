@@ -1152,12 +1152,6 @@ pub struct App {
     settings_open: bool,
     /// Whether the player asked to quit from the menu.
     quit_requested: bool,
-    /// Materials that may not be put in the world: the items.
-    ///
-    /// See [`tiamat_core::proto::MaterialDef::placeable`]. Empty until a server
-    /// sends its table, which is correct: a client with no table has nothing to
-    /// place either.
-    items: std::collections::BTreeSet<u16>,
     /// Whether the world this client is looking at is stopped.
     ///
     /// Only ever true for an embedded server the client paused itself: a hosted
@@ -1315,6 +1309,8 @@ pub struct App {
     /// The whole and model materials: aimed at, a whole one outlines and locks
     /// the dig onto the block whatever the tool's brush (Contract §7.5, §8.6).
     block_models: BlockModels,
+    /// What a slot's icons are made from, beside the atlas.
+    icon_art: IconArt,
     /// Materials a body walks through — Sub-Node Contract §2.
     ///
     /// **The client keeps its own copy because it predicts its own movement.**
@@ -1516,11 +1512,11 @@ impl App {
             particles: crate::particles::System::default(),
             badges: std::collections::BTreeMap::new(),
             step_sounds: std::collections::BTreeMap::new(),
-            items: std::collections::BTreeSet::new(),
             hosting: None,
             seed: None,
             transparent: mesher::Sight::default(),
             block_models: BlockModels::default(),
+            icon_art: IconArt::default(),
             passable: Vec::new(),
             friction: Vec::new(),
             pictures: crate::pictures::Pictures::new(),
@@ -2581,7 +2577,7 @@ impl App {
         // nothing to place, the same as an empty hand.
         let placeable = stack
             .as_ref()
-            .filter(|stack| !self.items.contains(&stack.material));
+            .filter(|stack| !self.icon_art.items.contains(&stack.material));
         let Some(stack) = placeable.cloned() else {
             // Aimed at a block or at nothing, the server hears it either way:
             // it is the one that knows which mods want a use without a cell,
@@ -2698,7 +2694,7 @@ impl App {
         // anyway — it owns that decision (charter rule 2) — but a client that
         // sent the request would spend a round trip to be told no, and the
         // player would watch their sword not become a block with no idea why.
-        self.items = table
+        self.icon_art.items = table
             .iter()
             .filter(|entry| !entry.placeable)
             .map(|entry| entry.id)
@@ -2751,6 +2747,14 @@ impl App {
             .iter()
             .filter_map(|entry| entry.model.clone().map(|model| (entry.id, model)))
             .collect();
+        self.icon_art.cards = table
+            .iter()
+            .filter(|entry| entry.billboard || entry.billboard_cross)
+            .map(|entry| entry.id)
+            .collect();
+        // Material ids are this session's; icons keyed by them are built
+        // again, from the models and skins that are kept.
+        self.icon_art.built = std::sync::Arc::new(crate::icons::ModelIcons::new());
 
         // And what a body walks through. Not part of `Sight`: it changes no
         // geometry, only what stops a step (Contract §2).
@@ -2900,12 +2904,12 @@ impl App {
                 tracing::warn!(%err, "a server's action was refused");
             }
         }
-        self.warn_about_shared_defaults();
+        self.log_shared_defaults();
     }
 
-    /// Warns about two actions whose default key is the same.
+    /// Logs two actions whose default key is the same.
     ///
-    /// # Why this is worth a line on the player's screen
+    /// # Why this is worth telling the player, and where
     ///
     /// **A mod cannot ask what is already bound**, and it should not be able
     /// to: the engine owns bindings and mods never read keys (charter rule 11).
@@ -2914,19 +2918,30 @@ impl App {
     /// [`crate::input::Bindings::action_for`] takes the FIRST action whose
     /// binding matches and the other one simply never fires.
     ///
-    /// The player is the one who can fix it, on the controls screen, so the
-    /// player is who is told — and told which mod, for the same reason a
-    /// mod-attributed warning exists at all.
+    /// The player is the one who can fix it, on the controls screen, so that
+    /// is where they are told — [`App::shared_defaults`], drawn under the
+    /// bindings. It stood on the HUD until 2026-10-08, when the designer had
+    /// it off the screen a player plays on: a notice about the controls page
+    /// belongs on the controls page. The log keeps a line for the modder.
     ///
     /// Only DEFAULTS: a player who has deliberately put two actions on one key
     /// has said what they meant.
-    fn warn_about_shared_defaults(&mut self) {
+    fn log_shared_defaults(&self) {
         for (first, second) in shared_defaults(&self.actions) {
-            self.warn(format!(
+            tracing::warn!(
                 "`{second}` and `{first}` are both on the same key by default; only one of them \
-                 will work until you rebind it"
-            ));
+                 will work until it is rebound"
+            );
         }
+    }
+
+    /// Pairs of actions whose default key is the same, `(first, second)` in
+    /// registration order: what the controls screen lists so the player can
+    /// rebind one. Read fresh, so it follows whichever server's actions are
+    /// current.
+    #[must_use]
+    pub fn shared_defaults(&self) -> Vec<(String, String)> {
+        shared_defaults(&self.actions)
     }
 
     /// Every sound the server's mods registered.
@@ -3100,7 +3115,7 @@ impl App {
                     // The same set the slots and the props read, so one sword
                     // is one shape in every view (`f7f20e1` missed this one).
                     // A cut of several materials is never a picture.
-                    item: cell_tiles.is_none() && self.items.contains(&stack.material),
+                    item: cell_tiles.is_none() && self.icon_art.items.contains(&stack.material),
                     // The opacity mask an item is extruded from — see
                     // `viewmodel::cells`. `None` for a block, which ignores
                     // it anyway, and for a material the atlas has no tile
@@ -3220,7 +3235,7 @@ impl App {
                 &joint,
                 crate::cut::drawn_shape(stack),
                 self.tile_of(stack.material),
-                cell_tiles.is_none() && self.items.contains(&stack.material),
+                cell_tiles.is_none() && self.icon_art.items.contains(&stack.material),
                 self.tiles.opacity_of(stack.material),
                 cell_tiles.as_ref(),
             ));
@@ -3275,7 +3290,7 @@ impl App {
                 crate::render::spin(now.as_secs_f32(), id),
                 crate::cut::drawn_shape(stack),
                 self.tile_of(stack.material),
-                cell_tiles.is_none() && self.items.contains(&stack.material),
+                cell_tiles.is_none() && self.icon_art.items.contains(&stack.material),
                 self.tiles.opacity_of(stack.material),
                 cell_tiles.as_ref(),
             ));
@@ -3918,8 +3933,89 @@ impl App {
     /// Read by whatever draws a slot, because an item is drawn flat and a block
     /// is drawn as a cube — see [`crate::icons::Icons::paint_stack`].
     #[must_use]
+    pub const fn cards(&self) -> &std::collections::BTreeSet<u16> {
+        &self.icon_art.cards
+    }
+
+    /// The icons of the model materials whose model and skin have both
+    /// arrived, built on first use and kept (the designer, 2026-10-08: a
+    /// campfire in a slot is the campfire, not a cube wearing its icon).
+    ///
+    /// Built here rather than when the asset lands because an egui texture
+    /// needs the context, which the network pump does not have. The map is
+    /// shared out rather than borrowed because the frame that draws it
+    /// borrows the app mutably for everything else.
+    pub fn model_icons(&mut self, ctx: &egui::Context) -> std::sync::Arc<crate::icons::ModelIcons> {
+        let missing: Vec<(u16, String)> = self
+            .block_models
+            .model_of
+            .iter()
+            .filter(|(material, _)| !self.icon_art.built.contains_key(material))
+            .map(|(material, id)| (*material, id.clone()))
+            .collect();
+        let mut built: Option<crate::icons::ModelIcons> = None;
+        for (material, id) in missing {
+            let (Some(model), Some(skin)) =
+                (self.icon_art.models.get(&id), self.icon_art.skins.get(&id))
+            else {
+                continue;
+            };
+            let (Ok(width), Ok(height)) =
+                (usize::try_from(skin.width), usize::try_from(skin.height))
+            else {
+                continue;
+            };
+            if skin.rgba.len() != width * height * 4 {
+                continue;
+            }
+            let texture = self
+                .icon_art
+                .textures
+                .entry(id.clone())
+                .or_insert_with(|| {
+                    ctx.load_texture(
+                        format!("model-icon:{id}"),
+                        egui::ColorImage::from_rgba_unmultiplied([width, height], &skin.rgba),
+                        egui::TextureOptions::NEAREST,
+                    )
+                })
+                .id();
+            built
+                .get_or_insert_with(|| (*self.icon_art.built).clone())
+                .insert(material, crate::icons::model_icon(model, texture));
+        }
+        if let Some(icons) = built {
+            self.icon_art.built = std::sync::Arc::new(icons);
+        }
+        std::sync::Arc::clone(&self.icon_art.built)
+    }
+
+    /// Drops the built icons of every material drawn with `model`, so the
+    /// next frame builds them from what just arrived.
+    fn forget_model_icons(&mut self, model: &str) {
+        let stale: Vec<u16> = self
+            .block_models
+            .model_of
+            .iter()
+            .filter(|(_, id)| id.as_str() == model)
+            .map(|(material, _)| *material)
+            .collect();
+        if stale
+            .iter()
+            .any(|material| self.icon_art.built.contains_key(material))
+        {
+            let mut icons = (*self.icon_art.built).clone();
+            for material in stale {
+                icons.remove(&material);
+            }
+            self.icon_art.built = std::sync::Arc::new(icons);
+        }
+    }
+
+    /// Materials that are items, drawn flat in a slot.
+    #[must_use]
     pub const fn items(&self) -> &std::collections::BTreeSet<u16> {
-        &self.items
+        &self.icon_art.items
     }
 
     /// What each material is called, by the id the wire names it with: the
@@ -4059,6 +4155,12 @@ impl App {
             }
             crate::net::Event::Font { id, bytes } => self.adopt_font(&id, bytes),
             crate::net::Event::Model { id, scale, model } => {
+                // A copy on this side for the slot icon (`model_icons`),
+                // scaled as the renderer's will be.
+                self.icon_art
+                    .models
+                    .insert(id.clone(), crate::icons::scaled(&model, scale));
+                self.forget_model_icons(&id);
                 self.renderer.add_model(&id, *model, scale);
             }
             crate::net::Event::ModelTexture { id, image } => {
@@ -4066,6 +4168,9 @@ impl App {
                 // before its geometry — the cache answers instantly for bytes
                 // it already holds — so this is remembered rather than
                 // dropped, and applied when the model turns up.
+                self.icon_art.skins.insert(id.clone(), image.clone());
+                self.icon_art.textures.remove(&id);
+                self.forget_model_icons(&id);
                 self.renderer.set_model_texture(&id, &image);
             }
             // Unreachable by construction: the caller matched these three. An
@@ -7080,6 +7185,32 @@ const fn resync_plan(client: u64, server: u64) -> Resync {
     }
 }
 
+/// What a slot's icons are made from, beside the atlas (the designer,
+/// 2026-10-08: a grass card in a slot is the card, a model block is the
+/// model).
+#[derive(Default)]
+struct IconArt {
+    /// Materials that may not be put in the world: the items.
+    ///
+    /// See [`tiamat_core::proto::MaterialDef::placeable`]. Empty until a server
+    /// sends its table, which is correct: a client with no table has nothing to
+    /// place either.
+    items: std::collections::BTreeSet<u16>,
+    /// Billboard materials — grass cards — drawn flat, as an item is
+    /// (Contract §8.4).
+    cards: std::collections::BTreeSet<u16>,
+    /// The CPU side of every model that arrived, by model id, scaled as the
+    /// renderer scaled its copy: what a slot's icon is projected from.
+    models: BTreeMap<String, tiamat_core::model::Model>,
+    /// The skin of every model that arrived, by model id.
+    skins: BTreeMap<String, crate::texture::Image>,
+    /// Those skins as egui textures, kept so they stay uploaded.
+    textures: BTreeMap<String, egui::TextureHandle>,
+    /// The model icons built so far, by material. Shared with the frame
+    /// that draws them; replaced, not edited, when one is added.
+    built: std::sync::Arc<crate::icons::ModelIcons>,
+}
+
 /// What the material table says about whole and model materials.
 #[derive(Debug, Default)]
 struct BlockModels {
@@ -7143,7 +7274,7 @@ fn outline_of(
 /// Pairs of actions whose DEFAULT key is the same, as `(held, clashing)`.
 ///
 /// Defaults only: a player who has deliberately put two actions on one key has
-/// said what they meant. See [`App::warn_about_shared_defaults`], which is the
+/// said what they meant. See [`App::log_shared_defaults`], which is the
 /// only caller and does nothing but phrase this.
 fn shared_defaults(actions: &crate::input::Actions) -> Vec<(String, String)> {
     let mut seen: std::collections::BTreeMap<crate::input::Input, String> =

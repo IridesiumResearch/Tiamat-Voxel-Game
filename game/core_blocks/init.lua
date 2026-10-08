@@ -171,7 +171,8 @@ game.register_block{
         "### ### ###",   -- the bowl
     },
     hardness = 0.5,
-    -- The inventory still shows a block by its texture.
+    -- What a slot shows until the model and its skin have arrived; then
+    -- the slot shows the model.
     textures = { all = "textures/white.png" },
 }
 

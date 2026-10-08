@@ -2470,6 +2470,24 @@ fn draw_settings(app: &mut App, ctx: &egui::Context, dressing: client::theme::Dr
                         ui.separator();
                     }
                 }
+                // Two actions that asked for one key by default. Here, under
+                // the bindings where the fix is, and not on the HUD (the
+                // designer, 2026-10-08); the rows above already show the
+                // binding in red while it is still shared.
+                let shared = app.shared_defaults();
+                if !shared.is_empty() {
+                    ui.heading("keys shared by default");
+                    client::theme::secondary(
+                        ui,
+                        "Two actions asked for the same key; only one of them works until \
+                         one is rebound above."
+                            .to_owned(),
+                    );
+                    for (first, second) in &shared {
+                        ui.label(format!("{second} and {first}"));
+                    }
+                    ui.separator();
+                }
                 ui.separator();
                 // No "Close" here: the top bar's Back is the way out of every
                 // screen, and a second one further down is a second thing to learn.
@@ -2671,6 +2689,11 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
         // Uploaded first, so the draw below can hold the dialogs and the views
         // by reference — see `App::dialog_art`.
         let dialog_art = app.dialog_art(&context);
+        // A grass card is a picture and a model block is its model: what a
+        // slot draws for them (the designer, 2026-10-08). The icons are
+        // built on first use, which needs the context.
+        let cards = app.cards().clone();
+        let model_icons = app.model_icons(&context);
         let reserve = app.sheet_reserve(size);
         let raised = surface.dialogs.draw(
             &context,
@@ -2678,7 +2701,9 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
             app.views(),
             client::icons::Icons::new(atlas_texture, Some(&tiles))
                 .with_items(&items)
-                .with_names(&material_names),
+                .with_names(&material_names)
+                .with_cards(&cards)
+                .with_models(&model_icons),
             &dialog_art,
             &app.fonts,
             size,
@@ -2702,7 +2727,9 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
             &context,
             client::icons::Icons::new(atlas_texture, Some(&tiles))
                 .with_items(&items)
-                .with_names(&material_names),
+                .with_names(&material_names)
+                .with_cards(&cards)
+                .with_models(&model_icons),
         );
         if lines.is_empty() && warnings.is_empty() && joined {
             return;

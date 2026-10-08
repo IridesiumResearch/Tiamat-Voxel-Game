@@ -208,7 +208,8 @@ pub const fn filled(mask: u32, x: i32, y: i32, z: i32) -> bool {
 ///
 /// Coordinates are corner coordinates, `0..=3`, not cell coordinates — a cell
 /// spans from its own corner to the next one along each axis.
-fn project(area: egui::Rect, x: f32, y: f32, z: f32) -> egui::Pos2 {
+#[must_use]
+pub fn project(area: egui::Rect, x: f32, y: f32, z: f32) -> egui::Pos2 {
     let scale = area.width().min(area.height()) / EXTENT;
     let centre = area.center();
     // Origin-centred first: the grid runs 0..3, so subtracting 1.5 from each
