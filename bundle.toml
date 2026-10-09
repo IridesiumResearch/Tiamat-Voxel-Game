@@ -5,43 +5,51 @@
 # at. Written by scripts/bundle-lock.sh from the repositories beside this
 # checkout; read by scripts/package.sh, which packages a mod from this commit
 # and never from a working tree. docs/distribution.md §6 and §7.
-#
-# Linked for development and left out of this release by choice:
-#   tiamat_default_magic
-#   tiamat_default_science
 
 [[mod]]
 id = "tiamat_default_craft"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Craft.git"
 path = "mods/tiamat_default_craft"
-commit = "c80d996892b94d7c712f53b79d91a69d7ea1a832"
+commit = "5c7b92c2805761c3dce0818fb2ec85b8cf23815f"
 
 [[mod]]
 id = "tiamat_default_life"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Life.git"
 path = "mods/tiamat_default_life"
-commit = "39cb606178cfeaa18717f1ee74f1300266279322"
+commit = "f52e538ab427ca12380b94b862e27358a41138a5"
+
+[[mod]]
+id = "tiamat_default_magic"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_Magic.git"
+path = "mods/tiamat_default_magic"
+commit = "edc175866c831cb7360683c800d39b76a989abf2"
 
 [[mod]]
 id = "tiamat_default_progress"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Progress.git"
 path = "mods/tiamat_default_progress"
-commit = "656d86d68ecee56d267ffc18fa873bc159d4112a"
+commit = "c391fde0504f6dbeea147a31be863db0bed17456"
+
+[[mod]]
+id = "tiamat_default_science"
+repo = "https://github.com/IridesiumResearch/Tiamat_Default_Science.git"
+path = "mods/tiamat_default_science"
+commit = "ae1b71a9d95fd27e3bd97d4e10bc5c6bdc7d72d1"
 
 [[mod]]
 id = "tiamat_default_ui"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_UI.git"
 path = "mods/tiamat_default_ui"
-commit = "d09b8716536ee5d60033981e24ae89ce1b3d1068"
+commit = "8385296c344a6e2b447042790442ed56f755108d"
 
 [[mod]]
 id = "tiamat_default_world"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_World.git"
 path = "mods/tiamat_default_world"
-commit = "d36be29f7f8ea1150dce2b79261ee68a16484349"
+commit = "793c76036100de18d85f4be5eadea55c3b80fdc7"
 
 [[mod]]
 id = "tiamat_weather"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Weather.git"
 path = "mods/tiamat_weather"
-commit = "5057e7092f997c1b8ec24803bf2c79bd81bd47ee"
+commit = "604b8e30e6544cfa5031ee8f4c044caa98f19b14"
