@@ -206,6 +206,8 @@ fn v1_to_v2(v1: EntityV1) -> crate::ent::Entity {
         owner: v1.owner,
         source: v1.source,
         script: v1.script,
+        tint: [255; 3],
+        flash: None,
     }
 }
 
@@ -240,6 +242,8 @@ fn v3_to_v4(v3: EntityV3) -> crate::ent::Entity {
         owner: v3.owner,
         source: v3.source,
         script: v3.script,
+        tint: [255; 3],
+        flash: None,
     }
 }
 

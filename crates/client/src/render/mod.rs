@@ -5721,6 +5721,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let boxes = held_boxes(
             &figure,
@@ -5760,6 +5761,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let boxes = held_boxes(
             &figure,
@@ -5800,6 +5802,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let block = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], false, None, None);
         let item = held_boxes(&figure, &joint([0.0; 3]), 0, [0.0; 4], true, None, None);
@@ -5840,6 +5843,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let mask = 0b111 << 12;
         let cut = held_boxes(&figure, &joint([0.0; 3]), mask, [0.0; 4], false, None, None);
@@ -5907,6 +5911,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let uv = [0.2, 0.2, 0.6, 0.6];
         let held = held_boxes(&figure, &joint([0.0; 3]), 0, uv, true, Some(mask), None);
@@ -5980,6 +5985,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let boxes = held_boxes(
             &figure,
@@ -6023,6 +6029,7 @@ mod tests {
             phase: 0.0,
             carrying: [false; 2],
             light: skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         let held = held_boxes(
             &figure,

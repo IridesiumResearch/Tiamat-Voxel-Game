@@ -4444,7 +4444,7 @@ function game.transfer_entity(id, domain, position) end
 ---a fall of four hundred land at exactly the same number, and a body dropping
 ---through water is slowed by the water before it touches down. Walking down a
 ---step raises nothing: a body that never left the ground never fell.
----@return { pos: { x: number, y: number, z: number }, yaw: number, pitch: number, facing: { x: number, y: number, z: number }, velocity: { x: number, y: number, z: number }, on_ground: boolean, submerged: number, fell: number, source: string, model: string|nil, item: table|nil, anim: integer, health: integer|nil, max_health: integer|nil, owner: string|nil, nametag: string|nil, nametag_player: string|nil }|nil
+---@return { pos: { x: number, y: number, z: number }, yaw: number, pitch: number, facing: { x: number, y: number, z: number }, velocity: { x: number, y: number, z: number }, on_ground: boolean, submerged: number, fell: number, source: string, model: string|nil, item: table|nil, anim: integer, health: integer|nil, max_health: integer|nil, owner: string|nil, nametag: string|nil, nametag_player: string|nil, tint: { r: number, g: number, b: number } }|nil
 function game.entity(id) end
 
 ---Changes an entity. Returns whether anything changed.
@@ -4473,7 +4473,7 @@ function game.entity(id) end
 ---})
 ---```
 ---@param id integer
----@param spec { pos?: { x: number, y: number, z: number }, velocity?: { x: number, y: number, z: number }, yaw?: number, pitch?: number, health?: integer, speed?: number, anim?: integer, drive?: { walk?: { x: number, z: number }, jump?: boolean, gait?: "walk"|"sprint"|"sneak" } }
+---@param spec { pos?: { x: number, y: number, z: number }, velocity?: { x: number, y: number, z: number }, yaw?: number, pitch?: number, health?: integer, speed?: number, anim?: integer, drive?: { walk?: { x: number, z: number }, jump?: boolean, gait?: "walk"|"sprint"|"sneak" }, tint?: { r: number, g: number, b: number }|false, tint_ticks?: integer } `tint` colours the figure, a multiplier on its skin in 0..=1 per channel, until changed (`false` clears it); with `tint_ticks` it is a FLASH over the tint underneath, eased back out over that many ticks by the engine, with no further messages — the hit flash, `{ tint = { r = 1, g = 0.55, b = 0.55 }, tint_ticks = 6 }`. Presentation only, and not persisted: a mod keeping a state across a save sets its colour again.
 ---@return boolean changed
 function game.set_entity(id, spec) end
 

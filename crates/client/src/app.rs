@@ -3217,6 +3217,7 @@ impl App {
                 light: self
                     .store
                     .light_on_body(feet, entity.collider.map_or(0.0, |size| size[1])),
+                tint: pose.tint,
             };
             props.extend(self.hand_props(&figure, &entity.hands));
         }
@@ -5833,6 +5834,7 @@ impl App {
             ],
             // The engine's own rig, which was lit as flatly as any mob.
             light: self.store.light_on_body(feet, HUMANOID_HEIGHT),
+            tint: [1.0; 3],
         };
         self.renderer.set_player(Some(figure));
         self.place_blobs();
@@ -6535,6 +6537,7 @@ impl App {
                 light: self
                     .store
                     .light_on_body(feet, entity.collider.map_or(0.0, |size| size[1])),
+                tint: pose.tint,
             };
             if let Some(model) = mods.filter(|_| !own) {
                 by_model.entry(model.to_owned()).or_default().push(figure);
@@ -6620,6 +6623,7 @@ impl App {
                             }
                             light
                         },
+                        tint: [1.0; 3],
                     },
                 ));
             }

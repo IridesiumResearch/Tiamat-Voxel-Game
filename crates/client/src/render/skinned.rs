@@ -93,6 +93,9 @@ pub struct Figure {
     /// The caller's to sample, because the caller has the world.
     /// [`OPEN_SKY`] draws a figure exactly as every figure was drawn before.
     pub light: [f32; 4],
+    /// The colour the figure is drawn in, a multiplier on its skin: white
+    /// for most things, a mod's tint on an entity (Life ask 21).
+    pub tint: [f32; 3],
 }
 
 /// [`Figure::light`] under the open sky with no lamp near: all of the sky and
@@ -138,6 +141,8 @@ struct Instance {
     placement: [f32; 4],
     /// [`Figure::light`], as it is.
     light: [f32; 4],
+    /// The colour the figure is drawn in (Life ask 21), `w` unused.
+    tint: [f32; 4],
 }
 
 /// Everything needed to draw skinned figures.
@@ -401,6 +406,7 @@ impl Skinned {
                 // else's arm.
                 placement: [figure.yaw, f32::from_bits(base), figure.pitch, figure.pivot],
                 light: figure.light,
+                tint: [figure.tint[0], figure.tint[1], figure.tint[2], 1.0],
             });
         }
 
@@ -509,10 +515,11 @@ fn vertex_layout() -> [wgpu::VertexBufferLayout<'static>; 2] {
         3 => Uint32x4,
         4 => Float32x4,
     ];
-    const INSTANCE: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+    const INSTANCE: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         5 => Float32x4,
         6 => Float32x4,
         7 => Float32x4,
+        8 => Float32x4,
     ];
     [
         wgpu::VertexBufferLayout {
@@ -810,6 +817,7 @@ mod pitch_tests {
             phase: 0.0,
             carrying: [false; 2],
             light: OPEN_SKY,
+            tint: [1.0; 3],
         }
     }
 

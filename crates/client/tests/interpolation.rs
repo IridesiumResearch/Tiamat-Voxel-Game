@@ -71,6 +71,7 @@ fn def(local: [f32; 3]) -> EntityDef {
         collider: Some([1.8, 5.4]),
         nametag: None,
         item: None,
+        tint: [255; 3],
     }
 }
 
@@ -83,6 +84,7 @@ fn delta(tick: u64, local: [f32; 3]) -> EntityDelta {
         yaw: 0,
         pitch: 0,
         anim: 0,
+        tint: [255; 3],
     }
     .tap(tick)
 }

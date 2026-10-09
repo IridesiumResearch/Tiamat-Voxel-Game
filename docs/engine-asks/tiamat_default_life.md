@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-05: 20**, a creature drawn at its pitch. 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-09: nothing.** 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
@@ -41,6 +41,34 @@ camera-facing row centred over an entity's head that FOLLOWS it, latest-state
 per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
+
+## 21. A creature cannot be tinted (2026-10-09): LANDED 2026-10-09 (engine, the commit after 311c4b72)
+
+**Wanted.** An animal hit flashes faintly red for a few ticks, the familiar
+"that landed" signal.
+
+**Why the mod can't.** A figure's colour is its texture and the light where
+it stands. `set_entity` has no colour field, and a model is chosen only at
+`spawn_entity`. Respawning a red copy loses the entity's id and everything
+keyed on it (grudges, tethers, a rider).
+
+**Smallest change.** A tint on the entity, eased out on the client:
+`game.set_entity(id, { tint = { r = 1.0, g = 0.55, b = 0.55 }, tint_ticks
+= 6 })` would multiply the figure's colour and fade back to normal over
+`tint_ticks`, with no further messages. Presentation only. A general tint
+also covers a frozen creature going blue, a poisoned one green and a
+ghost's pallor.
+
+**From the engine, 2026-10-09.** As asked, with one difference in where
+the easing lives: the server holds the flash and counts it down on the
+tick, in integer steps, and sends the colour shown each tick in the entity
+state it already sends; the client blends between ticks as it blends
+positions, so the fade is smooth at any frame rate, and a viewer who looks
+later sees the right colour. `tint = { r, g, b }` (0..=1 each) colours the
+figure until changed, `tint = false` clears it, and `tint_ticks` makes the
+same colour a flash over the tint underneath. `game.entity(id).tint` reads
+the tint back. Not persisted: a mod keeping a state across a save sets its
+colour again when it restores the state. Protocol 88.
 
 ## 20. A creature is drawn level, whatever its pitch (2026-10-05): LANDED 2026-10-05 (engine ed5826d2), awaiting the eye
 

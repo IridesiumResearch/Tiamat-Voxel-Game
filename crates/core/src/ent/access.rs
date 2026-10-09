@@ -50,6 +50,12 @@ pub struct Patch {
     pub anim: Option<AnimTag>,
     /// Current hit points. Ignored by an entity that has no health at all.
     pub health: Option<u32>,
+    /// A new tint, the colour the figure is drawn in (Life ask 21); white
+    /// clears one.
+    pub tint: Option<[u8; 3]>,
+    /// A flash: this colour over the tint, eased back out over so many
+    /// ticks. The tint underneath is untouched.
+    pub flash: Option<([u8; 3], u16)>,
     /// The mod's own state, opaque to the engine.
     pub script: Option<Vec<u8>>,
 }
@@ -63,6 +69,18 @@ impl Patch {
     /// its write dropped rather than a diverged world.
     pub fn apply(&self, entity: &mut Entity) -> bool {
         let mut changed = false;
+        if let Some(tint) = self.tint {
+            entity.tint = tint;
+            changed = true;
+        }
+        if let Some((tint, ticks)) = self.flash {
+            entity.flash = (ticks > 0).then_some(super::Flash {
+                tint,
+                total: ticks,
+                left: ticks,
+            });
+            changed = true;
+        }
         if let Some(position) = self.position.filter(|p| p.iter().all(|v| v.is_finite())) {
             entity.transform = Transform {
                 yaw: entity.transform.yaw,

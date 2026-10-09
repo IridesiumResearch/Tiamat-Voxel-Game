@@ -97,6 +97,9 @@ struct VertexIn {
     // Per-instance: the light where the figure stands. How much sky reaches
     // it (x), then the block light on it (y, z, w), each 0..1.
     @location(7) light: vec4<f32>,
+    // Per-instance: the colour the figure is drawn in, a multiplier on its
+    // skin (Life ask 21: a hit flash, a frozen creature's blue).
+    @location(8) tint: vec4<f32>,
 };
 
 struct VertexOut {
@@ -108,6 +111,7 @@ struct VertexOut {
     @location(2) uv: vec2<f32>,
     // The instance's light, the same at every vertex of a figure.
     @location(3) @interpolate(flat) light: vec4<f32>,
+    @location(4) @interpolate(flat) tint: vec4<f32>,
 };
 
 // The vertex, moved by its joints.
@@ -192,6 +196,7 @@ fn vertex_main(input: VertexIn) -> VertexOut {
     out.distance = length(world);
     out.uv = input.uv;
     out.light = input.light;
+    out.tint = input.tint;
     return out;
 }
 
@@ -293,7 +298,7 @@ fn fragment_main(input: VertexOut) -> @location(0) vec4<f32> {
     // before it had one — a model with no texture is bound to a white pixel,
     // so this is bit-for-bit the old colour for every figure that has none.
     let skin = textureSample(skin_texture, skin_sampler, input.uv).rgb;
-    let albedo = skin * vec3<f32>(0.92, 0.92, 0.94);
+    let albedo = skin * vec3<f32>(0.92, 0.92, 0.94) * input.tint.rgb;
     let lit = albedo * max(max(sun + sky, lamp), floor);
 
     let far = globals.sky_colour.w;

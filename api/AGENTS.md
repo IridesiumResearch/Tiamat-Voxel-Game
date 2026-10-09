@@ -20,6 +20,11 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A tint on an entity** (2026-10-09, Life ask 21). `game.set_entity(id,
+  { tint = { r, g, b } })` colours a creature's figure until changed;
+  `tint_ticks` makes it a flash eased back out by the engine — the hit flash,
+  a frozen creature's blue. `game.entity(id).tint` reads it back. Presentation
+  only, not persisted.
 - **A flicker on a block's light** (2026-10-09). `register_block{ light_emit
   = {...}, flicker = { depth = 0.3, rate = 8 } }` makes the light breathe on
   the client: the ground near it dims by up to `depth` with smooth noise,

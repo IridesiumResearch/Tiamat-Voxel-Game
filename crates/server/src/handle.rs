@@ -541,6 +541,7 @@ fn entity_messages(
                 yaw: tiamat_core::ent::replicate::quantise_yaw(spawn.transform.yaw),
                 pitch: tiamat_core::ent::replicate::quantise_pitch(spawn.transform.pitch),
                 anim: spawn.anim.0,
+                tint: spawn.tint,
                 model: spawn.model,
                 collider: spawn.collider.map(|box_| [box_.width, box_.height]),
                 item: spawn.item.as_ref().map(|stack| shared.wire_stack(stack)),
@@ -588,6 +589,7 @@ fn entity_messages(
                 yaw: delta.yaw,
                 pitch: delta.pitch,
                 anim: delta.anim.0,
+                tint: delta.tint,
             })
             .collect();
         messages.push(ServerMessage::EntityState { tick, entities });

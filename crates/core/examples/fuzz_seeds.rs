@@ -1011,6 +1011,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 collider: Some([0.6, 1.8]),
                 nametag: Some("a mimic".to_owned()),
                 item: None,
+                tint: [255; 3],
             }],
         },
         ServerMessage::EntityDespawn {
@@ -1026,6 +1027,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 yaw: 130,
                 pitch: -30,
                 anim: 2,
+                tint: [255; 3],
             }],
         },
         ServerMessage::ActionTable {

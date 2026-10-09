@@ -602,6 +602,15 @@ impl Population {
         // Bound once for the whole pass: every body here is in this domain, and
         // `ChunkLookup` has no way to carry one.
         let terrain = world.solid(domain);
+        // A flash fades a step a tick, on every entity of this space —
+        // riders and transients too, which the stepping below leaves out.
+        for id in self.entities.ids() {
+            if self.domain_of(id) == domain
+                && let Some(entity) = self.entities.get_mut(id)
+            {
+                entity.tick_flash();
+            }
+        }
         // Collected rather than marked as we go: the loop holds the entity
         // store mutably, and dirtying reaches the same struct.
         let mut moved_chunks: Vec<(ChunkPos, ChunkPos)> = Vec::new();

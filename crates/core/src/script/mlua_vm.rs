@@ -7628,6 +7628,7 @@ impl MluaVm {
                         .transpose()?,
                 )?;
                 out.set("anim", entity.anim.0)?;
+                out.set("tint", tint_table(lua, entity.tint)?)?;
                 // Charter rule 13: the UUID, as hex, and never the name. A mod
                 // that stores "whose is this" must store something a rename
                 // cannot invalidate, and giving it only the name would leave it
@@ -10440,6 +10441,38 @@ struct EntityApi {
 /// Absent means "leave it alone" throughout — see the type. Nothing here can
 /// create or destroy an entity or change its size, so a mod cannot grow a mob a
 /// collider halfway through a tick.
+/// The tint underneath, not a flash in flight, as `{ r, g, b }` in `0..=1`
+/// (Life ask 21).
+fn tint_table(lua: &Lua, tint: [u8; 3]) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    for (key, level) in ["r", "g", "b"].into_iter().zip(tint) {
+        table.set(key, f64::from(level) / 255.0)?;
+    }
+    Ok(table)
+}
+
+/// `{ r, g, b }` in `0..=1` as the bytes a figure is tinted by.
+fn tint_bytes(table: &Table) -> mlua::Result<[u8; 3]> {
+    let mut bytes = [255u8; 3];
+    for (slot, key) in bytes.iter_mut().zip(["r", "g", "b"]) {
+        let level: f64 = table.get::<Option<f64>>(key)?.unwrap_or(1.0);
+        if !level.is_finite() || !(0.0..=1.0).contains(&level) {
+            return Err(mlua::Error::external(format!(
+                "set_entity: tint.{key} must be 0..=1, got {level}"
+            )));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked into 0..=1 and rounded into a byte"
+        )]
+        {
+            *slot = (level * 255.0 + 0.5) as u8;
+        }
+    }
+    Ok(bytes)
+}
+
 fn read_patch(spec: &Table) -> mlua::Result<crate::ent::Patch> {
     let mut patch = crate::ent::Patch::default();
     if let Some(position) = spec.get::<Option<Table>>("pos")? {
@@ -10463,6 +10496,28 @@ fn read_patch(spec: &Table) -> mlua::Result<crate::ent::Patch> {
             )));
         }
         patch.speed = Some(speed);
+    }
+    // A tint, or a tint for a few ticks (Life ask 21): `tint = { r, g, b }`
+    // colours the figure until changed, `tint = false` clears it, and with
+    // `tint_ticks` it is a flash over the tint underneath, eased back out.
+    match spec.get::<Option<Value>>("tint")? {
+        Some(Value::Table(table)) => {
+            let colour = tint_bytes(&table)?;
+            match spec.get::<Option<u32>>("tint_ticks")? {
+                Some(ticks) if ticks > 0 => {
+                    patch.flash = Some((colour, u16::try_from(ticks).unwrap_or(u16::MAX)));
+                }
+                _ => patch.tint = Some(colour),
+            }
+        }
+        Some(Value::Boolean(false)) => patch.tint = Some([255; 3]),
+        Some(Value::Nil) | None => {}
+        Some(other) => {
+            return Err(mlua::Error::external(format!(
+                "set_entity: `tint` is {{ r, g, b }} in 0..=1, or false, not a {}",
+                other.type_name()
+            )));
+        }
     }
     if let Some(tag) = spec.get::<Option<u8>>("anim")? {
         patch.anim = Some(crate::ent::AnimTag(tag));
@@ -19238,6 +19293,64 @@ mod entity_tests {
             ),
         )
         .expect("the mod read its own item back");
+    }
+
+    #[test]
+    fn a_mod_tints_a_creature_and_flashes_it_for_a_few_ticks() {
+        // Life ask 21: the hit flash, and a lasting tint under it.
+        let (mut vm, store) = vm_with_entities();
+        load(
+            &mut vm,
+            "painter",
+            "id = nil\n\
+             game.register_on_tick(function()\n\
+               if id == nil then\n\
+                 id = game.spawn_entity{ pos = {x=0,y=0,z=0} }\n\
+               end\n\
+             end)",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        assert!(vm.tick(1).expect("tick").is_empty());
+        vm.eval_in(
+            "painter",
+            "assert(game.set_entity(id, { tint = { r = 0.5, g = 0.5, b = 1 } }))\n\
+             local me = game.entity(id)\n\
+             assert(math.abs(me.tint.b - 1) < 0.01 and math.abs(me.tint.r - 0.5) < 0.01, 'tint read back')\n\
+             assert(game.set_entity(id, { tint = { r = 1, g = 0.55, b = 0.55 }, tint_ticks = 6 }))\n\
+             assert(math.abs(game.entity(id).tint.b - 1) < 0.01, 'a flash leaves the tint underneath')",
+        )
+        .expect("tint and flash");
+        {
+            let entities = store.entities.lock().expect("lock");
+            let (_, entity) = entities.iter().next().expect("one entity");
+            assert_eq!(entity.tint, [128, 128, 255]);
+            let flash = entity.flash.expect("a flash in flight");
+            assert_eq!(
+                (flash.tint, flash.total, flash.left),
+                ([255, 140, 140], 6, 6)
+            );
+        }
+        vm.eval_in("painter", "assert(game.set_entity(id, { tint = false }))")
+            .expect("clear");
+        assert_eq!(
+            store
+                .entities
+                .lock()
+                .expect("lock")
+                .iter()
+                .next()
+                .expect("one")
+                .1
+                .tint,
+            [255; 3],
+            "`tint = false` is white again"
+        );
+        assert!(
+            vm.eval_in("painter", "game.set_entity(id, { tint = { r = 2 } })")
+                .is_err(),
+            "a channel past one is refused"
+        );
     }
 
     #[test]

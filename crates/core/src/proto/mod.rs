@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 87;
+pub const PROTOCOL_VERSION: u32 = 88;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 87;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v88 (Life 21, a tint on an entity): `EntityDef` and `EntityDelta` carry
+// `tint`, the colour the figure is drawn in this tick — a mod's hit flash,
+// a frozen creature's blue. Appended to each.
 // v87 (a flicker on a block's light, the designer 2026-10-09): `MaterialDef`
 // gains `flicker`, appended with a default — how a block's light breathes on
 // the client. Presentation only; the server's light is unchanged.
@@ -2697,6 +2700,9 @@ pub struct EntityDef {
     /// it has (charter rule 13), and a client holding the UUID instead would
     /// show a stale name until it reconnected.
     pub nametag: Option<String>,
+    /// The colour the figure is drawn in, a multiplier on its skin, white
+    /// unless a mod said (Life ask 21). Presentation only.
+    pub tint: [u8; 3],
 }
 
 /// What one entity is holding now.
@@ -2731,6 +2737,9 @@ pub struct EntityDelta {
     pub pitch: i8,
     /// Which clip to play.
     pub anim: u8,
+    /// The colour the figure is drawn in this tick (Life ask 21): the tint,
+    /// lifted toward a flash's colour as it fades.
+    pub tint: [u8; 3],
 }
 
 /// One registered fluid, as the wire carries it.
@@ -5396,6 +5405,7 @@ mod tests {
                 yaw: 0,
                 pitch: 0,
                 anim: 0,
+                tint: [255; 3],
             }],
         };
         assert!(validate_server_message(&poison).is_err());
@@ -5414,6 +5424,7 @@ mod tests {
                 collider: None,
                 nametag: None,
                 item: None,
+                tint: [255; 3],
             }],
         };
         assert!(validate_server_message(&infinite).is_err());
@@ -5435,6 +5446,7 @@ mod tests {
                 collider: Some([f32::NAN, 1.0]),
                 nametag: None,
                 item: None,
+                tint: [255; 3],
             }],
         };
         assert!(validate_server_message(&bad_box).is_err());

@@ -188,6 +188,16 @@ pub struct Entity {
     /// Deliberately NOT persisted — see [`AnimTag`].
     #[serde(skip)]
     pub anim: AnimTag,
+    /// The colour the figure is drawn in, a multiplier on its skin: white
+    /// unless a mod set one (Life ask 21) — a frozen creature blue, a ghost's
+    /// pallor. Presentation only, and NOT persisted: a mod that keeps a state
+    /// across a save keeps its colour by setting it again.
+    #[serde(skip, default = "white")]
+    pub tint: [u8; 3],
+    /// A colour on top of `tint` for a few ticks, eased back — the hit flash.
+    /// Counted down on the tick and never persisted.
+    #[serde(skip)]
+    pub flash: Option<Flash>,
     /// The stack this entity IS, for something lying on the ground.
     ///
     /// # Why an entity carries a stack rather than a mod drawing one
@@ -267,6 +277,8 @@ impl Entity {
             item: None,
             hands: Hands::default(),
             anim: AnimTag::default(),
+            tint: white(),
+            flash: None,
             health: None,
             nametag: None,
             owner: None,
@@ -275,11 +287,60 @@ impl Entity {
         }
     }
 
+    /// The colour the figure is drawn in this tick: the tint, lifted toward
+    /// the flash's colour by how much of the flash is left — integer
+    /// arithmetic on the tick, like everything the tick decides.
+    #[must_use]
+    pub fn shown_tint(&self) -> [u8; 3] {
+        let Some(flash) = &self.flash else {
+            return self.tint;
+        };
+        if flash.total == 0 {
+            return self.tint;
+        }
+        let mut shown = [0u8; 3];
+        for (channel, slot) in shown.iter_mut().enumerate() {
+            let base = i32::from(self.tint[channel]);
+            let peak = i32::from(flash.tint[channel]);
+            let mixed = base + (peak - base) * i32::from(flash.left) / i32::from(flash.total);
+            *slot = u8::try_from(mixed.clamp(0, 255)).unwrap_or(255);
+        }
+        shown
+    }
+
+    /// One tick of the flash, if any: it fades a step, and is gone at zero.
+    pub fn tick_flash(&mut self) {
+        if let Some(flash) = &mut self.flash {
+            flash.left = flash.left.saturating_sub(1);
+            if flash.left == 0 {
+                self.flash = None;
+            }
+        }
+    }
+
     /// The chunk this entity is anchored to, which is where it persists.
     #[must_use]
     pub const fn chunk(&self) -> ChunkPos {
         self.transform.chunk
     }
+}
+
+/// White, the tint of a figure nobody coloured.
+const fn white() -> [u8; 3] {
+    [255; 3]
+}
+
+/// A colour laid over an entity's tint for a few ticks and eased back out —
+/// the "that landed" flash (Life ask 21). `left` counts down from `total`;
+/// the colour shown is the tint lifted toward `tint` here by `left / total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flash {
+    /// The colour at the flash's peak, a multiplier on the skin.
+    pub tint: [u8; 3],
+    /// How many ticks it lasts.
+    pub total: u16,
+    /// How many are left.
+    pub left: u16,
 }
 
 /// One slot in the arena.
@@ -509,6 +570,36 @@ mod tests {
 
     fn somewhere(x: f32) -> Transform {
         Transform::at(ChunkPos::new(0, 0, 0), [x, 0.0, 0.0])
+    }
+
+    #[test]
+    fn a_flash_lifts_the_tint_and_fades_a_step_a_tick() {
+        // Life ask 21: the hit flash. Red over white for four ticks: full red
+        // at once, halfway back after two, gone after four — in integer
+        // steps, so the tick decides it the same everywhere.
+        let mut entity = Entity::at(Transform::from_world(0.0, 0.0, 0.0), "test");
+        assert_eq!(entity.shown_tint(), [255; 3]);
+        entity.flash = Some(Flash {
+            tint: [255, 0, 0],
+            total: 4,
+            left: 4,
+        });
+        assert_eq!(entity.shown_tint(), [255, 0, 0]);
+        entity.tick_flash();
+        entity.tick_flash();
+        assert_eq!(entity.shown_tint(), [255, 128, 128]);
+        entity.tick_flash();
+        entity.tick_flash();
+        assert_eq!(entity.flash, None, "a spent flash is gone");
+        assert_eq!(entity.shown_tint(), [255; 3]);
+        // A tint underneath stays under the flash.
+        entity.tint = [128, 128, 255];
+        entity.flash = Some(Flash {
+            tint: [255, 255, 255],
+            total: 2,
+            left: 1,
+        });
+        assert_eq!(entity.shown_tint(), [191, 191, 255]);
     }
 
     fn mob(x: f32) -> Entity {

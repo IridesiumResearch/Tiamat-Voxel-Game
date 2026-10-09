@@ -3330,6 +3330,7 @@ fn a_figure_on_screen_does_not_take_the_terrains_shadows_with_it() {
         phase: 0.0,
         carrying: [false; 2],
         light: client::render::skinned::OPEN_SKY,
+        tint: [1.0; 3],
     }]);
     let peopled = ratio(&mut renderer);
     renderer.set_entities(Vec::new());
@@ -3913,6 +3914,7 @@ fn player_at(offset: [f32; 3]) -> client::render::skinned::Figure {
         phase: 0.0,
         carrying: [false; 2],
         light: client::render::skinned::OPEN_SKY,
+        tint: [1.0; 3],
     }
 }
 
@@ -5211,6 +5213,7 @@ fn an_entity_is_drawn_where_the_server_put_it() {
         phase: 0.0,
         carrying: [false; 2],
         light: client::render::skinned::OPEN_SKY,
+        tint: [1.0; 3],
     }]);
     let peopled = target.capture(&mut renderer, &camera).expect("capture");
     let after = average(
@@ -5288,6 +5291,7 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
             phase: 0.0,
             carrying: [false; 2],
             light: client::render::skinned::OPEN_SKY,
+            tint: [1.0; 3],
         }],
     );
     renderer.set_model_figures(posed);
@@ -5389,6 +5393,7 @@ fn a_mods_model_casts_a_shadow_like_the_engines_own_rig() {
             phase: 0.0,
             carrying: [false; 2],
             light: client::render::skinned::OPEN_SKY,
+            tint: [1.0; 3],
         }],
     );
     renderer.set_model_figures(posed);
@@ -5450,6 +5455,7 @@ fn a_hundred_entities_all_reach_the_instance_buffer() {
                 phase: index as f32 * 0.05,
                 carrying: [false; 2],
                 light: client::render::skinned::OPEN_SKY,
+                tint: [1.0; 3],
             }
         })
         .collect();
@@ -5499,6 +5505,7 @@ fn a_figure_is_posed_by_its_clip_rather_than_drawn_at_rest() {
             phase,
             carrying: [false; 2],
             light: client::render::skinned::OPEN_SKY,
+            tint: [1.0; 3],
         }]);
         target.capture(&mut renderer, &camera).expect("capture")
     };
@@ -5559,6 +5566,7 @@ fn a_figure_is_lit_by_the_light_where_it_stands() {
                 phase: 0.0,
                 carrying: [false; 2],
                 light,
+                tint: [1.0; 3],
             }]);
             target.capture(&mut renderer, &camera).expect("capture")
         };
@@ -5710,6 +5718,7 @@ fn a_figure_in_the_frame_does_not_move_the_milk() {
         phase: 0.25,
         carrying: [false; 2],
         light: client::render::skinned::OPEN_SKY,
+        tint: [1.0; 3],
     }]);
     let peopled = target.capture(&mut renderer, &camera).expect("capture");
 
@@ -10693,6 +10702,7 @@ fn brazier_frame(gpu: Gpu, centre: BlockValue, model: bool) -> Image {
                         phase: 0.0,
                         carrying: [false; 2],
                         light: client::render::skinned::OPEN_SKY,
+                        tint: [1.0; 3],
                     }
                 })
             })
@@ -10802,6 +10812,7 @@ fn a_mods_model_is_turned_by_its_pitch_about_the_middle_of_its_collider() {
             phase: 0.0,
             carrying: [false; 2],
             light: client::render::skinned::OPEN_SKY,
+            tint: [1.0; 3],
         };
         renderer.set_model_figures([("zoo:climber".to_owned(), vec![figure])].into());
         let image = target.capture(&mut renderer, &camera).expect("capture");

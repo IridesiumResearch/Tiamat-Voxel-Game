@@ -93,6 +93,8 @@ struct Sample {
     yaw: u8,
     pitch: i8,
     anim: u8,
+    /// The colour shown that tick (Life ask 21).
+    tint: [u8; 3],
 }
 
 /// Where an entity should be drawn this frame.
@@ -108,6 +110,9 @@ pub struct Pose {
     pub pitch: f32,
     /// Which clip to play.
     pub anim: u8,
+    /// The colour the figure is drawn in, each channel `0..=1`, blended
+    /// between ticks like the position so a flash fades smoothly.
+    pub tint: [f32; 3],
 }
 
 impl Entity {
@@ -129,6 +134,7 @@ impl Entity {
                 yaw: def.yaw,
                 pitch: def.pitch,
                 anim: def.anim,
+                tint: def.tint,
             }],
         }
     }
@@ -149,6 +155,7 @@ impl Entity {
             yaw: delta.yaw,
             pitch: delta.pitch,
             anim: delta.anim,
+            tint: delta.tint,
         });
         if self.samples.len() > HISTORY {
             self.samples.remove(0);
@@ -209,6 +216,7 @@ impl Sample {
             yaw: unquantise_yaw(self.yaw),
             pitch: unquantise_pitch(self.pitch),
             anim: self.anim,
+            tint: blend_tint(self.tint, self.tint, 0.0),
         }
     }
 
@@ -244,8 +252,20 @@ impl Sample {
             } else {
                 self.anim
             },
+            tint: blend_tint(self.tint, other.tint, fraction),
         }
     }
+}
+
+/// A tint between two ticks' worth, each channel to `0..=1`.
+#[must_use]
+pub fn blend_tint(from: [u8; 3], to: [u8; 3], fraction: f32) -> [f32; 3] {
+    let mut out = [1.0f32; 3];
+    for (slot, (a, b)) in out.iter_mut().zip(from.iter().zip(to)) {
+        let (a, b) = (f32::from(*a) / 255.0, f32::from(b) / 255.0);
+        *slot = a + (b - a) * fraction.clamp(0.0, 1.0);
+    }
+    out
 }
 
 /// Radians from a quantised yaw.
@@ -388,6 +408,7 @@ mod tests {
             collider: Some([1.8, 5.4]),
             item: None,
             nametag: None,
+            tint: [255; 3],
         }
     }
 
@@ -400,6 +421,7 @@ mod tests {
             yaw: 0,
             pitch: 0,
             anim: 0,
+            tint: [255; 3],
         }
     }
 
@@ -430,6 +452,31 @@ mod tests {
             (pose.local[0] - 15.0).abs() < 0.001,
             "drew at {} rather than halfway",
             pose.local[0]
+        );
+    }
+
+    #[test]
+    fn a_tint_blends_between_ticks_like_the_position() {
+        // Life ask 21: a hit flash arrives as the colour shown each tick, and
+        // the draw between two ticks is between their colours, so the fade
+        // is smooth at any frame rate.
+        let mut world = Entities::new();
+        world.spawned(&[def(1, 0.0)], ms(0));
+        let mut red = delta(1, 0.0);
+        red.tint = [255, 0, 0];
+        world.moved(1, &[red], ms(50));
+        world.moved(2, &[delta(1, 0.0)], ms(100));
+        let pose = world.get(1).expect("known").pose(ms(150)).expect("pose");
+        assert!(
+            pose.tint[0] > 0.99 && pose.tint[1] < 0.01,
+            "at the red tick the figure is red: {:?}",
+            pose.tint
+        );
+        let pose = world.get(1).expect("known").pose(ms(175)).expect("pose");
+        assert!(
+            (pose.tint[1] - 0.5).abs() < 0.01,
+            "halfway to the next tick, half faded: {:?}",
+            pose.tint
         );
     }
 

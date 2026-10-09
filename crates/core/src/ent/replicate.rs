@@ -96,6 +96,8 @@ pub struct Spawn {
     /// and a rebound name would stay stale on every screen until someone
     /// reconnected.
     pub nametag: Option<Nametag>,
+    /// The colour shown this tick (Life ask 21).
+    pub tint: [u8; 3],
 }
 
 /// What an entity a viewer already knows about is holding now.
@@ -136,6 +138,8 @@ pub struct Delta {
     pub pitch: i8,
     /// What it is doing.
     pub anim: AnimTag,
+    /// The colour shown this tick (Life ask 21).
+    pub tint: [u8; 3],
 }
 
 /// Quantises a yaw in radians to a byte.
@@ -180,6 +184,9 @@ struct Sent {
     pitch: i8,
     anim: AnimTag,
     hands: crate::ent::Hands,
+    /// The colour shown this tick (Life ask 21): a flash fading on a
+    /// creature standing still is a change, and is sent as one.
+    tint: [u8; 3],
 }
 
 impl Sent {
@@ -191,12 +198,13 @@ impl Sent {
             pitch: quantise_pitch(entity.transform.pitch),
             anim: entity.anim,
             hands: entity.hands.clone().clone(),
+            tint: entity.shown_tint(),
         }
     }
 
     /// Whether the difference is worth a packet.
     fn differs_from(&self, other: &Self) -> bool {
-        if self.chunk != other.chunk || self.anim != other.anim {
+        if self.chunk != other.chunk || self.anim != other.anim || self.tint != other.tint {
             return true;
         }
         if self.yaw.abs_diff(other.yaw) >= LOOK_EPSILON
@@ -356,11 +364,13 @@ fn spawn_of(id: EntityId, entity: &Entity) -> Spawn {
         hands: entity.hands.clone().clone(),
         anim: entity.anim,
         nametag: entity.nametag.clone(),
+        tint: entity.shown_tint(),
     }
 }
 
 fn delta_of(id: EntityId, entity: &Entity) -> Delta {
     Delta {
+        tint: entity.shown_tint(),
         id,
         chunk: entity.transform.chunk,
         local: entity.transform.local,
@@ -454,6 +464,25 @@ mod tests {
             second.is_empty(),
             "a still entity produced traffic: {second:?}"
         );
+
+        // A tint is a change (Life ask 21): the hit flash on a creature
+        // standing still has to reach the viewer, and then fade on its own.
+        if let Some(entity) = world.get_mut(id) {
+            entity.flash = Some(crate::ent::Flash {
+                tint: [255, 0, 0],
+                total: 2,
+                left: 2,
+            });
+        }
+        let flashed = tracker.update(&world, home(), VIEW, None, &|_| true);
+        assert_eq!(flashed.moved.len(), 1, "the flash went unsent: {flashed:?}");
+        assert_eq!(flashed.moved[0].tint, [255, 0, 0]);
+        if let Some(entity) = world.get_mut(id) {
+            entity.tick_flash();
+        }
+        let fading = tracker.update(&world, home(), VIEW, None, &|_| true);
+        assert_eq!(fading.moved.len(), 1);
+        assert_eq!(fading.moved[0].tint, [255, 128, 128], "half faded");
     }
 
     #[test]
