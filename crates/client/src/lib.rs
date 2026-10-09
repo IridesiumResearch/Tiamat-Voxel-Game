@@ -45,6 +45,7 @@ pub mod cut;
 pub mod dialog;
 pub mod discovery;
 pub mod entities;
+pub mod flicker;
 pub mod fonts;
 pub mod front;
 pub mod handover;

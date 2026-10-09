@@ -2065,6 +2065,7 @@ fn a_declared_tint_colours_the_world_and_stays_where_the_world_is() {
         }),
         whole: false,
         model: None,
+        flicker: None,
     }];
     renderer.set_tints(&table);
     let tinted = target
@@ -4413,6 +4414,7 @@ fn a_swaying_material_moves_with_the_clock_and_a_still_one_does_not() {
             tint: None,
             whole: false,
             model: None,
+            flicker: None,
         }]
     };
 
@@ -4503,6 +4505,7 @@ fn a_billboard_turns_to_face_the_camera_from_any_side() {
         tint: None,
         whole: false,
         model: None,
+        flicker: None,
     }]);
     upload_with(
         &mut renderer,
@@ -4513,6 +4516,7 @@ fn a_billboard_turns_to_face_the_camera_from_any_side() {
             sprites: [GRASS.get()].into_iter().collect(),
             crosses: std::collections::BTreeSet::new(),
             models: std::collections::BTreeSet::new(),
+            flickers: std::collections::BTreeSet::new(),
         },
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -4615,6 +4619,7 @@ fn glass_beside_a_sprite_still_draws_from_its_own_chunk() {
         tint: None,
         whole: false,
         model: None,
+        flicker: None,
     };
     renderer.set_tints(&[
         material(GRASS, "grass", false, true),
@@ -4629,6 +4634,7 @@ fn glass_beside_a_sprite_still_draws_from_its_own_chunk() {
             sprites: [GRASS.get()].into_iter().collect(),
             crosses: std::collections::BTreeSet::new(),
             models: std::collections::BTreeSet::new(),
+            flickers: std::collections::BTreeSet::new(),
         },
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -4728,6 +4734,7 @@ fn a_biome_colour_blends_across_a_chunk_edge_instead_of_tiling_it() {
         }),
         whole: false,
         model: None,
+        flicker: None,
     }]);
 
     // Green at the west end, red at the east, over the columns the four chunks
@@ -6030,6 +6037,7 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             texture: None,
             whole: false,
             model: None,
+            flicker: None,
         },
         MaterialDef {
             step_sound: None,
@@ -6047,6 +6055,7 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             texture: None,
             whole: false,
             model: None,
+            flicker: None,
         },
         MaterialDef {
             step_sound: None,
@@ -6064,6 +6073,7 @@ fn terrain_drawn_through_a_real_atlas_is_not_the_missing_texture_chequer() {
             texture: Some([7u8; 32]),
             whole: false,
             model: None,
+            flicker: None,
         },
     ];
     let mut images = std::collections::BTreeMap::new();
@@ -6261,6 +6271,7 @@ fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
         tint: None,
         whole: false,
         model: None,
+        flicker: None,
     }]);
     upload_with(
         &mut renderer,
@@ -6271,6 +6282,7 @@ fn grass_stands_in_a_walls_shadow_in_beautiful_light() {
             sprites: [GRASS.get()].into_iter().collect(),
             crosses: std::collections::BTreeSet::new(),
             models: std::collections::BTreeSet::new(),
+            flickers: std::collections::BTreeSet::new(),
         },
     );
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
@@ -6500,6 +6512,7 @@ fn a_biome_colour_brighter_than_one_brightens_the_world() {
         }),
         whole: false,
         model: None,
+        flicker: None,
     }]);
 
     let brightness = |frame: &Image| {

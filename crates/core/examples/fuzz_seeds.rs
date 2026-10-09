@@ -747,6 +747,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                     step_sound: None,
                     whole: false,
                     model: None,
+                    flicker: None,
                 },
                 MaterialDef {
                     id: 1,
@@ -764,6 +765,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                     step_sound: None,
                     whole: false,
                     model: None,
+                    flicker: None,
                 },
                 MaterialDef {
                     id: 2,
@@ -781,6 +783,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                     step_sound: None,
                     whole: false,
                     model: None,
+                    flicker: None,
                 },
                 MaterialDef {
                     id: u16::MAX,
@@ -798,6 +801,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                     step_sound: None,
                     whole: false,
                     model: None,
+                    flicker: None,
                 },
                 // Protocol v85: a whole block drawn as a model, with a model id
                 // at the id limit — the `Option<String>` inside the `Vec` is a
@@ -818,6 +822,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                     step_sound: None,
                     whole: true,
                     model: Some("m".repeat(tiamat_core::proto::MAX_ID_BYTES)),
+                    flicker: None,
                 },
             ],
         },

@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A flicker on a block's light** (2026-10-09). `register_block{ light_emit
+  = {...}, flicker = { depth = 0.3, rate = 8 } }` makes the light breathe on
+  the client: the ground near it dims by up to `depth` with smooth noise,
+  `rate` steps a second, and a model block dims in step. Presentation only.
 - **`sweeps = false` on a whole block** (2026-10-08). A `whole` block set
   down on thin ground sweeps it by default; `sweeps = false` makes it stand
   among the ground's cells instead, its model clipping through — a torch.

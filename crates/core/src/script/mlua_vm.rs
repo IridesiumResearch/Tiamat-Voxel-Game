@@ -4213,10 +4213,8 @@ impl ScriptVm for MluaVm {
                         // built into its packed form HERE rather than at
                         // registration: the table holds what the mod said, and
                         // this is what turns it into what the wire carries.
-                        tint: entry
-                            .as_ref()
-                            .and_then(|entry| entry.get::<Option<Table>>("tint").ok().flatten())
-                            .and_then(|table| tint_of(&table)),
+                        tint: tint_rule(entry.as_ref()),
+                        flicker: flicker_rule(entry.as_ref()),
                         transparent: flag(entry.as_ref(), "transparent"),
                         cutout: flag(entry.as_ref(), "cutout"),
                         passable: flag(entry.as_ref(), "passable"),
@@ -10176,7 +10174,14 @@ fn register_item(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<u16> {
 /// names the mod and the block — rather than shipping a lamp that is quietly
 /// dimmer than its author intended.
 fn copy_light_emit(lua: &Lua, id: &str, spec: &Table, entry: &Table) -> mlua::Result<()> {
+    // A flicker is on the light, so it needs one (the designer, 2026-10-09).
+    let flicker = spec.get::<Option<Table>>("flicker")?;
     let Some(emit) = spec.get::<Option<Table>>("light_emit")? else {
+        if flicker.is_some() {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): `flicker` needs `light_emit`; there is no light to flicker"
+            )));
+        }
         return Ok(());
     };
     for key in ["r", "g", "b"] {
@@ -10194,7 +10199,61 @@ fn copy_light_emit(lua: &Lua, id: &str, spec: &Table, entry: &Table) -> mlua::Re
     for key in ["r", "g", "b"] {
         stored.set(key, emit.get::<Option<u8>>(key)?.unwrap_or(0))?;
     }
-    entry.set("light_emit", stored)
+    entry.set("light_emit", stored)?;
+    // `flicker = { depth = 0..1, rate = 1..30 }`: validated here so a typo
+    // stops the mod; what the wire carries is built in `flicker_of`.
+    if let Some(flicker) = flicker {
+        let depth = flicker.get::<Option<f64>>("depth")?.unwrap_or(0.3);
+        let rate = flicker.get::<Option<f64>>("rate")?.unwrap_or(8.0);
+        if !depth.is_finite() || !(0.0..=1.0).contains(&depth) {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): flicker.depth must be 0..=1, got {depth}"
+            )));
+        }
+        if !rate.is_finite() || !(1.0..=30.0).contains(&rate) {
+            return Err(mlua::Error::external(format!(
+                "register_block(\"{id}\"): flicker.rate must be 1..=30 steps a second, got {rate}"
+            )));
+        }
+        let kept = lua.create_table()?;
+        kept.set("depth", depth)?;
+        kept.set("rate", rate)?;
+        entry.set("flicker", kept)?;
+    }
+    Ok(())
+}
+
+/// The wire form of a stored `flicker` table: bytes, like a tint's.
+///
+/// Rounded by adding a half and truncating, which is `round` for a value
+/// already clamped non-negative, and keeps `f64::round` — on the
+/// determinism ban list for this crate — out of it.
+fn flicker_of(table: &Table) -> Option<crate::proto::Flicker> {
+    let depth = table.get::<Option<f64>>("depth").ok().flatten()?;
+    let rate = table.get::<Option<f64>>("rate").ok().flatten()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "validated at registration into 0..=1 and 1..=30, then rounded into bytes"
+    )]
+    Some(crate::proto::Flicker {
+        depth: (depth.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+        rate: (rate.clamp(1.0, 30.0) + 0.5) as u8,
+    })
+}
+
+/// A block's stored `tint`, in its wire form, from its registry entry.
+fn tint_rule(entry: Option<&Table>) -> Option<crate::proto::Tint> {
+    entry
+        .and_then(|entry| entry.get::<Option<Table>>("tint").ok().flatten())
+        .and_then(|table| tint_of(&table))
+}
+
+/// A block's stored `flicker`, in its wire form, from its registry entry.
+fn flicker_rule(entry: Option<&Table>) -> Option<crate::proto::Flicker> {
+    entry
+        .and_then(|entry| entry.get::<Option<Table>>("flicker").ok().flatten())
+        .and_then(|table| flicker_of(&table))
 }
 
 /// `light_falloff` on a block spec: levels lost per block (World ask 24).
@@ -11391,7 +11450,7 @@ const FLUID_FIELDS: [&str; 9] = [
 /// accepted them would be an API promising behaviour nothing implements.
 const ITEM_FIELDS: [&str; 4] = ["id", "name", "texture", "description"];
 
-const BLOCK_FIELDS: [&str; 24] = [
+const BLOCK_FIELDS: [&str; 25] = [
     "id",
     "name",
     "drops",
@@ -11401,6 +11460,7 @@ const BLOCK_FIELDS: [&str; 24] = [
     "tags",
     "textures",
     "light_emit",
+    "flicker",
     "sounds",
     "absorbs",
     "tint",
@@ -15065,6 +15125,54 @@ mod tests {
         let stone = of("camp:stone");
         assert!(!stone.whole && stone.model.is_none());
         assert_eq!(stone.shape, crate::block::OCCUPANCY_FULL);
+    }
+
+    #[test]
+    fn a_flicker_needs_light_and_a_sane_depth_and_rate() {
+        // The designer, 2026-10-09: a campfire's light breathes. Presentation
+        // only, so it rides the material table as two bytes.
+        let refused = |source: &str, says: &str| {
+            let mut vm = vm();
+            let err = load(&mut vm, "camp", source).expect_err(source);
+            let detail = format!("{err:?}");
+            assert!(detail.contains(says), "{source}: {detail}");
+        };
+        refused(
+            "game.register_block{ id = 'fire', flicker = { depth = 0.3, rate = 8 } }",
+            "needs `light_emit`",
+        );
+        refused(
+            "game.register_block{ id = 'fire', light_emit = { r = 14 }, flicker = { depth = 1.5 } }",
+            "depth must be 0..=1",
+        );
+        refused(
+            "game.register_block{ id = 'fire', light_emit = { r = 14 }, flicker = { rate = 60 } }",
+            "rate must be 1..=30",
+        );
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "camp",
+            "game.register_block{ id = 'fire', light_emit = { r = 14, g = 9, b = 4 }, flicker = { depth = 0.3, rate = 8 } }\n\
+             game.register_block{ id = 'lamp', light_emit = { r = 15 } }",
+        )
+        .expect("load");
+        let _ = vm.freeze();
+        let flicker = |name: &str| {
+            vm.registered_block_rules()
+                .into_iter()
+                .find(|rules| rules.block == name)
+                .map_or_else(
+                    || panic!("{name} was not registered"),
+                    |rules| rules.flicker,
+                )
+        };
+        assert_eq!(
+            flicker("camp:fire"),
+            Some(crate::proto::Flicker { depth: 77, rate: 8 }),
+            "three tenths of 255, eight a second"
+        );
+        assert_eq!(flicker("camp:lamp"), None, "a steady lamp");
     }
 
     #[test]

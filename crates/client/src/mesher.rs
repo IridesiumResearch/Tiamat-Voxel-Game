@@ -246,6 +246,8 @@ pub struct SubNodeGrid {
     /// One entry per block holding a model material's cell, found with the
     /// cells themselves (Contract §8.6 "Found at remesh").
     models: Vec<ModelInstance>,
+    /// Where the flickering lights stand, by block.
+    flickers: Vec<ModelInstance>,
     /// Each block's fluid surface height, in sixteenths of a cell, `0` for dry.
     ///
     /// **This is what makes the surface smooth rather than a staircase.** The
@@ -469,6 +471,7 @@ impl SubNodeGrid {
         let sprite_columns = sprite_columns_of(&materials, transparent);
         let model_columns = model_columns_of(&materials, transparent);
         let models = model_instances_of(&materials, transparent);
+        let flickers = flicker_sources_of(&materials, transparent);
 
         let mut grid = Self {
             materials,
@@ -480,6 +483,7 @@ impl SubNodeGrid {
             sprite_columns,
             model_columns,
             models,
+            flickers,
             heights,
             walls,
         };
@@ -902,6 +906,18 @@ pub trait Transparency {
         false
     }
 
+    /// Whether a material's light flickers (`flicker` on the material):
+    /// collected by position so the renderer can breathe the light near it.
+    fn is_flicker(&self, _material: u16) -> bool {
+        false
+    }
+
+    /// Whether any material's light flickers, so a chunk with none skips
+    /// the scan.
+    fn any_flicker(&self) -> bool {
+        false
+    }
+
     /// Whether ANY material in play is transparent.
     ///
     /// **Defaults to yes, which is the safe answer**, and every implementation
@@ -971,6 +987,14 @@ impl<T: Transparency + ?Sized> Transparency for &T {
     fn any_model(&self) -> bool {
         (*self).any_model()
     }
+
+    fn is_flicker(&self, material: u16) -> bool {
+        (*self).is_flicker(material)
+    }
+
+    fn any_flicker(&self) -> bool {
+        (*self).any_flicker()
+    }
 }
 
 /// Which materials are see-through, and in which of the two ways.
@@ -991,6 +1015,8 @@ pub struct Sight {
     pub crosses: std::collections::BTreeSet<u16>,
     /// Drawn as a registered model rather than as geometry. Contract §8.6.
     pub models: std::collections::BTreeSet<u16>,
+    /// Whose light flickers (`flicker` on the material; `crate::flicker`).
+    pub flickers: std::collections::BTreeSet<u16>,
 }
 
 impl Transparency for Sight {
@@ -1028,6 +1054,14 @@ impl Transparency for Sight {
 
     fn any_model(&self) -> bool {
         !self.models.is_empty()
+    }
+
+    fn is_flicker(&self, material: u16) -> bool {
+        self.flickers.contains(&material)
+    }
+
+    fn any_flicker(&self) -> bool {
+        !self.flickers.is_empty()
     }
 }
 
@@ -1295,6 +1329,8 @@ pub struct Mesh {
     pub billboards: Vec<Billboard>,
     /// The model blocks of the chunk, one per block. Contract §8.6.
     pub models: Vec<ModelInstance>,
+    /// The blocks whose light flickers, for the renderer's sources.
+    pub flickers: Vec<ModelInstance>,
     /// The merged alpha-tested quads: foliage.
     ///
     /// Their own list rather than the opaque one because their pipeline
@@ -2446,6 +2482,7 @@ impl MeshJob {
         let mut mesh = scratch.finish(&grid);
         mesh.billboards = lit_billboards(&grid, light);
         mesh.models = grid.models;
+        mesh.flickers = grid.flickers;
         mesh
     }
 }
@@ -2462,6 +2499,7 @@ pub fn mesh(grid: &SubNodeGrid, light: &impl BlockLight) -> Mesh {
     let mut mesh = scratch.finish(grid);
     mesh.billboards = lit_billboards(grid, light);
     mesh.models.clone_from(&grid.models);
+    mesh.flickers.clone_from(&grid.flickers);
     mesh
 }
 
@@ -2708,6 +2746,19 @@ fn model_instances_of(materials: &[u16], transparent: &impl Transparency) -> Vec
     if !transparent.any_model() {
         return Vec::new();
     }
+    instances_of(materials, |material| transparent.is_model(material))
+}
+
+/// The blocks whose light flickers, one entry per block, lowest material.
+fn flicker_sources_of(materials: &[u16], transparent: &impl Transparency) -> Vec<ModelInstance> {
+    if !transparent.any_flicker() {
+        return Vec::new();
+    }
+    instances_of(materials, |material| transparent.is_flicker(material))
+}
+
+/// One entry per block holding a cell `wanted`, lowest material of them.
+fn instances_of(materials: &[u16], wanted: impl Fn(u16) -> bool) -> Vec<ModelInstance> {
     let per = SUBNODES_PER_AXIS as usize;
     let blocks = N / per;
     let mut found: std::collections::BTreeMap<[u8; 3], u16> = std::collections::BTreeMap::new();
@@ -2715,7 +2766,7 @@ fn model_instances_of(materials: &[u16], transparent: &impl Transparency) -> Vec
         for y in 0..N {
             for x in 0..N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !transparent.is_model(material) {
+                if material == 0 || !wanted(material) {
                     continue;
                 }
                 let key = [(x / per) as u8, (y / per) as u8, (z / per) as u8];
@@ -5325,6 +5376,35 @@ mod tests {
             models: materials.iter().copied().collect(),
             ..Sight::default()
         }
+    }
+
+    #[test]
+    fn a_flickering_block_is_listed_by_position_and_still_meshed() {
+        // The designer, 2026-10-09: a campfire's light breathes. The mesher
+        // says where such blocks stand, one entry per block, and draws them
+        // as it always did — the flicker is the renderer's.
+        let sight = Sight {
+            flickers: [9u16].into_iter().collect(),
+            ..Sight::default()
+        };
+        let mut chunk = empty();
+        chunk
+            .set_block(BlockPos::new(4, 4, 4), BlockValue::Uniform(MaterialId(9)))
+            .expect("in chunk");
+        let mesh = model_mesh(&chunk, &sight);
+        assert_eq!(
+            mesh.flickers,
+            vec![ModelInstance {
+                local: [4, 4, 4],
+                material: 9
+            }]
+        );
+        assert!(mesh.models.is_empty(), "flickering is not being a model");
+        assert!(
+            mesh.quads.iter().any(|quad| quad.material == 9),
+            "a flickering block still has faces"
+        );
+        assert!(model_mesh(&chunk, &Sight::default()).flickers.is_empty());
     }
 
     /// Stone on every side of block (4,4,4), and `centre` in it.

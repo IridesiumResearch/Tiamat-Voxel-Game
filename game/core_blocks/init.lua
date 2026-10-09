@@ -171,6 +171,10 @@ game.register_block{
         "### ### ###",   -- the bowl
     },
     hardness = 0.5,
+    -- Lit, and its light breathes: the reference for `flicker`, which is the
+    -- client's alone — the light the server propagates is the steady one.
+    light_emit = { r = 14, g = 9, b = 4 },
+    flicker = { depth = 0.3, rate = 8 },
     -- What a slot shows until the model and its skin have arrived; then
     -- the slot shows the model.
     textures = { all = "textures/white.png" },

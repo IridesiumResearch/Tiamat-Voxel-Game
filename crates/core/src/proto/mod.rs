@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 86;
+pub const PROTOCOL_VERSION: u32 = 87;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,9 @@ pub const PROTOCOL_VERSION: u32 = 86;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v87 (a flicker on a block's light, the designer 2026-10-09): `MaterialDef`
+// gains `flicker`, appended with a default — how a block's light breathes on
+// the client. Presentation only; the server's light is unchanged.
 // v86 (weather W32): `SkyModifier` gains `light_floor`, appended after
 // `stars`: `None`, or the least the frame is lit at, `0..=1`, which raises
 // the sun term where the sky reaches and the renderer's ambient floor where it
@@ -855,6 +858,21 @@ pub struct HudScriptDef {
     pub reserve: u16,
 }
 
+/// A flicker on a material's light: how a campfire's glow breathes.
+///
+/// **Presentation only.** The light the server propagates (Sub-Node Contract
+/// §3) is what it is; the client dims the block light near such a source by up
+/// to `depth` of itself, with smooth noise stepping `rate` times a second, and
+/// dims the material's own model in step. Quantised to bytes like [`Tint`]:
+/// `depth` 0 to 255 is none to all, `rate` is steps a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Flicker {
+    /// How far the light dips, 0 none to 255 all of it.
+    pub depth: u8,
+    /// Steps a second, 1 to 30.
+    pub rate: u8,
+}
+
 /// How a material's colour varies from place to place.
 ///
 /// # What this is for
@@ -1061,6 +1079,10 @@ pub struct MaterialDef {
     /// until a mod says otherwise.
     #[serde(default)]
     pub model: Option<String>,
+    /// How its light breathes, if a mod said: a campfire. Presentation only;
+    /// see [`Flicker`].
+    #[serde(default)]
+    pub flicker: Option<Flicker>,
 }
 
 /// One mod in the server's resolved set.
@@ -5440,6 +5462,7 @@ mod tests {
                 step_sound: None,
                 whole: false,
                 model: None,
+                flicker: None,
             }],
         };
         for fine in [0.0, 0.05, 1.0] {
@@ -5473,6 +5496,7 @@ mod tests {
                     step_sound: None,
                     whole: false,
                     model: None,
+                    flicker: None,
                 },
                 MaterialDef {
                     id: 2,
@@ -5490,6 +5514,7 @@ mod tests {
                     step_sound: None,
                     whole: false,
                     model: None,
+                    flicker: None,
                 },
                 // A whole block drawn as a model (Contract §7.5 and §8.6).
                 MaterialDef {
@@ -5508,6 +5533,7 @@ mod tests {
                     step_sound: None,
                     whole: true,
                     model: Some("camp:campfire".to_owned()),
+                    flicker: None,
                 },
             ],
         };
@@ -5539,6 +5565,7 @@ mod tests {
                 step_sound: None,
                 whole: true,
                 model: Some(model.to_owned()),
+                flicker: None,
             }],
         };
         assert!(validate_server_message(&with("camp:campfire")).is_ok());

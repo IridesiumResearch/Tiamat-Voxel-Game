@@ -387,6 +387,9 @@ pub struct BlockRules {
     /// the material table so the client can multiply the texture by it, and
     /// charter rule 4's determinism does not reach it (rendering is exempt).
     pub tint: Option<crate::proto::Tint>,
+    /// How its light breathes, if the mod said — `flicker = { depth, rate }`
+    /// on a block with `light_emit`. Presentation only, the client's.
+    pub flicker: Option<crate::proto::Flicker>,
     /// Whether a block of it is one piece: dug whole by any brush, placed as
     /// its [`shape`](Self::shape) into an empty block, never written into.
     ///

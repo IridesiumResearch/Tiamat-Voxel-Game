@@ -210,6 +210,11 @@ bodies.
 
 ## 3. Lighting — block resolution, sub-node permeability test
 
+(A material's `flicker` — how a campfire's light breathes, the designer
+2026-10-09 — is presentation only: the client dims the propagated block light
+near such a block with noise in time and dims the block's model in step.
+Nothing below changes for it; the server's light is the light.)
+
 Light levels are stored **per block**, not per sub-node. Sub-nodes affect only
 whether light crosses a face.
 

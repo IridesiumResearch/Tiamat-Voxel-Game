@@ -126,6 +126,8 @@ fn material_table(
                 // the model table is built; a name nobody registered draws
                 // nothing on the client, which the contract says is right.
                 model: rules.get(name).and_then(|rules| rules.model.clone()),
+                // How its light breathes, the client's alone (`Flicker`).
+                flicker: rules.get(name).and_then(|rules| rules.flicker),
             })
         })
         .collect();

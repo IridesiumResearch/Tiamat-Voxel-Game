@@ -2731,6 +2731,13 @@ impl App {
                 .filter(|entry| entry.model.is_some())
                 .map(|entry| entry.id)
                 .collect(),
+            // Whose light breathes: listed by the mesher, breathed by the
+            // renderer (`crate::flicker`).
+            flickers: table
+                .iter()
+                .filter(|entry| entry.flicker.is_some())
+                .map(|entry| entry.id)
+                .collect(),
         };
         // A model material is whole by implication (§8.6).
         self.block_models.whole = table
@@ -2741,6 +2748,10 @@ impl App {
         self.block_models.model_of = table
             .iter()
             .filter_map(|entry| entry.model.clone().map(|model| (entry.id, model)))
+            .collect();
+        self.block_models.flicker_of = table
+            .iter()
+            .filter_map(|entry| entry.flicker.map(|flicker| (entry.id, flicker)))
             .collect();
         self.icon_art.cards = table
             .iter()
@@ -6532,6 +6543,7 @@ impl App {
             }
         }
         self.place_model_blocks(&mut by_model);
+        self.place_flickers();
         self.renderer.set_model_figures(by_model);
         self.renderer.set_entities(placed);
     }
@@ -6554,6 +6566,7 @@ impl App {
             return;
         }
         let side = tiamat_core::CHUNK_BLOCKS as i32;
+        let clock = self.renderer.clock();
         let mut found: Vec<(String, crate::render::skinned::Figure)> = Vec::new();
         for (drawn, models) in self.renderer.model_blocks() {
             let chunk = ChunkPos::new(
@@ -6588,7 +6601,25 @@ impl App {
                         anim: tiamat_core::ent::AnimTag::IDLE.0,
                         phase: 0.0,
                         carrying: [false, false],
-                        light: self.store.light_around_block(block),
+                        light: {
+                            // A fire's own model breathes with the light it
+                            // casts (`crate::flicker`): the same noise the
+                            // shader dims the ground by, on the block channels.
+                            let mut light = self.store.light_around_block(block);
+                            if let Some(flicker) = self.block_models.flicker_of.get(&model.material)
+                            {
+                                let keep = crate::flicker::factor(
+                                    clock,
+                                    f32::from(flicker.rate),
+                                    crate::flicker::phase_of(block),
+                                    f32::from(flicker.depth) / 255.0,
+                                );
+                                for channel in &mut light[1..] {
+                                    *channel *= keep;
+                                }
+                            }
+                            light
+                        },
                     },
                 ));
             }
@@ -6596,6 +6627,62 @@ impl App {
         for (id, figure) in found {
             by_model.entry(id).or_default().push(figure);
         }
+    }
+
+    /// Hands the renderer this frame's flickering lights: the nearest
+    /// [`crate::render::MAX_FLICKERS`] of the blocks the mesher listed, placed
+    /// as the model blocks are (`crate::flicker`).
+    fn place_flickers(&mut self) {
+        /// How far a fire's breathing reaches, in blocks.
+        const REACH: f32 = 8.0;
+        if self.block_models.flicker_of.is_empty() {
+            self.renderer.set_flickers(&[]);
+            return;
+        }
+        let side = tiamat_core::CHUNK_BLOCKS as i32;
+        let mut sources: Vec<(f32, crate::render::FlickerSource)> = Vec::new();
+        for (drawn, blocks) in self.renderer.flicker_blocks() {
+            let chunk = ChunkPos::new(
+                drawn.x - self.displacement[0],
+                drawn.y - self.displacement[1],
+                drawn.z - self.displacement[2],
+            );
+            let corner = self.camera.position.chunk_offset(drawn);
+            for source in blocks {
+                let Some(flicker) = self.block_models.flicker_of.get(&source.material) else {
+                    continue;
+                };
+                let [lx, ly, lz] = source.local.map(f32::from);
+                let block = tiamat_core::BlockPos::new(
+                    chunk.x * side + i32::from(source.local[0]),
+                    chunk.y * side + i32::from(source.local[1]),
+                    chunk.z * side + i32::from(source.local[2]),
+                );
+                let at = [
+                    corner.x + lx + 0.5,
+                    corner.y + ly + 0.5,
+                    corner.z + lz + 0.5,
+                ];
+                let near = at[0] * at[0] + at[1] * at[1] + at[2] * at[2];
+                sources.push((
+                    near,
+                    crate::render::FlickerSource {
+                        at,
+                        radius: REACH,
+                        depth: f32::from(flicker.depth) / 255.0,
+                        rate: f32::from(flicker.rate),
+                        phase: crate::flicker::phase_of(block),
+                    },
+                ));
+            }
+        }
+        sources.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let nearest: Vec<crate::render::FlickerSource> = sources
+            .into_iter()
+            .take(crate::render::MAX_FLICKERS)
+            .map(|(_, source)| source)
+            .collect();
+        self.renderer.set_flickers(&nearest);
     }
 
     /// Jumps to the edge of the world, for the floating-origin check.
@@ -7216,6 +7303,8 @@ struct BlockModels {
     whole: std::collections::BTreeSet<u16>,
     /// Which registered model draws each model material. Contract §8.6.
     model_of: std::collections::BTreeMap<u16, String>,
+    /// How each flickering material's light breathes (`crate::flicker`).
+    flicker_of: std::collections::BTreeMap<u16, tiamat_core::proto::Flicker>,
 }
 
 /// Whether the cell is of a `whole` material. Contract §7.5.
@@ -8008,6 +8097,7 @@ mod tests {
                 step_sound: None,
                 whole: false,
                 model: None,
+                flicker: None,
             },
             MaterialDef {
                 id: 5,
@@ -8025,6 +8115,7 @@ mod tests {
                 step_sound: None,
                 whole: false,
                 model: None,
+                flicker: None,
             },
         ];
         let mut images = BTreeMap::new();
@@ -8066,6 +8157,7 @@ mod tests {
             step_sound: None,
             whole: false,
             model: None,
+            flicker: None,
         }];
         let atlas = build_atlas(&table, &BTreeMap::new());
 

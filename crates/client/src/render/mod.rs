@@ -246,6 +246,40 @@ struct Globals {
     /// shaders that copy a prefix of this struct and never fog by sky light —
     /// the prop, figure and hand passes — need not declare it.
     cave_fog: [f32; 4],
+    /// `x` is how many of `flickers` are in use (`crate::flicker`). Last,
+    /// after everything the shader reads at fixed offsets.
+    flicker_meta: [u32; 4],
+    /// Two per source: `(x, y, z, radius)` camera-relative, then
+    /// `(depth, rate, phase, 0)`.
+    flickers: [[f32; 4]; 2 * MAX_FLICKERS],
+}
+
+/// How many flickering lights the shader breathes at once: the nearest.
+pub const MAX_FLICKERS: usize = 16;
+
+/// The flickering lights (`crate::flicker`): where they stand, per chunk,
+/// as the mesher found them, and this frame's nearest [`MAX_FLICKERS`]
+/// packed as the shader reads them.
+#[derive(Default)]
+struct Flickering {
+    blocks: BTreeMap<ChunkPos, Vec<crate::mesher::ModelInstance>>,
+    packed: [[f32; 4]; 2 * MAX_FLICKERS],
+    count: u32,
+}
+
+/// A flickering light as the shader wants it (`crate::flicker`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlickerSource {
+    /// The block's centre, camera-relative, in blocks.
+    pub at: [f32; 3],
+    /// How far the breathing reaches, in blocks.
+    pub radius: f32,
+    /// How far the light dips, 0 to 1.
+    pub depth: f32,
+    /// Steps a second.
+    pub rate: f32,
+    /// This source's own offset in time.
+    pub phase: f32,
 }
 
 /// How far a view of the sky is taken to cross a place's fog, in blocks.
@@ -966,6 +1000,8 @@ pub struct Renderer {
     /// has no quads and `set_chunk` stores no mesh for it, yet it still has a
     /// model to draw.
     model_blocks: BTreeMap<ChunkPos, Vec<crate::mesher::ModelInstance>>,
+    /// The flickering lights (`crate::flicker`).
+    flickering: Flickering,
     /// Each chunk COLUMN's biome colour, keyed on `(x, z)`. See
     /// [`Self::set_chunk_tint`]. Distinct from `tints`, which is the per
     /// MATERIAL table: this one says what a place is, that one what a thing is.
@@ -1239,6 +1275,7 @@ impl Renderer {
             biome_tints: BTreeMap::new(),
             chunks: BTreeMap::new(),
             model_blocks: BTreeMap::new(),
+            flickering: Flickering::default(),
             pool: BufferPool::default(),
             selection_pipeline,
             borders: border_buffer,
@@ -2067,7 +2104,7 @@ impl Renderer {
     /// buffer: a chunk that was solid and has been dug out entirely must stop
     /// being drawn, and a zero-index draw call is a per-frame cost for nothing.
     pub fn set_chunk(&mut self, pos: ChunkPos, mesh: &Mesh) {
-        self.set_model_blocks(pos, &mesh.models);
+        self.set_block_lists(pos, &mesh.models, &mesh.flickers);
         if mesh.is_empty() {
             self.drop_mesh(&pos);
             return;
@@ -2200,9 +2237,55 @@ impl Renderer {
         }
     }
 
+    /// Remembers a chunk's model blocks and its flickering lights.
+    fn set_block_lists(
+        &mut self,
+        pos: ChunkPos,
+        models: &[crate::mesher::ModelInstance],
+        flickers: &[crate::mesher::ModelInstance],
+    ) {
+        self.set_model_blocks(pos, models);
+        if flickers.is_empty() {
+            self.flickering.blocks.remove(&pos);
+        } else {
+            self.flickering.blocks.insert(pos, flickers.to_vec());
+        }
+    }
+
+    /// Where the flickering lights stand, per chunk (`crate::flicker`).
+    pub fn flicker_blocks(
+        &self,
+    ) -> impl Iterator<Item = (ChunkPos, &[crate::mesher::ModelInstance])> + '_ {
+        self.flickering
+            .blocks
+            .iter()
+            .map(|(pos, blocks)| (*pos, blocks.as_slice()))
+    }
+
+    /// This frame's flickering lights, nearest first; past
+    /// [`MAX_FLICKERS`] are dropped.
+    pub fn set_flickers(&mut self, sources: &[FlickerSource]) {
+        let mut packed = [[0.0f32; 4]; 2 * MAX_FLICKERS];
+        let used = sources.len().min(MAX_FLICKERS);
+        for (index, source) in sources.iter().take(used).enumerate() {
+            packed[2 * index] = [source.at[0], source.at[1], source.at[2], source.radius];
+            packed[2 * index + 1] = [source.depth, source.rate, source.phase, 0.0];
+        }
+        self.flickering.packed = packed;
+        self.flickering.count = u32::try_from(used).unwrap_or(0);
+    }
+
+    /// The renderer's clock, in seconds: what the shaders' `fluid.x` reads,
+    /// so a flicker computed on this side keeps step with one in the shader.
+    #[must_use]
+    pub const fn clock(&self) -> f32 {
+        self.elapsed
+    }
+
     /// Drops a chunk's mesh, returning its buffers to the pool.
     pub fn remove_chunk(&mut self, pos: &ChunkPos) {
         self.model_blocks.remove(pos);
+        self.flickering.blocks.remove(pos);
         self.drop_mesh(pos);
     }
 
@@ -2226,6 +2309,7 @@ impl Renderer {
     /// Forgets every mesh, for a reconnection.
     pub fn clear(&mut self) {
         self.model_blocks.clear();
+        self.flickering.blocks.clear();
         for (_, mesh) in std::mem::take(&mut self.chunks) {
             self.pool.give_mesh(mesh);
         }
@@ -2568,6 +2652,8 @@ impl Renderer {
             cloud_shadow: self.clouds.shadow_frame(),
             cloud_shadow_light: [self.clouds.shadow_strength(), 0.0, 0.0, 0.0],
             cave_fog: [self.cave_fog[0], self.cave_fog[1], self.cave_fog[2], 0.0],
+            flicker_meta: [self.flickering.count, 0, 0, 0],
+            flickers: self.flickering.packed,
         }
     }
 

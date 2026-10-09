@@ -92,6 +92,10 @@ struct Globals {
     // What fog fades towards where no sky reaches, in xyz — weather ask W29;
     // w unused. See `fog_colour`. **Appended**, for `cloud_shadow`'s reason.
     cave_fog: vec4<f32>,
+    // Flickering lights (`crate::flicker`): `flicker_meta.x` in use, two
+    // vec4 each — (x, y, z, radius) camera-relative, (depth, rate, phase, 0).
+    flicker_meta: vec4<u32>,
+    flickers: array<vec4<f32>, 32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -836,6 +840,42 @@ const SIMPLE_FLOOR: f32 = 1.0 / 12.0;
 // `textureSampleLevel` rather than `textureSample`: a cut-out fragment
 // reaches here after a `discard` it may or may not have taken, which is not
 // uniform control flow, and an implicit level of detail needs one.
+// A flicker on a block's light, the same arithmetic as `client::flicker`:
+// smooth value noise in time, a new level each step, eased between them.
+fn flicker_hash(step: i32) -> f32 {
+    var n = bitcast<u32>(step) * 0x9E3779B1u;
+    n = n ^ (n >> 15u);
+    n = n * 0x85EBCA6Bu;
+    n = n ^ (n >> 13u);
+    return f32(n & 0xFFFFu) / 65535.0;
+}
+
+fn flicker_noise(t: f32) -> f32 {
+    let whole = floor(t);
+    let step = i32(whole);
+    let f = t - whole;
+    let s = f * f * (3.0 - 2.0 * f);
+    return clamp(mix(flicker_hash(step), flicker_hash(step + 1), s), 0.0, 1.0);
+}
+
+// How much of its block light a point keeps this frame: the nearest
+// flickering source dips it by up to its depth, fading out over its radius.
+// Light from a steady lamp near a fire breathes a little with it, which is
+// what a fire does to a room.
+fn flicker_at(world: vec3<f32>) -> f32 {
+    let count = min(globals.flicker_meta.x, 16u);
+    var dip = 0.0;
+    let t = globals.fluid.x;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let source = globals.flickers[2u * i];
+        let shape = globals.flickers[2u * i + 1u];
+        let away = distance(world, source.xyz) / max(source.w, 0.001);
+        let reach = clamp(1.0 - away, 0.0, 1.0);
+        dip = max(dip, reach * shape.x * flicker_noise(t * shape.y + shape.z));
+    }
+    return 1.0 - dip;
+}
+
 fn cloud_shade(world: vec3<f32>) -> f32 {
     let strength = globals.cloud_shadow_light.x;
     if (strength <= 0.0) {
@@ -942,6 +982,9 @@ fn lighting(input: VertexOut, shadow: f32) -> vec3<f32> {
     // dim one. The lamp keeps its colour where it is bright enough for the
     // colour to be what anyone is looking at.
     var block = input.block_light;
+    if (globals.flicker_meta.x > 0u) {
+        block = block * flicker_at(input.world);
+    }
     let peak = max(block.r, max(block.g, block.b));
 
     // Steeper than the stored falloff, which is linear because the flood

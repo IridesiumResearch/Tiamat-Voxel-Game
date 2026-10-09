@@ -2395,6 +2395,7 @@ mod tests {
                 tint: None,
                 whole: false,
                 model: None,
+                flicker: None,
             })
             .collect()
     }
