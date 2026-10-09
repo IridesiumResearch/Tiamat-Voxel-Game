@@ -426,7 +426,12 @@ jobs:
             ./scripts/check-dco.sh "${{ github.event.before }}..${{ github.sha }}"
           fi
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        name: Licence and advisory audit (charter rule 17)
+      # cargo-deny from a prebuilt release rather than the action that builds
+      # its own container: that build failed twice in a row on 2026-10-09
+      # ("Docker build failed with exit code 1") and took every policy check
+      # after it down with it, having judged nothing.
+      - uses: taiki-e/install-action@v2
         with:
-          command: check
+          tool: cargo-deny
+      - name: Licence and advisory audit (charter rule 17)
+        run: cargo deny check
