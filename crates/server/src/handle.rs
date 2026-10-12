@@ -3646,6 +3646,11 @@ impl ServerHandle {
                         // Rides that ended in this pass, heard by `on_dismount`
                         // once the entities have moved (Life ask 18).
                         let mut dismounted: Vec<tiamat_core::script::DismountEvent> = Vec::new();
+                        // Chunks a body ran into that are not resident, for the
+                        // reload after the loop: the world is borrowed by the
+                        // terrain view for as long as bodies are being stepped.
+                        let mut met_absent: Vec<(PlayerUuid, String, tiamat_core::ChunkPos)> =
+                            Vec::new();
                         // **The entity store as well, and taken first**: a
                         // rider's keys step their mount (Life ask 18).
                         // Population before bodies is the order every path
@@ -3763,6 +3768,11 @@ impl ServerHandle {
                                 // this side can say what it was standing on when
                                 // it did. Not a rider's: their body was placed,
                                 // not stepped, and the step was the mount's.
+                                if voxels.touched_absent() {
+                                    for pos in voxels.absent_chunks() {
+                                        met_absent.push((*uuid, player.domain.clone(), pos));
+                                    }
+                                }
                                 if !carried && let Some(trace) = trace.as_ref() {
                                     trace.tick(&crate::trace::Moment {
                                         tick,
@@ -3815,6 +3825,51 @@ impl ServerHandle {
                             }
                         }
                         drop(mobs);
+
+                        // **A stored chunk a body ran into comes back before
+                        // the next step.** Collision reads only resident chunks
+                        // and an absent one is solid (`phys::voxels`): right for
+                        // terrain still being made, and wrong for terrain the
+                        // unload sweep took away. The client was sent that
+                        // chunk and still draws it, nothing asks the streamer
+                        // for a chunk a client already holds, and so nothing
+                        // would ever load it again: an invisible wall on a
+                        // chunk's face, the server pushing the player back out
+                        // of ground they can see every tick. Reported from the
+                        // window as exactly that. A stored chunk is one read
+                        // and a relight, taken here only when a body actually
+                        // met it; a chunk the world has never generated stays
+                        // absent and stays a wall, as it must, because
+                        // generation does not happen inside the tick.
+                        let mut brought_back = std::collections::BTreeSet::new();
+                        for (uuid, domain, pos) in met_absent {
+                            if !brought_back.insert((domain.clone(), pos)) {
+                                continue;
+                            }
+                            match world.load_stored(&domain, pos) {
+                                Ok(true) => info!(
+                                    player = %uuid.short(),
+                                    %domain,
+                                    ?pos,
+                                    "a body met a chunk that had left memory; reloaded it"
+                                ),
+                                Ok(false) => debug!(
+                                    player = %uuid.short(),
+                                    %domain,
+                                    ?pos,
+                                    "a body met a chunk the world has never generated"
+                                ),
+                                // A space with no voxels has nothing to load, and
+                                // a body in one is in no wall.
+                                Err(tiamat_core::WorldError::NoVoxels { .. }) => {}
+                                Err(err) => warn!(
+                                    player = %uuid.short(),
+                                    %domain,
+                                    ?pos,
+                                    "could not reload a chunk a body met: {err}"
+                                ),
+                            }
+                        }
 
                         // **Every player is also an entity** (charter rule 2).
                         // The body that moves is the `PlayerSim` stepped above;

@@ -165,6 +165,48 @@ async fn sees_keeper(bot: &mut Bot, patience: Duration) -> bool {
 }
 
 #[test]
+fn walking_back_into_ground_the_sweep_unloaded_meets_no_wall() {
+    // **Reported from the window as invisible chunk walls**: ground that is
+    // drawn, that mobs cross, and that pushes the player back out at a chunk's
+    // face. Collision reads only resident chunks and an absent one is solid,
+    // so a chunk the sweep unloaded behind a player — one their client was
+    // sent and still holds, and so never asks for again — is a wall the
+    // moment they turn round and walk back into it. The server now brings a
+    // stored chunk back the tick a body meets it.
+    //
+    // A minimum view keeps three chunks around the player. East past that,
+    // long enough for the sweep, then back past where we started: the server
+    // must let the body through.
+    let server = start("walk-back", write_keeper("walk-back"));
+    block_on(async {
+        let mut bot = join(&server, "Pacer").await;
+        assert!(
+            holds_ground(&mut bot, PATIENCE).await,
+            "the ground under spawn never arrived"
+        );
+        // A player walks 0.215 blocks a tick: 350 ticks is about 75 blocks,
+        // four and a half chunks, past the keep margin of three.
+        let out = bot.walk([1.0, 0.0, 0.0], 0, 350).await.expect("walk east");
+        assert!(
+            out.chunk.x >= 4,
+            "the walk east did not get past the keep margin: {out:?}"
+        );
+        // The sweep runs once a second; give it a few, receiving meanwhile.
+        let settle = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < settle {
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+        let back = bot.walk([-1.0, 0.0, 0.0], 0, 450).await.expect("walk west");
+        assert!(
+            back.chunk.x <= 0,
+            "walked west for 450 ticks and the server held the player at {back:?}: a wall \
+             where the sweep had unloaded ground the client still holds"
+        );
+    });
+    assert!(server.stop());
+}
+
+#[test]
 fn chunks_nobody_is_near_leave_memory_and_come_back_whole() {
     let server = start("round-trip", write_keeper("round-trip"));
     let control = server.control().clone();

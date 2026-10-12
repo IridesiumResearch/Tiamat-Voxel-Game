@@ -97,6 +97,24 @@ fn bindings_file() -> std::path::PathBuf {
 /// Starting window size.
 const DEFAULT_SIZE: (u32, u32) = (1280, 720);
 
+/// `client.log` under the data directory, fresh for this run, with the last
+/// run's kept beside it as `client.1.log`.
+///
+/// The DEFAULT data directory: logging is set up before the configuration is
+/// read, and a player who moved their data directory by hand can read stderr.
+/// `None` when the directory cannot be written, and the log stays on stderr
+/// alone rather than the client refusing to start over a log file.
+fn client_log_file() -> Option<std::fs::File> {
+    let data = client::config::data_dir();
+    std::fs::create_dir_all(&data).ok()?;
+    let path = data.join("client.log");
+    let previous = data.join("client.1.log");
+    if path.exists() {
+        let _ = std::fs::rename(&path, &previous);
+    }
+    std::fs::File::create(path).ok()
+}
+
 /// Keeps every panic in `crash.log` under the data directory, as well as on
 /// stderr.
 ///
@@ -152,12 +170,24 @@ fn crash_entry(message: &str, location: &str, backtrace: &str) -> String {
 }
 
 fn main() -> std::process::ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // **To a file as well as stderr.** A player on Windows or in the macOS
+    // bundle has no console, so everything the client and its embedded server
+    // say — a chunk a body met that had left memory, a prediction that ran
+    // into a chunk the client does not hold — went nowhere. `crash.log`
+    // keeps the panics; this keeps the rest of the last two runs.
+    match client_log_file() {
+        Some(file) => {
+            use tracing_subscriber::fmt::writer::MakeWriterExt;
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(std::io::stderr.and(std::sync::Arc::new(file)))
+                .init();
+        }
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
 
     // An installed client started on its own goes through the launcher, so it
     // gets its update step, its working directory and its mods.

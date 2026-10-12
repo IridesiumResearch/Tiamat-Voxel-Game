@@ -80,6 +80,10 @@ impl FluidLookup for Dry {
     }
 }
 
+/// How many absent chunks one view remembers meeting — see
+/// [`Voxels::absent_chunks`].
+pub const MOST_ABSENT_NOTED: usize = 8;
+
 /// A [`Solid`] view of loaded chunks, in a frame anchored to `origin`.
 pub struct Voxels<'a, S: ChunkLookup, F: FluidLookup = Dry> {
     source: &'a S,
@@ -106,6 +110,14 @@ pub struct Voxels<'a, S: ChunkLookup, F: FluidLookup = Dry> {
     /// different: the second one is a wall the server does not have, and the
     /// divergence it causes arrives as a correction the player sees.
     absent: std::cell::Cell<bool>,
+    /// Which chunks those queries found absent — the first few.
+    ///
+    /// The same diagnostic with an address on it. A caller that can bring a
+    /// stored chunk back needs to know which one the body ran into, and a
+    /// caller explaining a wall needs to say where it stood. Bounded at
+    /// [`MOST_ABSENT_NOTED`]: a body straddles a handful of chunks, and a
+    /// storm of queries must not grow a list on the tick.
+    absent_at: std::cell::RefCell<Vec<ChunkPos>>,
     /// Materials a body walks through — Sub-Node Contract §2.
     ///
     /// Borrowed rather than owned because the caller has it already: it comes
@@ -136,6 +148,7 @@ impl<'a, S: ChunkLookup> Voxels<'a, S, Dry> {
             fluid: None,
             origin: std::cell::Cell::new(origin),
             absent: std::cell::Cell::new(false),
+            absent_at: std::cell::RefCell::new(Vec::new()),
             passable: &[],
             friction: &[],
         }
@@ -177,6 +190,7 @@ impl<'a, S: ChunkLookup, F: FluidLookup> Voxels<'a, S, F> {
             fluid: Some(fluid),
             origin: std::cell::Cell::new(origin),
             absent: std::cell::Cell::new(false),
+            absent_at: std::cell::RefCell::new(Vec::new()),
             passable: &[],
             friction: &[],
         }
@@ -192,6 +206,17 @@ impl<'a, S: ChunkLookup, F: FluidLookup> Voxels<'a, S, F> {
     #[must_use]
     pub fn touched_absent(&self) -> bool {
         self.absent.get()
+    }
+
+    /// The chunks queries found absent, in the order they were met — at most
+    /// [`MOST_ABSENT_NOTED`] of them, each once.
+    ///
+    /// Empty whenever [`Voxels::touched_absent`] is false. What a server does
+    /// with the list is bring a stored chunk back before the next step; what a
+    /// client does is say which chunk its wall was.
+    #[must_use]
+    pub fn absent_chunks(&self) -> Vec<ChunkPos> {
+        self.absent_at.borrow().clone()
     }
 
     /// The world sub-node position of a cell in this frame.
@@ -230,6 +255,12 @@ impl<'a, S: ChunkLookup, F: FluidLookup> Voxels<'a, S, F> {
             // Recorded, not acted on — see the field's docs. The answer this
             // produces is identical to what it always was.
             self.absent.set(true);
+            if let Ok(mut at) = self.absent_at.try_borrow_mut()
+                && at.len() < MOST_ABSENT_NOTED
+                && !at.contains(&chunk)
+            {
+                at.push(chunk);
+            }
             return None;
         };
         chunk.get_subnode(world)
@@ -633,6 +664,10 @@ mod tests {
             voxels.touched_absent(),
             "a query that landed in an absent chunk went unreported"
         );
+        // And WHICH chunk, once each: what a server brings back if it is
+        // stored, and what a client's log names.
+        voxels.solid(2, span + 1, 2);
+        assert_eq!(voxels.absent_chunks(), vec![ChunkPos::new(0, 1, 0)]);
     }
 
     #[test]

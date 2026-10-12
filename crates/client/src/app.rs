@@ -1954,6 +1954,7 @@ impl App {
         // ticks being re-simulated consulted geometry the client does not have,
         // because those are the ticks whose answer cannot match the server's.
         let touched_absent = voxels.touched_absent();
+        let absent = voxels.absent_chunks();
 
         if let Some(divergence) = divergence {
             self.pacing.divergence(divergence.distance);
@@ -1964,6 +1965,39 @@ impl App {
         self.trace(divergence.as_ref(), state);
         if touched_absent {
             self.pacing.predicted_into_the_unloaded();
+            self.note_absent(&absent);
+        }
+    }
+
+    /// Says, now and then, which chunk the prediction ran into that this
+    /// client does not hold — and what it holds there instead.
+    ///
+    /// Reported from the window as "invisible chunk walls". The overlay's
+    /// "(predicted into unloaded chunks)" says it happened; this line in the
+    /// log says WHERE, and whether the wall is this client's (a summary, or
+    /// nothing at all, where the server has a chunk) — the server's own log
+    /// says when the wall was its own. Once in a while, because a body held
+    /// against a wall asks every tick.
+    fn note_absent(&self, chunks: &[tiamat_core::ChunkPos]) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_NOTED: AtomicU64 = AtomicU64::new(0);
+        const EVERY_SECONDS: u64 = 5;
+        let now = self.since_start.elapsed().as_secs().max(1);
+        if now.saturating_sub(LAST_NOTED.load(Ordering::Relaxed)) < EVERY_SECONDS {
+            return;
+        }
+        LAST_NOTED.store(now, Ordering::Relaxed);
+        for pos in chunks {
+            let holds = if self.store.summary(*pos).is_some() {
+                "a summary"
+            } else {
+                "nothing"
+            };
+            tracing::warn!(
+                ?pos,
+                holds,
+                "the prediction ran into a chunk this client does not hold"
+            );
         }
     }
 
