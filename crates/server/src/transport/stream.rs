@@ -135,7 +135,37 @@ pub struct Streamer {
     /// `tests::measure_a_pass_at_the_default_view`, release. See
     /// [`Self::is_shadowed`].
     shadowed: BTreeSet<ChunkPos>,
+    /// Block edits to chunks still on their way, to be written after them.
+    ///
+    /// **A chunk in flight carries the world from before the edits that
+    /// land while it flies.** A request is answered on the tick, from the
+    /// chunk as it is then, and written on the connection's next beat; an
+    /// edit in between was broadcast at once, and a client that did not yet
+    /// hold the chunk dropped it as noise — then the chunk arrived without
+    /// it. A stamp into terrain a player was still loading showed gaps, and
+    /// a block placed by a mod became an invisible wall the client could not
+    /// draw. So an edit to a chunk in flight waits here and goes out right
+    /// behind the chunk; applied over a chunk that already carries it, it
+    /// changes nothing. See [`Streamer::hold_edit`].
+    held_edits: BTreeMap<ChunkPos, Held>,
 }
+
+/// Edits waiting behind a chunk in flight — see [`Streamer::hold_edit`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Held {
+    /// Nothing waited.
+    None,
+    /// These, in the order they happened.
+    Edits(Vec<tiamat_core::proto::ServerMessage>),
+    /// More than [`MAX_HELD_EDITS`] landed: cheaper to send the chunk again
+    /// than the edits, so the caller forgets it was sent.
+    Resend,
+}
+
+/// The most edits held behind one chunk in flight before the chunk is
+/// simply sent again. A stamp of a few hundred blocks into one chunk fits;
+/// anything past this is a chunk whose fresh copy is the smaller message.
+pub const MAX_HELD_EDITS: usize = 1024;
 
 /// What one look at a horizon position found. See [`Streamer::next_summaries`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +197,7 @@ impl Streamer {
             view,
             sent: BTreeSet::new(),
             in_flight: BTreeSet::new(),
+            held_edits: BTreeMap::new(),
             horizon: horizon_for(view),
             rings: Rings::new(u32::from(view.horizontal), Rings::MARGIN),
             summaries: BTreeMap::new(),
@@ -220,6 +251,7 @@ impl Streamer {
         // the same coordinates, which is terrain from somewhere else appearing
         // in a place a player is standing.
         self.in_flight.clear();
+        self.held_edits.clear();
         // Sealed is a fact about chunks in the OLD domain; the same positions
         // in the new one are different chunks.
         self.sealed.clear();
@@ -295,6 +327,8 @@ impl Streamer {
         // client's world, it has become a summary.
         self.in_flight
             .retain(|pos| interest::contains(centre, self.horizon, *pos));
+        let in_flight = &self.in_flight;
+        self.held_edits.retain(|pos, _| in_flight.contains(pos));
         self.departed()
     }
 
@@ -561,6 +595,38 @@ impl Streamer {
         self.in_flight.insert(pos);
     }
 
+    /// Whether a chunk has been asked for and not yet written to the client.
+    #[must_use]
+    pub fn is_in_flight(&self, pos: ChunkPos) -> bool {
+        self.in_flight.contains(&pos)
+    }
+
+    /// Holds an edit to a chunk in flight, to be written right behind it —
+    /// see [`Streamer::held_edits`]. Past [`MAX_HELD_EDITS`] the chunk is
+    /// marked to be sent again instead.
+    pub fn hold_edit(&mut self, pos: ChunkPos, edit: tiamat_core::proto::ServerMessage) {
+        let held = self.held_edits.entry(pos).or_insert(Held::None);
+        match held {
+            Held::None => *held = Held::Edits(vec![edit]),
+            Held::Edits(edits) if edits.len() < MAX_HELD_EDITS => edits.push(edit),
+            Held::Edits(_) => *held = Held::Resend,
+            Held::Resend => {}
+        }
+    }
+
+    /// Takes what waited behind a chunk, once the chunk has been written.
+    #[must_use]
+    pub fn take_held_edits(&mut self, pos: ChunkPos) -> Held {
+        self.held_edits.remove(&pos).unwrap_or(Held::None)
+    }
+
+    /// Forgets that a chunk was sent, so the next pass sends it again — what
+    /// [`Held::Resend`] asks for.
+    pub fn forget(&mut self, pos: ChunkPos) {
+        self.sent.remove(&pos);
+        self.sealed.remove(&pos);
+    }
+
     /// Records that a request came back, whether or not it produced a chunk.
     ///
     /// Called on **every** outcome — delivered, empty, failed. An in-flight
@@ -569,6 +635,9 @@ impl Streamer {
     /// filling in.
     pub fn completed(&mut self, pos: ChunkPos) {
         self.in_flight.remove(&pos);
+        // No chunk reached the client, so nothing to write the edits behind:
+        // the next request's answer carries them.
+        self.held_edits.remove(&pos);
     }
 
     /// Records that a chunk reached the client.
@@ -1451,6 +1520,56 @@ mod tests {
                 "{pos:?} is in flight and must not be requested again"
             );
         }
+    }
+
+    #[test]
+    fn an_edit_to_a_chunk_in_flight_waits_behind_it() {
+        // The streaming race: a chunk answered on the tick and written on the
+        // next beat carries the world from before an edit that lands in
+        // between, and a client that does not hold the chunk yet drops the
+        // edit. Held here, it goes out behind the chunk; a request that
+        // produced no chunk drops the edits (the next answer carries them);
+        // past the cap the chunk is sent again instead.
+        let edit = |material: u16| tiamat_core::proto::ServerMessage::BlockDelta {
+            edit: tiamat_core::proto::Edit::Block {
+                pos: tiamat_core::BlockPos::new(1, 2, 3),
+                material,
+            },
+            actor: None,
+        };
+        let view = ViewDistance::MINIMUM;
+        let mut streamer = Streamer::new(tiamat_core::domain::OVERWORLD, ORIGIN, view);
+        let pos = ChunkPos::new(0, 0, 0);
+        assert!(!streamer.is_in_flight(pos));
+        streamer.requested(pos);
+        assert!(streamer.is_in_flight(pos));
+        streamer.hold_edit(pos, edit(1));
+        streamer.hold_edit(pos, edit(2));
+        streamer.delivered(pos);
+        assert!(!streamer.is_in_flight(pos));
+        assert_eq!(
+            streamer.take_held_edits(pos),
+            Held::Edits(vec![edit(1), edit(2)]),
+            "in the order they happened"
+        );
+        assert_eq!(streamer.take_held_edits(pos), Held::None, "taken once");
+
+        // No chunk came: nothing to write them behind.
+        streamer.requested(pos);
+        streamer.hold_edit(pos, edit(3));
+        streamer.completed(pos);
+        assert_eq!(streamer.take_held_edits(pos), Held::None);
+
+        // Too many: the chunk again, and `forget` makes the next pass ask.
+        streamer.requested(pos);
+        for material in 0..=MAX_HELD_EDITS {
+            streamer.hold_edit(pos, edit(u16::try_from(material % 9).expect("small")));
+        }
+        streamer.delivered(pos);
+        assert!(streamer.holds(pos));
+        assert_eq!(streamer.take_held_edits(pos), Held::Resend);
+        streamer.forget(pos);
+        assert!(!streamer.holds(pos), "forgotten, so it is asked for again");
     }
 
     #[test]

@@ -3776,6 +3776,15 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                                 // player who dug will see next, so it becomes
                                 // requestable — see `Streamer::unseal`.
                                 streamer.unseal(pos);
+                                // **A chunk still on its way carries the world
+                                // from before this edit**, and a client that
+                                // does not hold the chunk yet drops the edit as
+                                // noise — so it waits and goes out right behind
+                                // the chunk. See `Streamer::held_edits`.
+                                if streamer.is_in_flight(pos) {
+                                    streamer.hold_edit(pos, outbound.message.clone());
+                                    continue;
+                                }
                             }
                             frame::write(&mut send, &outbound.message).await?;
                         }
@@ -4197,6 +4206,17 @@ async fn pump_chunks(
                     None if sealed => streamer.delivered_sealed(pos),
                     None => streamer.delivered(pos),
                     Some(level) => streamer.summarised(pos, level),
+                }
+                // The edits that landed while it flew, right behind it — or
+                // the chunk again, when there were more of them than a chunk.
+                match streamer.take_held_edits(pos) {
+                    crate::transport::stream::Held::None => {}
+                    crate::transport::stream::Held::Edits(edits) => {
+                        for edit in &edits {
+                            frame::write(send, edit).await?;
+                        }
+                    }
+                    crate::transport::stream::Held::Resend => streamer.forget(pos),
                 }
             }
             Ok(None) => {
