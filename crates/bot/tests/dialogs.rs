@@ -106,6 +106,46 @@ end)
     root
 }
 
+/// The shop again, with a larder: an item, `shop:meat`, three of which a
+/// player is given on joining.
+fn write_larder(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("shop");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"shop\"\nname = \"Shop\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+game.register_item{ id = "meat", name = "Raw meat" }
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+game.register_tool{ id = "hand", brush = "block", speed_multiplier = 1.0, default = true }
+
+game.register_on_player_join(function(event)
+    game.give(event.player, { material = "shop:meat", units = 81 })
+    game.show_dialog{
+        player = event.player,
+        form = "till",
+        tree = {
+            type = "container", direction = "column", gap = 4, padding = 8,
+            children = {
+                { type = "item_grid", view = "player:main", columns = 9, count = 9 },
+            },
+        },
+    }
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
 fn start(name: &str, mods: PathBuf) -> ServerHandle {
     ServerHandle::start(&Settings {
         world_options: Vec::new(),
@@ -744,6 +784,91 @@ fn splitting_a_stack_in_a_dialog_respects_the_twenty_seven_unit_arithmetic() {
             Some((material, units))
         );
         assert_eq!(bot.held(), None, "the hand should be empty after placing");
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
+#[test]
+fn an_item_splits_and_is_put_down_in_whole_items_over_the_wire() {
+    // **Craft ask 15, end to end.** The unit test in `core::inventory::slots`
+    // proves the rule; this proves the server's own slots were told which
+    // materials are items, which is the half a unit test cannot see: three
+    // meat given on joining, a right-click that takes two and leaves one, and
+    // a right-click into an empty slot that puts ONE down — never 14 and 13,
+    // never one unit.
+    let server = start("whole-items", write_larder("whole-items"));
+    block_on(async {
+        let mut bot = join(&server, "Butcher").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+        let given = bot
+            .until_view("player:main", |slots| {
+                slots
+                    .first()
+                    .and_then(|slot| slot.as_ref())
+                    .is_some_and(|stack| stack.units == 81)
+            })
+            .await
+            .expect("the meat never arrived");
+        let meat = given[0].as_ref().expect("meat").material;
+
+        // Right-click: two meat to the hand, one left behind.
+        bot.dialog_event(
+            "shop:till",
+            DialogEvent::Clicked {
+                view: "player:main".to_owned(),
+                index: 0,
+                click: Click::Right,
+            },
+        )
+        .await
+        .expect("send");
+        let split = bot
+            .until_view("player:main", |slots| {
+                slots
+                    .first()
+                    .and_then(|slot| slot.as_ref())
+                    .is_some_and(|stack| stack.units < 81)
+            })
+            .await
+            .expect("the split never happened");
+        assert_eq!(
+            split[0].as_ref().map(|stack| stack.units),
+            Some(27),
+            "one whole meat stays behind"
+        );
+        assert_eq!(
+            bot.held().map(|stack| (stack.material, stack.units)),
+            Some((meat, 54)),
+            "two whole meat in the hand"
+        );
+
+        // A right-click into the empty slot beside it: one meat goes down.
+        bot.dialog_event(
+            "shop:till",
+            DialogEvent::Clicked {
+                view: "player:main".to_owned(),
+                index: 1,
+                click: Click::Right,
+            },
+        )
+        .await
+        .expect("send");
+        let placed = bot
+            .until_view("player:main", |slots| {
+                slots.get(1).and_then(|slot| slot.as_ref()).is_some()
+            })
+            .await
+            .expect("nothing was put down");
+        assert_eq!(
+            placed[1].as_ref().map(|stack| stack.units),
+            Some(27),
+            "one whole meat put down, not one unit"
+        );
+        assert_eq!(bot.held().map(|stack| stack.units), Some(27));
 
         bot.disconnect().await;
     });

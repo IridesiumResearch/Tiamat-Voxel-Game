@@ -21,7 +21,7 @@ added 2026-09-28 from the mod's sheet and landed the same day (engine
 cbbbc5e). Ask 10 added 2026-09-28 and landed the same day (engine
 7cf1c73). Ask 11 added 2026-09-28 and landed the same day (engine
 f2cbc36). Ask 12 added 2026-10-07 and landed the next day (engine
-671f5763). Nothing is open.
+671f5763). Asks 13 and 14 added 2026-10-08 and landed the same day. Ask 15 added 2026-10-12 and landed the same day (engine). Nothing is open.
 
 **From the engine, 2026-10-08 (night), for "Level this ground" (Craft
 09eee00).** Two engine changes the same day move the ground under that gate.
@@ -39,6 +39,44 @@ station without a `shape`), which now sweeps rock unrefused: key the gate
 on `e.swept` (and `game.get_block` on `e.x, e.y, e.z` still reads the
 block as it stands, cards included). The designer's words for the refusal
 are exactly "level this ground".
+
+## 15. An item moves in whole items (2026-10-12): LANDED 2026-10-12 (engine)
+
+**From the engine, 2026-10-12.** As asked, at the engine's own inventory: a
+material registered with `register_item` moves in whole items in every view
+the engine holds. A right-click halves a stack of it in whole items, the
+larger half to the hand; a right-click with a stack held puts down one whole
+item; a merge and a shift-click move whole items; and `game.give`/`game.take`
+round to whole items (forty units of meat is one meat given and thirteen
+handed back; ten units is no meat taken). Sub-Node Contract §9 carries the
+rule. No protocol change; nothing for the mod to do but re-vendor `api/` if it
+wants the stub's note.
+
+**Seen.** The designer's playtest, 2026-10-12: "items like meat should never
+have subnodes in the inventory. too many duplication glitches." A
+right-click on a stack in any view halves it by UNITS (`Slots::right_click`,
+`grain` 1 for everything but a cut of several), so one raw meat — 27 units —
+becomes 14 in the hand and 13 left behind, and a right-click with a stack
+held puts down one unit. Neither half is an item any more: not food to
+Life's eat key, not an ingredient a recipe counting items will take, and a
+quantity every mod's arithmetic has to survive. An item (`register_item`,
+`placeable = false`) has no cells; a part of one means nothing.
+
+**Why the mod cannot.** Slot clicks are applied by the engine before any mod
+hears them, cannot be vetoed, and the cursor is out of a mod's reach, so a
+mod cannot put a split back; and `game.give`/`game.take` accept any units of
+an item, so every mod would have to round on its own.
+
+**Smallest change.** For a non-placeable material, `grain` is a whole item
+(27 units), as it already is for a cut of several: a right-click takes half
+the ITEMS (rounded so the hand gets the larger half), a right-click with a
+stack held puts down one ITEM, and a shift-click or a merge moves whole
+items. Optionally `give`/`take` of an item refuse, or round down to, a
+whole number of items — the same rule, at the API.
+
+**Stands in.** Nothing this mod makes gives part of an item: every item a
+recipe here gives is counted in whole items. The splits come from the
+inventory alone.
 
 ## 14. A small whole thing that clips into the ground instead of sweeping it (2026-10-08): LANDED 2026-10-08 (engine, the commit after 8f20397a)
 

@@ -229,8 +229,15 @@ impl Stack {
     /// than it holds, and in whole [`Self::grain`]s.
     #[must_use]
     pub fn takeable(&self, asked: u32) -> u32 {
+        self.takeable_by(self.grain(), asked)
+    }
+
+    /// The same, in whole `grain`s: what a holder that knows more than the
+    /// stack does — that its material is an item — asks with.
+    #[must_use]
+    pub fn takeable_by(&self, grain: u32, asked: u32) -> u32 {
         let most = self.units.min(asked);
-        let grain = self.grain();
+        let grain = grain.max(1);
         most - most % grain
     }
 
@@ -307,6 +314,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         }
     }
 

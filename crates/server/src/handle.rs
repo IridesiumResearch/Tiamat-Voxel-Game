@@ -2249,6 +2249,15 @@ impl ServerHandle {
             .filter(|rules| rules.billboard || rules.billboard_cross)
             .filter_map(|rules| runtime_of(&rules.block))
             .collect();
+        // The items — `register_item`, not placeable — which move in whole
+        // items in every inventory (Contract §9; Craft ask 15).
+        let item_materials: std::collections::BTreeSet<tiamat_core::MaterialId> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_items())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|name| runtime_of(name))
+            .collect();
         // The whole materials that stand among thin ground's cells rather
         // than sweeping them (Contract §7.6; Craft ask 14).
         let no_sweep: std::collections::BTreeSet<tiamat_core::MaterialId> = host
@@ -2784,6 +2793,7 @@ impl ServerHandle {
             whole,
             cards,
             no_sweep,
+            item_materials,
             material_ids,
             main_slots,
         });

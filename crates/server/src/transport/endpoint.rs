@@ -450,6 +450,10 @@ pub struct Shared {
     /// stand among a thin block's cells rather than sweeping them (Contract
     /// §7.6; Craft ask 14).
     pub no_sweep: std::collections::BTreeSet<tiamat_core::MaterialId>,
+    /// The items — `register_item`, not placeable — which every inventory
+    /// moves in whole items (Contract §9; Craft ask 15). Given to each
+    /// player's slots as they are made or restored.
+    pub item_materials: std::collections::BTreeSet<tiamat_core::MaterialId>,
     /// Every registered material by name, to its runtime id — what a dig
     /// hook's `drops` answer is resolved with, at the moment it is given, and
     /// what an inventory holds.
@@ -2430,7 +2434,10 @@ impl Shared {
     /// size a mod fixed it to, if one did (UI ask 14).
     #[must_use]
     pub fn fresh_slots(&self) -> tiamat_core::inventory::Slots {
-        tiamat_core::inventory::Slots::for_player_sized(self.main_slots, &self.views)
+        let mut slots =
+            tiamat_core::inventory::Slots::for_player_sized(self.main_slots, &self.views);
+        slots.items = self.item_materials.clone();
+        slots
     }
 
     /// Whether a player could be credited these stacks in full.
@@ -2737,7 +2744,10 @@ impl Shared {
     /// thread, which is where the world database is; this is the door into the
     /// endpoint's own copy. Marks the inventory dirty, because a client that
     /// joined a moment earlier has already been sent the empty one.
-    pub fn restore_inventory(&self, uuid: PlayerUuid, slots: tiamat_core::inventory::Slots) {
+    pub fn restore_inventory(&self, uuid: PlayerUuid, mut slots: tiamat_core::inventory::Slots) {
+        // A stored inventory knows its stacks and not this session's ids:
+        // what is an item is told here, as `fresh_slots` tells a new one.
+        slots.items = self.item_materials.clone();
         if let Ok(mut inventories) = self.inventories.lock() {
             inventories.insert(uuid, slots);
         }
@@ -4537,6 +4547,7 @@ mod tests {
             whole: std::collections::BTreeMap::new(),
             cards: std::collections::BTreeSet::new(),
             no_sweep: std::collections::BTreeSet::new(),
+            item_materials: std::collections::BTreeSet::new(),
             material_ids: std::collections::BTreeMap::new(),
             main_slots: None,
         }

@@ -29,6 +29,7 @@
 //! and `proptest` asserts it does not.
 
 use super::{Stack, StackKey};
+use crate::material::MaterialId;
 
 /// A named run of slots.
 ///
@@ -105,7 +106,18 @@ impl View {
     ///
     /// `into` names one slot, or `None` for "anywhere it fits".
     #[must_use]
-    pub fn fill(&mut self, into: Option<usize>, mut stack: Stack) -> Option<Stack> {
+    pub fn fill(&mut self, into: Option<usize>, stack: Stack) -> Option<Stack> {
+        self.fill_by(&std::collections::BTreeSet::new(), into, stack)
+    }
+
+    /// The same, moving an item among `items` in whole items — see
+    /// [`Slots::items`].
+    pub fn fill_by(
+        &mut self,
+        items: &std::collections::BTreeSet<MaterialId>,
+        into: Option<usize>,
+        mut stack: Stack,
+    ) -> Option<Stack> {
         if stack.is_empty() {
             return None;
         }
@@ -131,7 +143,7 @@ impl View {
                 continue;
             }
             let room = slot.capacity().saturating_sub(slot.units);
-            let giving = stack.takeable(room);
+            let giving = stack.takeable_by(grain_for(items, &stack), room);
             if giving > 0
                 && let Ok(part) = stack.split(giving)
                 && slot.merge(&part).is_err()
@@ -170,6 +182,18 @@ impl View {
     /// [`Slots::take`] is: a recipe asking for stone must not melt down the
     /// named sword somebody left in the same box.
     pub fn draw(&mut self, from: Option<usize>, which: StackKey<'_>, units: u32) -> u32 {
+        self.draw_by(&std::collections::BTreeSet::new(), from, which, units)
+    }
+
+    /// The same, taking an item among `items` in whole items — see
+    /// [`Slots::items`].
+    pub fn draw_by(
+        &mut self,
+        items: &std::collections::BTreeSet<MaterialId>,
+        from: Option<usize>,
+        which: StackKey<'_>,
+        units: u32,
+    ) -> u32 {
         let slots: Vec<usize> = match from {
             Some(index) if index < self.slots.len() => vec![index],
             Some(_) => return 0,
@@ -186,7 +210,7 @@ impl View {
             if !which.matches(stack) {
                 continue;
             }
-            let taking = stack.takeable(left);
+            let taking = stack.takeable_by(grain_for(items, stack), left);
             if let Ok(part) = stack.split(taking) {
                 left -= part.units;
             }
@@ -225,6 +249,34 @@ pub struct Slots {
     /// fit answers with what did not, and the engine's own credits check
     /// first.
     pub main_fixed: bool,
+    /// The materials that are ITEMS — registered with `register_item`, not
+    /// placeable — which move in whole items of 27 units and never in part
+    /// (Sub-Node Contract §9, Craft ask 15).
+    ///
+    /// A right-click on a stack of meat halved it by UNITS, so one raw meat
+    /// became 14 in the hand and 13 left behind, and a right-click with a
+    /// stack held put down one unit: neither half was an item any more —
+    /// not food to the eat key, not an ingredient a recipe counting items
+    /// would take. A block is cells and a part of one is still that
+    /// material; an item has no cells and a part of one means nothing.
+    ///
+    /// This session's ids, set by the server that owns the slots; empty
+    /// everywhere else, where every stack moves as it always did.
+    pub items: std::collections::BTreeSet<MaterialId>,
+}
+
+/// The fewest units a stack may move in among `items`: a whole item for an
+/// item, otherwise the stack's own grain — a cut of several materials moves
+/// whole, loose material by the unit.
+///
+/// A free function rather than a method so a caller holding one of the views
+/// mutably can still ask: the two are different fields.
+fn grain_for(items: &std::collections::BTreeSet<MaterialId>, stack: &Stack) -> u32 {
+    if items.contains(&stack.material) {
+        stack.per_item()
+    } else {
+        stack.grain()
+    }
 }
 
 /// The engine's own view names.
@@ -321,6 +373,7 @@ impl Slots {
             views,
             grab: Grab::default(),
             main_fixed: main.is_some(),
+            items: std::collections::BTreeSet::new(),
         }
     }
 
@@ -416,7 +469,8 @@ impl Slots {
     /// **The halving is on UNITS.** Charter rule 5: 40 units splits into 20 and
     /// 20, and an odd count leaves the larger half in the hand — 41 gives 21
     /// held and 20 behind — because a player who right-clicks a stack expects
-    /// to be holding at least as much as they left.
+    /// to be holding at least as much as they left. **Except an item**, which
+    /// halves in whole items and puts down one whole item — [`Slots::items`].
     pub fn right_click(&mut self, view: &str, index: usize) -> bool {
         let Some(at) = self.locate(view, index) else {
             return false;
@@ -427,15 +481,19 @@ impl Slots {
                 // The half left BEHIND, so the hand keeps the remainder and an
                 // odd count rounds the player's way rather than into thin air.
                 // Counted in grains, which are units except for a cut of
-                // several materials, which halves in whole items (§9.1).
-                let grain = stack.grain();
+                // several materials and for an item, which halve in whole
+                // items (§9.1, §9).
+                let grain = grain_for(&self.items, &stack);
                 let behind = stack.units / grain / 2 * grain;
                 let taken = stack.split(stack.units - behind).ok();
                 ((!stack.is_empty()).then_some(stack), taken)
             }
             // One unit down, keeping the rest — the "place one at a time"
-            // gesture, on units rather than on blocks.
-            (Some(held), there) => place_one(held, there),
+            // gesture, on units rather than on blocks; one ITEM for an item.
+            (Some(held), there) => {
+                let grain = grain_for(&self.items, &held);
+                place_one(held, there, grain)
+            }
             (None, None) => return false,
         };
         self.views[at].slots[index] = slot;
@@ -470,7 +528,7 @@ impl Slots {
             if !slot.same_item(&moving) {
                 continue;
             }
-            let giving = moving.takeable(u32::MAX - slot.units);
+            let giving = moving.takeable_by(grain_for(&self.items, &moving), u32::MAX - slot.units);
             if giving > 0
                 && let Ok(part) = moving.split(giving)
                 && slot.merge(&part).is_err()
@@ -557,7 +615,8 @@ impl Slots {
             if !stack.same_item(&moving) {
                 continue;
             }
-            let giving = moving.takeable(u32::MAX - stack.units);
+            let giving =
+                moving.takeable_by(grain_for(&self.items, &moving), u32::MAX - stack.units);
             if giving > 0
                 && let Ok(part) = moving.split(giving)
                 && stack.merge(&part).is_err()
@@ -610,7 +669,7 @@ impl Slots {
             return false;
         };
         let offered = moving.units;
-        let left = self.views[target].fill(None, moving);
+        let left = self.views[target].fill_by(&self.items, None, moving);
         let moved = left.as_ref().is_none_or(|rest| rest.units < offered);
         // Whatever would not fit goes back where it came from.
         self.views[source].slots[index] = left;
@@ -626,7 +685,13 @@ impl Slots {
     /// is refused whole, so nothing is half-given. `false` also for a slot
     /// the view does not have.
     pub fn give_into(&mut self, view: &str, slot: usize, stack: Stack) -> bool {
-        if stack.is_empty() || stack.units > stack.capacity() {
+        // A part of an item is refused rather than rounded: this is a stack
+        // into ONE slot, with nowhere to hand a remainder back to
+        // ([`Slots::items`]).
+        if stack.is_empty()
+            || stack.units > stack.capacity()
+            || !stack.units.is_multiple_of(grain_for(&self.items, &stack))
+        {
             return false;
         }
         let Some(at) = self.locate(view, slot) else {
@@ -659,7 +724,7 @@ impl Slots {
         if !which.matches(stack) {
             return 0;
         }
-        let taking = stack.takeable(units);
+        let taking = stack.takeable_by(grain_for(&self.items, stack), units);
         let Ok(part) = stack.split(taking) else {
             return 0;
         };
@@ -715,7 +780,7 @@ impl Slots {
             // through to the next matching slot, then to an empty one, then to
             // a slot the view grows for it.
             let room = slot.capacity().saturating_sub(slot.units);
-            let giving = stack.takeable(room);
+            let giving = stack.takeable_by(grain_for(&self.items, &stack), room);
             if giving > 0
                 && let Ok(part) = stack.split(giving)
                 && slot.merge(&part).is_err()
@@ -729,7 +794,15 @@ impl Slots {
         // A stack bigger than one slot holds is laid out over as many as it
         // needs, rather than being refused or quietly truncated.
         let cap = stack.capacity();
+        let grain = grain_for(&self.items, &stack);
         while !stack.is_empty() {
+            // **An item goes in whole** ([`Slots::items`]): what is left short
+            // of a whole item is the caller's to keep, as a fixed view's
+            // overflow is.
+            let whole = stack.takeable_by(grain, cap);
+            if whole == 0 {
+                return Some(stack);
+            }
             let Some(empty) = self.views[at].slots.iter().position(Option::is_none) else {
                 if fixed {
                     // No room, and the view may not grow: the rest is the
@@ -738,13 +811,13 @@ impl Slots {
                 }
                 // Never fails: the amount asked for is the smaller of what is
                 // left and one slot's worth.
-                let Ok(part) = stack.split(stack.units.min(cap)) else {
+                let Ok(part) = stack.split(whole) else {
                     break;
                 };
                 self.views[at].slots.push(Some(part));
                 continue;
             };
-            let Ok(part) = stack.split(stack.units.min(cap)) else {
+            let Ok(part) = stack.split(whole) else {
                 break;
             };
             self.views[at].slots[empty] = Some(part);
@@ -781,7 +854,7 @@ impl Slots {
             if !which.matches(stack) {
                 continue;
             }
-            let taking = stack.takeable(left);
+            let taking = stack.takeable_by(grain_for(&self.items, stack), left);
             if let Ok(part) = stack.split(taking) {
                 left -= part.units;
             }
@@ -849,10 +922,11 @@ fn merge_or_swap(held: Stack, there: Stack) -> (Option<Stack>, Option<Stack>) {
 ///
 /// Returns `(what goes in the slot, what stays in the hand)`.
 ///
-/// "One" is one unit, or one whole item of a cut of several materials, which
-/// moves in nothing smaller (Sub-Node Contract §9.1).
-fn place_one(mut held: Stack, there: Option<Stack>) -> (Option<Stack>, Option<Stack>) {
-    let Ok(one) = held.split(held.grain().min(held.units)) else {
+/// "One" is `grain` units: one unit, or one whole item of a cut of several
+/// materials or of an item, which move in nothing smaller (Sub-Node Contract
+/// §9.1, §9).
+fn place_one(mut held: Stack, there: Option<Stack>, grain: u32) -> (Option<Stack>, Option<Stack>) {
+    let Ok(one) = held.split(grain.max(1).min(held.units)) else {
         return ((!held.is_empty()).then_some(held), there);
     };
     let slot = match there {
@@ -1174,6 +1248,7 @@ mod tests {
                 held: Some(Stack::shaped(STONE, shape, 3).expect("cut")),
             },
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
 
         assert!(inv.left_click(PLAYER_MAIN, 0));
@@ -1208,6 +1283,7 @@ mod tests {
                 held: Some(Stack::shaped(STONE, shape, 3).expect("cut")),
             },
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         let before = inv.total_units();
 
@@ -1234,6 +1310,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
 
         // Taking the cut takes it from the cut slot only.
@@ -1302,6 +1379,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1367,6 +1445,7 @@ mod tests {
                     ],
                     grab: Grab { held },
                     main_fixed: false,
+                    items: std::collections::BTreeSet::new(),
                 })
         }
 
@@ -1516,6 +1595,7 @@ mod tests {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         let whole = crate::inventory::ITEMS_PER_STACK * UNITS_PER_BLOCK;
         assert!(inv.insert(
@@ -1550,6 +1630,7 @@ mod tests {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         assert!(
             inv.insert(
@@ -1583,6 +1664,7 @@ mod tests {
             views: vec![View::empty("player:main", 2)],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         for material in 2..8u16 {
             assert!(inv.insert(
@@ -1611,6 +1693,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         inv.insert("player:main", Stack::new(STONE, 7).expect("stack"));
         assert_eq!(at(&inv, "player:main", 0).expect("topped up").units, 12);
@@ -1629,6 +1712,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         // Spanning two slots, first one emptied.
         assert_eq!(inv.take("player:main", StackKey::loose(STONE), 7), 7);
@@ -1665,6 +1749,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         let held = inv.consolidated("player:main");
         assert_eq!(held.len(), 2, "{held:?}");
@@ -1747,6 +1832,77 @@ mod tests {
     }
 
     #[test]
+    fn an_item_moves_in_whole_items_and_never_in_part() {
+        // **Craft ask 15**, from the designer's playtest: "items like meat
+        // should never have subnodes in the inventory. too many duplication
+        // glitches." A right-click halved a stack of meat by units, so one
+        // raw meat became 14 in the hand and 13 behind, and neither was meat
+        // any more.
+        const MEAT: MaterialId = MaterialId(9);
+        let item = |units: u32| Stack::new(MEAT, units);
+        let with_items = |main: Vec<Option<Stack>>| {
+            let mut inv = slots(main);
+            inv.items.insert(MEAT);
+            inv
+        };
+
+        // Three meat: a right-click takes two and leaves one — the larger
+        // half to the hand, in whole items.
+        let mut inv = with_items(vec![item(3 * UNITS_PER_BLOCK), None]);
+        assert!(inv.right_click("player:main", 0));
+        assert_eq!(
+            inv.grab.held.as_ref().expect("hand").units,
+            2 * UNITS_PER_BLOCK
+        );
+        assert_eq!(
+            at(&inv, "player:main", 0).expect("behind").units,
+            UNITS_PER_BLOCK
+        );
+        assert_eq!(inv.total_units(), u64::from(3 * UNITS_PER_BLOCK));
+
+        // One meat cannot be halved: the hand takes it whole.
+        let mut inv = with_items(vec![item(UNITS_PER_BLOCK), None]);
+        inv.right_click("player:main", 0);
+        assert_eq!(inv.grab.held.as_ref().expect("hand").units, UNITS_PER_BLOCK);
+        assert!(at(&inv, "player:main", 0).is_none());
+
+        // A right-click with meat held puts down ONE MEAT, not one unit.
+        let mut inv = with_items(vec![None, None]);
+        inv.grab.held = item(2 * UNITS_PER_BLOCK);
+        inv.right_click("player:main", 0);
+        assert_eq!(
+            at(&inv, "player:main", 0).expect("placed").units,
+            UNITS_PER_BLOCK
+        );
+        assert_eq!(inv.grab.held.as_ref().expect("hand").units, UNITS_PER_BLOCK);
+
+        // A mod's give and take move whole items too: of forty units of
+        // meat one meat goes in and thirteen come back; ten units is no
+        // meat to take and forty is one.
+        let mut inv = with_items(vec![None, None]);
+        let left = inv.insert_within("player:main", item(40).expect("stack"));
+        assert_eq!(left.map_or(0, |left| left.units), 40 - UNITS_PER_BLOCK);
+        assert_eq!(inv.total_units(), u64::from(UNITS_PER_BLOCK));
+        let mut inv = with_items(vec![item(3 * UNITS_PER_BLOCK), None]);
+        assert_eq!(
+            inv.take("player:main", StackKey::loose(MEAT), 10),
+            0,
+            "ten units is no meat"
+        );
+        assert_eq!(
+            inv.take("player:main", StackKey::loose(MEAT), 40),
+            UNITS_PER_BLOCK,
+            "forty units is one meat"
+        );
+
+        // And the same stack with nothing declared an item halves by the
+        // unit, as every block always has.
+        let mut inv = slots(vec![item(3 * UNITS_PER_BLOCK), None]);
+        inv.right_click("player:main", 0);
+        assert_eq!(inv.grab.held.as_ref().expect("hand").units, 41);
+    }
+
+    #[test]
     fn a_left_click_takes_places_merges_and_swaps() {
         // Take.
         let mut inv = slots(vec![stack(STONE, 30), None]);
@@ -1789,6 +1945,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         assert!(inv.shift_click("player:main", 0, "player:hotbar"));
         assert_eq!(
@@ -1824,6 +1981,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         inv.shift_click("player:main", 0, "player:hotbar");
         assert_eq!(
@@ -1957,6 +2115,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            items: std::collections::BTreeSet::new(),
         };
         inv.shift_click("player:main", 0, "player:hotbar");
         assert!(at(&inv, "player:main", 0).is_none(), "shift click");

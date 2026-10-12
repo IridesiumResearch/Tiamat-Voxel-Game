@@ -1044,6 +1044,12 @@ function game.register_view(spec) end
 ---    texture = "items/sword.png",
 ---}
 ---```
+---
+---**An item moves in whole items.** It has no cells, so a part of one means
+---nothing: in every inventory the engine holds, a right-click halves a stack of
+---it in whole items (the larger half to the hand), a right-click with a stack
+---held puts down one whole item, and `game.give`/`game.take` round to whole
+---items — 27 units each, exactly as 27 units of a block are one block.
 ---@param spec { id: string, name?: string, texture?: string, description?: string }
 ---@return integer material_id
 function game.register_item(spec) end
@@ -1746,7 +1752,10 @@ function game.inventory(player, view) end
 ---and brick.
 ---
 ---Returns false for a player who is not connected, or for a quantity of zero.
----An inventory never refuses for lack of room — it grows.
+---An inventory never refuses for lack of room — it grows. **An item
+---(`register_item`) goes in whole**: of forty units of meat one meat goes in
+---and thirteen come back in `left`, and `slot` refuses a part of an item
+---outright.
 ---@param player string A player UUID in hex.
 ---`slot` names ONE slot of the view, one-based, and then the stack goes in whole
 ---or not at all — an empty slot takes it, one holding the same thing with room
@@ -1861,7 +1870,8 @@ function game.heading(dx, dz) end
 ---the block, whose `material` and missing mask look like loose material's. A
 ---stack table `game.inventory` reported is a spec for the same stack. A cut of
 ---several is taken in whole items: asking for part of one takes the whole
----ones the request covers.
+---ones the request covers. So is an item (`register_item`): ten units of meat
+---is no meat taken, forty is one.
 ---@param player string A player UUID in hex.
 ---`slot` names ONE slot of the view, one-based, to take from that slot alone.
 ---@param spec { material: string|integer?, units: integer?, count: integer?, shape: integer?, cells: (string|integer)[]?, detail: string?, view: string?, slot: integer? }

@@ -20,6 +20,12 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **An item moves in whole items** (2026-10-12, Craft ask 15). A material
+  from `register_item` has no cells, so in every inventory the engine holds a
+  right-click halves a stack of it in whole items, a right-click with a stack
+  held puts down one whole item, and `game.give`/`game.take` round to whole
+  items (27 units). Nothing to do unless a mod handed out parts of an item
+  and relied on them.
 - **A tint on an entity** (2026-10-09, Life ask 21). `game.set_entity(id,
   { tint = { r, g, b } })` colours a creature's figure until changed;
   `tint_ticks` makes it a flash eased back out by the engine — the hit flash,

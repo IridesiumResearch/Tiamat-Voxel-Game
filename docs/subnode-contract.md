@@ -1418,6 +1418,18 @@ Breaking a block yields:
   material, and a whole material is never loose in part: the arithmetic still
   has no exceptions, because 27 went in and 27 come out.
 
+**An item moves in whole items** (added 2026-10-12, Craft ask 15). A material
+registered with `register_item` — not placeable — has no cells, so a part of
+one means nothing: in every inventory the engine holds, a right-click halves a
+stack of it in whole items (the larger half to the hand), a right-click with a
+stack held puts down one whole item, a merge moves whole items, and a mod's
+`give` and `take` round to whole items (forty units of meat is one meat given
+and thirteen handed back; ten units is no meat taken). Loose material and a
+cut of one material still move by the unit, and a cut of several by the item
+(§9.1 rule 7). The arithmetic still has no exceptions: it is the grain that
+differs, and 27 of an item's units are one item exactly as 27 of a block's are
+one block.
+
 **Output order is ascending `MaterialId`, always.** Drop order is observable — it
 decides which stack an almost-full inventory keeps — so it must not depend on
 cell iteration order or anything else that could differ between machines running
