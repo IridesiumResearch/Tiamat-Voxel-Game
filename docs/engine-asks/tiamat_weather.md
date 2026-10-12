@@ -12,12 +12,50 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W34 and W35, filed 2026-10-12. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W36, filed 2026-10-12; W34 and W35, filed 2026-10-12. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 
 
+
+## W36. A rain puddle draws as a full block of water (2026-10-12)
+
+**Seen.** The designer, playing 0.4.0: "rain puddles need to puddle out.
+They just sit as blocks of water now and it looks weird." Asked what they
+see: whole cubes, or nearly, of water standing on the ground — not a thin
+slab, not square patches.
+
+**What Weather writes.** `game.set_fluid(pos, { fluid =
+"tiamat_weather:rainwater", volume = 3 or 4 })` into the open block over a
+whole block of ground, one sampled column in 32 while it rains
+(`ground.lua`). The fluid is registered like World's water — its block is
+`transparent = true`, `tick_rate = 2` — plus `evaporates = 100`,
+`opacity = 0.35`, `washes = false`. Three or four cells should draw as a
+slab under a sixth of a block (`mesher.rs`: height = depth × FULL_BLOCK /
+27), spreading by rule 2 into neighbours of a cell or two and evaporating.
+
+**Leads, unconfirmed.** The mesher fills every free cell of a wet block with
+the fluid's material and shapes the water only by pulling surface vertices
+down to the corner-averaged height (`from_chunk_with_fluid`, the
+`SubNodeGrid::surface_at` note), so a lone wet block whose corners are not
+pulled down would be a full cube. Candidates: a lone block whose four
+neighbours are all open dry air (every corner average leans to zero, which
+is the opposite of a cube unless the pull-down is skipped); the shell /
+skirt pass (`depth` None reads as dry but is filled whole); the transparent
+blended pass drawing the filled cells as glass rather than through the fluid
+quads; or the 0.4.0 fluid-tick change. Rivers, where blocks brim, would
+hide all four.
+
+**Why the mod cannot.** How a wet block is drawn is the client's; Weather
+writes three cells and nothing about their shape.
+
+**Ask.** A block holding a few cells of a fluid, alone on level open ground,
+draws as the thin slab its volume says, sloping to nothing at its edges, in
+every lighting mode. Gate: 1, 3 and 9 cells of a transparent-material fluid
+set into one open block over flat ground draw at about 1/27, 3/27 and 9/27
+of a block, and the same three cells spread over three blocks draw as a
+film.
 ## W35. A schematic stamped at run time (2026-10-12)
 
 **Seen.** The designer asked for a crashed ship, built "using schematics", at
