@@ -410,6 +410,9 @@ struct Cover<'a> {
     take: Option<&'a super::density::Density>,
     /// The world seed `take` is evaluated with.
     seed: u64,
+    /// The materials a body walks through, sorted: not ground for a run
+    /// (Contract §5.1; World ask 46).
+    passable: &'a [u16],
     /// The chunk's corner, in world blocks.
     origin: [i32; 3],
     /// `take`, evaluated over one block's 27 cells.
@@ -1322,6 +1325,15 @@ impl ChunkBuffer {
     /// neighbouring chunk is not available at generation. One row in
     /// forty-eight.
     ///
+    /// **A passable cell is not ground** (World ask 46). `passable` is the
+    /// materials a body walks through, sorted — every plant the mods lay as
+    /// cover — and a run stands only on a cell whose material collides. A run
+    /// this call wrote was never ground for another; a run an EARLIER call
+    /// wrote was, and every biome lays its grass, its flowers and its plants
+    /// in separate calls, so ferns stood on monstera and wheat on grass, some
+    /// 350 cells in 2,880 chunks. "No ground cover should grow on other
+    /// ground cover."
+    ///
     /// # Errors
     ///
     /// [`BufferError`] if `take` cannot be evaluated.
@@ -1331,6 +1343,7 @@ impl ChunkBuffer {
         cells: u32,
         take: Option<&super::density::Density>,
         seed: u64,
+        passable: &[u16],
     ) -> Result<(), BufferError> {
         // **A run taller than a block is a different plant, and says so by
         // being taller than a block.** Up to three cells it stays where it
@@ -1362,6 +1375,7 @@ impl ChunkBuffer {
             may_carry: cells > SUBNODES_PER_AXIS,
             take,
             seed,
+            passable,
             origin: [
                 self.pos.x * CHUNK_BLOCKS as i32,
                 self.pos.y * CHUNK_BLOCKS as i32,
@@ -1416,9 +1430,12 @@ impl ChunkBuffer {
                 }
             }
         }
-        // The bases: empty cells standing on an occupied one. Read BEFORE
-        // anything is written, so a run this call writes is never the ground
-        // for another.
+        // The bases: empty cells standing on GROUND. Read BEFORE anything is
+        // written, so a run this call writes is never the ground for another
+        // — and a passable cell, which is what an earlier call's cover is, is
+        // not ground either (World ask 46): a run stands only on a cell a body
+        // would stop at. An occupied cell that is not ground is still not
+        // empty, so nothing is written over it.
         let mut bases: [Option<u32>; CELL_COLUMNS] = [None; CELL_COLUMNS];
         let mut any = false;
         for cz in 0..SUBNODES_PER_AXIS {
@@ -1426,12 +1443,13 @@ impl ChunkBuffer {
                 let column = (cz * SUBNODES_PER_AXIS + cx) as usize;
                 let mut under = below[column];
                 for cy in 0..SUBNODES_PER_AXIS {
-                    let here = pass.block_cells[subnode_index(cx, cy, cz)] != MaterialId::AIR;
-                    if !here && under && bases[column].is_none() {
+                    let cell = pass.block_cells[subnode_index(cx, cy, cz)];
+                    let occupied = cell != MaterialId::AIR;
+                    if !occupied && under && bases[column].is_none() {
                         bases[column] = Some(cy);
                         any = true;
                     }
-                    under = here;
+                    under = occupied && pass.passable.binary_search(&cell.0).is_err();
                 }
                 below[column] = under;
             }
@@ -3101,7 +3119,7 @@ mod tests {
         // each of them.
         const ALLIUM: MaterialId = MaterialId(11);
         let mut buffer = sloped_ground();
-        buffer.fill_cover(ALLIUM, 6, None, 7).expect("cover");
+        buffer.fill_cover(ALLIUM, 6, None, 7, &[]).expect("cover");
 
         let mut crossings = 0;
         let mut tallest = 0;
@@ -3155,7 +3173,7 @@ mod tests {
                 buffer.set_block(LocalBlock::new(x, 2, z), STONE);
             }
         }
-        buffer.fill_cover(IVY, 9, None, 7).expect("cover");
+        buffer.fill_cover(IVY, 9, None, 7, &[]).expect("cover");
 
         let block = LocalBlock::new(4, 1, 4);
         for cy in 0..SUBNODES_PER_AXIS {
@@ -3173,6 +3191,95 @@ mod tests {
     }
 
     #[test]
+    fn cover_never_stands_on_a_passable_cell_another_call_wrote() {
+        // **World ask 46**, from the designer's playtest: "grass should not
+        // grow on bushes or flowers, only ground; no ground cover should grow
+        // on other ground cover." A run this call wrote was never ground for
+        // another; a run an EARLIER call wrote was, and every biome lays each
+        // of its covers in its own call.
+        const GRASS: MaterialId = MaterialId(9);
+        const FLOWER: MaterialId = MaterialId(10);
+
+        // Grass on the west half only, so the east half is bare ground the
+        // flowers can still take: an earlier call's cover everywhere would
+        // leave the passable rule nothing to show but an empty chunk.
+        let planted = || {
+            let mut buffer = sloped_ground();
+            buffer.fill_cover(GRASS, 1, None, 7, &[]).expect("cover");
+            for z in 0..CHUNK_BLOCKS {
+                for y in 0..CHUNK_BLOCKS {
+                    for x in CHUNK_BLOCKS / 2..CHUNK_BLOCKS {
+                        let local = LocalBlock::new(x, y, z);
+                        for cell in 0..SUBNODES_PER_BLOCK {
+                            let (cx, cy, cz) = crate::block::subnode_offset(cell);
+                            if buffer.get_subnode(local, cx, cy, cz) == GRASS {
+                                buffer.set_subnode(local, cx, cy, cz, MaterialId::AIR);
+                            }
+                        }
+                    }
+                }
+            }
+            buffer
+        };
+        let flowers_on = |buffer: &ChunkBuffer| {
+            let (mut flowers, mut on_grass) = (0, 0);
+            for z in 0..CHUNK_BLOCKS {
+                for y in 0..CHUNK_BLOCKS {
+                    for x in 0..CHUNK_BLOCKS {
+                        let local = LocalBlock::new(x, y, z);
+                        for cell in 0..SUBNODES_PER_BLOCK {
+                            let (cx, cy, cz) = crate::block::subnode_offset(cell);
+                            if buffer.get_subnode(local, cx, cy, cz) != FLOWER {
+                                continue;
+                            }
+                            flowers += 1;
+                            if under(buffer, local, cx, cy, cz) == Some(GRASS) {
+                                on_grass += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            (flowers, on_grass)
+        };
+
+        // The control: told nothing is passable, the flowers stand on the
+        // grass as they always did.
+        let mut buffer = planted();
+        buffer.fill_cover(FLOWER, 2, None, 7, &[]).expect("cover");
+        let (flowers, on_grass) = flowers_on(&buffer);
+        assert!(
+            on_grass > 0,
+            "the control grew no flower on grass ({flowers} flowers)"
+        );
+
+        // Told the grass is passable, none does — and the bare half still
+        // flowers.
+        let mut buffer = planted();
+        buffer
+            .fill_cover(FLOWER, 2, None, 7, &[GRASS.0])
+            .expect("cover");
+        let (flowers, on_grass) = flowers_on(&buffer);
+        assert_eq!(on_grass, 0, "a flower stood on grass");
+        assert!(flowers > 0, "no flower grew on the bare half");
+        // And the grass is untouched: a passable cell is not ground, and it
+        // is not empty either.
+        let mut grass = 0;
+        for z in 0..CHUNK_BLOCKS {
+            for y in 0..CHUNK_BLOCKS {
+                for x in 0..CHUNK_BLOCKS {
+                    let local = LocalBlock::new(x, y, z);
+                    for cell in 0..SUBNODES_PER_BLOCK {
+                        let (cx, cy, cz) = crate::block::subnode_offset(cell);
+                        grass += u32::from(buffer.get_subnode(local, cx, cy, cz) == GRASS);
+                    }
+                }
+            }
+        }
+        assert!(grass > 0, "the grass was written over");
+    }
+
+    #[test]
     fn cover_stands_on_the_ground_inside_one_block_and_is_never_stacked() {
         // Every cover cell either stands on ground, or stands on a cover cell
         // that stands on ground — and a cover cell at the bottom of a block
@@ -3182,7 +3289,7 @@ mod tests {
         // case both occur.
         const GRASS: MaterialId = MaterialId(9);
         let mut buffer = sloped_ground();
-        buffer.fill_cover(GRASS, 2, None, 7).expect("cover");
+        buffer.fill_cover(GRASS, 2, None, 7, &[]).expect("cover");
 
         let (mut singles, mut doubles, mut total) = (0, 0, 0);
         for z in 0..CHUNK_BLOCKS {
@@ -3245,7 +3352,7 @@ mod tests {
         for held in [MaterialId::AIR, STONE] {
             let mut buffer = ChunkBuffer::new(origin(), held);
             let before = buffer.clone();
-            buffer.fill_cover(GRASS, 2, None, 7).expect("cover");
+            buffer.fill_cover(GRASS, 2, None, 7, &[]).expect("cover");
             assert_eq!(
                 buffer, before,
                 "cover changed a chunk made entirely of one material"
@@ -3257,7 +3364,7 @@ mod tests {
         // surface, and its top cell grows a run.
         let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
         buffer.set_block(LocalBlock::new(5, 5, 5), STONE);
-        buffer.fill_cover(GRASS, 2, None, 7).expect("cover");
+        buffer.fill_cover(GRASS, 2, None, 7, &[]).expect("cover");
         assert_eq!(
             buffer.get_subnode(LocalBlock::new(5, 6, 5), 1, 0, 1),
             GRASS,
@@ -3278,7 +3385,9 @@ mod tests {
         ])
         .expect("compile");
         let mut buffer = sloped_ground();
-        buffer.fill_cover(GRASS, 2, Some(&take), 7).expect("cover");
+        buffer
+            .fill_cover(GRASS, 2, Some(&take), 7, &[])
+            .expect("cover");
 
         let mut west = 0;
         for z in 0..CHUNK_BLOCKS {
@@ -3308,7 +3417,7 @@ mod tests {
         }
         // Carve the bottom cell layer of the upper block: a one-cell gap.
         buffer.set_subnode(LocalBlock::new(5, 4, 5), 1, 0, 1, MaterialId::AIR);
-        buffer.fill_cover(GRASS, 2, None, 7).expect("cover");
+        buffer.fill_cover(GRASS, 2, None, 7, &[]).expect("cover");
         assert_eq!(
             buffer.get_subnode(LocalBlock::new(5, 4, 5), 1, 0, 1),
             GRASS,

@@ -20,6 +20,11 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A cover never stands on a passable cell** (2026-10-12, World ask 46).
+  `buf:fill_cover` takes a cell whose material is `passable` as neither
+  ground nor empty, so one call's grass is not the next call's floor and is
+  not written over. A mod that cut earlier covers out of later takes by hand
+  can stop.
 - **An item moves in whole items** (2026-10-12, Craft ask 15). A material
   from `register_item` has no cells, so in every inventory the engine holds a
   right-click halves a stack of it in whole items, a right-click with a stack

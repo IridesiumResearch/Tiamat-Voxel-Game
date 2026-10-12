@@ -238,6 +238,9 @@ function ChunkBuffer:fill_layers(depth, code, layers) end
 ---buf:fill_cover(allium, { cells = 6, take = rare })   -- two blocks tall
 ---```
 ---@param material integer
+---**A passable cell is not ground** (2026-10-12). A run stands only on a cell
+---whose material collides, so an earlier call's grass, flowers or plants —
+---every one of them `passable` — are never grown on, and never written over.
 ---@param options table? `{ cells = 1..9, take = Tiamat.Density }`
 function ChunkBuffer:fill_cover(material, options) end
 

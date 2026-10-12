@@ -703,6 +703,9 @@ struct BufferHandle {
     /// shape, as a player's placement does; the area fills are terrain and
     /// take the material as it is named. Read once per chunk, like `fluids`.
     shapes: BTreeMap<u16, u32>,
+    /// The passable materials, sorted: what a cover run will not stand on
+    /// (`ChunkBuffer::fill_cover`; World ask 46). Read once per chunk too.
+    passable: Vec<u16>,
 }
 
 impl BufferHandle {
@@ -988,11 +991,16 @@ impl BufferHandle {
                             cells,
                             Some(&density.density),
                             seed,
+                            &this.passable,
                         )
                     }
-                    None => this
-                        .buffer
-                        .fill_cover(MaterialId(material), cells, None, seed),
+                    None => this.buffer.fill_cover(
+                        MaterialId(material),
+                        cells,
+                        None,
+                        seed,
+                        &this.passable,
+                    ),
                 }
                 .map_err(|err| mlua::Error::external(err.to_string()))?;
                 Ok(())
@@ -1510,6 +1518,34 @@ impl MluaVm {
                 (shape != crate::block::OCCUPANCY_FULL).then_some((id, shape))
             })
             .collect()
+    }
+
+    /// The materials a body walks through, sorted by id: what a cover run
+    /// will not stand on (World ask 46). Read per chunk like the shapes, for
+    /// the reason the fluids are.
+    fn passable_materials(&self) -> Vec<u16> {
+        let (Ok(blocks), Ok(rules)) = (
+            self.lua.named_registry_value::<Table>("tiamat.blocks"),
+            self.lua.named_registry_value::<Table>("tiamat.block_rules"),
+        ) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<u16> = blocks
+            .pairs::<String, u16>()
+            .filter_map(Result::ok)
+            .filter(|(name, _)| {
+                rules
+                    .get::<Option<Table>>(name.as_str())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|entry| {
+                        entry.get::<Option<bool>>("passable").ok().flatten() == Some(true)
+                    })
+            })
+            .map(|(_, id)| id)
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     #[allow(
@@ -3478,6 +3514,7 @@ impl ScriptVm for MluaVm {
                 world_seed,
                 fluids,
                 shapes: self.whole_shapes(),
+                passable: self.passable_materials(),
             })
             .map_err(|err| self.vm_error(&err))?;
 
@@ -15023,6 +15060,83 @@ mod tests {
         );
         assert!(seed_from_lua(&Value::Number(0.5)).is_err());
         assert!(seed_from_lua(&Value::Nil).is_err());
+    }
+
+    #[test]
+    fn a_cover_laid_by_a_later_call_does_not_stand_on_a_passable_one() {
+        // **World ask 46, through the registry.** `ChunkBuffer::fill_cover`
+        // is told the passable materials by the buffer handle, which reads
+        // them from what `register_block` recorded — the half the buffer's
+        // own test cannot see. Grass on every surface cell, then flowers:
+        // with the grass passable the flowers find no ground at all and the
+        // grass is untouched; with it not (the control) they stand on it.
+        fn generate(passable: &str) -> (crate::Chunk, [u16; 3]) {
+            let mut vm = vm();
+            load(
+                &mut vm,
+                "meadow",
+                &format!(
+                    "rock = game.register_block{{ id = \"rock\" }}\n\
+                     grass = game.register_block{{ id = \"grass\"{passable} }}\n\
+                     flower = game.register_block{{ id = \"flower\", passable = true }}\n\
+                     game.register_on_generate(function(buf, pos)\n\
+                     \x20   buf:fill_below_heightmap(game.flat_heightmap(8), rock)\n\
+                     \x20   buf:fill_cover(grass, {{ cells = 1 }})\n\
+                     \x20   buf:fill_cover(flower, {{ cells = 2 }})\n\
+                     end)"
+                ),
+            )
+            .expect("load");
+            vm.freeze().expect("freeze");
+            vm.set_world_seed(7);
+            let chunk = vm
+                .generate_chunk(
+                    crate::domain::OVERWORLD,
+                    7,
+                    crate::ChunkPos::new(0, 0, 0),
+                    MaterialId::AIR,
+                )
+                .expect("generate")
+                .0;
+            let env = vm.environment("meadow").expect("env");
+            let id = |name: &str| env.get::<u16>(name).expect("a registered id");
+            (chunk, [id("rock"), id("grass"), id("flower")])
+        }
+        let (planted, [rock, grass, flower]) = generate(", passable = true");
+        let (control, _) = generate("");
+        let cells = |chunk: &crate::Chunk| {
+            let mut tally: std::collections::BTreeMap<u16, usize> =
+                std::collections::BTreeMap::new();
+            for index in 0..crate::BLOCKS_PER_CHUNK {
+                let local = crate::coords::LocalBlock::from_index(index);
+                let view = chunk.get_block_local(local);
+                for cell in 0..crate::block::SUBNODES_PER_BLOCK {
+                    let (x, y, z) = crate::block::subnode_offset(cell);
+                    let material = view.subnode_at(x, y, z);
+                    if !material.is_air() {
+                        *tally.entry(material.get()).or_default() += 1;
+                    }
+                }
+            }
+            tally
+        };
+        let planted = cells(&planted);
+        let control = cells(&control);
+        assert!(planted.get(&rock).copied().unwrap_or(0) > 0, "no ground");
+        assert_eq!(
+            planted.get(&grass),
+            control.get(&grass),
+            "the grass should be the same either way"
+        );
+        assert_eq!(
+            planted.get(&flower).copied().unwrap_or(0),
+            0,
+            "with the grass passable the flowers have no ground: {planted:?}"
+        );
+        assert!(
+            control.get(&flower).copied().unwrap_or(0) > 0,
+            "the control grew no flowers on the grass: {control:?}"
+        );
     }
 
     #[test]

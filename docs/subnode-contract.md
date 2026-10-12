@@ -569,6 +569,13 @@ permit and which reads as a bug.
 written, so a run never stands on a run. Without this rule a two-cell run would
 seed a further run above it on the next block, and grass would climb.
 
+**Nor is anybody else's cover** (added 2026-10-12, World ask 46). A passable
+cell is not ground: a run stands only on a cell whose material collides (§2).
+Every plant the mods lay as cover is `passable`, and every biome lays its
+grass, its flowers and its plants in separate calls, so without this rule an
+earlier call's cover was ground to the next — ferns on monstera, wheat on
+grass. A passable cell is not empty either, so a run never writes over one.
+
 Two consequences worth stating because they are visible:
 
 - A block holding two surfaces at once — a one-cell shelf — grows cover on the

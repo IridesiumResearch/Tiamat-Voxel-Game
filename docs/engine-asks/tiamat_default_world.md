@@ -32,7 +32,14 @@ fills: half of all new worlds were dirt with no biome claim, with air holes
 and solid boxes. `generate.lua`'s float branch in `seed_int` no longer runs
 and can go.
 
-## 46. A cover stands on another call's cover (2026-10-12)
+## 46. A cover stands on another call's cover (2026-10-12): LANDED 2026-10-12 (engine)
+
+**From the engine, 2026-10-12.** As asked: in `fill_cover` a passable cell is
+not ground — a run stands only on a cell whose material collides — and it is
+not empty either, so a run never writes over one. The buffer is told the
+passable materials when it is made, from the registry, so nothing changes at
+the call. Sub-Node Contract §5.1 carries the rule. `shape.exclusive_takes` can
+go.
 
 **Seen.** The designer's playtest: "grass should not grow on bushes or
 flowers, only ground; no ground cover should grow on other ground cover."
