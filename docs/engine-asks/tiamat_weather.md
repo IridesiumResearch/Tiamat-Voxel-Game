@@ -12,11 +12,50 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W34 and W35, filed 2026-10-12. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 
+
+## W35. A schematic stamped at run time (2026-10-12)
+
+**Seen.** The designer asked for a crashed ship, built "using schematics", at
+the end of a rainbow. A rainbow comes long after its ground was generated,
+and `game.schematic` is stamped only by `buf:scatter` inside a generator, so
+Weather builds the wreck from a list in the schematic's own shape
+(`{ dx, dy, dz, material, mask }`) written block by block through its paced
+edit queue (`wreck.lua`). `game.plans.stamp` paces a build but can only
+stamp what `capture` took from the world.
+
+**Ask.** `game.stamp_schematic(schematic, pos, { domain?, turn? })`: the
+schematic written at `pos` as the scatter writes it (a merge write by cell),
+paced across ticks as `plans.stamp` is, answering "accepted"; `turn` 0..3
+quarter turns about the vertical, masks turned with it. Then a structure
+built once at load serves a generator and an event alike, and Weather's
+list goes. Gate: a schematic of a few hundred blocks stamped beside a player
+lands whole within a few seconds without a tick over budget, the same as
+`buf:scatter` would have written it there, at all four turns.
+
+## W34. Clouds in Simple are white whatever the sky (2026-10-12)
+
+**Seen.** The designer: "the clouds in Simple lighting mode are bright white
+and should be a faded darker colour to match the sky." In `clouds.wgsl` mode
+0 shades a hit by its face alone, `colour * (0.72 + 0.28 * up)`, with no sun
+colour, no sky colour and no light intensity, so at night, at dusk and under
+a storm the deck stays daytime white against a dark sky. (Storm `darkness`
+still greys it.)
+
+**Why the mod cannot.** `colour` is registered once and is the lit colour
+in every mode; darkening it for Simple would darken Classic and Beautiful.
+
+**Ask.** In Simple, the same cheap face shading, then multiplied by the
+frame's light (`sun_lit`'s intensity, so night and storm dim it) and mixed a
+share towards the sky colour by distance, as the other modes' haze does —
+no extra field lookups, so Simple stays the mode that pays for nothing. Gate:
+in Simple the deck at noon reads as today, at midnight as a dim blue-grey
+near the night sky, and at dusk takes the dusk's tint; the other modes are
+unchanged.
 ## W33. Rain vanishes in front of the sky (2026-10-05): LANDED 2026-10-07 (engine 9d248a3a), awaiting the eye
 
 **Seen.** The designer: "rain renders on top of the clouds but does not
