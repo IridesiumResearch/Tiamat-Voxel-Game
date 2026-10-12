@@ -131,6 +131,7 @@ fn perception(c: &mut Criterion) {
         b.iter(|| {
             black_box(path::search(
                 &open,
+                &[],
                 black_box(BlockPos::new(2, 0, 2)),
                 black_box(BlockPos::new(18, 0, 2)),
                 &Options::default(),
@@ -142,6 +143,7 @@ fn perception(c: &mut Criterion) {
         b.iter(|| {
             black_box(path::search(
                 &open,
+                &[],
                 black_box(BlockPos::new(2, 0, 2)),
                 black_box(BlockPos::new(66, 0, 2)),
                 &Options::default(),
@@ -155,6 +157,7 @@ fn perception(c: &mut Criterion) {
         b.iter(|| {
             black_box(path::search(
                 &sealed,
+                &[],
                 black_box(BlockPos::new(2, 0, 2)),
                 black_box(BlockPos::new(80, 0, 2)),
                 &Options::default(),
@@ -167,6 +170,7 @@ fn perception(c: &mut Criterion) {
         b.iter(|| {
             black_box(path::search(
                 &sealed,
+                &[],
                 black_box(BlockPos::new(2, 0, 2)),
                 black_box(BlockPos::new(80, 0, 2)),
                 &Options {
