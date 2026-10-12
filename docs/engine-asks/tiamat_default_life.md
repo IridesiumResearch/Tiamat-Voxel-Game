@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-09: nothing.** 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-12: 22** (an operator's flight a mod cannot withhold). 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
@@ -41,6 +41,31 @@ camera-facing row centred over an entity's head that FOLLOWS it, latest-state
 per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
+
+## 22. An operator flies whatever the mod says (2026-10-12)
+
+**Wanted.** In a survival world (Default, Adventure) nobody flies, not even
+an admin, unless they are the world's owner and have taken their powers
+with `powers on`, which the whole server is told (modes.lua). The designer
+asked for exactly that: flying is a cheat in survival, and an admin who
+uses it should have to say so in front of everybody.
+
+**Why the mod can't.** `game.set_player_abilities{ fly }` is OR-ed with the
+operator list: `PlayerSim::abilities` is `fly: granted.fly || operator`, and
+`may_fly` on the network thread answers true for any operator before it
+looks at the grant (`transport/endpoint.rs`). So the mod can grant flight
+and can never withhold it from an operator, and every admin can press N in
+a survival world. Teleporting is the mod's own command and is shut; N is
+the engine's.
+
+**Smallest change.** Let a mod's grant say no to an operator too, for
+example `game.set_player_abilities(uuid, { fly = false, operator_fly =
+false })`: with `operator_fly = false` the grant is the whole answer and
+the operator list is not consulted for that player. Left out, it is as
+now, so no other mod changes. Both places that decide (`abilities` and
+`may_fly`) read the same field, as they read the same grant today. Life
+would send `operator_fly = false` to every player in a survival world, and
+`fly = true` to the owner with their powers taken.
 
 ## 21. A creature cannot be tinted (2026-10-09): LANDED 2026-10-09 (engine, the commit after 311c4b72)
 
