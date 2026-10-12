@@ -364,8 +364,46 @@ impl Dialogs {
         if !open.is_empty() {
             paint_cursor_stack(ctx, views, icons);
         }
+        // **A click outside every screen with a stack in hand drops it** (UI
+        // ask 21), reported to the topmost screen — the one the stack was
+        // picked up on, for every screen there is. Only with something held:
+        // a click on nothing with an empty cursor stays a click on nothing.
+        if let Some(form) = open.keys().next_back()
+            && views.values().any(|contents| contents.held.is_some())
+            && let Some(click) = click_outside(ctx)
+        {
+            raised.push(Raised {
+                form: form.clone(),
+                event: DialogEvent::Dropped { click },
+            });
+        }
         raised
     }
+}
+
+/// The click that landed on no screen this frame, if one did.
+///
+/// Left drops all of it and right one grain, with shift the unit — the same
+/// reading a slot gives the buttons, so a player learns one set of gestures.
+/// A shift-left outside is a left: there is no other view to move to.
+fn click_outside(ctx: &egui::Context) -> Option<Click> {
+    if ctx.is_pointer_over_egui() {
+        return None;
+    }
+    ctx.input(|input| {
+        let shift = input.modifiers.shift;
+        if input.pointer.primary_clicked() {
+            Some(Click::Left)
+        } else if input.pointer.secondary_clicked() {
+            Some(if shift {
+                Click::ShiftRight
+            } else {
+                Click::Right
+            })
+        } else {
+            None
+        }
+    })
 }
 
 /// Draws the stack on the player's cursor, under the pointer.
@@ -1778,7 +1816,14 @@ fn paint_slot(
         let shift = ui.input(|i| i.modifiers.shift);
         Some(if shift { Click::ShiftLeft } else { Click::Left })
     } else if response.secondary_clicked() {
-        Some(Click::Right)
+        // Shift makes the split gesture the unit one (UI ask 21), where a
+        // mod has made the plain one move whole blocks.
+        let shift = ui.input(|i| i.modifiers.shift);
+        Some(if shift {
+            Click::ShiftRight
+        } else {
+            Click::Right
+        })
     } else {
         None
     };
@@ -2325,17 +2370,30 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> Vec<Raised> {
-            self.run(events).0
+            self.run(events, egui::Modifiers::default()).0
+        }
+
+        fn frame_with(
+            &mut self,
+            events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+        ) -> Vec<Raised> {
+            self.run(events, modifiers).0
         }
 
         /// One frame, and every face it drew from the atlas.
-        fn run(&mut self, events: Vec<egui::Event>) -> (Vec<Raised>, Vec<egui::Mesh>) {
+        fn run(
+            &mut self,
+            events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+        ) -> (Vec<Raised>, Vec<egui::Mesh>) {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1280.0, 720.0),
                 )),
                 events,
+                modifiers,
                 ..Default::default()
             };
             let mut raised = Vec::new();
@@ -2375,7 +2433,7 @@ mod tests {
         /// The middle of the cube on screen, from the faces it drew — which is
         /// on the view axis, so a click there reaches the nearest corner cell.
         fn centre(&mut self) -> egui::Pos2 {
-            let (_, faces) = self.run(Vec::new());
+            let (_, faces) = self.run(Vec::new(), egui::Modifiers::default());
             let mut bounds = egui::Rect::NOTHING;
             for face in &faces {
                 for vertex in &face.vertices {
@@ -2394,15 +2452,28 @@ mod tests {
         }
 
         fn click_with(&mut self, at: egui::Pos2, which: egui::PointerButton) -> Vec<Raised> {
+            self.click_held(at, which, egui::Modifiers::default())
+        }
+
+        fn shift_click_with(&mut self, at: egui::Pos2, which: egui::PointerButton) -> Vec<Raised> {
+            self.click_held(at, which, egui::Modifiers::SHIFT)
+        }
+
+        fn click_held(
+            &mut self,
+            at: egui::Pos2,
+            which: egui::PointerButton,
+            modifiers: egui::Modifiers,
+        ) -> Vec<Raised> {
             let button = |pressed| egui::Event::PointerButton {
                 pos: at,
                 button: which,
                 pressed,
-                modifiers: egui::Modifiers::default(),
+                modifiers,
             };
             self.frame(vec![egui::Event::PointerMoved(at)]);
-            self.frame(vec![egui::Event::PointerMoved(at), button(true)]);
-            let raised = self.frame(vec![button(false)]);
+            self.frame_with(vec![egui::Event::PointerMoved(at), button(true)], modifiers);
+            let raised = self.frame_with(vec![button(false)], modifiers);
             self.frame(Vec::new());
             raised
         }
@@ -2424,6 +2495,58 @@ mod tests {
                 .and_then(|local| local.turn.get("cut").copied())
                 .unwrap_or(0)
         }
+    }
+
+    #[test]
+    fn a_click_past_every_screen_with_a_stack_in_hand_drops_it() {
+        // **UI ask 21.** With a stack on the cursor, a click on no screen is
+        // a drop, reported to the topmost screen with the button: all of it
+        // on a left, one grain on a right, one unit with shift. A click on
+        // the screen is not, and neither is any click with an empty cursor.
+        let mut editor = Editor::new();
+        let outside = egui::pos2(4.0, 4.0);
+        let dropped = |raised: &[Raised]| -> Vec<Click> {
+            raised
+                .iter()
+                .filter_map(|raised| match raised.event {
+                    DialogEvent::Dropped { click } => Some(click),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Nothing in hand: nothing dropped.
+        assert_eq!(dropped(&editor.click(outside)), Vec::<Click>::new());
+
+        editor.views.insert(
+            "player:main".to_owned(),
+            ViewContents {
+                slots: Vec::new(),
+                held: Some(tiamat_core::proto::StackDef {
+                    material: 7,
+                    units: 54,
+                    shape: 0,
+                    detail: None,
+                    cells: Vec::new(),
+                }),
+            },
+        );
+        let raised = editor.click(outside);
+        assert_eq!(dropped(&raised), vec![Click::Left]);
+        assert_eq!(raised[0].form, "mod:screen", "told to the open screen");
+        assert_eq!(
+            dropped(&editor.click_with(outside, egui::PointerButton::Secondary)),
+            vec![Click::Right]
+        );
+        assert_eq!(
+            dropped(&editor.shift_click_with(outside, egui::PointerButton::Secondary)),
+            vec![Click::ShiftRight]
+        );
+
+        // On the screen itself — the sheet is centred in the window — the
+        // click is the screen's, not a drop.
+        let on_the_sheet = egui::pos2(640.0, 360.0);
+        assert_eq!(dropped(&editor.click(on_the_sheet)), Vec::<Click>::new());
     }
 
     #[test]
@@ -2597,7 +2720,7 @@ mod tests {
         let tiles = four_tiles();
         let tile_of = |material: u16| tiles.uv_of(material).expect("the atlas is up");
         let mut editor = Editor::of(several(two_with_a_corner_of_three(), 2), Some(four_tiles()));
-        let (_, faces) = editor.run(Vec::new());
+        let (_, faces) = editor.run(Vec::new(), egui::Modifiers::default());
         assert_eq!(
             faces.len(),
             27 * 3,

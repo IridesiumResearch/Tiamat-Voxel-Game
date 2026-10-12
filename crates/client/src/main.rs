@@ -784,8 +784,16 @@ impl Client {
                 // mouse-look, not asking to dig a hole under an unaimed
                 // crosshair — and that is a property of the window rather than
                 // of whatever `engine:dig` happens to be bound to.
+                // **Not while a screen is up.** A click past the sheet with
+                // a stack in hand drops it (UI ask 21), and with nothing in
+                // hand it is a click on nothing; neither is a request for
+                // mouse-look under an open inventory. Escape still closes
+                // the screen, and the one rule in `frame` hands the cursor
+                // back then.
                 if button == MouseButton::Left && pressed && !self.grabbed {
-                    self.grabbed = grab(window, true);
+                    if app.dialogs().is_empty() {
+                        self.grabbed = grab(window, true);
+                    }
                     return;
                 }
                 // The same rule for the mouse: a capture owns the button.

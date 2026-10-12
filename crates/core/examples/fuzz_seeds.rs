@@ -439,6 +439,26 @@ fn client_messages() -> Vec<Vec<u8>> {
             form: "core_ui:inventory".to_owned(),
             event: DialogEvent::Closed,
         },
+        // Protocol v89: the split by the unit, and a stack dropped outside
+        // the sheet by each click that drops one.
+        ClientMessage::DialogEvent {
+            form: "core_ui:inventory".to_owned(),
+            event: DialogEvent::Clicked {
+                view: "player:main".to_owned(),
+                index: 0,
+                click: Click::ShiftRight,
+            },
+        },
+        ClientMessage::DialogEvent {
+            form: "core_ui:inventory".to_owned(),
+            event: DialogEvent::Dropped { click: Click::Left },
+        },
+        ClientMessage::DialogEvent {
+            form: "core_ui:inventory".to_owned(),
+            event: DialogEvent::Dropped {
+                click: Click::ShiftRight,
+            },
+        },
         // Protocol v25, and a mask with every bit set above the block's
         // twenty-seven — the shape the validator has to refuse.
         ClientMessage::DialogEvent {

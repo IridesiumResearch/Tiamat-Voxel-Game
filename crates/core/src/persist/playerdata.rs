@@ -361,6 +361,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         }
     }

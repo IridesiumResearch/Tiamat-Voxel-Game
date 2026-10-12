@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 88;
+pub const PROTOCOL_VERSION: u32 = 89;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,12 @@ pub const PROTOCOL_VERSION: u32 = 88;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v89 (UI ask 21, whole blocks first and a stack dropped outside the sheet):
+// `Click::ShiftRight`, appended — the split-and-place gesture by the unit once
+// a mod has made the plain right-click move whole blocks
+// (`game.set_slot_grain`); and `DialogEvent::Dropped { click }`, appended — a
+// click outside every open screen while the cursor held a stack, which the
+// server takes off the cursor and reports to the screen's owner.
 // v88 (Life 21, a tint on an entity): `EntityDef` and `EntityDelta` carry
 // `tint`, the colour the figure is drawn in this tick — a mod's hit flash,
 // a frozen creature's blue. Appended to each.
@@ -1541,6 +1547,19 @@ pub enum DialogEvent {
         /// occupancy is `shape`. Empty from an editor of one material.
         cells: Vec<u16>,
     },
+    /// A click outside every open screen while the cursor held a stack
+    /// (protocol v89, UI ask 21).
+    ///
+    /// **Reported after the fact, as a slot click is.** The server has taken
+    /// what the click asked for off the cursor — all of it, one slot grain,
+    /// one unit — before the screen's owner hears, so the event describes a
+    /// stack that has left the player and asks nothing. What it becomes is
+    /// the mod's; a mod that does not claim it gets it put back.
+    Dropped {
+        /// Which click: left for all of it, right for one grain, shift-right
+        /// for one unit. A shift-left counts as a left.
+        click: Click,
+    },
 }
 
 /// How a slot was clicked.
@@ -1556,6 +1575,12 @@ pub enum Click {
     Right,
     /// Move the stack to the other view in one go.
     ShiftLeft,
+    /// Take half, or place one, **by the unit** (protocol v89).
+    ///
+    /// What [`Click::Right`] does where the plain gesture moves whole blocks —
+    /// a mod's `game.set_slot_grain(27)` — and the same thing where it does
+    /// not: the unit is the finest grain there is.
+    ShiftRight,
 }
 
 /// Which press a button had.
@@ -3604,7 +3629,7 @@ fn check_dialog_event(form: &str, event: &DialogEvent) -> Result<(), ProtocolErr
             check_len("dialog_text", text.len(), MAX_CHAT_BYTES)?;
         }
         DialogEvent::Clicked { view, .. } => check_len("view", view.len(), MAX_ID_BYTES)?,
-        DialogEvent::Closed => {}
+        DialogEvent::Closed | DialogEvent::Dropped { .. } => {}
     }
     Ok(())
 }
@@ -4889,6 +4914,13 @@ mod tests {
                 cells: Vec::new(),
             }),
             7
+        );
+        // Protocol v89, appended below that.
+        assert_eq!(
+            ordinal(&DialogEvent::Dropped {
+                click: Click::ShiftRight
+            }),
+            8
         );
     }
 

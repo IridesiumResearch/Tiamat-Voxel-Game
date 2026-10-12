@@ -1796,6 +1796,28 @@ function game.give(player, spec) end
 ---@param slots integer 1 to 256.
 function game.set_main_slots(slots) end
 
+---Makes a plain right-click deal in whole blocks. Registration window only,
+---and one grain for the server: a second mod naming a different one is an
+---error at load.
+---
+---Without this a right-click on a stack of loose material takes half of it
+---BY THE UNIT and a right-click with a stack held puts down one unit. With
+---`game.set_slot_grain(27)` the same clicks move whole blocks: a hundred
+---units of stone (3 blocks and 19 nodes) right-clicked takes two blocks to
+---the hand and leaves a block and the nineteen; a right-click with a stack
+---held puts down one block, or what is held when that is less. A cut of one
+---material then moves in whole cuts. **Shift with the right-click is the unit
+---gesture** — half by the unit, one unit down — so nothing a player could do
+---before is lost. Items and cuts of several materials move in whole items
+---whatever this says. `units` is the grain, 1 to 27; 27 is what a block game
+---wants.
+---
+---```lua
+---game.set_slot_grain(27)
+---```
+---@param units integer 1 to 27.
+function game.set_slot_grain(units) end
+
 ---What a player is holding: the stack in the hotbar slot they have selected.
 ---
 ---Returns nil for a player who is not connected or an empty slot, which are the
@@ -2062,14 +2084,25 @@ function game.close_dialog(spec) end
 ---  - `"toggled"` — `name`, `checked`
 ---  - `"slid"` — `name`, `value`
 ---  - `"chose"` — `name`, `index` (one-based)
----  - `"clicked"` — `view`, `index` (one-based), `click` ("left", "right", "shift_left")
+---  - `"clicked"` — `view`, `index` (one-based), `click` ("left", "right",
+---    "shift_left", "shift_right")
 ---  - `"chiselled"` — `name`, `shape` (the whole 27-bit mask), and `cells` (27
 ---    numeric ids, `0` for empty) from an editor of several materials
 ---  - `"closed"` — nothing else
+---  - `"dropped"` — `click` ("left", "right", "shift_right") and `stack`: the
+---    player clicked outside every open screen with a stack on the cursor,
+---    and this much of it has LEFT them — all of it on a left, one block (one
+---    whole item) on a right, one unit on a shift-right. `stack` is as
+---    `game.inventory` reports one (`material`, `units`, `shape`, `cells`,
+---    `detail`). What it becomes is yours — an item entity thrown along
+---    `facing`, a sale, nothing. **Return `true` to say you took it.** Return
+---    nothing and the engine puts it back on the cursor, so a screen that
+---    never thought about drops loses the player nothing.
 ---
 ---**Every one is a REQUEST, never a result.** A slot click says what the player
 ---did with the mouse; whether any item moves is the server's decision, taken
 ---against its own inventory. A client saying "I moved this" does not make it so.
+---A `"dropped"` is the one event with an answer the engine reads: `true`.
 ---
 ---**A button's `click` is which press it had**, and what each means is yours:
 ---ten for a click, one for a right-click, a stackful for a double. It is always
@@ -2078,7 +2111,7 @@ function game.close_dialog(spec) end
 ---coming without making every button wait to answer. So on `"double"`, do what
 ---is left of the larger thing rather than the whole of it again. A right-click
 ---presses a button; a mod that never reads `click` treats it as a press.
----@param callback fun(event: { player: string, form: string, kind: string, name: string?, text: string?, checked: boolean?, value: integer?, index: integer?, view: string?, click: string?, shape: integer?, cells: integer[]? })
+---@param callback fun(event: { player: string, form: string, kind: string, name: string?, text: string?, checked: boolean?, value: integer?, index: integer?, view: string?, click: string?, shape: integer?, cells: integer[]?, stack: table? }): boolean?
 function game.register_on_dialog_event(callback) end
 
 ---Registers a sound. Registration window only.

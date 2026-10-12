@@ -146,6 +146,66 @@ end)
     root
 }
 
+/// The shop again as a quarry: whole blocks are the grain
+/// (`game.set_slot_grain(27)`), a hundred units of loose ground are given on
+/// joining, and a stack dropped outside the sheet is marked and claimed.
+///
+/// A drop marks `y = 14` for a right-click of one block, `y = 16` for a
+/// shift-right of one unit and `y = 18` for a left of everything, each only
+/// when the stack it heard is the size the gesture means — so the mark is
+/// the assertion about the stack as well as about the click.
+fn write_quarry(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("shop");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"shop\"\nname = \"Shop\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("init.lua"),
+        r#"
+local ground = game.register_block{ id = "ground" }
+local counter = game.register_block{ id = "counter" }
+game.set_slot_grain(27)
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+game.register_tool{ id = "hand", brush = "block", speed_multiplier = 1.0, default = true }
+
+game.register_on_player_join(function(event)
+    game.give(event.player, { material = "shop:ground", units = 100 })
+    game.show_dialog{
+        player = event.player,
+        form = "till",
+        tree = {
+            type = "container", direction = "column", gap = 4, padding = 8,
+            children = {
+                { type = "item_grid", view = "player:main", columns = 9, count = 9 },
+            },
+        },
+    }
+end)
+
+game.register_on_dialog_event(function(event)
+    if event.kind ~= "dropped" then return end
+    local y = 0
+    if event.click == "right" and event.stack.units == 27 then y = 14
+    elseif event.click == "shift_right" and event.stack.units == 1 then y = 16
+    elseif event.click == "left" and event.stack.units == 26 then y = 18
+    end
+    if y > 0 then
+        game.set_block({ x = 0, y = y, z = 0 }, "shop:counter")
+    end
+    return true
+end)
+"#,
+    )
+    .expect("script");
+    root
+}
+
 fn start(name: &str, mods: PathBuf) -> ServerHandle {
     ServerHandle::start(&Settings {
         world_options: Vec::new(),
@@ -183,6 +243,30 @@ async fn join(server: &ServerHandle, name: &str) -> Bot {
     .expect("connect");
     bot.join(name).await.expect("join");
     bot
+}
+
+/// Receives view updates until the cursor holds `want` units (`None` for an
+/// empty hand), or gives up after a bounded number of them and answers what
+/// it holds then.
+///
+/// A drop is answered with the views as they now are, and the inventory's
+/// dirty pass sends them again a tick later: waiting for one update could
+/// read the stale one, so this waits for the hand itself.
+async fn until_held(bot: &mut Bot, want: Option<u32>) -> Option<u32> {
+    for _ in 0..8 {
+        let held = bot.held().map(|stack| stack.units);
+        if held == want {
+            return held;
+        }
+        if bot
+            .recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ViewUpdate { .. }))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    bot.held().map(|stack| stack.units)
 }
 
 /// A mod that registers a font and draws a label in it.
@@ -869,6 +953,239 @@ fn an_item_splits_and_is_put_down_in_whole_items_over_the_wire() {
             "one whole meat put down, not one unit"
         );
         assert_eq!(bot.held().map(|stack| stack.units), Some(27));
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
+#[test]
+fn a_right_click_moves_whole_blocks_once_a_mod_asks_and_shift_moves_units() {
+    // **UI ask 21, over the wire.** The unit test proves the arithmetic;
+    // this proves the server read the mod's grain and the new click reaches
+    // it: a hundred units right-clicked is two blocks in hand and a block and
+    // nineteen behind, a right-click down is one block, and shift+right on
+    // the slot is the unit gesture.
+    let server = start("grain", write_quarry("grain"));
+    block_on(async {
+        let mut bot = join(&server, "Quarrier").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+        let given = bot
+            .until_view("player:main", |slots| {
+                slots
+                    .first()
+                    .and_then(|slot| slot.as_ref())
+                    .is_some_and(|stack| stack.units == 100)
+            })
+            .await
+            .expect("the ground never arrived");
+        let ground = given[0].as_ref().expect("ground").material;
+
+        let click = |view: &str, index: u16, click: Click| DialogEvent::Clicked {
+            view: view.to_owned(),
+            index,
+            click,
+        };
+        bot.dialog_event("shop:till", click("player:main", 0, Click::Right))
+            .await
+            .expect("send");
+        let split = bot
+            .until_view("player:main", |slots| {
+                slots
+                    .first()
+                    .and_then(|slot| slot.as_ref())
+                    .is_some_and(|stack| stack.units < 100)
+            })
+            .await
+            .expect("the split never happened");
+        assert_eq!(
+            split[0].as_ref().map(|stack| stack.units),
+            Some(46),
+            "a block and nineteen nodes stay behind"
+        );
+        assert_eq!(
+            bot.held().map(|stack| (stack.material, stack.units)),
+            Some((ground, 54)),
+            "two whole blocks in the hand"
+        );
+
+        // One block down into the empty slot beside it.
+        bot.dialog_event("shop:till", click("player:main", 1, Click::Right))
+            .await
+            .expect("send");
+        let placed = bot
+            .until_view("player:main", |slots| {
+                slots.get(1).and_then(|slot| slot.as_ref()).is_some()
+            })
+            .await
+            .expect("nothing was put down");
+        assert_eq!(placed[1].as_ref().map(|stack| stack.units), Some(27));
+        assert_eq!(bot.held().map(|stack| stack.units), Some(27));
+
+        // Shift+right: one UNIT down.
+        bot.dialog_event("shop:till", click("player:main", 2, Click::ShiftRight))
+            .await
+            .expect("send");
+        let unit = bot
+            .until_view("player:main", |slots| {
+                slots.get(2).and_then(|slot| slot.as_ref()).is_some()
+            })
+            .await
+            .expect("no unit was put down");
+        assert_eq!(unit[2].as_ref().map(|stack| stack.units), Some(1));
+        assert_eq!(bot.held().map(|stack| stack.units), Some(26));
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
+#[test]
+fn a_stack_dropped_outside_the_sheet_leaves_the_player_and_reaches_the_mod() {
+    // **UI ask 21, the drop.** With two blocks in hand, a right-click outside
+    // takes one block off the cursor and the mod hears a stack of 27; a
+    // shift-right takes one unit; a left takes the rest. The mod claims each
+    // with `true`, so nothing comes back; the marks prove it heard the size
+    // each gesture means.
+    let server = start("drop", write_quarry("drop"));
+    block_on(async {
+        let mut bot = join(&server, "Dropper").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+        let counter = bot
+            .material_table()
+            .expect("a material table")
+            .into_iter()
+            .find(|entry| entry.name == "shop:counter")
+            .map(|entry| entry.id)
+            .expect("the mod registers a counter");
+        bot.until_view("player:main", |slots| {
+            slots
+                .first()
+                .and_then(|slot| slot.as_ref())
+                .is_some_and(|stack| stack.units == 100)
+        })
+        .await
+        .expect("the ground never arrived");
+        bot.dialog_event(
+            "shop:till",
+            DialogEvent::Clicked {
+                view: "player:main".to_owned(),
+                index: 0,
+                click: Click::Right,
+            },
+        )
+        .await
+        .expect("send");
+        bot.until_view("player:main", |slots| {
+            slots
+                .first()
+                .and_then(|slot| slot.as_ref())
+                .is_some_and(|stack| stack.units == 46)
+        })
+        .await
+        .expect("the split never happened");
+        assert_eq!(bot.held().map(|stack| stack.units), Some(54));
+
+        let drop = |click| DialogEvent::Dropped { click };
+        bot.dialog_event("shop:till", drop(Click::Right))
+            .await
+            .expect("send");
+        bot.expect_block(tiamat_core::BlockPos::new(0, 14, 0), counter, PATIENCE)
+            .await
+            .expect("the mod never heard a block dropped");
+        assert_eq!(
+            until_held(&mut bot, Some(27)).await,
+            Some(27),
+            "one block left the hand"
+        );
+
+        bot.dialog_event("shop:till", drop(Click::ShiftRight))
+            .await
+            .expect("send");
+        bot.expect_block(tiamat_core::BlockPos::new(0, 16, 0), counter, PATIENCE)
+            .await
+            .expect("the mod never heard a unit dropped");
+        assert_eq!(
+            until_held(&mut bot, Some(26)).await,
+            Some(26),
+            "one unit left the hand"
+        );
+
+        bot.dialog_event("shop:till", drop(Click::Left))
+            .await
+            .expect("send");
+        bot.expect_block(tiamat_core::BlockPos::new(0, 18, 0), counter, PATIENCE)
+            .await
+            .expect("the mod never heard the rest dropped");
+        assert_eq!(until_held(&mut bot, None).await, None, "the hand is empty");
+        // And the inventory kept only what was never dropped.
+        let left = bot.until_view("player:main", |_| true).await.expect("view");
+        let total: u32 = left.iter().flatten().map(|stack| stack.units).sum();
+        assert_eq!(total, 46, "the dropped blocks are gone from the player");
+
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
+#[test]
+fn a_drop_nobody_claims_stays_on_the_cursor() {
+    // **UI ask 21's safety rule.** The larder's mod has no dialog handler at
+    // all; a drop reaches nobody, and the stack is back on the cursor rather
+    // than gone — a held stack never disappears.
+    let server = start("unclaimed", write_larder("unclaimed"));
+    block_on(async {
+        let mut bot = join(&server, "Keeper").await;
+        bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ShowDialog { .. }))
+            .await
+            .expect("no dialog arrived");
+        bot.until_view("player:main", |slots| {
+            slots
+                .first()
+                .and_then(|slot| slot.as_ref())
+                .is_some_and(|stack| stack.units == 81)
+        })
+        .await
+        .expect("the meat never arrived");
+        bot.dialog_event(
+            "shop:till",
+            DialogEvent::Clicked {
+                view: "player:main".to_owned(),
+                index: 0,
+                click: Click::Left,
+            },
+        )
+        .await
+        .expect("send");
+        bot.until_view("player:main", |slots| {
+            slots.first().is_some_and(Option::is_none)
+        })
+        .await
+        .expect("the pickup never happened");
+        assert_eq!(bot.held().map(|stack| stack.units), Some(81));
+
+        bot.dialog_event("shop:till", DialogEvent::Dropped { click: Click::Left })
+            .await
+            .expect("send");
+        // The server answers a drop with the views as they now are, and the
+        // pickup's own dirty pass may still owe one update: two updates
+        // after the drop means at least one came from the drop.
+        for _ in 0..2 {
+            bot.recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::ViewUpdate { .. }))
+                .await
+                .expect("no view update after the drop");
+        }
+        assert_eq!(
+            bot.held().map(|stack| stack.units),
+            Some(81),
+            "still in hand"
+        );
+        let after = bot.views().get("player:main").cloned().unwrap_or_default();
+        assert!(after[0].is_none(), "and not back in the slot either");
 
         bot.disconnect().await;
     });

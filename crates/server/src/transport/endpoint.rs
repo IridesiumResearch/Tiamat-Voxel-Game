@@ -463,6 +463,10 @@ pub struct Shared {
     /// `None` is the view that grows, as it always has. Settled at start
     /// like the views beside it, because the registries are frozen.
     pub main_slots: Option<usize>,
+    /// The units a plain right-click splits and places loose material in,
+    /// from a mod's `game.set_slot_grain` (UI ask 21): one unless one asked.
+    /// Settled at start with `main_slots`, for the same reason.
+    pub slot_grain: u32,
 
     /// How each material resists a tool: its bare-handed seconds, and how
     /// strongly it imposes that on a block it is only part of.
@@ -2440,6 +2444,7 @@ impl Shared {
         let mut slots =
             tiamat_core::inventory::Slots::for_player_sized(self.main_slots, &self.views);
         slots.items = self.item_materials.clone();
+        slots.grain = self.slot_grain;
         slots
     }
 
@@ -2754,8 +2759,10 @@ impl Shared {
     /// joined a moment earlier has already been sent the empty one.
     pub fn restore_inventory(&self, uuid: PlayerUuid, mut slots: tiamat_core::inventory::Slots) {
         // A stored inventory knows its stacks and not this session's ids:
-        // what is an item is told here, as `fresh_slots` tells a new one.
+        // what is an item is told here, as `fresh_slots` tells a new one —
+        // and the grain the mods chose, which is this session's too.
         slots.items = self.item_materials.clone();
+        slots.grain = self.slot_grain;
         if let Ok(mut inventories) = self.inventories.lock() {
             inventories.insert(uuid, slots);
         }
@@ -2842,6 +2849,38 @@ impl Shared {
         }
     }
 
+    /// Takes `portion` of what is on a player's cursor off it, for the
+    /// screen's owner to spend (UI ask 21). `None` when nothing is held.
+    pub fn take_held(
+        &self,
+        uuid: &PlayerUuid,
+        portion: tiamat_core::inventory::Portion,
+    ) -> Option<tiamat_core::inventory::Stack> {
+        let taken = self.with_slots(uuid, |slots| slots.take_held(portion))??;
+        self.mark_inventory_dirty(uuid);
+        Some(taken)
+    }
+
+    /// Puts back what [`Shared::take_held`] took and no mod claimed.
+    ///
+    /// Back onto the cursor, so an unclaimed drop is a click that did
+    /// nothing. What fits nowhere — a fixed main view with the cursor since
+    /// taken up by something else — is logged and lost; the view grows
+    /// otherwise, so that is a corner of a corner.
+    pub fn untake_held(&self, uuid: &PlayerUuid, stack: tiamat_core::inventory::Stack) {
+        let left = self
+            .with_slots(uuid, |slots| slots.untake_held(PLAYER_MAIN, stack))
+            .flatten();
+        if let Some(left) = left {
+            tracing::error!(
+                player = %uuid.to_hex(),
+                units = left.units,
+                "an unclaimed drop fitted nowhere and is lost"
+            );
+        }
+        self.mark_inventory_dirty(uuid);
+    }
+
     ///
     /// `across` is the container this player has open, if any: a shift-click
     /// then crosses into it from their own view and back out of it, which is
@@ -2863,6 +2902,7 @@ impl Shared {
         let changed = match click {
             tiamat_core::proto::Click::Left => slots.left_click(view, index),
             tiamat_core::proto::Click::Right => slots.right_click(view, index),
+            tiamat_core::proto::Click::ShiftRight => slots.shift_right_click(view, index),
             tiamat_core::proto::Click::ShiftLeft => match across {
                 // A chest on the screen: out of it into the player's own view,
                 // or out of any view of theirs into it.
@@ -4558,6 +4598,7 @@ mod tests {
             item_materials: std::collections::BTreeSet::new(),
             material_ids: std::collections::BTreeMap::new(),
             main_slots: None,
+            slot_grain: 1,
         }
     }
 

@@ -1437,6 +1437,18 @@ cut of one material still move by the unit, and a cut of several by the item
 differs, and 27 of an item's units are one item exactly as 27 of a block's are
 one block.
 
+**A mod may make the plain right-click deal in whole blocks** (added
+2026-10-12, UI ask 21). `game.set_slot_grain(27)`, once at registration, is
+the grain a right-click splits and places loose material in (and a cut of one
+material then moves in whole cuts); shift with the same click is the unit
+gesture. A split in whole grains gives the hand the larger half of the whole
+grains and leaves any part of one behind: a hundred units at a block's grain
+is two blocks in hand, a block and nineteen nodes behind. Still 27-unit
+arithmetic, still no exception: the grain is chosen, the units are not. A stack
+dropped outside every screen leaves the cursor by the same grains (all, one
+grain, one unit) and goes to the screen's owner, back onto the cursor when no
+mod claims it — a held stack never disappears.
+
 **Output order is ascending `MaterialId`, always.** Drop order is observable — it
 decides which stack an almost-full inventory keeps — so it must not depend on
 cell iteration order or anything else that could differ between machines running

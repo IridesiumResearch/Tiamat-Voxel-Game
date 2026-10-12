@@ -263,6 +263,26 @@ pub struct Slots {
     /// This session's ids, set by the server that owns the slots; empty
     /// everywhere else, where every stack moves as it always did.
     pub items: std::collections::BTreeSet<MaterialId>,
+    /// The fewest units a plain right-click splits or places LOOSE material
+    /// in (UI ask 21): a block, once a mod has asked for whole blocks with
+    /// `game.set_slot_grain(27)`; one, the unit, until then and everywhere no
+    /// server set it (zero reads as one). A cut of one material then moves
+    /// in whole cuts, and the shift-right-click is the unit gesture a plain
+    /// right-click used to be. An item and a cut of several materials move
+    /// in whole items whatever this says ([`Slots::items`], §9.1).
+    pub grain: u32,
+}
+
+/// How much of the stack on the cursor a click outside the sheet drops (UI
+/// ask 21): the gesture, as [`crate::proto::Click`] names a slot's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Portion {
+    /// All of it — a left click.
+    All,
+    /// One [`Slots::grain`] of it, or one whole item — a right click.
+    One,
+    /// One unit of it, or one whole item — a shift-right click.
+    Unit,
 }
 
 /// The fewest units a stack may move in among `items`: a whole item for an
@@ -277,6 +297,24 @@ fn grain_for(items: &std::collections::BTreeSet<MaterialId>, stack: &Stack) -> u
     } else {
         stack.grain()
     }
+}
+
+/// How a right-click halves `units` that move in `grain`s: `(behind, hand)`.
+///
+/// In whole grains, the larger half to the hand and any part of a grain left
+/// behind: a hundred units of loose stone at a block's grain is three blocks
+/// and nineteen nodes, and the hand takes two blocks and leaves one and the
+/// nineteen (UI ask 21's own example). Fewer than one grain cannot be halved,
+/// so the hand takes it all — as it takes a single meat. At a grain of one
+/// this is the rule it always was: `units / 2` behind, the rest in hand.
+fn halves(units: u32, grain: u32) -> (u32, u32) {
+    let grain = grain.max(1);
+    let grains = units / grain;
+    if grains == 0 {
+        return (0, units);
+    }
+    let hand = (grains - grains / 2) * grain;
+    (units - hand, hand)
 }
 
 /// The engine's own view names.
@@ -373,6 +411,7 @@ impl Slots {
             views,
             grab: Grab::default(),
             main_fixed: main.is_some(),
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         }
     }
@@ -464,14 +503,43 @@ impl Slots {
         false
     }
 
-    /// A right click: take half, or put down a single unit.
+    /// A right click: take half, or put down one.
     ///
-    /// **The halving is on UNITS.** Charter rule 5: 40 units splits into 20 and
-    /// 20, and an odd count leaves the larger half in the hand — 41 gives 21
-    /// held and 20 behind — because a player who right-clicks a stack expects
-    /// to be holding at least as much as they left. **Except an item**, which
-    /// halves in whole items and puts down one whole item — [`Slots::items`].
+    /// **The halving is on UNITS**, until a mod says otherwise. Charter rule
+    /// 5: 40 units splits into 20 and 20, and an odd count leaves the larger
+    /// half in the hand — 41 gives 21 held and 20 behind — because a player
+    /// who right-clicks a stack expects to be holding at least as much as
+    /// they left. **Except an item**, which halves in whole items and puts
+    /// down one whole item — [`Slots::items`]. **And except where a mod set
+    /// [`Slots::grain`]** (UI ask 21): then loose material halves and places
+    /// in whole blocks, a cut in whole cuts, and the unit gesture is
+    /// [`Slots::shift_right_click`].
     pub fn right_click(&mut self, view: &str, index: usize) -> bool {
+        self.split_or_place(view, index, false)
+    }
+
+    /// A shift-right click: [`Slots::right_click`] by the unit (UI ask 21).
+    ///
+    /// Where no mod set [`Slots::grain`] this IS the right click; an item
+    /// still moves whole.
+    pub fn shift_right_click(&mut self, view: &str, index: usize) -> bool {
+        self.split_or_place(view, index, true)
+    }
+
+    /// The units one right-click moves of `stack`: a whole item for an item
+    /// or a cut of several materials; otherwise the unit when `fine` (the
+    /// shift gesture) and a [`Slots::grain`] when not — a block's worth of
+    /// loose material, one cut of a cut of one material.
+    fn click_grain(&self, stack: &Stack, fine: bool) -> u32 {
+        let whole = grain_for(&self.items, stack);
+        if whole > 1 || fine {
+            whole
+        } else {
+            stack.per_item().min(self.grain.max(1))
+        }
+    }
+
+    fn split_or_place(&mut self, view: &str, index: usize, fine: bool) -> bool {
         let Some(at) = self.locate(view, index) else {
             return false;
         };
@@ -480,18 +548,16 @@ impl Slots {
             (None, Some(mut stack)) => {
                 // The half left BEHIND, so the hand keeps the remainder and an
                 // odd count rounds the player's way rather than into thin air.
-                // Counted in grains, which are units except for a cut of
-                // several materials and for an item, which halve in whole
-                // items (§9.1, §9).
-                let grain = grain_for(&self.items, &stack);
-                let behind = stack.units / grain / 2 * grain;
+                // Counted in grains: units, blocks where a mod asked for
+                // them, whole items for an item (§9.1, §9).
+                let (behind, _) = halves(stack.units, self.click_grain(&stack, fine));
                 let taken = stack.split(stack.units - behind).ok();
                 ((!stack.is_empty()).then_some(stack), taken)
             }
-            // One unit down, keeping the rest — the "place one at a time"
-            // gesture, on units rather than on blocks; one ITEM for an item.
+            // One down, keeping the rest — the "place one at a time"
+            // gesture: a unit, a block, one item.
             (Some(held), there) => {
-                let grain = grain_for(&self.items, &held);
+                let grain = self.click_grain(&held, fine);
                 place_one(held, there, grain)
             }
             (None, None) => return false,
@@ -499,6 +565,48 @@ impl Slots {
         self.views[at].slots[index] = slot;
         self.grab.held = hand;
         true
+    }
+
+    /// Takes `portion` of what is on the cursor off it, for a mod to spend
+    /// (UI ask 21).
+    ///
+    /// **The drop is a fact before the mod hears of it**, as a slot click is:
+    /// what comes back has left the player. A caller that finds no taker puts
+    /// it back with [`Slots::untake_held`]. `None` when nothing is held.
+    pub fn take_held(&mut self, portion: Portion) -> Option<Stack> {
+        let mut held = self.grab.held.take()?;
+        let units = match portion {
+            Portion::All => held.units,
+            Portion::One => self.click_grain(&held, false),
+            Portion::Unit => self.click_grain(&held, true),
+        }
+        .min(held.units);
+        if let Ok(taken) = held.split(units) {
+            self.grab.held = (!held.is_empty()).then_some(held);
+            Some(taken)
+        } else {
+            self.grab.held = Some(held);
+            None
+        }
+    }
+
+    /// Puts back what [`Slots::take_held`] took and nobody claimed.
+    ///
+    /// Onto the cursor it came off, so an unclaimed drop is a click that did
+    /// nothing; into `view` only if the cursor has since taken up something
+    /// else. The answer is what fitted nowhere, which a growing view never
+    /// leaves.
+    pub fn untake_held(&mut self, view: &str, stack: Stack) -> Option<Stack> {
+        let Some(mut held) = self.grab.held.take() else {
+            self.grab.held = Some(stack);
+            return None;
+        };
+        if held.same_item(&stack) && held.merge(&stack).is_ok() {
+            self.grab.held = Some(held);
+            return None;
+        }
+        self.grab.held = Some(held);
+        self.insert_within(view, stack)
     }
 
     /// A shift-click: send the stack to the first view that is not this one.
@@ -1248,6 +1356,7 @@ mod tests {
                 held: Some(Stack::shaped(STONE, shape, 3).expect("cut")),
             },
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
 
@@ -1283,6 +1392,7 @@ mod tests {
                 held: Some(Stack::shaped(STONE, shape, 3).expect("cut")),
             },
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         let before = inv.total_units();
@@ -1310,6 +1420,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
 
@@ -1379,6 +1490,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         }
     }
@@ -1445,6 +1557,7 @@ mod tests {
                     ],
                     grab: Grab { held },
                     main_fixed: false,
+                    grain: 1,
                     items: std::collections::BTreeSet::new(),
                 })
         }
@@ -1595,6 +1708,7 @@ mod tests {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         let whole = crate::inventory::ITEMS_PER_STACK * UNITS_PER_BLOCK;
@@ -1630,6 +1744,7 @@ mod tests {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         assert!(
@@ -1664,6 +1779,7 @@ mod tests {
             views: vec![View::empty("player:main", 2)],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         for material in 2..8u16 {
@@ -1693,6 +1809,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         inv.insert("player:main", Stack::new(STONE, 7).expect("stack"));
@@ -1712,6 +1829,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         // Spanning two slots, first one emptied.
@@ -1749,6 +1867,7 @@ mod tests {
             }],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         let held = inv.consolidated("player:main");
@@ -1903,6 +2022,144 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_block_grain_splits_and_places_in_blocks_and_shift_in_units() {
+        const MEAT: MaterialId = MaterialId(9);
+        // **UI ask 21.** The designer's own example: a hundred units of
+        // loose stone is three blocks and nineteen nodes; a right-click takes
+        // two blocks and leaves a block and the nineteen; a right-click with
+        // the stack held puts down one block; shift does what the plain
+        // click did before — half by the unit, one unit down.
+        let held = |inv: &Slots| inv.grab.held.as_ref().map_or(0, |s| s.units);
+        let with_grain = |main: Vec<Option<Stack>>| {
+            let mut inv = slots(main);
+            inv.grain = UNITS_PER_BLOCK;
+            inv
+        };
+
+        let mut inv = with_grain(vec![stack(STONE, 100), None]);
+        assert!(inv.right_click("player:main", 0));
+        assert_eq!(held(&inv), 2 * UNITS_PER_BLOCK, "two blocks to the hand");
+        assert_eq!(at(&inv, "player:main", 0).expect("behind").units, 46);
+        assert!(inv.right_click("player:main", 1), "one block down");
+        assert_eq!(
+            at(&inv, "player:main", 1).expect("placed").units,
+            UNITS_PER_BLOCK
+        );
+        assert_eq!(held(&inv), UNITS_PER_BLOCK);
+        assert_eq!(inv.total_units(), 100);
+
+        // Shift: the unit gesture. Half of 100 by the unit, one unit down.
+        let mut inv = with_grain(vec![stack(STONE, 100), None]);
+        assert!(inv.shift_right_click("player:main", 0));
+        assert_eq!(held(&inv), 50);
+        assert_eq!(at(&inv, "player:main", 0).expect("behind").units, 50);
+        assert!(inv.shift_right_click("player:main", 1));
+        assert_eq!(at(&inv, "player:main", 1).expect("placed").units, 1);
+        assert_eq!(held(&inv), 49);
+
+        // Less than a block there: the hand takes it all, as it takes one
+        // meat; placing puts down what is held when that is less than one.
+        let mut inv = with_grain(vec![stack(STONE, 20), None]);
+        assert!(inv.right_click("player:main", 0));
+        assert_eq!(held(&inv), 20);
+        assert!(at(&inv, "player:main", 0).is_none());
+        assert!(inv.right_click("player:main", 1));
+        assert_eq!(at(&inv, "player:main", 1).expect("placed").units, 20);
+        assert_eq!(held(&inv), 0);
+
+        // A cut of one material moves in whole cuts once blocks are the
+        // grain: three stairs of ten cells, two to the hand and one down.
+        let stair = crate::inventory::Shape::new(0b11_1111_1111).expect("ten cells");
+        let stairs = |count| Stack::shaped(STONE, stair, count);
+        let mut inv = with_grain(vec![stairs(3), None]);
+        assert!(inv.right_click("player:main", 0));
+        assert_eq!(held(&inv), 20);
+        assert!(inv.right_click("player:main", 1));
+        assert_eq!(at(&inv, "player:main", 1).expect("placed").units, 10);
+        // And by the unit with shift, as before.
+        let mut inv = with_grain(vec![stairs(3), None]);
+        assert!(inv.shift_right_click("player:main", 0));
+        assert_eq!(held(&inv), 15);
+
+        // An item is whole items at any grain, shift or not.
+        let mut inv = with_grain(vec![stack(MEAT, 3 * UNITS_PER_BLOCK), None]);
+        inv.items.insert(MEAT);
+        assert!(inv.shift_right_click("player:main", 0));
+        assert_eq!(held(&inv), 2 * UNITS_PER_BLOCK);
+
+        // No grain set: nothing changed, and shift is the same click.
+        let mut inv = slots(vec![stack(STONE, 100), None]);
+        assert!(inv.right_click("player:main", 0));
+        assert_eq!(held(&inv), 50);
+        let mut inv = slots(vec![stack(STONE, 100), None]);
+        assert!(inv.shift_right_click("player:main", 0));
+        assert_eq!(held(&inv), 50);
+    }
+
+    #[test]
+    fn a_dropped_portion_leaves_the_cursor_and_an_unclaimed_one_comes_back() {
+        const MEAT: MaterialId = MaterialId(9);
+        // **UI ask 21, the cursor's half.** Left drops all of it, right one
+        // block (one unit at no grain), shift-right one unit; what nobody
+        // claims goes back onto the cursor and nothing is lost either way.
+        let held = |inv: &Slots| inv.grab.held.as_ref().map_or(0, |s| s.units);
+        let mut inv = slots(vec![None, None]);
+        inv.grain = UNITS_PER_BLOCK;
+        inv.grab.held = stack(STONE, 100);
+
+        let one = inv.take_held(Portion::One).expect("a block");
+        assert_eq!(one.units, UNITS_PER_BLOCK);
+        assert_eq!(held(&inv), 73);
+        let unit = inv.take_held(Portion::Unit).expect("a unit");
+        assert_eq!(unit.units, 1);
+        assert_eq!(held(&inv), 72);
+        assert_eq!(
+            inv.untake_held("player:main", unit),
+            None,
+            "back on the cursor"
+        );
+        assert_eq!(held(&inv), 73);
+        let all = inv.take_held(Portion::All).expect("the rest");
+        assert_eq!(all.units, 73);
+        assert_eq!(inv.grab.held, None);
+        assert_eq!(inv.take_held(Portion::All), None, "nothing to drop");
+        assert_eq!(inv.untake_held("player:main", all), None);
+        assert_eq!(held(&inv), 73);
+        assert_eq!(
+            inv.total_units(),
+            73,
+            "the block that left is the only loss"
+        );
+
+        // Less than a grain held: a right drop takes what there is.
+        inv.grab.held = stack(STONE, 5);
+        assert_eq!(inv.take_held(Portion::One).map(|s| s.units), Some(5));
+        assert_eq!(inv.grab.held, None);
+
+        // An item drops whole, and at no grain a right drop is one unit.
+        let mut inv = slots(vec![None]);
+        inv.items.insert(MEAT);
+        inv.grab.held = stack(MEAT, 2 * UNITS_PER_BLOCK);
+        assert_eq!(
+            inv.take_held(Portion::Unit).map(|s| s.units),
+            Some(UNITS_PER_BLOCK)
+        );
+        inv.grab.held = stack(STONE, 10);
+        assert_eq!(inv.take_held(Portion::One).map(|s| s.units), Some(1));
+
+        // The cursor took something else meanwhile: the unclaimed stack goes
+        // into the view rather than onto a different item.
+        let mut inv = slots(vec![None]);
+        inv.grab.held = stack(MEAT, 27);
+        assert_eq!(
+            inv.untake_held("player:main", stack(STONE, 7).expect("stack")),
+            None
+        );
+        assert_eq!(at(&inv, "player:main", 0).expect("in the view").units, 7);
+        assert_eq!(held(&inv), 27);
+    }
+
+    #[test]
     fn a_left_click_takes_places_merges_and_swaps() {
         // Take.
         let mut inv = slots(vec![stack(STONE, 30), None]);
@@ -1945,6 +2202,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         assert!(inv.shift_click("player:main", 0, "player:hotbar"));
@@ -1981,6 +2239,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         inv.shift_click("player:main", 0, "player:hotbar");
@@ -2115,6 +2374,7 @@ mod tests {
             ],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         };
         inv.shift_click("player:main", 0, "player:hotbar");

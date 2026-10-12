@@ -2614,6 +2614,17 @@ impl ServerHandle {
         if let Some(main_slots) = main_slots {
             info!(main_slots, "the main inventory view is a fixed size");
         }
+        // And the grain a plain right-click moves loose material in (UI ask
+        // 21): a unit until a mod asks for blocks. Settled here with the rest.
+        let slot_grain = host
+            .as_ref()
+            .map_or(1, |loaded| loaded.vm().registered_slot_grain());
+        if slot_grain > 1 {
+            info!(
+                slot_grain,
+                "a right-click moves loose material in whole grains"
+            );
+        }
         // Lowest id among those marked default, so the answer does not depend
         // on which mod loaded first — among mods that are not reference mods,
         // the rule the sky uses: the engine's own fixture hand loses to any
@@ -2796,6 +2807,7 @@ impl ServerHandle {
             item_materials,
             material_ids,
             main_slots,
+            slot_grain,
         });
 
         // The runtime is built here rather than inside the network thread, and
@@ -5829,6 +5841,41 @@ impl ServerHandle {
                                     let _ = shared
                                         .push_entity_messages(&uuid, shared.view_updates(&uuid));
                                 }
+                                // **A drop outside the sheet leaves the cursor
+                                // HERE, before the mod hears** (UI ask 21), for
+                                // the reason a click is applied here: the mod is
+                                // told a fact. What it becomes is the mod's; a
+                                // mod that does not claim it gets it put back
+                                // below, so a screen that never thought about
+                                // drops loses nobody anything.
+                                let dropped = match &event {
+                                    tiamat_core::proto::DialogEvent::Dropped { click } => {
+                                        let portion = match click {
+                                            tiamat_core::proto::Click::Left
+                                            | tiamat_core::proto::Click::ShiftLeft => {
+                                                tiamat_core::inventory::Portion::All
+                                            }
+                                            tiamat_core::proto::Click::Right => {
+                                                tiamat_core::inventory::Portion::One
+                                            }
+                                            tiamat_core::proto::Click::ShiftRight => {
+                                                tiamat_core::inventory::Portion::Unit
+                                            }
+                                        };
+                                        shared.take_held(&uuid, portion)
+                                    }
+                                    _ => None,
+                                };
+                                let was_a_drop = matches!(
+                                    event,
+                                    tiamat_core::proto::DialogEvent::Dropped { .. }
+                                );
+                                if was_a_drop && dropped.is_none() {
+                                    // Nothing on the cursor: a client describing
+                                    // a drop that cannot have happened, or one
+                                    // that raced a close. Nothing to tell.
+                                    continue;
+                                }
                                 let closing = matches!(
                                     event,
                                     tiamat_core::proto::DialogEvent::Closed
@@ -5863,9 +5910,21 @@ impl ServerHandle {
                                         mod_id: owner,
                                         form: form.clone(),
                                         event,
+                                        dropped: dropped.clone(),
                                     });
                                 for (mod_id, err) in &verdict.faults {
                                     error!(mod_id = %mod_id, "mod disabled after an on_dialog_event failure: {err}");
+                                }
+                                // Unclaimed — no handler, a handler that
+                                // answered nothing, or one that failed — and the
+                                // stack goes back where it came from. Either way
+                                // the client is shown the cursor as it now is.
+                                if let Some(stack) = dropped {
+                                    if !verdict.claimed {
+                                        shared.untake_held(&uuid, stack);
+                                    }
+                                    let _ = shared
+                                        .push_entity_messages(&uuid, shared.view_updates(&uuid));
                                 }
                                 // A player closing a dialog closes it, whatever the
                                 // mod does about it. Otherwise a mod that ignored

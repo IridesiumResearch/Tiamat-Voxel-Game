@@ -1276,6 +1276,10 @@ pub struct DialogEvent {
     pub form: String,
     /// What happened.
     pub event: crate::proto::DialogEvent,
+    /// What a [`crate::proto::DialogEvent::Dropped`] took off the cursor
+    /// (UI ask 21): the stack that has left the player, for the mod to
+    /// spend. `None` for every other event.
+    pub dropped: Option<crate::inventory::Stack>,
 }
 
 /// Fluid pressing against something it cannot get into.
@@ -1368,6 +1372,15 @@ pub struct HookOutcome {
     pub drops: Option<Vec<(String, u32)>>,
     /// Mods that faulted during this round, now disabled.
     pub faults: Vec<(String, ScriptError)>,
+    /// Whether the mod answered `true`: it took what the event handed it.
+    ///
+    /// Read for a dropped stack (UI ask 21) and nowhere else. A dialog's
+    /// owner is told, not asked, so its return value never refuses anything;
+    /// but a stack that has left the cursor needs a taker, and a handler that
+    /// never thought about drops — or no handler at all — must not be where
+    /// it vanishes. `true` says "mine"; anything else and the engine puts it
+    /// back where it came from.
+    pub claimed: bool,
 }
 
 /// The longest refusal a mod may put in front of a player.
@@ -1386,6 +1399,7 @@ impl HookOutcome {
             reason: None,
             drops: None,
             faults: Vec::new(),
+            claimed: false,
         }
     }
 
@@ -1420,6 +1434,11 @@ pub trait ScriptVm: Sized {
     /// The size a mod fixed `player:main` at with `game.set_main_slots`, if
     /// one did (UI ask 14). Read after the freeze, like the views.
     fn registered_main_slots(&self) -> Option<usize>;
+
+    /// The units a plain right-click splits and places loose material in,
+    /// from `game.set_slot_grain` (UI ask 21): one unless a mod asked. Read
+    /// after the freeze, like the views.
+    fn registered_slot_grain(&self) -> u32;
 
     /// Creates a VM with the given limits, with the registration window **open**.
     ///

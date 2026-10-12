@@ -4073,6 +4073,11 @@ impl ScriptVm for MluaVm {
         let Ok(table) = self.hook_event(event.player).and_then(|table| {
             table.set("form", event.form.as_str())?;
             dialog_event_fields(&self.lua, &table, &event.event)?;
+            // What a drop took off the cursor (UI ask 21), as `game.inventory`
+            // reports a stack: the mod spends it and answers `true`.
+            if let Some(stack) = &event.dropped {
+                table.set("stack", stack_table(&self.lua, stack)?)?;
+            }
             Ok(table)
         }) else {
             return HookOutcome::allow();
@@ -4408,6 +4413,14 @@ impl ScriptVm for MluaVm {
             .named_registry_value::<Option<usize>>("tiamat.main_slots")
             .ok()
             .flatten()
+    }
+
+    fn registered_slot_grain(&self) -> u32 {
+        self.lua
+            .named_registry_value::<Option<u32>>("tiamat.slot_grain")
+            .ok()
+            .flatten()
+            .unwrap_or(1)
     }
 
     fn registered_views(&self) -> Vec<crate::inventory::ViewDef> {
@@ -6481,6 +6494,13 @@ impl MluaVm {
             .create_function(move |lua, slots: usize| set_main_slots(lua, &owner, slots))
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_main_slots", set_main_slots)
+            .map_err(|err| self.vm_error(&err))?;
+        let owner = mod_id.to_owned();
+        let set_slot_grain = self
+            .lua
+            .create_function(move |lua, units: u32| set_slot_grain(lua, &owner, units))
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_slot_grain", set_slot_grain)
             .map_err(|err| self.vm_error(&err))?;
         game.set("register_view", register_view)
             .map_err(|err| self.vm_error(&err))?;
@@ -9522,15 +9542,22 @@ impl MluaVm {
         }
         let result = callback.call::<mlua::Value>(event.clone());
         self.disarm_budget();
-        if let Err(err) = result {
-            let error = Self::classify(&err, mod_id, hook);
-            self.fault(mod_id);
-            tracing::error!(
-                mod_id = %mod_id,
-                error = %error,
-                "disabling mod after a {hook} failure"
-            );
-            outcome.faults.push((mod_id.to_owned(), error));
+        match result {
+            // An owner is told, not asked, so nothing here refuses; but a
+            // `true` is the mod saying it took what the event handed it — a
+            // dropped stack (UI ask 21) — and nothing else counts as that.
+            Ok(mlua::Value::Boolean(true)) => outcome.claimed = true,
+            Ok(_) => {}
+            Err(err) => {
+                let error = Self::classify(&err, mod_id, hook);
+                self.fault(mod_id);
+                tracing::error!(
+                    mod_id = %mod_id,
+                    error = %error,
+                    "disabling mod after a {hook} failure"
+                );
+                outcome.faults.push((mod_id.to_owned(), error));
+            }
         }
         outcome
     }
@@ -10891,6 +10918,44 @@ fn set_main_slots(lua: &Lua, owner: &str, slots: usize) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `game.set_slot_grain(units)`: what a plain right-click splits and places
+/// loose material in (UI ask 21) — 27 for whole blocks.
+///
+/// Registration window only, and one grain for the server, for the reason
+/// `set_main_slots` is: the inventory is one thing every screen draws.
+fn set_slot_grain(lua: &Lua, owner: &str, units: u32) -> mlua::Result<()> {
+    let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
+    if frozen {
+        return Err(mlua::Error::external(format!(
+            "mod `{owner}`: registration is closed"
+        )));
+    }
+    if units == 0 || units > crate::UNITS_PER_BLOCK {
+        return Err(mlua::Error::external(format!(
+            "set_slot_grain({units}): outside 1..={}",
+            crate::UNITS_PER_BLOCK
+        )));
+    }
+    if let Some(was) = lua
+        .named_registry_value::<Option<u32>>("tiamat.slot_grain")
+        .ok()
+        .flatten()
+        && was != units
+    {
+        let by = lua
+            .named_registry_value::<Option<String>>("tiamat.slot_grain_by")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        return Err(mlua::Error::external(format!(
+            "set_slot_grain({units}): mod `{by}` already set the grain to {was} units"
+        )));
+    }
+    lua.set_named_registry_value("tiamat.slot_grain", units)?;
+    lua.set_named_registry_value("tiamat.slot_grain_by", owner.to_owned())?;
+    Ok(())
+}
+
 fn register_view(lua: &Lua, owner: &str, spec: &Table) -> mlua::Result<()> {
     let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
     if frozen {
@@ -11732,7 +11797,7 @@ fn dialog_event_fields(
     table: &Table,
     event: &crate::proto::DialogEvent,
 ) -> mlua::Result<()> {
-    use crate::proto::{Click, DialogEvent, Press};
+    use crate::proto::{DialogEvent, Press};
     let _ = lua;
     match event {
         DialogEvent::Pressed { name, click } => {
@@ -11789,18 +11854,28 @@ fn dialog_event_fields(
             table.set("kind", "clicked")?;
             table.set("view", view.as_str())?;
             table.set("index", u32::from(*index) + 1)?;
-            table.set(
-                "click",
-                match click {
-                    Click::Left => "left",
-                    Click::Right => "right",
-                    Click::ShiftLeft => "shift_left",
-                },
-            )?;
+            table.set("click", click_name(*click))?;
         }
         DialogEvent::Closed => table.set("kind", "closed")?,
+        // UI ask 21. The stack that left is set by the caller, which has it;
+        // the click says how much the player meant to drop.
+        DialogEvent::Dropped { click } => {
+            table.set("kind", "dropped")?;
+            table.set("click", click_name(*click))?;
+        }
     }
     Ok(())
+}
+
+/// A slot click's gesture as a mod reads it.
+const fn click_name(click: crate::proto::Click) -> &'static str {
+    use crate::proto::Click;
+    match click {
+        Click::Left => "left",
+        Click::Right => "right",
+        Click::ShiftLeft => "shift_left",
+        Click::ShiftRight => "shift_right",
+    }
 }
 
 fn widget_tree(spec: &Table) -> mlua::Result<crate::ui::Tree> {
@@ -16487,6 +16562,86 @@ mod tests {
                 "{bad} slots loaded"
             );
         }
+    }
+
+    #[test]
+    fn the_slot_grain_is_set_once_and_by_one_size() {
+        // UI ask 21, the same shape as the main view's size: one answer for
+        // the server, read after the freeze, a unit until a mod asks.
+        let mut vm = vm();
+        assert_eq!(vm.registered_slot_grain(), 1);
+        load(&mut vm, "screen", "game.set_slot_grain(27)").expect("screen");
+        load(&mut vm, "agree", "game.set_slot_grain(27)").expect("the same grain again");
+        let err = load(&mut vm, "other", "game.set_slot_grain(9)").expect_err("a second grain");
+        assert!(format!("{err:?}").contains("already set"), "{err:?}");
+        vm.freeze().expect("freeze");
+        assert_eq!(vm.registered_slot_grain(), 27);
+        assert!(
+            load(&mut vm, "late", "game.set_slot_grain(27)").is_err(),
+            "set after the freeze"
+        );
+        for bad in ["0", "28"] {
+            let mut fresh = self::vm();
+            assert!(
+                load(&mut fresh, "screen", &format!("game.set_slot_grain({bad})")).is_err(),
+                "a grain of {bad} loaded"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_stack_reaches_the_screens_owner_and_only_a_true_claims_it() {
+        // UI ask 21. The owner hears `kind = "dropped"` with the click and
+        // the stack as `game.inventory` reports one; answering `true` is the
+        // claim, and a handler that answers nothing — or no handler — leaves
+        // the engine to put the stack back.
+        let dropped = |vm: &mut MluaVm, owner: &str| {
+            let mut stack = crate::inventory::Stack::new(MaterialId(3), 27).expect("stack");
+            stack.detail = Some("flint".to_owned());
+            vm.dialog_event(&crate::script::DialogEvent {
+                player: [1; 32],
+                mod_id: owner.to_owned(),
+                form: format!("{owner}:till"),
+                event: crate::proto::DialogEvent::Dropped {
+                    click: crate::proto::Click::ShiftRight,
+                },
+                dropped: Some(stack),
+            })
+        };
+        let mut vm = vm();
+        // Claimed only when every field is as it should be, so the claim is
+        // the assertion: a sandboxed mod has no global a test could read.
+        load(
+            &mut vm,
+            "shop",
+            "game.register_on_dialog_event(function(event)\n\
+                 return event.kind == 'dropped' and event.click == 'shift_right'\n\
+                     and event.stack.units == 27 and event.stack.material == 3\n\
+                     and event.stack.detail == 'flint' and event.form == 'shop:till'\n\
+             end)",
+        )
+        .expect("shop");
+        load(
+            &mut vm,
+            "quiet",
+            "game.register_on_dialog_event(function(event) end)",
+        )
+        .expect("quiet");
+        let _ = vm.freeze();
+        let verdict = dropped(&mut vm, "shop");
+        assert!(
+            verdict.claimed,
+            "a true claims the stack, and every field was heard"
+        );
+        assert!(verdict.faults.is_empty());
+        assert!(
+            !dropped(&mut vm, "quiet").claimed,
+            "nothing answered is not a claim"
+        );
+        assert!(
+            !dropped(&mut vm, "nobody").claimed,
+            "no handler is not a claim"
+        );
     }
 
     #[test]

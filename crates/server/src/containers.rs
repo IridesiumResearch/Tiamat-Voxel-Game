@@ -449,6 +449,7 @@ mod tests {
             views: vec![View::empty("player:main", 4)],
             grab: Grab::default(),
             main_fixed: false,
+            grain: 1,
             items: std::collections::BTreeSet::new(),
         }
     }
