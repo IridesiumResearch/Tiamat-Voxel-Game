@@ -9001,6 +9001,148 @@ fn the_deck_is_dark_at_midnight_and_still_lit_from_below_at_golden_hour() {
     );
 }
 
+/// The mean colour of the pixels the deck changed and of the same pixels
+/// without it, as fractions of full brightness, and how many there were —
+/// the cloud, and the sky it stands against. The whole frame.
+fn deck_and_sky_colour(with: &Image, without: &Image) -> ([f32; 3], [f32; 3], usize) {
+    let (mut cloud, mut sky, mut count) = ([0.0_f32; 3], [0.0_f32; 3], 0usize);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let (Some(pixel), Some(bare)) = (with.pixel(x, y), without.pixel(x, y)) else {
+                continue;
+            };
+            if (0..3).all(|channel| pixel[channel].abs_diff(bare[channel]) <= 2) {
+                continue;
+            }
+            for channel in 0..3 {
+                cloud[channel] += f32::from(pixel[channel]) / 255.0;
+                sky[channel] += f32::from(bare[channel]) / 255.0;
+            }
+            count += 1;
+        }
+    }
+    let n = count.max(1) as f32;
+    (
+        [cloud[0] / n, cloud[1] / n, cloud[2] / n],
+        [sky[0] / n, sky[1] / n, sky[2] / n],
+        count,
+    )
+}
+
+#[test]
+fn in_simple_the_deck_is_white_at_noon_dim_blue_grey_at_midnight_and_warm_at_dusk() {
+    // **Weather W34, from the window: "the clouds in Simple lighting mode are
+    // bright white and should be a faded darker colour to match the sky."**
+    // Simple shaded a hit by its face alone, so the deck was daytime white at
+    // every hour. Now that face term is times the frame's light, `sun_lit`.
+    //
+    // Seen from below, every face Simple draws is at the face term's floor,
+    // 0.72 — an underside faces down and a side is level, and only a top
+    // takes more — so overhead, nearer than the haze reaches, the deck is
+    // 0.72 times the light, stored as sRGB. At Core Sky's own keyframes:
+    //
+    // - noon, white at 1.0: 0.72, stored 0.865 — the white the deck was
+    //   before this at every hour. Unchanged: the same bytes before and after.
+    // - dusk, (1.0, 0.55, 0.30) at 0.5: (0.360, 0.198, 0.108), stored
+    //   (0.634, 0.482, 0.362).
+    // - midnight, (0.35, 0.45, 0.80) at 0.095: (0.024, 0.031, 0.055), stored
+    //   (0.168, 0.192, 0.259), against a night sky behind it of about
+    //   (0.12, 0.17, 0.31).
+    //
+    // Measured on llvmpipe within 0.003 of each. The margin, 0.03, is
+    // several rounding steps of an 8-bit surface; the old white at dusk or
+    // midnight is 0.2 and more from the answer.
+    //
+    // Classic and Beautiful never read this term — both replace it with
+    // their own sunward mix — and their frames of these three hours from
+    // these two views were byte-identical before and after the change.
+    let Some(gpu) = gpu() else { return };
+    let chunks = scene();
+    let mut renderer = prepare(gpu, &chunks, RenderMode::Textured);
+    renderer.set_lighting_mode(LightingMode::Simple);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    // Steeply up, so most of the frame is deck and all of it near.
+    let mut camera = Camera {
+        position: Position::from_world(24.0, 18.0, 20.0),
+        ..Camera::default()
+    };
+    camera.look(-std::f32::consts::FRAC_PI_2, 0.9);
+    // The light as the client hands it on (`Sky::light_direction`): the
+    // sun's while it is up, the moon's — its antipode — once it has set.
+    let light = |time: f32| {
+        let sun = sunlight_at(time);
+        if sun[1] <= 0.0 {
+            sun
+        } else {
+            [-sun[0], -sun[1], -sun[2]]
+        }
+    };
+    let mut wrong: Vec<String> = Vec::new();
+    for (hour, time, sky, sun, intensity, expected) in [
+        (
+            "noon",
+            0.5_f32,
+            [0.50, 0.70, 1.00],
+            [1.0, 1.0, 1.0],
+            1.0_f32,
+            [0.865_f32, 0.865, 0.865],
+        ),
+        (
+            "dusk",
+            0.73,
+            [0.90, 0.45, 0.28],
+            [1.0, 0.55, 0.30],
+            0.50,
+            [0.634, 0.482, 0.362],
+        ),
+        (
+            "midnight",
+            0.0,
+            [0.02, 0.03, 0.08],
+            [0.35, 0.45, 0.80],
+            0.095,
+            [0.168, 0.192, 0.259],
+        ),
+    ] {
+        renderer.set_sun(intensity, sun, light(time));
+        renderer.set_sky(sky, 2000.0);
+        let (with, without) =
+            with_and_without(&mut renderer, &target, &camera, sky_of(0.9, 0.0, 0.0, 0.0));
+        let (cloud, behind, seen) = deck_and_sky_colour(&with, &without);
+        println!("{hour}: deck {cloud:.3?} against the sky's {behind:.3?} ({seen} px)");
+        if seen < 20_000 {
+            wrong.push(format!("{hour}: only {seen} pixels of deck in the frame"));
+            continue;
+        }
+        if (0..3).any(|channel| (cloud[channel] - expected[channel]).abs() > 0.03) {
+            wrong.push(format!(
+                "{hour}: the deck is {cloud:.3?} where 0.72 times the light is {expected:.3?}"
+            ));
+        }
+        // The gate in the ask's own words, beside the numbers. At midnight,
+        // dim and near the night sky — every channel within a tenth of the
+        // sky behind it, where the white deck was seven tenths off — and
+        // blue-grey, as the moonlight is.
+        if hour == "midnight" {
+            if (0..3).any(|channel| (cloud[channel] - behind[channel]).abs() > 0.1) {
+                wrong.push(format!(
+                    "{hour}: the deck {cloud:.3?} is not near the night sky {behind:.3?}"
+                ));
+            }
+            if cloud[2] <= cloud[0] + 0.05 {
+                wrong.push(format!("{hour}: the deck {cloud:.3?} is not blue-grey"));
+            }
+        }
+        // At dusk, the dusk's tint: red over green over blue, as the sky is.
+        if hour == "dusk" && !(cloud[0] > cloud[1] + 0.05 && cloud[1] > cloud[2] + 0.05) {
+            wrong.push(format!(
+                "{hour}: the deck {cloud:.3?} has not taken the dusk's tint"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 #[test]
 fn a_front_in_the_cover_map_is_a_gradient_a_cell_wide_and_not_a_line() {
     // Weather ask W18. The map was read nearest-cell, and since every share

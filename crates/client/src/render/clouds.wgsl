@@ -1693,11 +1693,8 @@ fn fragment_main(in: Varyings) -> Painted {
 
     let normal = found.normal;
 
-    // Mode 1 shades by face direction alone: no sun colour, no sky colour, one
-    // ambient. It is the mode that pays for nothing it cannot show.
     let toward_sun = -clouds.sun_direction.xyz;
     let facing = dot(normal, toward_sun);
-    var lit = clouds.colour.xyz * (0.72 + 0.28 * max(normal.y, 0.0));
     // **A sun under the horizon lights nothing** (weather ask W17). Golden
     // hour is backlit on purpose — the sun AT the horizon lights bases — but
     // the same geometry carried on into the night: once the sun was under
@@ -1707,6 +1704,24 @@ fn fragment_main(in: Varyings) -> Painted {
     // keeps its lit bases and midnight has none.
     let horizon = smoothstep(-0.15, 0.0, toward_sun.y);
     let sun_lit = clouds.sun.xyz * horizon;
+
+    // Mode 1 shades by face direction alone: no sunward face, no sky colour
+    // of its own, one ambient. It is the mode that pays for nothing it
+    // cannot show.
+    //
+    // **But it is lit by the frame's light** (weather ask W34: "bright white
+    // and should be a faded darker colour to match the sky"). It was the face
+    // term alone, and `colour` is the lit colour in every mode, so the deck
+    // stood at daytime white against a midnight, a dusk and a storm alike,
+    // and a mod could not darken it for this mode without darkening the
+    // other two. Times `sun_lit` — the sun's colour at the light's
+    // intensity, a sky modifier's dimming already in it: white at one by
+    // day, which changes nothing; moonlight blue at under a tenth at
+    // midnight; the sunset's orange at a half at dusk. The light Classic's
+    // faces take theirs from, for one multiply and no lookup. The sky's
+    // share is the aerial perspective below, which every mode takes by
+    // distance.
+    var lit = clouds.colour.xyz * (0.72 + 0.28 * max(normal.y, 0.0)) * sun_lit;
 
     if (mode >= 1.0) {
         // **Golden hour is BACKLIT.** The sun is at the horizon, so it lights
