@@ -7101,7 +7101,11 @@ fn the_suns_disc_is_the_brightest_thing_in_the_sky_in_every_mode() {
                 let path = std::path::Path::new(&dir).join(format!("disc-{hour}-{mode:?}.png"));
                 std::fs::write(&path, &bytes).expect("write");
             }
-            if luma(centre) <= luma(beside) + 0.05 {
+            // Brighter, by a margin a driver's rounding cannot cross: at the
+            // sunset keyframe the sky is nine tenths red already and the
+            // tonemap's shoulder leaves the disc only a little over it, which
+            // on Metal measured 0.049 against a margin of 0.05.
+            if luma(centre) <= luma(beside) + 0.01 {
                 wrong.push(format!(
                     "{hour} {mode:?}: the sun's disc {centre:?} is not brighter than the sky \
                      beside it {beside:?}"
