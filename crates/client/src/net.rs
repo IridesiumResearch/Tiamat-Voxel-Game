@@ -434,6 +434,10 @@ pub enum Event {
     /// A row of pictures to hang over an entity — Life ask 15.
     ShowOver(tiamat_core::particle::Badge),
 
+    /// What this player reads under a stack's name on hover, by world
+    /// material id, replacing the last table — Craft ask 16.
+    HoverLines(Vec<(u16, String)>),
+
     /// A downsampled chunk, for the horizon.
     ///
     /// Arrives INSTEAD of an [`Event::Chunk`] for a position outside the detail
@@ -1457,6 +1461,10 @@ async fn session(
 
             ServerMessage::ShowOver { badge } => {
                 let _ = events.send(Event::ShowOver(badge));
+            }
+
+            ServerMessage::HoverLines { lines } => {
+                let _ = events.send(Event::HoverLines(lines));
             }
 
             ServerMessage::ChunkSummary { pos, blob } => {

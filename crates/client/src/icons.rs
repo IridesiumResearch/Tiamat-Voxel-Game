@@ -56,6 +56,9 @@ pub struct Icons<'a> {
     cards: Option<&'a std::collections::BTreeSet<u16>>,
     /// Model materials (Contract §8.6) whose icon has been built.
     models: Option<&'a ModelIcons>,
+    /// A mod's line under each material's name on hover (Craft ask 16), by
+    /// world material id. What a stack is FOR, where its name already is.
+    hover: Option<&'a std::collections::BTreeMap<u16, String>>,
 }
 
 /// A model material's slot picture: its triangles, projected the way a
@@ -177,6 +180,7 @@ impl<'a> Icons<'a> {
             names: None,
             cards: None,
             models: None,
+            hover: None,
         }
     }
 
@@ -226,6 +230,19 @@ impl<'a> Icons<'a> {
     pub const fn with_names(mut self, names: &'a std::collections::BTreeMap<u16, String>) -> Self {
         self.names = Some(names);
         self
+    }
+
+    /// The same, told what a mod says under each material's name.
+    #[must_use]
+    pub const fn with_hover(mut self, hover: &'a std::collections::BTreeMap<u16, String>) -> Self {
+        self.hover = Some(hover);
+        self
+    }
+
+    /// A mod's line for this material, if it sent one (Craft ask 16).
+    #[must_use]
+    pub fn hover_of(&self, material: u16) -> Option<&'a str> {
+        self.hover?.get(&material).map(String::as_str)
     }
 
     /// What this material is called, if the table has arrived.

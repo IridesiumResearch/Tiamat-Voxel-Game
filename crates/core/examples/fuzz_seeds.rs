@@ -680,6 +680,12 @@ fn server_messages() -> Vec<Vec<u8>> {
             }),
         },
         ServerMessage::Rainbow { rainbow: None },
+        // Protocol v90 (Craft 16): a hover line at both caps, and the empty
+        // table that clears them.
+        ServerMessage::HoverLines {
+            lines: vec![(u16::MAX, "x".repeat(tiamat_core::proto::MAX_HOVER_BYTES))],
+        },
+        ServerMessage::HoverLines { lines: Vec::new() },
         ServerMessage::BlockDelta {
             edit: Edit::Block {
                 pos: BlockPos::new(2, 3, 4),

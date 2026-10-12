@@ -1811,6 +1811,10 @@ impl tiamat_core::ui::host::Access for Screen {
     fn close(&self, _player: &str, _form: &str) -> bool {
         true
     }
+
+    fn set_hover(&self, _player: &str, _lines: Vec<(tiamat_core::MaterialId, String)>) -> bool {
+        true
+    }
 }
 
 #[test]

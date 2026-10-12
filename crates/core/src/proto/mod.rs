@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 89;
+pub const PROTOCOL_VERSION: u32 = 90;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -88,6 +88,10 @@ pub const PROTOCOL_VERSION: u32 = 89;
 // read back the one they got, which makes the seed box write-only and a world
 // worth keeping unshareable. Appended to the variant, safe because the version
 // is agreed in the handshake before a `JoinWorld` is sent.
+// v90 (Craft ask 16, a line of a mod's under a stack's name on hover):
+// `ServerMessage::HoverLines`, appended — the latest table of hover lines for
+// one player, keyed by world material id and replaced whole each time, which
+// the client draws under the stack's name wherever that player hovers one.
 // v89 (UI ask 21, whole blocks first and a stack dropped outside the sheet):
 // `Click::ShiftRight`, appended — the split-and-place gesture by the unit once
 // a mod has made the plain right-click move whole blocks
@@ -360,6 +364,16 @@ pub const MAX_CHAT_BYTES: usize = 512;
 /// generous rather than tight — the point is that a hostile server cannot make
 /// a client allocate an unbounded string, not that any real id approaches it.
 pub const MAX_ID_BYTES: usize = 128;
+
+/// The most hover lines one [`ServerMessage::HoverLines`] may carry (Craft
+/// ask 16): one per material a player might hover, and a mod's whole table
+/// is sent each time, so this bounds what a player reads and what a mod
+/// can make a client hold.
+pub const MAX_HOVER_LINES: usize = 256;
+
+/// The longest hover line, in bytes — the tooltip's own cap
+/// (`ui::Limits::tooltip_bytes`), because it is drawn in the same place.
+pub const MAX_HOVER_BYTES: usize = 256;
 
 /// Most entities one message may describe.
 ///
@@ -2565,6 +2579,18 @@ pub enum ServerMessage {
         /// The rainbow, or `None` for none.
         rainbow: Option<crate::atmosphere::Rainbow>,
     },
+    /// What this player reads under a stack's name when they hover one —
+    /// Craft ask 16.
+    ///
+    /// **Appended at the end** (protocol v90). Latest state per player, keyed
+    /// by material rather than by slot so it survives items moving, and
+    /// replaced whole each time: a mod sends it when what the player knows
+    /// changes, not per click. An empty table clears it. Each line is capped
+    /// at [`MAX_HOVER_BYTES`] and the table at [`MAX_HOVER_LINES`].
+    HoverLines {
+        /// World material id, and the line to draw under that material's name.
+        lines: Vec<(u16, String)>,
+    },
 }
 
 /// [`phys::Abilities`](crate::phys::Abilities) as it travels.
@@ -3814,6 +3840,7 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::DomainChanged { domain } => {
             check_len("domain_changed", domain.len(), MAX_ID_BYTES)?;
         }
+        ServerMessage::HoverLines { lines } => check_hover_lines(lines)?,
         ServerMessage::InventoryUpdate { stacks } => {
             for stack in stacks {
                 check_stack(stack)?;
@@ -3928,6 +3955,17 @@ fn check_hands(hands: &[Option<StackDef>; 2]) -> Result<(), ProtocolError> {
             });
         }
         check_stack(held)?;
+    }
+    Ok(())
+}
+
+/// Bounds a mod's hover lines (Craft ask 16): drawn in a tooltip, and a
+/// server is not trusted (charter rule 14) — the same caps its own mod was
+/// held to.
+fn check_hover_lines(lines: &[(u16, String)]) -> Result<(), ProtocolError> {
+    check_len("hover_lines", lines.len(), MAX_HOVER_LINES)?;
+    for (_, text) in lines {
+        check_len("hover_line", text.len(), MAX_HOVER_BYTES)?;
     }
     Ok(())
 }
@@ -4921,6 +4959,32 @@ mod tests {
                 click: Click::ShiftRight
             }),
             8
+        );
+    }
+
+    #[test]
+    fn hover_lines_are_capped_in_count_and_in_length() {
+        // Craft ask 16: a tooltip's worth per line, and a bounded table, both
+        // refused on arrival rather than drawn (charter rule 14).
+        let fine = ServerMessage::HoverLines {
+            lines: vec![(1, "a".repeat(MAX_HOVER_BYTES))],
+        };
+        assert!(validate_server_message(&fine).is_ok());
+        let long = ServerMessage::HoverLines {
+            lines: vec![(1, "a".repeat(MAX_HOVER_BYTES + 1))],
+        };
+        assert!(
+            validate_server_message(&long).is_err(),
+            "a line over the cap"
+        );
+        let many = ServerMessage::HoverLines {
+            lines: (0..=MAX_HOVER_LINES)
+                .map(|material| (u16::try_from(material).expect("small"), String::new()))
+                .collect(),
+        };
+        assert!(
+            validate_server_message(&many).is_err(),
+            "a table over the cap"
         );
     }
 

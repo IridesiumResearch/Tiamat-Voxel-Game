@@ -7260,6 +7260,22 @@ impl tiamat_core::ui::host::Access for Screens {
         }
         was_open
     }
+
+    fn set_hover(&self, player: &str, lines: Vec<(tiamat_core::MaterialId, String)>) -> bool {
+        let Ok(uuid) = tiamat_core::identity::PlayerUuid::from_hex(player) else {
+            return false;
+        };
+        // In world ids, as a stack's material leaves: the client keys its
+        // table by what the view updates say a slot holds.
+        let lines = lines
+            .into_iter()
+            .map(|(material, text)| (self.shared.wire_material(material), text))
+            .collect();
+        !self.shared.push_entity_messages(
+            &uuid,
+            std::iter::once(tiamat_core::proto::ServerMessage::HoverLines { lines }),
+        )
+    }
 }
 
 /// `game.play_sound`, delivered to whoever is close enough to hear it.

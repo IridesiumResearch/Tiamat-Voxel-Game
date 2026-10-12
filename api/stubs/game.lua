@@ -2038,6 +2038,35 @@ function game.update_dialog(spec) end
 ---@return boolean closed
 function game.close_dialog(spec) end
 
+---A line of yours under a stack's name, per player, wherever they hover a
+---stack of that material: an `item_slot`, an `item_grid`, any screen's.
+---
+---**Latest state, keyed by material.** The whole table replaces the last one
+---each call, so send it when what the player knows changes — what they have
+---researched, what they have made — and not per click; keyed by material
+---rather than by slot, it follows items as they move. Each key is a block id
+---(`"mod:name"`, or a bare name of your own) or the numeric material a stack
+---reports; each value is one line of at most 256 bytes, the tooltip's cap.
+---At most 256 lines. `nil` clears it.
+---
+---What to say is yours. The reference use is Craft's "Makes: Planks
+---(workbench, new), Sticks (by hand), …" — every recipe the material goes
+---into that the player may make, the ones they have never made first.
+---
+---Returns whether the player was there to be told.
+---
+---```lua
+---game.set_hover(uuid, {
+---    ["core:oak_log"] = "Makes: Planks (workbench, new), Sticks (by hand)",
+---    [stone] = "Makes: Cobble walls (by hand)",
+---})
+---game.set_hover(uuid, nil) -- nothing under any name
+---```
+---@param player string A player UUID in hex.
+---@param lines table<string|integer, string>? Material to line, or nil to clear.
+---@return boolean told
+function game.set_hover(player, lines) end
+
 ---# The shape editor
 ---
 ---`{ type = "shape_editor", shape = <mask>, material = <id> }` draws a block as

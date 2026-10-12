@@ -235,6 +235,7 @@ impl Seen {
             Event::ModSettings { .. } => {}
             Event::Particles(_)
             | Event::ShowOver(_)
+            | Event::HoverLines(_)
             | Event::SkyModifier(_)
             | Event::Flash(_)
             | Event::Lightning(_)

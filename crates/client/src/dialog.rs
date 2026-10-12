@@ -1807,7 +1807,15 @@ fn paint_slot(
         // than no tooltip at all, because it looks like the name.
         if let Some(name) = stack_name(paint.icons, &stack) {
             let (blocks, spares) = tiamat_core::inventory::display(units);
-            response = response.on_hover_text(format!("{name}\n{blocks} blocks + {spares} nodes"));
+            let mut text = format!("{name}\n{blocks} blocks + {spares} nodes");
+            // **And what it is for, in the mod's words** (Craft ask 16): the
+            // line the server sent for this material, under the name — per
+            // player, so it can follow what they have learnt to make.
+            if let Some(line) = paint.icons.hover_of(stack.material) {
+                text.push('\n');
+                text.push_str(line);
+            }
+            response = response.on_hover_text(text);
             showed_own_hover = true;
         }
     }
@@ -2192,6 +2200,57 @@ mod tests {
         assert!(
             !painted.contains("outer"),
             "the container's tooltip painted over its child's: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_mods_hover_line_is_drawn_under_the_stacks_name() {
+        // Craft ask 16: the server's line for a material, under its name,
+        // wherever a slot of it is hovered; a material without one shows the
+        // name alone, as before.
+        let tree = Build::of(
+            Node {
+                size: Some(40),
+                ..Node::new(Widget::ItemSlot {
+                    view: "player:main".to_owned(),
+                    index: 0,
+                })
+            },
+            Vec::new(),
+        )
+        .flatten();
+        let mut views = BTreeMap::new();
+        views.insert(
+            "player:main".to_owned(),
+            ViewContents {
+                slots: vec![Some(tiamat_core::proto::StackDef {
+                    material: 7,
+                    units: 27,
+                    shape: 0,
+                    detail: None,
+                    cells: Vec::new(),
+                })],
+                held: None,
+            },
+        );
+        let mut names = std::collections::BTreeMap::new();
+        names.insert(7u16, "Cobblestone".to_owned());
+        let mut lines = std::collections::BTreeMap::new();
+        lines.insert(7u16, "Makes: Walls (by hand, new)".to_owned());
+
+        let icons = Icons::default().with_names(&names).with_hover(&lines);
+        let painted = paint_at_with(&tree, (100, 40), egui::pos2(20.0, 20.0), &views, icons);
+        assert!(
+            painted.contains("Cobblestone") && painted.contains("Makes: Walls (by hand, new)"),
+            "the mod's line did not paint under the name: {painted:?}"
+        );
+
+        let none = std::collections::BTreeMap::new();
+        let icons = Icons::default().with_names(&names).with_hover(&none);
+        let painted = paint_at_with(&tree, (100, 40), egui::pos2(20.0, 20.0), &views, icons);
+        assert!(
+            painted.contains("Cobblestone") && !painted.contains("Makes:"),
+            "a material without a line should show its name alone: {painted:?}"
         );
     }
 

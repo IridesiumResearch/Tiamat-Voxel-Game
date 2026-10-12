@@ -20,6 +20,12 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A line of yours under a stack's name on hover** (2026-10-13, Craft ask
+  16). `game.set_hover(uuid, { [material] = "text", ... })`, latest state per
+  player and keyed by material (a block id or the number a stack reports),
+  each line at most 256 bytes, at most 256 lines, `nil` to clear: the client
+  draws it under the stack's name wherever that player hovers a stack of that
+  material. What it says is yours — Craft's "Makes: …" is the reference.
 - **Whole blocks first, and a stack dropped outside the sheet** (2026-10-12,
   UI ask 21). `game.set_slot_grain(27)`, registration only, makes a plain
   right-click split and place loose material in whole blocks (a cut in whole

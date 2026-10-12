@@ -35,6 +35,12 @@ pub trait Access: Send + Sync {
 
     /// Closes a dialog. Returns whether one was open.
     fn close(&self, player: &str, form: &str) -> bool;
+
+    /// Sets what a player reads under a stack's name when they hover one
+    /// (Craft ask 16): one line per material, in this session's runtime ids,
+    /// the whole table replacing the last. Returns whether the player was
+    /// there to be told — the same answer [`Access::show`] gives.
+    fn set_hover(&self, player: &str, lines: Vec<(crate::material::MaterialId, String)>) -> bool;
 }
 
 /// Who is allowed to act on an event, and on which dialog.

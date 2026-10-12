@@ -176,6 +176,7 @@ game.register_tool{ id = "hand", brush = "block", speed_multiplier = 1.0, defaul
 
 game.register_on_player_join(function(event)
     game.give(event.player, { material = "shop:ground", units = 100 })
+    game.set_hover(event.player, { ["shop:counter"] = "Makes: a till (new)" })
     game.show_dialog{
         player = event.player,
         form = "till",
@@ -1187,6 +1188,35 @@ fn a_drop_nobody_claims_stays_on_the_cursor() {
         let after = bot.views().get("player:main").cloned().unwrap_or_default();
         assert!(after[0].is_none(), "and not back in the slot either");
 
+        bot.disconnect().await;
+    });
+    server.stop();
+}
+
+#[test]
+fn a_mods_hover_line_reaches_the_client_keyed_by_the_worlds_material_id() {
+    // **Craft ask 16, over the wire.** The quarry sets one line on joining,
+    // by block id; the client receives it keyed by the WORLD id of that
+    // material — the number its slots and its material table use — with the
+    // text as written.
+    let server = start("hover", write_quarry("hover"));
+    block_on(async {
+        let mut bot = join(&server, "Hoverer").await;
+        let counter = bot
+            .material_table()
+            .expect("a material table")
+            .into_iter()
+            .find(|entry| entry.name == "shop:counter")
+            .map(|entry| entry.id)
+            .expect("the mod registers a counter");
+        let message = bot
+            .recv_until(|m| matches!(m, tiamat_core::proto::ServerMessage::HoverLines { .. }))
+            .await
+            .expect("no hover lines arrived");
+        let tiamat_core::proto::ServerMessage::HoverLines { lines } = message else {
+            unreachable!("recv_until answered with another message");
+        };
+        assert_eq!(lines, vec![(counter, "Makes: a till (new)".to_owned())]);
         bot.disconnect().await;
     });
     server.stop();

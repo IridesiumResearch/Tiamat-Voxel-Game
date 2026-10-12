@@ -2808,7 +2808,8 @@ fn draw_hud(surface: &mut Surface, view: &wgpu::TextureView) {
                 .with_items(&items)
                 .with_names(&material_names)
                 .with_cards(&cards)
-                .with_models(&model_icons),
+                .with_models(&model_icons)
+                .with_hover(app.hover_lines()),
             &dialog_art,
             &app.fonts,
             size,

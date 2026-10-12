@@ -5575,6 +5575,53 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("close_dialog", close)
             .map_err(|err| self.vm_error(&err))?;
+
+        // `game.set_hover` (Craft ask 16): a line of the mod's under a stack's
+        // name, per player and per material. Beside the dialogs because it is
+        // drawn where their slots are, and reaches the same host.
+        let slot = std::sync::Arc::clone(&self.dialogs);
+        let set_hover =
+            self.lua
+                .create_function(move |lua, (player, lines): (String, Option<Table>)| {
+                    // Keyed by material and sorted by it, so the wire carries one
+                    // line per material in one order whatever the table's was.
+                    let mut by_material: std::collections::BTreeMap<
+                        crate::material::MaterialId,
+                        String,
+                    > = std::collections::BTreeMap::new();
+                    if let Some(lines) = lines {
+                        for pair in lines.pairs::<mlua::Value, String>() {
+                            let (key, text) = pair?;
+                            let material = material_of(lua, &key)?;
+                            if text.len() > crate::proto::MAX_HOVER_BYTES {
+                                return Err(mlua::Error::external(format!(
+                                    "set_hover: the line for material {} is {} bytes, over the \
+                                 cap of {}",
+                                    material.0,
+                                    text.len(),
+                                    crate::proto::MAX_HOVER_BYTES
+                                )));
+                            }
+                            by_material.insert(material, text);
+                        }
+                    }
+                    if by_material.len() > crate::proto::MAX_HOVER_LINES {
+                        return Err(mlua::Error::external(format!(
+                            "set_hover: {} lines, over the cap of {}",
+                            by_material.len(),
+                            crate::proto::MAX_HOVER_LINES
+                        )));
+                    }
+                    let lines: Vec<(crate::material::MaterialId, String)> =
+                        by_material.into_iter().collect();
+                    let told = slot.lock().ok().and_then(|slot| {
+                        slot.as_ref().map(|access| access.set_hover(&player, lines))
+                    });
+                    Ok(told.unwrap_or(false))
+                })
+                .map_err(|err| self.vm_error(&err))?;
+        game.set("set_hover", set_hover)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -13070,11 +13117,15 @@ mod tests {
         MluaVm::new(VmLimits::default()).expect("create vm")
     }
 
+    /// One player's hover table as it reached the screen (Craft ask 16).
+    type Hovered = (String, Vec<(MaterialId, String)>);
+
     /// Shows a dialog and captures what the server was asked to show.
     #[derive(Default)]
     struct Screen {
         shown: std::sync::Mutex<Vec<crate::ui::host::ShowRequest>>,
         closed: std::sync::Mutex<Vec<(String, String)>>,
+        hovers: std::sync::Mutex<Vec<Hovered>>,
     }
 
     impl crate::ui::host::Access for Screen {
@@ -13091,6 +13142,53 @@ mod tests {
             }
             true
         }
+
+        fn set_hover(&self, player: &str, lines: Vec<(MaterialId, String)>) -> bool {
+            if let Ok(mut hovers) = self.hovers.lock() {
+                hovers.push((player.to_owned(), lines));
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn a_hover_line_per_material_reaches_the_screen_sorted_and_capped() {
+        // Craft ask 16. Keyed by a block id or a numeric material, sent
+        // sorted by material whatever the table's order; nil clears; a line
+        // over the tooltip's cap fails the call and names the material.
+        let mut vm = vm();
+        let screen = std::sync::Arc::new(Screen::default());
+        vm.set_dialog_access(
+            std::sync::Arc::clone(&screen) as std::sync::Arc<dyn crate::ui::host::Access>
+        );
+        load(
+            &mut vm,
+            "shop",
+            "local till = game.register_block{ id = 'till' }\n\
+             local counter = game.register_block{ id = 'counter' }\n\
+             assert(game.set_hover('abc', { [counter] = 'Makes: change', ['shop:till'] = 'Makes: a sale' }))\n\
+             assert(game.set_hover('abc', nil))\n\
+             local ok = pcall(game.set_hover, 'abc', { [till] = string.rep('x', 257) })\n\
+             assert(not ok, 'a line over the cap was taken')",
+        )
+        .expect("shop");
+        let hovers = screen.hovers.lock().expect("lock").clone();
+        assert_eq!(hovers.len(), 2, "two calls reached the screen: {hovers:?}");
+        assert_eq!(hovers[0].0, "abc");
+        // `till` registered first and so has the lower id; the table named
+        // the counter first, and the wire is sorted by material regardless.
+        let texts: Vec<&str> = hovers[0].1.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["Makes: a sale", "Makes: change"],
+            "sorted by material"
+        );
+        assert!(
+            hovers[0].1[0].0 < hovers[0].1[1].0,
+            "ascending ids: {:?}",
+            hovers[0].1
+        );
+        assert!(hovers[1].1.is_empty(), "nil clears");
     }
 
     /// Loads a mod that shows `tree`, and returns what reached the server.

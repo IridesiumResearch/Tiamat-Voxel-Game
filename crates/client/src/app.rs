@@ -1043,6 +1043,9 @@ pub struct App {
     /// message is: sending happens on the network side, and the renderer runs
     /// inside a frame.
     dialog_events: Vec<crate::dialog::Raised>,
+    /// What this player reads under a stack's name on hover, by world
+    /// material id (Craft ask 16): a mod's latest table, replaced whole.
+    hover_lines: std::collections::BTreeMap<u16, String>,
     /// Chat lines received, newest last, each with when it fades
     /// (`crate::chat`).
     ///
@@ -1519,6 +1522,7 @@ impl App {
             textured: 0,
             entering: None,
             dialog_events: Vec::new(),
+            hover_lines: std::collections::BTreeMap::new(),
             mixer,
             heard: Vec::new(),
             particles: crate::particles::System::default(),
@@ -3070,6 +3074,12 @@ impl App {
             event: tiamat_core::proto::DialogEvent::Closed,
         }]);
         true
+    }
+
+    /// A mod's line under each material's name on hover (Craft ask 16).
+    #[must_use]
+    pub const fn hover_lines(&self) -> &std::collections::BTreeMap<u16, String> {
+        &self.hover_lines
     }
 
     /// Takes the dialog events raised since the last call, to send them.
@@ -5040,6 +5050,7 @@ impl App {
 
             Event::Particles(bursts) => self.adopt_particles(&bursts),
             Event::ShowOver(badge) => self.adopt_badge(badge),
+            Event::HoverLines(lines) => self.hover_lines = lines.into_iter().collect(),
 
             Event::PlayerState(state) => self.accept_player_state(&state),
 
