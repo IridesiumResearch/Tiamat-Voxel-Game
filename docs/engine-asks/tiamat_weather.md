@@ -110,7 +110,7 @@ every lighting mode. Gate: 1, 3 and 9 cells of a transparent-material fluid
 set into one open block over flat ground draw at about 1/27, 3/27 and 9/27
 of a block, and the same three cells spread over three blocks draw as a
 film.
-## W35. A schematic stamped at run time (2026-10-12)
+## W35. A schematic stamped at run time (2026-10-12): LANDED 2026-10-13 (engine 75a0132e)
 
 **Seen.** The designer asked for a crashed ship, built "using schematics", at
 the end of a rainbow. A rainbow comes long after its ground was generated,
@@ -128,6 +128,44 @@ built once at load serves a generator and an event alike, and Weather's
 list goes. Gate: a schematic of a few hundred blocks stamped beside a player
 lands whole within a few seconds without a tick over budget, the same as
 `buf:scatter` would have written it there, at all four turns.
+
+**From the engine, 2026-10-13.** Since 75a0132e,
+`game.stamp_schematic(schematic, pos, { turn = 0..3, domain = id })` writes
+a `game.schematic` (or `game.schematic_shapes`) into the running world with
+its root at `pos`, as `buf:scatter` writes one: a whole mask replaces the
+block (air clears it), a partial mask sets its cells and keeps the rest of
+the block (Contract §7.4's merge), air in a partial mask carves, and the
+blocks go in the list's order, so a later block lands over an earlier one.
+It joins the queue `game.plans.stamp` feeds — the same pacing, 256 edits a
+tick with a merge charged a cell each, and the same limit of eight waiting —
+and answers the same way: `true` is accepted, `false` is no world yet or too
+many stamps waiting, to be asked again later. `domain` defaults to
+`pos.domain`, then the overworld. A `turn` outside 0..3, a domain that does
+not exist, an option it does not know, a `pos` not in whole blocks, or a
+value that is not a schematic is an error naming the field. **The turn:**
+one quarter turn about the vertical through the root takes `+z` to `+x`,
+the way a shape placed facing east turns, so an offset `(dx, dz)` becomes
+`(dz, -dx)` and each mask turns with its block, cell `(x, y, z)` to
+`(z, y, 2 - x)`. That is the other way round from `wreck.lua`'s `turned`
+(its `r = 1` is `(-dz, dx)`): pass `turn = (4 - r) % 4` to keep the hull
+where `site` measured it, though its corners are symmetric, so `rng:below(4)`
+straight in is as good. The gate, in `crates/bot/tests/plans.rs`
+(`a_schematic_stamped_at_run_time_lands_whole_*`): a 243-block wreck — hull,
+slab rail, blocks merged into and carved out of the ground, a layer over a
+block — stamped beside a player lands in 2 to 4 ticks with no tick over
+budget, every cell what the scatter's own loop writes, at all four turns.
+**For the mod:** build the ship once with `game.schematic`, from the
+materials as `materials()` resolves them, and replace `pending`, the
+`wx.on_tick` pump and `turned` with one `game.stamp_schematic(SHIP, s,
+{ turn = r })` in `build`. The chest goes in with its full mask (a `whole`
+material is written as its own shape; a partial mask of one writes nothing),
+and its container is named by where the engine's turn puts it, so turn the
+chest's offset the engine's way when `stock` names it. One thing seen while
+testing, not the stamp's: a chunk still
+streaming to a client when an edit lands in it can reach that client after
+the edit and hold the world from before it, so a wreck stamped into terrain
+a player is just loading may show gaps to them until the chunk is sent
+again. That is the engine's to fix, in the streaming.
 
 ## W34. Clouds in Simple are white whatever the sky (2026-10-12): LANDED 2026-10-13 (engine ae2dbece), awaiting the eye
 

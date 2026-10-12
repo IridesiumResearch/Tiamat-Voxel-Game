@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `game.plans`, over a real server.
+//! `game.plans`, over a real server — and `game.stamp_schematic`, which rides
+//! the same stamp queue (weather ask W35).
 //!
 //! # Why this test exists at all
 //!
@@ -297,4 +298,297 @@ fn a_plan_outlives_the_world_that_captured_it() {
                 });
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// `game.stamp_schematic` (weather ask W35): a schematic written at run time.
+// ---------------------------------------------------------------------------
+
+/// Where the `wrecker` fixture roots its wreck: beside the player, who
+/// spawns at (0, 1, 0), on the ground (the flat ground's top block is
+/// y = -1).
+///
+/// **Placed so every turn stays in chunks the player holds whole.** At the
+/// smallest view a client holds the chunks beside its own in full and the
+/// diagonal ones as summaries, which carry no cells to check; the wreck
+/// reaches twelve blocks from its root along whichever way it faces, and from
+/// here that is always the root's chunk and a neighbour along one axis.
+const ROOT: (i32, i32, i32) = (8, 0, 8);
+
+/// Where the fixture says the stamp was accepted.
+const ACCEPTED: (i32, i32, i32) = (-6, 0, 1);
+
+/// The cells at x = 0 of a block: a slab on its `-x` face, which no turn
+/// leaves where it was.
+fn west() -> u32 {
+    (0..27)
+        .filter(|i| i % 3 == 0)
+        .fold(0, |mask, i| mask | (1 << i))
+}
+
+/// The cells at y = 2 of a block: its top layer.
+fn top() -> u32 {
+    (0..27)
+        .filter(|i| (i / 3) % 3 == 2)
+        .fold(0, |mask, i| mask | (1 << i))
+}
+
+/// The wreck, block for block, in the order the fixture's Lua builds it:
+/// `(dx, dy, dz, material, mask)`, with the material's short name and `""`
+/// for air. Written twice — here and in [`write_wrecker`] — on purpose: the
+/// test's copy is what the engine's answer is checked against.
+fn wreck() -> Vec<(i32, i32, i32, &'static str, u32)> {
+    let full = tiamat_core::block::OCCUPANCY_FULL;
+    let mut list = Vec::new();
+    // A hull twelve long, four high and seven wide, shell only: its floor on
+    // the ground, a rail of slabs round the top.
+    for dx in -3..=8_i32 {
+        for dy in 0..=3 {
+            for dz in -1..=5 {
+                if dx == -3 || dx == 8 || dy == 0 || dy == 3 || dz == -1 || dz == 5 {
+                    let material = if (dx + 2 * dz + dy).rem_euclid(5) == 0 {
+                        "char"
+                    } else {
+                        "plank"
+                    };
+                    list.push((dx, dy, dz, material, if dy == 3 { west() } else { full }));
+                }
+            }
+        }
+    }
+    // Merged INTO the ground: the ground's other cells stay.
+    for dx in 10..=12 {
+        list.push((dx, -1, 0, "plank", top()));
+    }
+    // Carved: a hole, and a scrape off the top of one block.
+    list.push((10, -1, 2, "", full));
+    list.push((11, -1, 2, "", top()));
+    // A block, and a later layer over it.
+    list.push((12, 0, 4, "plank", full));
+    list.push((12, 0, 4, "char", west()));
+    // Last, so its arrival says the rest is down: the stamp goes in order.
+    list.push((0, 6, 0, "flag", full));
+    list
+}
+
+/// A mod that builds [`wreck`] at load and stamps it at `turn` when a player
+/// says "stamp".
+///
+/// On a chat line rather than at the first tick, so the player is there to be
+/// told: a stamp that landed before anybody joined would arrive as chunk data
+/// and never as the edits this test watches for.
+fn write_wrecker(name: &str, turn: u32) -> PathBuf {
+    let root = scratch(name);
+    let dir = root.join("wrecker");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"wrecker\"\nname = \"Wrecker\"\nversion = \"0.1.0\"\n\
+         license = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    let script = r#"
+local ground = game.register_block{ id = "ground" }
+local plank = game.register_block{ id = "plank" }
+local char = game.register_block{ id = "char" }
+local flag = game.register_block{ id = "flag" }
+game.register_block{ id = "accepted" }
+local AIR = 0
+
+game.register_on_generate(function(buf, pos)
+    buf:fill_below_heightmap(game.flat_heightmap(0), ground)
+end)
+
+local FULL = game.OCCUPANCY_FULL
+local WEST, TOP = 0, 0
+for i = 0, 26 do
+    if i % 3 == 0 then WEST = WEST | (1 << i) end
+    if (i // 3) % 3 == 2 then TOP = TOP | (1 << i) end
+end
+
+local list = {}
+local function put(dx, dy, dz, material, mask)
+    list[#list + 1] = { dx, dy, dz, material, mask }
+end
+for dx = -3, 8 do
+    for dy = 0, 3 do
+        for dz = -1, 5 do
+            if dx == -3 or dx == 8 or dy == 0 or dy == 3 or dz == -1 or dz == 5 then
+                put(dx, dy, dz, ((dx + 2 * dz + dy) % 5 == 0) and char or plank,
+                    dy == 3 and WEST or FULL)
+            end
+        end
+    end
+end
+for dx = 10, 12 do put(dx, -1, 0, plank, TOP) end
+put(10, -1, 2, AIR, FULL)
+put(11, -1, 2, AIR, TOP)
+put(12, 0, 4, plank, FULL)
+put(12, 0, 4, char, WEST)
+put(0, 6, 0, flag, FULL)
+local WRECK = game.schematic(list)
+
+game.register_on_chat(function(event)
+    if event.text == "stamp" then
+        if game.stamp_schematic(WRECK, { x = 8, y = 0, z = 8 }, { turn = TURN }) then
+            game.set_block({ x = -6, y = 0, z = 1 }, "wrecker:accepted")
+        end
+        return false
+    end
+end)
+"#
+    .replace("TURN", &turn.to_string());
+    std::fs::write(dir.join("init.lua"), script).expect("script");
+    root
+}
+
+/// One quarter turn, as the engine documents it: `+z` to `+x`, so the
+/// offset `(dx, dz)` becomes `(dz, -dx)` and the cell `(x, y, z)` becomes
+/// `(z, y, 2 - x)`. Written out here rather than borrowed from the engine,
+/// so the engine's turn is checked against the convention and not against
+/// itself.
+fn turned(dx: i32, dz: i32, mask: u32, quarters: u32) -> (i32, i32, u32) {
+    let (mut dx, mut dz, mut mask) = (dx, dz, mask);
+    for _ in 0..quarters {
+        (dx, dz) = (dz, -dx);
+        let mut next = 0;
+        for index in 0..27 {
+            if mask & (1 << index) != 0 {
+                let (x, y, z) = (index % 3, (index / 3) % 3, index / 9);
+                next |= 1 << (z + 3 * y + 9 * (2 - x));
+            }
+        }
+        mask = next;
+    }
+    (dx, dz, mask)
+}
+
+/// Stamps the wreck at `quarters` in a world of its own and checks every block
+/// it touched, cell by cell, against what `buf:scatter` would have written
+/// there: a whole mask replaces the block, and a partial one sets its cells
+/// and keeps the rest (Sub-Node Contract §7.4) — so the model below is the
+/// scatter's own loop, run over the world the generator made.
+fn a_wreck_lands_whole_at(quarters: u32) {
+    let world = scratch(&format!("wreck-world-{quarters}"));
+    let server = start(write_wrecker(&format!("wreck-{quarters}"), quarters), world);
+    block_on(async {
+        let mut bot = watcher(&server, "Castaway").await;
+        let ids: std::collections::BTreeMap<&str, u16> =
+            ["ground", "plank", "char", "flag", "accepted"]
+                .into_iter()
+                .map(|name| (name, material(&bot, &format!("wrecker:{name}"))))
+                .collect();
+        let id = |name: &str| ids[name];
+        let air = tiamat_core::MaterialId::AIR;
+        let ground = tiamat_core::MaterialId(id("ground"));
+
+        let mut expected: std::collections::BTreeMap<BlockPos, tiamat_core::block::Cells> =
+            std::collections::BTreeMap::new();
+        for (dx, dy, dz, name, mask) in wreck() {
+            let (dx, dz, mask) = turned(dx, dz, mask, quarters);
+            let at = BlockPos::new(ROOT.0 + dx, ROOT.1 + dy, ROOT.2 + dz);
+            let material = if name.is_empty() {
+                air
+            } else {
+                tiamat_core::MaterialId(id(name))
+            };
+            let cells = expected
+                .entry(at)
+                .or_insert([if at.y < 0 { ground } else { air }; 27]);
+            for (index, cell) in cells.iter_mut().enumerate() {
+                if mask & (1 << index) != 0 {
+                    *cell = material;
+                }
+            }
+        }
+        assert!(
+            expected.len() > 200,
+            "the wreck is meant to be a few hundred blocks"
+        );
+
+        // **Every chunk the wreck will touch held BEFORE it is stamped.** A
+        // chunk the server answered on one tick is written on the
+        // connection's next beat, and a block delta from the tick between is
+        // written as it comes — so a chunk still streaming in can arrive
+        // after an edit to it, holding the world from before, and the client
+        // has nothing to apply the edit to. That is the streaming layer's
+        // race, not the stamp's; waiting the stream out keeps this test about
+        // the stamp.
+        let chunks: std::collections::BTreeSet<_> = expected.keys().map(|at| at.chunk()).collect();
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let held = bot.chunks_received();
+            if chunks.iter().all(|chunk| held.contains(chunk)) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the wreck's chunks never all arrived: wanted {chunks:?}; {}",
+                bot.chunk_report(1)
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(100), bot.recv()).await;
+        }
+
+        bot.chat("stamp").await.expect("chat");
+        bot.expect_block(
+            BlockPos::new(ACCEPTED.0, ACCEPTED.1, ACCEPTED.2),
+            id("accepted"),
+            PATIENCE,
+        )
+        .await
+        .expect("the stamp was refused, or the mod errored");
+        let control = server.control();
+        let (from_tick, from_time, over_before) = (
+            control.tick(),
+            std::time::Instant::now(),
+            control.over_budget_ticks(),
+        );
+
+        // The flag stands over the root, which no turn moves.
+        bot.expect_block(
+            BlockPos::new(ROOT.0, ROOT.1 + 6, ROOT.2),
+            id("flag"),
+            PATIENCE,
+        )
+        .await
+        .expect("the wreck never finished landing");
+        println!(
+            "turn {quarters}: {} blocks landed in {} ticks ({:?}); {} ticks over budget while it \
+             did, slowest tick of the run {} µs",
+            expected.len(),
+            control.tick() - from_tick,
+            from_time.elapsed(),
+            control.over_budget_ticks() - over_before,
+            control.slowest_tick_micros(),
+        );
+
+        // Every block it touched, cell by cell, as a client was told it.
+        for (at, cells) in &expected {
+            let told = bot.block_as_told(*at).expect("a chunk the bot holds");
+            assert_eq!(
+                &told, cells,
+                "turn {quarters}: {at:?} is not what the scatter would have written"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_schematic_stamped_at_run_time_lands_whole_unturned() {
+    a_wreck_lands_whole_at(0);
+}
+
+#[test]
+fn a_schematic_stamped_at_run_time_lands_whole_turned_once() {
+    a_wreck_lands_whole_at(1);
+}
+
+#[test]
+fn a_schematic_stamped_at_run_time_lands_whole_turned_twice() {
+    a_wreck_lands_whole_at(2);
+}
+
+#[test]
+fn a_schematic_stamped_at_run_time_lands_whole_turned_three_times() {
+    a_wreck_lands_whole_at(3);
 }

@@ -20,6 +20,14 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A schematic stamped at run time** (2026-10-13, weather ask W35).
+  `game.stamp_schematic(schematic, pos, { turn, domain })` writes a
+  `game.schematic` (or `game.schematic_shapes`) into the running world as
+  `buf:scatter` writes it — a whole mask replaces, a partial one merges by
+  cell — paced with `game.plans.stamp` and answering whether it was accepted.
+  `turn` is 0 to 3 quarter turns about the vertical, `+z` to `+x`: offset
+  `(dx, dz)` to `(dz, -dx)`, cell `(x, y, z)` to `(z, y, 2 - x)`. One
+  structure built at load now serves a generator and an event alike.
 - **A line of yours under a stack's name on hover** (2026-10-13, Craft ask
   16). `game.set_hover(uuid, { [material] = "text", ... })`, latest state per
   player and keyed by material (a block id or the number a stack reports),

@@ -9276,7 +9276,97 @@ impl MluaVm {
         game.set("schematic", schematic)
             .map_err(|err| self.vm_error(&err))?;
         self.install_schematic_shapes(game)?;
+        self.install_schematic_stamp(game)?;
 
+        Ok(())
+    }
+
+    /// Installs `game.stamp_schematic`: a schematic written into the running
+    /// world, turned, and paced across ticks (weather ask W35).
+    ///
+    /// **Why it exists.** A schematic was stamped only by `buf:scatter`, inside
+    /// a generator, and `game.plans.stamp` can only stamp what a capture took
+    /// from the world — so a structure that belongs to an EVENT rather than to
+    /// the terrain, a wreck at the end of a rainbow long after its ground was
+    /// made, was a list the mod wrote block by block through pacing of its
+    /// own. Now one structure built at load serves a generator and an event
+    /// alike.
+    ///
+    /// **Turned and checked here; written by the tick.** The turn is a
+    /// permutation done once, at the call ([`StampBlock::turned`]), and the
+    /// blocks join the queue `game.plans.stamp` feeds, which writes them as
+    /// the scatter does — see [`crate::plan::Access::stamp_schematic`]. So the
+    /// answer is the plan stamp's: `true` is ACCEPTED, not landed, and `false`
+    /// is no world yet or too many stamps waiting.
+    ///
+    /// **A mistake is an error, not a `false`.** A turn of five, a domain
+    /// nobody made, or a table where the schematic should be is a bug that
+    /// would otherwise build nothing, silently; `false` is kept for the
+    /// refusals a mod can wait out.
+    fn install_schematic_stamp(&self, game: &Table) -> Result<(), ScriptError> {
+        let plans = std::sync::Arc::clone(&self.plans);
+        let domains = std::sync::Arc::clone(&self.domains);
+        let stamp = self
+            .lua
+            .create_function(
+                move |lua, (schematic, pos, options): (mlua::Value, mlua::Value, Option<Table>)| {
+                    let what = |message: &str| {
+                        mlua::Error::external(format!("stamp_schematic: {message}"))
+                    };
+                    let handle = match &schematic {
+                        mlua::Value::UserData(handle) => handle.borrow::<SchematicHandle>().ok(),
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        what("`schematic` is one built by game.schematic or game.schematic_shapes")
+                    })?;
+                    let mlua::Value::Table(pos) = pos else {
+                        return Err(what("`pos` is a table of whole blocks, { x, y, z }"));
+                    };
+                    // Whole numbers only: 0.5 is not a block, and truncating
+                    // it would put a structure a block off on one side of
+                    // zero and not the other.
+                    let axis = |name: &str| {
+                        whole_number(lua, pos.get(name)?)
+                            .and_then(|value| i32::try_from(value).ok())
+                            .ok_or_else(|| {
+                                what(&format!("`pos.{name}` is a whole block coordinate"))
+                            })
+                    };
+                    let at = crate::BlockPos::new(axis("x")?, axis("y")?, axis("z")?);
+                    let (domain, turn) = stamp_options(lua, &pos, options.as_ref())?;
+                    let known = domains
+                        .lock()
+                        .ok()
+                        .and_then(|slot| slot.as_ref().map(std::sync::Arc::clone));
+                    if let Some(known) = known
+                        && !known.exists(&domain)
+                    {
+                        return Err(what(&format!("`domain` names no domain: \"{domain}\"")));
+                    }
+                    let blocks = handle.schematic.turned(turn);
+                    // Checked here so the tick never meets an offset that runs
+                    // off the end of the coordinates: a schematic's offsets are
+                    // whatever integers the table held.
+                    if let Some(index) = blocks.iter().position(|block| {
+                        at.x.checked_add(block.dx).is_none()
+                            || at.y.checked_add(block.dy).is_none()
+                            || at.z.checked_add(block.dz).is_none()
+                    }) {
+                        return Err(what(&format!(
+                            "block {} lands past the edge of the coordinates from `pos`",
+                            index + 1
+                        )));
+                    }
+                    let Some(store) = plan_store(&plans)? else {
+                        return Ok(false);
+                    };
+                    Ok(store.stamp_schematic(&domain, at, blocks))
+                },
+            )
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("stamp_schematic", stamp)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 
@@ -12317,6 +12407,74 @@ fn plan_store(
         mlua::Error::external("the plan store is poisoned; the simulation panicked")
     })?;
     Ok(guard.as_ref().map(std::sync::Arc::clone))
+}
+
+/// The options `game.stamp_schematic` takes: which space, and how far turned.
+///
+/// `domain` falls back to `pos.domain` and then to the overworld — the rule
+/// every position a mod hands the engine follows, so the `pos` an event
+/// handed the mod stamps where the event happened. `turn` is 0 to 3 quarter
+/// turns about the vertical.
+///
+/// **A field it does not know is refused by name**, as `register_domain`'s
+/// are: `trun = 1` would otherwise build the structure unturned, and the mod
+/// would find out by looking at it.
+fn stamp_options(lua: &Lua, pos: &Table, options: Option<&Table>) -> mlua::Result<(String, u32)> {
+    let what = |message: &str| mlua::Error::external(format!("stamp_schematic: {message}"));
+    let Some(options) = options else {
+        return Ok((domain_of(pos)?, 0));
+    };
+    let mut unknown = Vec::new();
+    for pair in options.pairs::<mlua::Value, mlua::Value>() {
+        let (key, _) = pair?;
+        let name = match &key {
+            mlua::Value::String(text) => text.to_str()?.to_owned(),
+            other => format!("a {} key", other.type_name()),
+        };
+        if name != "domain" && name != "turn" {
+            unknown.push(name);
+        }
+    }
+    // Sorted, so the error names the same field however Lua orders a table.
+    unknown.sort();
+    if let Some(name) = unknown.first() {
+        return Err(what(&format!(
+            "no option called `{name}`; the options are `domain` and `turn`"
+        )));
+    }
+    let domain = match options
+        .get::<Option<String>>("domain")
+        .map_err(|_| what("`domain` is a domain's id, as a string"))?
+    {
+        Some(domain) if !domain.is_empty() => domain,
+        Some(_) => return Err(what("`domain` is a domain's id, not an empty string")),
+        None => domain_of(pos)?,
+    };
+    let turn = match options.get::<mlua::Value>("turn")? {
+        mlua::Value::Nil => 0,
+        value => whole_number(lua, value)
+            .ok_or_else(|| what("`turn` is a whole number of quarter turns, 0 to 3"))?,
+    };
+    let turn = u32::try_from(turn)
+        .ok()
+        .filter(|turn| *turn < 4)
+        .ok_or_else(|| {
+            what(&format!(
+                "`turn` is 0 to 3 quarter turns about the vertical, not {turn}"
+            ))
+        })?;
+    Ok((domain, turn))
+}
+
+/// A Lua value as a whole number, or `None` for anything else — `1.5` and
+/// `"east"` included.
+///
+/// Lua's own rule (`lua_tointegerx`): an integer, a float that is exactly one,
+/// or a string reading as one. The conversion `get::<i64>` does instead
+/// TRUNCATES a float, so `turn = 1.5` would have been a turn of one and a
+/// position of `-0.5` would have been the block at zero.
+fn whole_number(lua: &Lua, value: mlua::Value) -> Option<i64> {
+    lua.coerce_integer(value).ok().flatten()
 }
 
 /// One word for why a capture was refused, for a mod to branch on.
@@ -20841,6 +20999,7 @@ mod entity_tests {
         world: std::sync::Mutex<Result<crate::plan::Plan, crate::plan::PlanError>>,
         asked: std::sync::Mutex<Vec<(String, crate::BlockPos, crate::BlockPos)>>,
         stamped: std::sync::Mutex<Vec<(String, crate::BlockPos, crate::plan::Plan)>>,
+        schematics: std::sync::Mutex<Vec<(String, crate::BlockPos, Vec<StampBlock>)>>,
     }
 
     impl Drawers {
@@ -20850,6 +21009,7 @@ mod entity_tests {
                 world: std::sync::Mutex::new(plan),
                 asked: std::sync::Mutex::new(Vec::new()),
                 stamped: std::sync::Mutex::new(Vec::new()),
+                schematics: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -20907,6 +21067,19 @@ mod entity_tests {
                 .lock()
                 .expect("lock")
                 .push((domain.to_owned(), at, plan));
+            true
+        }
+
+        fn stamp_schematic(
+            &self,
+            domain: &str,
+            at: crate::BlockPos,
+            blocks: Vec<StampBlock>,
+        ) -> bool {
+            self.schematics
+                .lock()
+                .expect("lock")
+                .push((domain.to_owned(), at, blocks));
             true
         }
     }
@@ -21044,6 +21217,157 @@ mod entity_tests {
              assert(game.plans.forget('x') == false)",
         )
         .expect("no world");
+    }
+
+    /// A domain store that knows a fixed list of spaces and makes none.
+    struct Spaces(&'static [&'static str]);
+
+    impl crate::domain::Access for Spaces {
+        fn create(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+
+        fn destroy(&self, _: &str) -> bool {
+            false
+        }
+
+        fn exists(&self, id: &str) -> bool {
+            self.0.contains(&id)
+        }
+    }
+
+    /// The two-block ship the schematic stamp tests build: a cell on the
+    /// `+z` face of the block north of the root, and a whole block up and east.
+    const SHIP: &str = "ship = game.schematic{ {0, 0, 1, 7, 1 << 21}, {1, 2, 0, 8, 0x7FFFFFF} }";
+
+    #[test]
+    fn a_schematic_is_stamped_turned_at_run_time_into_the_space_asked_for() {
+        // Weather ask W35: the structure `buf:scatter` stamps at generation,
+        // stamped at run time — turned by the call, and handed to the queue
+        // the plans use. What reaches the store is the turned blocks, in the
+        // schematic's order, with the space they go into.
+        let (mut vm, drawers) = vm_with_plans(Ok(a_cottage()));
+        vm.set_domain_access(std::sync::Arc::new(Spaces(&["overworld", "cellar"])));
+        load(&mut vm, "wrecker", "game.register_on_tick(function() end)").expect("load");
+        let _ = vm.freeze();
+
+        vm.eval_in(
+            "wrecker",
+            &format!(
+                "{SHIP}\n\
+                 assert(game.stamp_schematic(ship, {{x=10, y=4, z=-2}}) == true)\n\
+                 assert(game.stamp_schematic(ship, {{x=10, y=4, z=-2}}, {{ turn = 1 }}))\n\
+                 assert(game.stamp_schematic(ship, {{x=0, y=0, z=0, domain='cellar'}}, {{ turn = 3 }}))\n\
+                 assert(game.stamp_schematic(ship, {{x=0, y=0, z=0, domain='nowhere'}},\n\
+                     {{ domain = 'cellar', turn = 2 }}))"
+            ),
+        )
+        .expect("the stamps");
+
+        let block = |dx, dy, dz, material, mask| StampBlock {
+            dx,
+            dy,
+            dz,
+            material: MaterialId(material),
+            mask,
+        };
+        let full = crate::block::OCCUPANCY_FULL;
+        let cell = |x, y, z| 1 << crate::block::subnode_index(x, y, z);
+        let overworld = crate::domain::OVERWORLD.to_owned();
+        let schematics = drawers.schematics.lock().expect("lock");
+        assert_eq!(
+            *schematics,
+            vec![
+                // As built: no turn.
+                (
+                    overworld.clone(),
+                    crate::BlockPos::new(10, 4, -2),
+                    vec![block(0, 0, 1, 7, cell(0, 1, 2)), block(1, 2, 0, 8, full)],
+                ),
+                // One turn: +z to +x and +x to -z, the cell with its block.
+                (
+                    overworld,
+                    crate::BlockPos::new(10, 4, -2),
+                    vec![block(1, 0, 0, 7, cell(2, 1, 2)), block(0, 2, -1, 8, full)],
+                ),
+                (
+                    "cellar".to_owned(),
+                    crate::BlockPos::new(0, 0, 0),
+                    vec![block(-1, 0, 0, 7, cell(0, 1, 0)), block(0, 2, 1, 8, full)],
+                ),
+                // The option's domain wins over the position's.
+                (
+                    "cellar".to_owned(),
+                    crate::BlockPos::new(0, 0, 0),
+                    vec![block(0, 0, -1, 7, cell(2, 1, 0)), block(-1, 2, 0, 8, full)],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mistaken_schematic_stamp_is_an_error_naming_what_was_wrong() {
+        // A turn of five or a space nobody made would otherwise build nothing
+        // and say nothing; `false` is kept for what a mod can wait out.
+        let (mut vm, drawers) = vm_with_plans(Ok(a_cottage()));
+        vm.set_domain_access(std::sync::Arc::new(Spaces(&["overworld"])));
+        load(&mut vm, "wrecker", "game.register_on_tick(function() end)").expect("load");
+        let _ = vm.freeze();
+        vm.eval_in("wrecker", SHIP).expect("the ship");
+
+        for (call, named) in [
+            ("ship, {x=0, y=0, z=0}, { turn = 4 }", "`turn`"),
+            ("ship, {x=0, y=0, z=0}, { turn = -1 }", "`turn`"),
+            ("ship, {x=0, y=0, z=0}, { turn = 1.5 }", "`turn`"),
+            ("ship, {x=0, y=0, z=0}, { turn = 'east' }", "`turn`"),
+            ("ship, {x=0, y=0, z=0}, { domain = 'nowhere' }", "`domain`"),
+            ("ship, {x=0, y=0, z=0, domain = 'nowhere'}", "`domain`"),
+            ("ship, {x=0, y=0, z=0}, { domain = '' }", "`domain`"),
+            ("ship, {x=0, y=0, z=0}, { trun = 1 }", "`trun`"),
+            ("{ {0, 0, 0, 7, 1} }, {x=0, y=0, z=0}", "`schematic`"),
+            ("nil, {x=0, y=0, z=0}", "`schematic`"),
+            ("ship, 'here'", "`pos`"),
+            ("ship, {x=0, y=0}", "`pos.z`"),
+            ("ship, {x=0.5, y=0, z=0}", "`pos.x`"),
+            // The ship's second block is one east of the root.
+            ("ship, {x=2147483647, y=0, z=0}", "block 2"),
+        ] {
+            let err = vm
+                .eval_in("wrecker", &format!("game.stamp_schematic({call})"))
+                .expect_err(call);
+            assert!(
+                format!("{err:?}").contains(named),
+                "`{call}` should name {named}: {err:?}"
+            );
+        }
+        assert!(
+            drawers.schematics.lock().expect("lock").is_empty(),
+            "a mistaken stamp reached the store"
+        );
+    }
+
+    #[test]
+    fn a_schematic_stamp_is_false_with_no_world_and_still_checks_its_arguments() {
+        // During worldgen, or in a test with no server: the plan stamp's
+        // answer. A mistake is still a mistake, so it is still an error.
+        let mut vm = vm();
+        load(&mut vm, "early", "game.register_on_tick(function() end)").expect("load");
+        let _ = vm.freeze();
+        vm.eval_in(
+            "early",
+            &format!(
+                "{SHIP}\n\
+                 assert(game.stamp_schematic(ship, {{x=0, y=0, z=0}}, {{ turn = 3 }}) == false)"
+            ),
+        )
+        .expect("no world");
+        let err = vm
+            .eval_in(
+                "early",
+                "game.stamp_schematic(ship, {x=0, y=0, z=0}, { turn = 9 })",
+            )
+            .expect_err("a turn of nine");
+        assert!(format!("{err:?}").contains("`turn`"), "{err:?}");
     }
 
     /// A storage store a test can watch: the server's semantics, in memory.
