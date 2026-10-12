@@ -2126,64 +2126,19 @@ fn draw_chat(app: &mut App, ctx: &egui::Context) {
     if lines.is_empty() && !open {
         return;
     }
-
     let focus = app.take_chat_focus();
-    let mut send = false;
-    let mut close = false;
-    egui::Area::new(egui::Id::new("chat"))
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(egui::Color32::from_black_alpha(140))
-                .inner_margin(6.0)
-                .show(ui, |ui| {
-                    // Newest at the bottom, which is where a reader's eye is.
-                    // Only the last few unless the box is open, so chat does
-                    // not cover the world nobody is talking about.
-                    let shown = if open { 12 } else { 5 };
-                    let skip = lines.len().saturating_sub(shown);
-                    egui::ScrollArea::vertical()
-                        .max_height(220.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for (line, alpha) in lines.iter().skip(skip) {
-                                ui.label(
-                                    egui::RichText::new(line)
-                                        .color(egui::Color32::WHITE.gamma_multiply(*alpha)),
-                                );
-                            }
-                        });
-                    if !open {
-                        return;
-                    }
-                    let response = ui.add(
-                        egui::TextEdit::singleline(app.chat_draft_mut())
-                            .desired_width(420.0)
-                            .hint_text("say something"),
-                    );
-                    // **Once, on the frame it opens — never every frame.**
-                    //
-                    // Reported from the window: chat did not work. It took the
-                    // keys and never sent, because egui reports a single-line
-                    // field's Enter as `lost_focus`, and a field handed focus
-                    // back on every frame never loses it. Enter was landing on
-                    // a box that immediately took focus again, so the line sat
-                    // there being typed into for ever.
-                    if focus {
-                        response.request_focus();
-                    }
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        send = true;
-                    }
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        close = true;
-                    }
-                });
-        });
-
-    if send {
+    let drawn = client::chat::draw(
+        ctx,
+        client::chat::Panel {
+            lines: &lines,
+            open,
+            draft: app.chat_draft_mut(),
+            focus,
+        },
+    );
+    if drawn.send {
         app.send_chat();
-    } else if close {
+    } else if drawn.close {
         app.set_chat_open(false);
     }
 }
