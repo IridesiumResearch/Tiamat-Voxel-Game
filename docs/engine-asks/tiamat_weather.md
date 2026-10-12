@@ -162,10 +162,11 @@ material is written as its own shape; a partial mask of one writes nothing),
 and its container is named by where the engine's turn puts it, so turn the
 chest's offset the engine's way when `stock` names it. One thing seen while
 testing, not the stamp's: a chunk still
-streaming to a client when an edit lands in it can reach that client after
+streaming to a client when an edit lands in it could reach that client after
 the edit and hold the world from before it, so a wreck stamped into terrain
-a player is just loading may show gaps to them until the chunk is sent
-again. That is the engine's to fix, in the streaming.
+a player was just loading showed gaps to them. Fixed in the streaming
+(engine 6ead3ea8): an edit to a chunk in flight now waits and is written
+right behind the chunk.
 
 ## W34. Clouds in Simple are white whatever the sky (2026-10-12): LANDED 2026-10-13 (engine ae2dbece), awaiting the eye
 
