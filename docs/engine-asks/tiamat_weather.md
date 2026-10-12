@@ -20,7 +20,7 @@ W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 
 
-## W37. The sun is a dark disc (2026-10-13)
+## W37. The sun is a dark disc (2026-10-13): LANDED 2026-10-13 (engine b37bfa5e), awaiting the eye
 
 **Seen.** The designer, playing 0.4.0: "the sun seems to be a dark circle
 rather than a white (or orange at sunset) one." Which lighting mode, and
@@ -44,6 +44,23 @@ colour (orange at dusk) low down — in every lighting mode, with storm
 darkness and a sky modifier dimming it as they dim the rest. Gate: a clear
 noon and a clear dusk, looking at the sun, in each mode: the disc is the
 brightest thing in the sky and the colour of the keyframe's sun.
+
+**From the engine, 2026-10-13.** Two faults, neither the mod's. The disc
+was painted at the LIGHT's intensity — a sunset keyframe at 0.5 made it
+darker than the 0.9-red sky beside it — and in Beautiful the post pass's
+fog painted every far-plane sky pixel over, disc included (the bow and the
+stars are re-added after the fog for the same reason; now the disc is too).
+Since b37bfa5e the renderer is handed the disc's own brightness (the
+keyframe's intensity floored at 0.85, times a sky modifier's intensity, so
+storm darkness still dims it) and Beautiful re-paints it over its fog;
+ae81eaee set the gate's margin where a driver's rounding cannot cross it.
+Nothing changes on the mod's side. Side effect to look at: at night the
+disc is drawn where the light comes from, so a moonlit sky shows a pale
+blue disc at the moon.
+
+*[H]:* a clear noon and a clear dusk, looking at the sun, in Simple, Classic
+and Beautiful: the disc is the brightest thing in the sky and the colour of
+the keyframe's sun.
 ## W36. A rain puddle draws as a full block of water (2026-10-12): LANDED 2026-10-12 (engine 3394bdb3)
 
 **From the engine, 2026-10-12.** The cube was GLASS, not water. The
