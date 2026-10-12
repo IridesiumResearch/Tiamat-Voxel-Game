@@ -1917,6 +1917,13 @@ impl Renderer {
     /// How many particles the next frame draws.
     #[must_use]
     pub const fn particle_count(&self) -> u32 {
+        // **The whole table, not only the fluids named.** A material a
+        // previous table drew a fluid as keeps its row, and a row that kept
+        // its opacity would draw that material's next fluid at the last
+        // world's number. Zero is "unsaid", which falls back to the default.
+        for row in &mut rows {
+            row.params[3] = 0.0;
+        }
         self.particles.count()
     }
 

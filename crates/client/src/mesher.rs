@@ -465,13 +465,17 @@ impl SubNodeGrid {
         // world has no glass in it — so `Transparency::any` gates it exactly as
         // `FluidFill::any` gates the fluid columns. A world without windows
         // meshes as it always did.
-        let glass = glass_columns(&materials, transparent);
-        let cutout = cutout_columns(&materials, transparent);
-        let sprites = billboards_of(&materials, transparent);
-        let sprite_columns = sprite_columns_of(&materials, transparent);
-        let model_columns = model_columns_of(&materials, transparent);
-        let models = model_instances_of(&materials, transparent);
-        let flickers = flicker_sources_of(&materials, transparent);
+        //
+        // **And never a wet cell** — see [`is_wet`]. Every scan below reads
+        // the material a cell holds, and a wet cell holds the fluid's.
+        let dry = wet.as_ref();
+        let glass = glass_columns(&materials, dry, transparent);
+        let cutout = cutout_columns(&materials, dry, transparent);
+        let sprites = billboards_of(&materials, dry, transparent);
+        let sprite_columns = sprite_columns_of(&materials, dry, transparent);
+        let model_columns = model_columns_of(&materials, dry, transparent);
+        let models = model_instances_of(&materials, dry, transparent);
+        let flickers = flicker_sources_of(&materials, dry, transparent);
 
         let mut grid = Self {
             materials,
@@ -2599,7 +2603,28 @@ pub fn mesh_chunk(
 /// the transparency question is per CELL and the block writers work a whole
 /// block at a time, so asking there would mean asking per cell anyway — in
 /// three places instead of one, and inside the loops that were measured.
-fn glass_columns(materials: &[u16], transparent: &impl Transparency) -> Option<[Vec<u64>; 3]> {
+/// Whether the cell at `(x, y, z)` holds fluid rather than terrain.
+///
+/// **A wet cell is in no set but the fluid's.** `fill_fluid` writes a wet
+/// cell's material into the grid so the fluid pass can read it back, and that
+/// is where the glass, foliage, sprite, model and flicker scans found it too.
+/// A sea drawn as a block that declares `transparent` — a block in a slot is a
+/// block, and a slab of water looks like glass — put every wet cell in the
+/// glass set; glass is culled against glass alone (Contract §8.1), and the
+/// padding a neighbour's water seeds is in the fluid set and not the glass
+/// set, so every wet cell on a chunk's edge drew a pane there. Reported from
+/// the window, for the third time, as chunk borders drawn across the ocean —
+/// a grid of panes on the seams and a sheet over the bed, none of them fluid
+/// faces, so no fluid seam search could see them.
+fn is_wet(wet: Option<&[Vec<u64>; 3]>, x: usize, y: usize, z: usize) -> bool {
+    wet.is_some_and(|wet| wet[0][y * N + z] & (1 << (x as u32 + FIRST)) != 0)
+}
+
+fn glass_columns(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Option<[Vec<u64>; 3]> {
     if !transparent.any() {
         return None;
     }
@@ -2609,7 +2634,7 @@ fn glass_columns(materials: &[u16], transparent: &impl Transparency) -> Option<[
         for y in 0..N {
             for x in 0..N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !transparent.is_transparent(material) {
+                if material == 0 || is_wet(wet, x, y, z) || !transparent.is_transparent(material) {
                     continue;
                 }
                 found = true;
@@ -2664,7 +2689,11 @@ pub struct Billboard {
 /// The same walk as [`glass_columns`] over the other flag. Two passes rather
 /// than one that sorts into both, because a world has glass or foliage or
 /// neither far more often than both, and each pass is skipped whole.
-fn cutout_columns(materials: &[u16], transparent: &impl Transparency) -> Option<[Vec<u64>; 3]> {
+fn cutout_columns(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Option<[Vec<u64>; 3]> {
     if !transparent.any_cutout() {
         return None;
     }
@@ -2674,7 +2703,7 @@ fn cutout_columns(materials: &[u16], transparent: &impl Transparency) -> Option<
         for y in 0..N {
             for x in 0..N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !transparent.is_cutout(material) {
+                if material == 0 || is_wet(wet, x, y, z) || !transparent.is_cutout(material) {
                     continue;
                 }
                 found = true;
@@ -2692,7 +2721,11 @@ fn cutout_columns(materials: &[u16], transparent: &impl Transparency) -> Option<
 /// The same walk `cutout_columns` does over the other flag, and needed for the
 /// opposite reason: these cells are removed from the geometry rather than added
 /// to a second set of it.
-fn sprite_columns_of(materials: &[u16], transparent: &impl Transparency) -> Option<[Vec<u64>; 3]> {
+fn sprite_columns_of(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Option<[Vec<u64>; 3]> {
     if !transparent.any_billboard() {
         return None;
     }
@@ -2702,7 +2735,7 @@ fn sprite_columns_of(materials: &[u16], transparent: &impl Transparency) -> Opti
         for y in 0..N {
             for x in 0..N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !transparent.is_billboard(material) {
+                if material == 0 || is_wet(wet, x, y, z) || !transparent.is_billboard(material) {
                     continue;
                 }
                 found = true;
@@ -2717,7 +2750,11 @@ fn sprite_columns_of(materials: &[u16], transparent: &impl Transparency) -> Opti
 
 /// The occupancy columns of every model-material cell, or `None` if there are
 /// none. The sprite walk over the other flag (Contract §8.6).
-fn model_columns_of(materials: &[u16], transparent: &impl Transparency) -> Option<[Vec<u64>; 3]> {
+fn model_columns_of(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Option<[Vec<u64>; 3]> {
     if !transparent.any_model() {
         return None;
     }
@@ -2727,7 +2764,7 @@ fn model_columns_of(materials: &[u16], transparent: &impl Transparency) -> Optio
         for y in 0..N {
             for x in 0..N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !transparent.is_model(material) {
+                if material == 0 || is_wet(wet, x, y, z) || !transparent.is_model(material) {
                     continue;
                 }
                 found = true;
@@ -2742,7 +2779,11 @@ fn model_columns_of(materials: &[u16], transparent: &impl Transparency) -> Optio
 
 /// One instance per block that holds a model material's cell, in block order.
 /// If a block holds two model materials the lowest id wins (Contract §8.6).
-fn model_instances_of(materials: &[u16], transparent: &impl Transparency) -> Vec<ModelInstance> {
+fn model_instances_of(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Vec<ModelInstance> {
     if !transparent.any_model() {
         return Vec::new();
     }
@@ -2750,7 +2791,11 @@ fn model_instances_of(materials: &[u16], transparent: &impl Transparency) -> Vec
 }
 
 /// The blocks whose light flickers, one entry per block, lowest material.
-fn flicker_sources_of(materials: &[u16], transparent: &impl Transparency) -> Vec<ModelInstance> {
+fn flicker_sources_of(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Vec<ModelInstance> {
     if !transparent.any_flicker() {
         return Vec::new();
     }
@@ -2758,7 +2803,11 @@ fn flicker_sources_of(materials: &[u16], transparent: &impl Transparency) -> Vec
 }
 
 /// One entry per block holding a cell `wanted`, lowest material of them.
-fn instances_of(materials: &[u16], wanted: impl Fn(u16) -> bool) -> Vec<ModelInstance> {
+fn instances_of(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    wanted: impl Fn(u16) -> bool,
+) -> Vec<ModelInstance> {
     let per = SUBNODES_PER_AXIS as usize;
     let blocks = N / per;
     let mut found: std::collections::BTreeMap<[u8; 3], u16> = std::collections::BTreeMap::new();
@@ -2766,7 +2815,7 @@ fn instances_of(materials: &[u16], wanted: impl Fn(u16) -> bool) -> Vec<ModelIns
         for y in 0..N {
             for x in 0..N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !wanted(material) {
+                if material == 0 || is_wet(wet, x, y, z) || !wanted(material) {
                     continue;
                 }
                 let key = [(x / per) as u8, (y / per) as u8, (z / per) as u8];
@@ -2795,7 +2844,11 @@ fn instances_of(materials: &[u16], wanted: impl Fn(u16) -> bool) -> Vec<ModelIns
 ///
 /// Walks columns upward so a run is found from its base, which is where the
 /// sprite stands.
-fn billboards_of(materials: &[u16], transparent: &impl Transparency) -> Vec<Sprite> {
+fn billboards_of(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Vec<Sprite> {
     if !transparent.any_billboard() {
         return Vec::new();
     }
@@ -2805,7 +2858,7 @@ fn billboards_of(materials: &[u16], transparent: &impl Transparency) -> Vec<Spri
             let mut y = 0;
             while y < N {
                 let material = materials[x + N * y + N * N * z];
-                if material == 0 || !transparent.is_billboard(material) {
+                if material == 0 || is_wet(wet, x, y, z) || !transparent.is_billboard(material) {
                     y += 1;
                     continue;
                 }
@@ -3583,6 +3636,93 @@ mod tests {
         // the safe answer for every caller that does not know — and this is
         // what proves the default is doing its job.
         let chunk = empty();
+    #[test]
+    fn a_wet_cell_is_in_no_set_but_the_fluids() {
+        // **Reported from the window, for the third time: chunk borders drawn
+        // across the sea.** The block a sea is drawn as declared `transparent`
+        // — a block in a slot is a block, and a slab of water looks like glass
+        // — and every wet cell, which holds that material so the fluid pass
+        // can read it back, went into the glass set with it. Glass is culled
+        // against glass alone (Contract §8.1) and the padding a neighbour's
+        // water seeds is fluid, not glass: a pane on every seam of the ocean
+        // and a sheet over its bed, none of them fluid faces, so the fluid
+        // seam search never saw them. See `is_wet`.
+        let water = MaterialId(7);
+        let pond = Pond {
+            block: LocalBlock::new(8, 8, 8),
+            depth: 27,
+            material: water.get(),
+        };
+        let chunk = empty();
+        let as_glass = mesh_chunk(
+            &chunk,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &pond,
+            &Glass(water),
+        );
+        assert!(
+            as_glass.glass_quads.is_empty(),
+            "a wet cell was meshed as glass: {} panes",
+            as_glass.glass_quads.len()
+        );
+        assert!(
+            as_glass.fluid_vertices.len() >= 4 * 6,
+            "and it is still the fluid's: a block of milk in the air is six faces and its \
+             skirt, not {}",
+            as_glass.fluid_vertices.len() / 4
+        );
+
+        // The same for every other set a material can be in.
+        let as_leaves = mesh_chunk(
+            &chunk,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &pond,
+            &Leaves(water),
+        );
+        assert!(
+            as_leaves.cutout_quads.is_empty(),
+            "a wet cell was meshed as foliage: {} quads",
+            as_leaves.cutout_quads.len()
+        );
+        let as_sprites = mesh_chunk(
+            &chunk,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &pond,
+            &Sprites(water),
+        );
+        assert!(
+            as_sprites.billboards.is_empty(),
+            "a wet cell was meshed as a sprite: {} of them",
+            as_sprites.billboards.len()
+        );
+
+        // And a DRY cell of the same material is still what it declares: the
+        // guard is on the cell, not on the material.
+        let mut pane = empty();
+        pane.set_subnode(BlockPos::new(2, 2, 2).subnode(0, 0, 0), water)
+            .expect("in chunk");
+        let dry = mesh_chunk(
+            &pane,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &NoFluid,
+            &Glass(water),
+        );
+        assert_eq!(
+            dry.glass_quads.len(),
+            6,
+            "a placed cell of the water block is glass, as it declares"
+        );
+        assert!(dry.fluid_vertices.is_empty());
+    }
+
         assert_eq!(
             chunk.is_uniform(),
             Some(tiamat_core::MaterialId::AIR),

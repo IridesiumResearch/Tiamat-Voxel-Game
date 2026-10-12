@@ -15,6 +15,14 @@
 //! Such a face is interior to one body of water and must not exist. A surface
 //! the sea really has is not one — it has air above it, not water.
 //!
+//! **And a pane is a wall too** (2026-10-12). The third report from the window
+//! was chunk borders drawn across the ocean after every fluid wall was gone: the
+//! block the sea is drawn as declares `transparent`, and every wet cell went into
+//! the mesher's glass set with it, which is culled against glass alone — so a
+//! grid of glass panes stood on the seams. The search below reads the glass
+//! quads as it reads the fluid faces, meshed with the sight the material table
+//! gives a real client rather than with `NoGlass`.
+//!
 //! **Non-vacuous by construction.** Each run ends by giving one chunk a layer of
 //! a fluid the client was never told about, which `fluid_at` reports as water
 //! and the mesher draws as nothing, and asserts the search then finds walls. A
@@ -62,6 +70,9 @@ fn write_sea(name: &str, lua: &str) -> PathBuf {
     root
 }
 
+/// A face on a seam plane: `(axis, positive, min cell, max cell)`.
+type SeamFace = (u8, bool, (u32, u32, u32), (u32, u32, u32));
+
 /// A fluid face on a chunk seam with water on the far side of it.
 struct Wall {
     chunk: ChunkPos,
@@ -83,7 +94,7 @@ impl std::fmt::Debug for Wall {
 /// Meshes each held chunk exactly as `App::remesh` does — the store's own
 /// neighbours, absent policy and fluid view — so what this reads is what the
 /// player would be looking at.
-fn seam_walls(store: &ChunkStore) -> Vec<Wall> {
+fn seam_walls(store: &ChunkStore, sight: &mesher::Sight) -> Vec<Wall> {
     let mut walls = Vec::new();
     let edge = tiamat_core::CHUNK_SUBNODES;
     let per = tiamat_core::SUBNODES_PER_AXIS;
@@ -97,9 +108,14 @@ fn seam_walls(store: &ChunkStore) -> Vec<Wall> {
             ABSENT_POLICY,
             &DAY,
             &store.fluid_for(pos),
-            &mesher::NoGlass,
+            sight,
         );
         let corner = BlockPos::from_chunk_corner(pos);
+        // Every face on a seam plane, fluid or glass: `(axis, positive, min
+        // cell, max cell)`, in the chunk's cells. A fluid vertex is on the
+        // plane itself (0 or 48); a glass quad names the last CELL it covers
+        // (0 or 47), which is the same seam read from inside the cell.
+        let mut faces: Vec<SeamFace> = Vec::new();
         for quad in mesh.fluid_vertices.chunks_exact(4) {
             let (axis, positive) = quad[0].face();
             let min = quad.iter().fold((u32::MAX, u32::MAX, u32::MAX), |m, v| {
@@ -111,9 +127,36 @@ fn seam_walls(store: &ChunkStore) -> Vec<Wall> {
                 (m.0.max(x), m.1.max(y), m.2.max(z))
             });
             let plane = [min.0, min.1, min.2][usize::from(axis)];
-            if !((positive && plane == edge) || (!positive && plane == 0)) {
+            if (positive && plane == edge) || (!positive && plane == 0) {
+                faces.push((axis, positive, min, max));
+            }
+        }
+        for quad in &mesh.glass_quads {
+            let last = edge - 1;
+            if !((quad.positive && u32::from(quad.w) == last) || (!quad.positive && quad.w == 0)) {
                 continue;
             }
+            let (ua, va) = match quad.axis {
+                0 => (1, 2),
+                1 => (0, 2),
+                _ => (0, 1),
+            };
+            let mut min = [0u32; 3];
+            let mut max = [0u32; 3];
+            min[usize::from(quad.axis)] = u32::from(quad.w);
+            max[usize::from(quad.axis)] = u32::from(quad.w);
+            min[ua] = u32::from(quad.u);
+            max[ua] = u32::from(quad.u) + u32::from(quad.du);
+            min[va] = u32::from(quad.v);
+            max[va] = u32::from(quad.v) + u32::from(quad.dv);
+            faces.push((
+                quad.axis,
+                quad.positive,
+                (min[0], min[1], min[2]),
+                (max[0], max[1], max[2]),
+            ));
+        }
+        for (axis, positive, min, max) in faces {
             // The blocks this quad covers, asked one at a time: a merged face
             // can span a shoreline, and one wet block behind it is a wall.
             let (ua, va) = match axis {
@@ -163,6 +206,8 @@ struct Diver {
     server: ServerHandle,
     connection: Connection,
     store: ChunkStore,
+    /// What the material table said is glass, as `App` builds it.
+    sight: mesher::Sight,
     tally: std::collections::BTreeMap<&'static str, usize>,
     world: PathBuf,
 }
@@ -214,6 +259,7 @@ impl Diver {
             server,
             connection,
             store: ChunkStore::new(),
+            sight: mesher::Sight::default(),
             tally: std::collections::BTreeMap::new(),
             world,
         }
@@ -252,6 +298,13 @@ impl Diver {
                     self.store.set_fluid(pos, *layer);
                 }
                 Event::Fluids { fluids } => self.store.set_fluid_table(&fluids),
+                Event::Materials { table, .. } => {
+                    self.sight.glass = table
+                        .iter()
+                        .filter(|entry| entry.transparent)
+                        .map(|entry| entry.id)
+                        .collect();
+                }
                 Event::ChunkUnload(pos) => {
                     world += 1;
                     *self.tally.entry("unload").or_default() += 1;
@@ -301,7 +354,7 @@ impl Diver {
 
     /// Asserts the sea has no walls, and that the search could have found one.
     fn assert_seamless(&mut self) {
-        let walls = seam_walls(&self.store);
+        let walls = seam_walls(&self.store, &self.sight);
         assert!(
             walls.is_empty(),
             "{} walls on the seams of a sea of {} chunks: {:?}",
@@ -334,7 +387,7 @@ impl Diver {
             );
         }
         self.store.set_fluid(wet, unknown);
-        let found = seam_walls(&self.store).len();
+        let found = seam_walls(&self.store, &self.sight).len();
         self.store.set_fluid(wet, held);
         assert!(
             found > 0,
@@ -413,6 +466,17 @@ const TERRACED: &str = "local sand = game.register_block{ id = \"sand\" }\n\
      \x20   return false\n\
      end)\n";
 
+/// `FLAT`, with the water block declared `transparent` — what the default
+/// World mod does, so that a block of it in a slot is drawn as the glass it
+/// looks like.
+const FLAT_GLASS: &str = "local sand = game.register_block{ id = \"sand\" }\n\
+     game.register_block{ id = \"water\", transparent = true }\n\
+     game.register_fluid{ id = \"water\", material = \"sea:water\" }\n\
+     game.register_on_generate(function(buf, pos)\n\
+     \x20   buf:fill_below_heightmap(game.flat_heightmap(-40), sand)\n\
+     \x20   buf:fill_fluid_below(8, \"sea:water\")\n\
+     end)\n";
+
 const VIEW: ViewDistance = ViewDistance {
     horizontal: 3,
     vertical: 3,
@@ -422,6 +486,25 @@ const VIEW: ViewDistance = ViewDistance {
 fn a_streamed_sea_draws_no_walls_between_its_chunks() {
     let mut diver = Diver::join("flat", FLAT, VIEW);
     diver.settle();
+    diver.assert_seamless();
+    diver.stop();
+}
+
+#[test]
+fn a_sea_drawn_as_a_transparent_block_draws_no_panes_between_its_chunks() {
+    // **Reported from the window, the third time: chunk borders across the
+    // ocean.** Every fluid wall was gone by then; what stood on the seams was
+    // GLASS, because the block the sea is drawn as declares `transparent`
+    // and every wet cell went into the glass set with it (see the mesher's
+    // `is_wet`). The search reads glass quads too, and this is the sea that
+    // has them.
+    let mut diver = Diver::join("flat-glass", FLAT_GLASS, VIEW);
+    diver.settle();
+    assert!(
+        !diver.sight.glass.is_empty(),
+        "the material table never said the water block was glass, so the search could \
+         not have found a pane"
+    );
     diver.assert_seamless();
     diver.stop();
 }

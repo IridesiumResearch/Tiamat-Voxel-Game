@@ -51,6 +51,28 @@ pub const HUD_FONT: &[u8] = include_bytes!("../assets/third-party/go-font/Go-Mon
 /// knob that can be added when something wants one.
 const UNDERWATER_VISIBILITY: f32 = 16.0;
 
+/// The least a body under a fluid can see, in blocks, whatever the fluid.
+///
+/// Not zero: a fog that is total at no distance is a division the shader has
+/// to guard, and a hand's reach of the world keeps the frame from being a flat
+/// colour with nothing in it to say which way is up.
+const SUBMERGED_FLOOR: f32 = 0.5;
+
+/// How far a body under a fluid sees, in blocks, from what the fluid hides.
+///
+/// **Lava is a surface, and it is a surface from inside too.** The submerged
+/// fog took [`UNDERWATER_VISIBILITY`] for every fluid alike, so a body in lava
+/// saw sixteen blocks of cave through an orange haze — reported from the
+/// window as "lava does not render as opaque". The fluid's own `opacity`
+/// (`register_fluid`) says how much of the world its surface hides, and the
+/// same number says how much of the world its body hides: water at the
+/// default sees most of its sixteen blocks, and lava at 1.0 sees to the end
+/// of an arm.
+fn submerged_visibility(opacity: f32) -> f32 {
+    let clear = (1.0 - opacity).clamp(0.0, 1.0);
+    (UNDERWATER_VISIBILITY * clear).max(SUBMERGED_FLOOR)
+}
+
 /// The least light a particle is drawn with, so a spray at night is dim rather
 /// than a hole in the picture.
 const PARTICLE_FLOOR: f32 = 0.12;
@@ -5462,11 +5484,10 @@ impl App {
         let submerged = self.submerged_in();
         self.renderer.set_place_fog_visible(submerged.is_none());
         let (sky, far, up) = match submerged {
-            Some(fluid) => (
-                self.store.fluid_colour(fluid),
-                UNDERWATER_VISIBILITY,
-                UNDERWATER_VISIBILITY,
-            ),
+            Some(fluid) => {
+                let reach = submerged_visibility(self.store.fluid_opacity(fluid));
+                (self.store.fluid_colour(fluid), reach, reach)
+            }
             // **The HORIZON, not the detail radius, and inside it.** Since
             // Task 15b the world carries on past the chunks a client is sent
             // in full, drawn from summaries — and fog at the detail radius
@@ -7655,6 +7676,27 @@ mod tests {
         use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
         let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
+    #[test]
+    fn a_body_under_lava_sees_an_arms_length_and_one_under_water_sees_the_pond() {
+        // `register_fluid{ opacity }` decides the submerged view as it decides
+        // the surface: the one number, read twice.
+        let lava = super::submerged_visibility(1.0);
+        assert!(
+            (lava - super::SUBMERGED_FLOOR).abs() < f32::EPSILON,
+            "under an opaque fluid the view is the floor, not {lava}"
+        );
+        let water = super::submerged_visibility(tiamat_core::script::FluidRules::DEFAULT_OPACITY);
+        assert!(
+            water > 4.0 && water < super::UNDERWATER_VISIBILITY,
+            "under water the view is most of the pond: {water}"
+        );
+        let clear = super::submerged_visibility(0.0);
+        assert!((clear - super::UNDERWATER_VISIBILITY).abs() < f32::EPSILON);
+        // Nonsense in, the floor out, never a negative or a NaN fog.
+        assert!(super::submerged_visibility(7.0) >= super::SUBMERGED_FLOOR);
+        assert!(super::submerged_visibility(-3.0) <= super::UNDERWATER_VISIBILITY);
+    }
+
         for x in 0..6 {
             for z in 0..6 {
                 chunk

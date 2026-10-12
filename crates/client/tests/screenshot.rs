@@ -6447,32 +6447,79 @@ fn a_fluid_hides_what_is_under_it_by_the_opacity_its_mod_declared() {
             .fold(0.0_f32, f32::max)
     };
 
-    // Nothing declared: the engine default, which is what every fluid was drawn
-    // at before a mod could say otherwise.
-    let defaulted = shows_through(&mut renderer);
-    assert!(
-        defaulted > 0.05,
-        "a fluid whose mod declared no opacity hides its floor completely ({defaulted}), so the \
-         default is not the see-through one every pond had"
-    );
+    // **In every lighting mode** (2026-10-12, "lava does not render as
+    // opaque"): the fluid pipeline is built once per mode — Beautiful's writes
+    // depth and draws into the float target — and an opacity that reached two
+    // of the three would be a report exactly like that one.
+    for mode in [
+        client::config::LightingMode::Simple,
+        client::config::LightingMode::Classic,
+        client::config::LightingMode::Beautiful,
+    ] {
+        renderer.set_lighting_mode(mode);
 
-    // Lava: opaque, declared as such.
+        // Nothing declared: the engine default, which is what every fluid was
+        // drawn at before a mod could say otherwise.
+        renderer.set_fluid_opacity(&[]);
+        let defaulted = shows_through(&mut renderer);
+        assert!(
+            defaulted > 0.05,
+            "{mode:?}: a fluid whose mod declared no opacity hides its floor completely \
+             ({defaulted}), so the default is not the see-through one every pond had"
+        );
+
+        // Lava: opaque, declared as such.
+        renderer.set_fluid_opacity(&[(LAVA.get(), 1.0)]);
+        let opaque = shows_through(&mut renderer);
+        assert!(
+            opaque < 0.01,
+            "{mode:?}: a fluid declared fully opaque still shows {opaque} of the floor under \
+             it, against {defaulted} for the default — `opacity` is not reaching the shader"
+        );
+
+        // And back the other way, to prove the number is read rather than a
+        // flag: barely-there water shows MORE of the floor than the default.
+        renderer.set_fluid_opacity(&[(LAVA.get(), 0.15)]);
+        let clear = shows_through(&mut renderer);
+        assert!(
+            clear > defaulted,
+            "{mode:?}: a fluid at opacity 0.15 shows {clear} of its floor and the default \
+             0.72 shows {defaulted} — the value is not being read, only its presence"
+        );
+    }
+
+    // **And a far sea of it, from a summary**, which reaches the same pipeline
+    // through `mesh_summary`'s fluid list rather than the chunk mesher's.
+    renderer.set_lighting_mode(client::config::LightingMode::Classic);
+    let n = tiamat_core::lod::cells_per_axis(tiamat_core::lod::FINEST).expect("a level") as usize;
+    let far_floor = |material: MaterialId| {
+        let mut cells = vec![MaterialId::AIR; n * n * n];
+        for z in 0..n {
+            for x in 0..n {
+                cells[(z * n + 8) * n + x] = material;
+                cells[(z * n + 9) * n + x] = LAVA;
+            }
+        }
+        let summary =
+            tiamat_core::lod::Summary::from_parts(tiamat_core::lod::FINEST, cells).expect("build");
+        mesher::mesh_summary(&summary, &[LAVA.get()], |_, _| false)
+    };
+    let far_through = |renderer: &mut Renderer, material: MaterialId| {
+        renderer.set_chunk(ChunkPos::new(0, 0, 0), &far_floor(material));
+        let frame = target.capture(renderer, &camera).expect("capture");
+        average(&frame, WIDTH / 4, HEIGHT / 4, WIDTH * 3 / 4, HEIGHT * 3 / 4)
+    };
     renderer.set_fluid_opacity(&[(LAVA.get(), 1.0)]);
-    let opaque = shows_through(&mut renderer);
-    assert!(
-        opaque < 0.01,
-        "a fluid declared fully opaque still shows {opaque} of the floor under it, against \
-         {defaulted} for the default — `opacity` is not reaching the shader"
+    let (dark, pale) = (
+        far_through(&mut renderer, DARK),
+        far_through(&mut renderer, PALE),
     );
-
-    // And back the other way, to prove the number is read rather than a flag:
-    // barely-there water shows MORE of the floor than the default does.
-    renderer.set_fluid_opacity(&[(LAVA.get(), 0.15)]);
-    let clear = shows_through(&mut renderer);
+    let far_opaque = (0..3)
+        .map(|channel| (pale[channel] - dark[channel]).abs())
+        .fold(0.0_f32, f32::max);
     assert!(
-        clear > defaulted,
-        "a fluid at opacity 0.15 shows {clear} of its floor and the default 0.72 shows \
-         {defaulted} — the value is not being read, only its presence"
+        far_opaque < 0.01,
+        "a far sea of an opaque fluid shows {far_opaque} of the bed under it"
     );
 }
 

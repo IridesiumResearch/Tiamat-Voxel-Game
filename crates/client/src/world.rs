@@ -167,6 +167,9 @@ pub struct ChunkStore {
     /// same `set_sky` they are — a fluid tinted in a different space would be a
     /// different colour on screen from the one the mod chose.
     fluid_colours: [[f32; 3]; tiamat_core::fluid::MAX_FLUIDS + 1],
+    /// How much of the world a surface of each fluid hides, by fluid id — and
+    /// so how far a body under it can see (`App::submerged_visibility`).
+    fluid_opacities: [f32; tiamat_core::fluid::MAX_FLUIDS + 1],
     /// Summaries of chunks too far away to be sent in full.
     ///
     /// **Disjoint from `chunks` by construction**, because they are the same
@@ -277,6 +280,8 @@ impl ChunkStore {
     pub fn set_fluid_table(&mut self, fluids: &[tiamat_core::proto::FluidDef]) {
         self.fluid_materials = [0; tiamat_core::fluid::MAX_FLUIDS + 1];
         self.fluid_colours = [[1.0; 3]; tiamat_core::fluid::MAX_FLUIDS + 1];
+        self.fluid_opacities =
+            [tiamat_core::script::FluidRules::DEFAULT_OPACITY; tiamat_core::fluid::MAX_FLUIDS + 1];
         for def in fluids {
             let Some(slot) = usize::from(def.id).checked_sub(0) else {
                 continue;
@@ -286,6 +291,7 @@ impl ChunkStore {
             }
             self.fluid_materials[slot] = def.material;
             self.fluid_colours[slot] = def.color.map(|channel| f32::from(channel) / 255.0);
+            self.fluid_opacities[slot] = def.opacity;
         }
         if !self.fluid.is_empty() {
             self.mark_all_dirty();
@@ -302,6 +308,19 @@ impl ChunkStore {
             .get(usize::from(fluid.0))
             .copied()
             .unwrap_or([1.0; 3])
+    }
+
+    /// How much of what is behind a surface of this fluid it hides, `0..=1`,
+    /// as its mod declared (`register_fluid{ opacity }`).
+    ///
+    /// Zero for a fluid this client was never told about: nothing is hidden
+    /// by a fluid that is not drawn.
+    #[must_use]
+    pub fn fluid_opacity(&self, fluid: tiamat_core::fluid::FluidId) -> f32 {
+        self.fluid_opacities
+            .get(usize::from(fluid.0))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// The fluid in one chunk, as the mesher wants it.
