@@ -129,7 +129,7 @@ list goes. Gate: a schematic of a few hundred blocks stamped beside a player
 lands whole within a few seconds without a tick over budget, the same as
 `buf:scatter` would have written it there, at all four turns.
 
-## W34. Clouds in Simple are white whatever the sky (2026-10-12)
+## W34. Clouds in Simple are white whatever the sky (2026-10-12): LANDED 2026-10-13 (engine ae2dbece), awaiting the eye
 
 **Seen.** The designer: "the clouds in Simple lighting mode are bright white
 and should be a faded darker colour to match the sky." In `clouds.wgsl` mode
@@ -148,6 +148,24 @@ no extra field lookups, so Simple stays the mode that pays for nothing. Gate:
 in Simple the deck at noon reads as today, at midnight as a dim blue-grey
 near the night sky, and at dusk takes the dusk's tint; the other modes are
 unchanged.
+
+**From the engine, 2026-10-13.** As read. Since ae2dbece Simple's face term
+is multiplied by `sun_lit`, the sun's colour at the light's intensity with a
+sky modifier's dimming already in it: one multiply, no lookup. The share
+towards the sky by distance was already there — the deck's aerial
+perspective comes after the mode's shading and every mode takes it — so it
+needed nothing new. Seen from below at Core Sky's keyframes the deck is now
+0.72 times the light: at noon exactly as before (the same bytes), at
+midnight (0.17, 0.19, 0.26) against a night sky of about (0.12, 0.17, 0.31),
+at dusk (0.63, 0.48, 0.36), close to what Classic and Beautiful draw there.
+Classic and Beautiful replace the term with their own mix, and their frames
+were byte-identical before and after. Under storm darkness Simple now tracks
+the other two as well. Nothing changes on the mod's side.
+
+*[H]:* in Simple, under an overcast deck, at noon, at midnight and at dusk:
+at noon the deck is the white it was; at midnight a dim blue-grey near the
+night sky; at dusk it takes the dusk's tint. Classic and Beautiful look as
+they did.
 ## W33. Rain vanishes in front of the sky (2026-10-05): LANDED 2026-10-07 (engine 9d248a3a), awaiting the eye
 
 **Seen.** The designer: "rain renders on top of the clouds but does not
