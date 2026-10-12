@@ -228,13 +228,17 @@ proptest! {
         let merged = mesh_chunk(&chunk, &Neighbours::open(), Absent::Air, &DAY,
         &client::mesher::NoFluid, &client::mesher::NoGlass,
     );
-        let (vertices, indices) = merged.to_buffers();
+        let vertices = merged.to_buffers();
+        // Drawn through the shared pattern: six indices a quad, every one of
+        // them inside this mesh's four-a-quad vertex list.
+        let indices = client::mesher::quad_indices(merged.quads.len());
 
         for vertex in &vertices {
             let (x, y, z) = vertex.position();
             prop_assert!(x <= 48 && y <= 48 && z <= 48, "position out of range");
             prop_assert!(vertex.material_id() != 0, "air was meshed");
         }
+        prop_assert_eq!(vertices.len(), merged.quads.len() * 4);
         for index in &indices {
             prop_assert!((*index as usize) < vertices.len(), "index out of range");
         }

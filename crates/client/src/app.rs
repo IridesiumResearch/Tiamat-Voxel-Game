@@ -1043,8 +1043,6 @@ pub struct App {
     /// whatever mods a server runs — a chat that arrived with a mod would be a
     /// chat an operator could not rely on.
     chat: crate::chat::ChatLog,
-    /// Whether the chat input line is open and taking keys.
-    chat_open: bool,
     /// How many materials the atlas holds a texture for.
     textured: usize,
     /// The space being entered, while its world is still arriving.
@@ -1055,15 +1053,6 @@ pub struct App {
     /// first chunk of the new space arrives, because that is the moment there
     /// is something to look at rather than a moment chosen by a timer.
     entering: Option<String>,
-    /// Whether the input line still needs to be given keyboard focus.
-    ///
-    /// Set when chat opens and taken once. **Asking every frame is what broke
-    /// sending**: egui reports a single-line field's Enter as `lost_focus`, and
-    /// a field handed focus back every frame never loses it, so Enter did
-    /// nothing at all.
-    chat_focus: bool,
-    /// What is typed into it.
-    chat_draft: String,
     /// What each inventory view holds, as the server last said.
     ///
     /// The server's answer, not the client's belief: a slot moves when the
@@ -1160,6 +1149,8 @@ pub struct App {
     last_step_at: [f32; 3],
     /// Whether the volumes have changed since they were written out.
     volumes_dirty: bool,
+    /// The summaries held back past the fog, and what they were judged by.
+    horizon: HorizonHold,
     /// Where the interface-scale slider has been dragged to and not let go of.
     ///
     /// Held rather than applied, because applying it moves the slider — see
@@ -1518,11 +1509,8 @@ impl App {
             dialogs: std::collections::BTreeMap::new(),
             views: std::collections::BTreeMap::new(),
             chat: crate::chat::ChatLog::default(),
-            chat_open: false,
             textured: 0,
             entering: None,
-            chat_focus: false,
-            chat_draft: String::new(),
             dialog_events: Vec::new(),
             mixer,
             heard: Vec::new(),
@@ -1546,6 +1534,7 @@ impl App {
             stride: 0.0,
             last_step_at: [0.0; 3],
             volumes_dirty: false,
+            horizon: HorizonHold::default(),
             ui_scale_draft: None,
             settings_open: false,
             menu_open: false,
@@ -3395,25 +3384,25 @@ impl App {
     /// Whether the chat input is open.
     #[must_use]
     pub const fn chat_open(&self) -> bool {
-        self.chat_open
+        self.chat.open
     }
 
     /// The line being typed, for the window to render and edit.
     pub const fn chat_draft_mut(&mut self) -> &mut String {
-        &mut self.chat_draft
+        &mut self.chat.draft
     }
 
     /// Opens or closes the chat input, discarding a half-typed line on close.
     pub fn set_chat_open(&mut self, open: bool) {
-        if open && !self.chat_open {
+        if open && !self.chat.open {
             // Only on the transition. Re-opening an already-open box would
             // otherwise steal focus back every time the key repeated.
-            self.chat_focus = true;
+            self.chat.focus = true;
         }
-        self.chat_open = open;
+        self.chat.open = open;
         if !open {
-            self.chat_draft.clear();
-            self.chat_focus = false;
+            self.chat.draft.clear();
+            self.chat.focus = false;
         }
     }
 
@@ -3422,7 +3411,7 @@ impl App {
     /// True exactly once per opening. See [`App::chat_focus`] for what asking
     /// every frame did.
     pub const fn take_chat_focus(&mut self) -> bool {
-        std::mem::replace(&mut self.chat_focus, false)
+        std::mem::replace(&mut self.chat.focus, false)
     }
 
     /// Sends what is typed, if anything, and closes the input.
@@ -3430,9 +3419,9 @@ impl App {
     /// Trimmed, and an empty line sends nothing: pressing Enter twice is how a
     /// player closes the box, not how they say nothing loudly.
     pub fn send_chat(&mut self) {
-        let text = self.chat_draft.trim().to_owned();
-        self.chat_open = false;
-        self.chat_draft.clear();
+        let text = self.chat.draft.trim().to_owned();
+        self.chat.open = false;
+        self.chat.draft.clear();
         if text.is_empty() {
             return;
         }
@@ -4156,6 +4145,7 @@ impl App {
         for pos in drawn {
             self.renderer.remove_chunk(&self.drawn_at(pos));
         }
+        self.horizon.beyond.clear();
         self.store.clear();
         self.entities.clear();
         self.particles.clear();
@@ -4992,6 +4982,7 @@ impl App {
             }
 
             Event::ChunkUnload(pos) => {
+                self.horizon.beyond.remove(&pos);
                 if self.store.remove(pos) {
                     // The mesh has to go with the data. A renderer holding
                     // a mesh for a chunk the store has forgotten draws a
@@ -5315,6 +5306,45 @@ impl App {
         )
     }
 
+    /// Where the card's memory goes, for the overlay — `Renderer::vram`.
+    ///
+    /// Allocated beside written, so the pool's rounding is a number and not a
+    /// suspicion, and the summaries held past the fog beside the horizon, so
+    /// what was NOT built is a number too.
+    ///
+    /// The textured count is on the overlay because that is where somebody
+    /// looking at a wrong-looking world already is. A world drawn entirely in
+    /// the missing-texture chequer has exactly two causes — the atlas never
+    /// got the textures, or it got them and the shader is not sampling them —
+    /// and they need opposite fixes. The count says which without a round
+    /// trip: 0 is the first, the material count is the second.
+    fn vram_line(&self, material_count: usize) -> String {
+        let vram = self.renderer.vram();
+        format!(
+            "VRAM {} = meshes {} ({} written, idle {}) + atlas {} + depth {} + post {} + shared \
+             {}; {} summaries past the fog; {material_count} materials, {} textured",
+            human_bytes(vram.total()),
+            human_bytes(vram.geometry),
+            human_bytes(vram.written),
+            human_bytes(vram.idle),
+            human_bytes(vram.atlas),
+            human_bytes(vram.depth),
+            human_bytes(vram.post),
+            human_bytes(vram.shared),
+            self.horizon.beyond.len(),
+            self.textured,
+        )
+    }
+
+    /// How many summaries are held back unbuilt as past the fog's reach.
+    ///
+    /// For the session test: the horizon it does not build is as much the
+    /// point as the one it does.
+    #[must_use]
+    pub fn summaries_beyond_fog(&self) -> usize {
+        self.horizon.beyond.len()
+    }
+
     /// How many summaries the client is holding.
     ///
     /// For the HUD and for the session test: a horizon that never arrives and a
@@ -5335,6 +5365,7 @@ impl App {
     /// skipped rather than cleared: the chunk pass owns that position now and
     /// is about to draw over it.
     pub fn build_horizon(&mut self) -> usize {
+        self.rejudge_horizon();
         let due = self.store.take_stale(HORIZON_BUDGET);
         if due.is_empty() {
             return 0;
@@ -5350,6 +5381,16 @@ impl App {
                 // walks it every frame.
                 if summary.is_empty() || self.store.horizon_is_buried(*pos) {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
+                } else if self.past_the_fog(*pos) {
+                    // **Past the fog's reach nothing can be seen**, so
+                    // nothing is built: the fog is total there, in every
+                    // lighting mode, and a horizon of 32 chunks against a
+                    // fog of 24 is a third more summaries than ever reach
+                    // the frame — each one a mesh and a buffer on the card.
+                    // Held, and judged again when the reach grows or the
+                    // camera comes nearer (`rejudge_horizon`).
+                    self.renderer.remove_chunk(&self.drawn_at(*pos));
+                    self.horizon.beyond.insert(*pos);
                 } else {
                     let fluids = self.store.fluid_material_ids();
                     let width = summary.width() as usize;
@@ -5391,6 +5432,64 @@ impl App {
             }
         }
         built
+    }
+
+    /// Brings held-back summaries within the fog's reach back to the queue
+    /// when the reach has grown or the camera has moved.
+    ///
+    /// Once per camera chunk and once per growth of the reach, not per frame:
+    /// a summary's distance only changes with the camera's chunk, and a reach
+    /// that shrinks hides what is built without needing anything torn down.
+    fn rejudge_horizon(&mut self) {
+        let Some(reach) = self.horizon.reach else {
+            return;
+        };
+        let centre = self.camera_chunk();
+        let grown =
+            reach.0 > self.horizon.judged.0 * 1.02 || reach.1 > self.horizon.judged.1 * 1.02;
+        if centre == self.horizon.centre && !grown {
+            return;
+        }
+        self.horizon.centre = centre;
+        self.horizon.judged = reach;
+        let held = std::mem::take(&mut self.horizon.beyond);
+        let mut within = Vec::new();
+        for pos in held {
+            // A summary the store has since let go is nobody's to judge.
+            if self.store.summary(pos).is_none() {
+                continue;
+            }
+            if self.past_the_fog(pos) {
+                self.horizon.beyond.insert(pos);
+            } else {
+                within.push(pos);
+            }
+        }
+        if !within.is_empty() {
+            self.store.requeue_stale(&within);
+        }
+    }
+
+    /// Whether a summary lies wholly past the fog's reach, where the fog is
+    /// total and nothing drawn could be seen.
+    ///
+    /// The fog's ellipsoid, as `fog_reach` in `world.wgsl` and `post.wgsl`
+    /// measure it: sideways against the far reach, up and down against the
+    /// vertical one. Tested at the nearest the chunk comes — its centre less
+    /// half its diagonal — so a chunk straddling the edge is built.
+    fn past_the_fog(&self, pos: ChunkPos) -> bool {
+        let Some((far, up)) = self.horizon.reach else {
+            return false;
+        };
+        if !(far > 0.0 && up > 0.0) {
+            return false;
+        }
+        let corner = self.camera.position.chunk_offset(self.drawn_at(pos));
+        let centre = corner + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
+        let sideways =
+            (glam::Vec2::new(centre.x, centre.z).length() - HALF_CHUNK_DIAGONAL).max(0.0) / far;
+        let vertical = (centre.y.abs() - HALF_CHUNK_DIAGONAL).max(0.0) / up;
+        sideways * sideways + vertical * vertical > 1.0
     }
 
     /// Moves the camera and records the frame time.
@@ -5517,6 +5616,9 @@ impl App {
             ),
         };
         self.renderer.set_sky(sky, far);
+        if submerged.is_none() {
+            self.horizon.reach = Some((far, up));
+        }
         // **A cave's fog is the sky owner's, and not the clock's** (weather
         // ask W29): the renderer blends each fragment's fog from `sky` at full
         // sky light to this at none. Under the milk the milk is the whole
@@ -6882,18 +6984,7 @@ impl App {
                 self.store.dirty_len()
             ),
             self.horizon_line(),
-            format!(
-                "{} of meshes, {material_count} materials, {} textured",
-                human_bytes(self.renderer.mesh_bytes()),
-                // **On the overlay because that is where somebody looking at a
-                // wrong-looking world already is.** A world drawn entirely in
-                // the missing-texture chequer has exactly two causes — the
-                // atlas never got the textures, or it got them and the shader
-                // is not sampling them — and they need opposite fixes. The
-                // count says which without a round trip: 0 is the first, the
-                // material count is the second.
-                self.textured
-            ),
+            self.vram_line(material_count),
             // Vsync sits here because a worst-frame figure cannot be read
             // without it. An unsynchronised loop is back-pressured by the
             // swapchain, which lands in `Phases::acquire` and looks exactly
@@ -7549,8 +7640,63 @@ mod dig_lock_tests {
     }
 }
 
+/// Half a chunk's diagonal, in blocks: how far a chunk reaches from its
+/// centre at most. `16 * sqrt(3) / 2`, written out because this is
+/// presentation and a constant.
+const HALF_CHUNK_DIAGONAL: f32 = 13.86;
+
+/// Summaries held back unbuilt as past the fog's reach, and what that was
+/// judged by — see [`App::build_horizon`] and [`App::rejudge_horizon`].
+struct HorizonHold {
+    /// Wholly past the fog's reach, held until the reach grows or the camera
+    /// comes nearer.
+    beyond: std::collections::BTreeSet<ChunkPos>,
+    /// The fog's reach in clear air, sideways and up, in blocks: what the
+    /// horizon is judged against, kept from the last frame's fog so a dive
+    /// under water does not throw the horizon away and build it again.
+    /// `None` until a frame has set the fog at all.
+    reach: Option<(f32, f32)>,
+    /// The reach and the camera chunk the horizon was last judged from.
+    judged: (f32, f32),
+    centre: ChunkPos,
+}
+
+impl Default for HorizonHold {
+    fn default() -> Self {
+        Self {
+            beyond: std::collections::BTreeSet::new(),
+            reach: None,
+            // Nothing yet: the first real reach counts as having grown, so
+            // the first judgement is made against it.
+            judged: (0.0, 0.0),
+            centre: ChunkPos::new(0, 0, 0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_body_under_lava_sees_an_arms_length_and_one_under_water_sees_the_pond() {
+        // `register_fluid{ opacity }` decides the submerged view as it decides
+        // the surface: the one number, read twice.
+        let lava = super::submerged_visibility(1.0);
+        assert!(
+            (lava - super::SUBMERGED_FLOOR).abs() < f32::EPSILON,
+            "under an opaque fluid the view is the floor, not {lava}"
+        );
+        let water = super::submerged_visibility(tiamat_core::script::FluidRules::DEFAULT_OPACITY);
+        assert!(
+            water > 4.0 && water < super::UNDERWATER_VISIBILITY,
+            "under water the view is most of the pond: {water}"
+        );
+        let clear = super::submerged_visibility(0.0);
+        assert!((clear - super::UNDERWATER_VISIBILITY).abs() < f32::EPSILON);
+        // Nonsense in, the floor out, never a negative or a NaN fog.
+        assert!(super::submerged_visibility(7.0) >= super::SUBMERGED_FLOOR);
+        assert!(super::submerged_visibility(-3.0) <= super::UNDERWATER_VISIBILITY);
+    }
+
     use super::*;
     use tiamat_core::proto::MaterialDef;
 
@@ -7676,27 +7822,6 @@ mod tests {
         use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
         let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
-    #[test]
-    fn a_body_under_lava_sees_an_arms_length_and_one_under_water_sees_the_pond() {
-        // `register_fluid{ opacity }` decides the submerged view as it decides
-        // the surface: the one number, read twice.
-        let lava = super::submerged_visibility(1.0);
-        assert!(
-            (lava - super::SUBMERGED_FLOOR).abs() < f32::EPSILON,
-            "under an opaque fluid the view is the floor, not {lava}"
-        );
-        let water = super::submerged_visibility(tiamat_core::script::FluidRules::DEFAULT_OPACITY);
-        assert!(
-            water > 4.0 && water < super::UNDERWATER_VISIBILITY,
-            "under water the view is most of the pond: {water}"
-        );
-        let clear = super::submerged_visibility(0.0);
-        assert!((clear - super::UNDERWATER_VISIBILITY).abs() < f32::EPSILON);
-        // Nonsense in, the floor out, never a negative or a NaN fog.
-        assert!(super::submerged_visibility(7.0) >= super::SUBMERGED_FLOOR);
-        assert!(super::submerged_visibility(-3.0) <= super::UNDERWATER_VISIBILITY);
-    }
-
         for x in 0..6 {
             for z in 0..6 {
                 chunk

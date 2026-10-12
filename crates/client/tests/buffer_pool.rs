@@ -125,13 +125,13 @@ fn streaming_chunks_reuses_buffers_instead_of_allocating_new_ones() {
          {reused} served from the pool"
     );
 
-    // Two buffers per chunk, so unpooled this would be `2 * updates` — 768
-    // allocations and 768 frees. The pool should serve essentially all of them.
+    // One buffer per chunk — the indices are one shared pattern — so unpooled
+    // this would be `updates` allocations and as many frees. The pool should
+    // serve essentially all of them.
     assert!(
         streamed <= updates / 8,
         "streaming {updates} chunks created {streamed} buffers after warm-up; unpooled that \
-         would be {}, and the pool is meant to make this number roughly zero",
-        updates * 2
+         would be {updates}, and the pool is meant to make this number roughly zero"
     );
     assert!(
         reused >= updates,
@@ -229,7 +229,7 @@ fn a_mesh_that_outgrows_its_buffer_gets_a_bigger_one() {
         &client::mesher::NoGlass,
     );
     assert!(
-        large_mesh.to_buffers().0.len() > small_mesh.to_buffers().0.len() * 4,
+        large_mesh.to_buffers().len() > small_mesh.to_buffers().len() * 4,
         "the two scenes are not different enough in size to exercise a grow"
     );
 
@@ -238,9 +238,8 @@ fn a_mesh_that_outgrows_its_buffer_gets_a_bigger_one() {
 
     // It drew, and it drew the big one: the reported byte count has to match
     // what the large mesh actually needs, not what the small buffer held.
-    let (vertices, indices) = large_mesh.to_buffers();
-    let expected =
-        (std::mem::size_of_val(&vertices[..]) + std::mem::size_of_val(&indices[..])) as u64;
+    let vertices = large_mesh.to_buffers();
+    let expected = std::mem::size_of_val(&vertices[..]) as u64;
     assert_eq!(
         renderer.mesh_bytes(),
         expected,

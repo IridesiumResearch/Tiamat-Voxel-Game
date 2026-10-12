@@ -1349,9 +1349,11 @@ pub struct Mesh {
     /// it scrolls on that field's gradient — so it is resolved here, while the
     /// grid it was meshed from is still in hand, rather than being carried in a
     /// form that cannot be expanded later.
+    ///
+    /// Four vertices a quad in [`quad_corner_order`], drawn through the
+    /// renderer's one shared index pattern ([`quad_indices`]) like every other
+    /// list here: no mesh carries indices of its own.
     pub fluid_vertices: Vec<FluidVertex>,
-    /// Indices into [`Mesh::fluid_vertices`].
-    pub fluid_indices: Vec<u32>,
     /// Which of its vertices the fog takes as under the open sky, whatever
     /// sunlight they carry — weather ask W29. [`OpenSky::NONE`] from the
     /// mesher, [`OpenSky::ALL`] from [`mesh_summary`]; the client sets a
@@ -1459,19 +1461,18 @@ impl Mesh {
         self.vertex_count() * size_of::<PackedVertex>()
     }
 
-    /// Bytes a GPU index buffer would need, at `u32` indices.
+    /// Bytes of the shared index pattern a draw of the opaque quads reads, at
+    /// `u32` indices. **Not uploaded per mesh** — see [`quad_indices`].
     #[must_use]
     pub fn index_bytes(&self) -> usize {
         self.index_count() * size_of::<u32>()
     }
 
-    /// Total VRAM for this mesh, fluid included.
+    /// VRAM this mesh's own buffers take, fluid included: its vertices. The
+    /// indices it is drawn through are the renderer's one shared pattern.
     #[must_use]
     pub fn gpu_bytes(&self) -> usize {
-        self.vertex_bytes()
-            + self.index_bytes()
-            + self.fluid_vertices.len() * size_of::<FluidVertex>()
-            + self.fluid_indices.len() * size_of::<u32>()
+        self.vertex_bytes() + self.fluid_vertices.len() * size_of::<FluidVertex>()
     }
 
     /// Whether the mesh has nothing to draw **at all**, fluid included.
@@ -1512,11 +1513,14 @@ impl Mesh {
         self.cutout_quads.is_empty()
     }
 
-    /// Expands to the vertex and index buffers a renderer uploads.
+    /// Expands to the vertex buffer a renderer uploads: four vertices a quad,
+    /// drawn through the shared index pattern of [`quad_indices`].
     ///
     /// Winding is counter-clockwise when viewed from outside the surface, for
     /// every face direction — so the pipeline can cull back faces and a quad
-    /// facing away is not drawn.
+    /// facing away is not drawn. The pattern is one and the same for every
+    /// quad, so the winding is in the ORDER the corners are emitted:
+    /// [`quad_corner_order`].
     ///
     /// # The y axis winds the other way, and this is why
     ///
@@ -1539,7 +1543,7 @@ impl Mesh {
     /// arrangement in which the wrong answer is a blank screen instead of a
     /// plausible one.
     #[must_use]
-    pub fn to_buffers(&self) -> (Vec<PackedVertex>, Vec<u32>) {
+    pub fn to_buffers(&self) -> Vec<PackedVertex> {
         Self::buffers_of(&self.quads)
     }
 
@@ -1549,24 +1553,22 @@ impl Mesh {
     /// nearly every chunk has no glass in it and would be handed two empty
     /// vectors to allocate and throw away.
     #[must_use]
-    pub fn glass_buffers(&self) -> (Vec<PackedVertex>, Vec<u32>) {
+    pub fn glass_buffers(&self) -> Vec<PackedVertex> {
         Self::buffers_of(&self.glass_quads)
     }
 
     /// The same, for the alpha-tested faces of foliage.
     #[must_use]
-    pub fn cutout_buffers(&self) -> (Vec<PackedVertex>, Vec<u32>) {
+    pub fn cutout_buffers(&self) -> Vec<PackedVertex> {
         Self::buffers_of(&self.cutout_quads)
     }
 
     /// Expands any list of quads. Shared by both of the above, so the opaque
     /// and transparent halves cannot wind differently.
-    fn buffers_of(quads: &[Quad]) -> (Vec<PackedVertex>, Vec<u32>) {
+    fn buffers_of(quads: &[Quad]) -> Vec<PackedVertex> {
         let mut vertices = Vec::with_capacity(quads.len() * 4);
-        let mut indices = Vec::with_capacity(quads.len() * 6);
 
         for quad in quads {
-            let base = u32::try_from(vertices.len()).unwrap_or(0);
             let corners = quad_corners(quad);
             // **Which corners are the top edge**, for Contract §8.3's fake
             // wind. Geometry only: nothing here asks what the material is,
@@ -1584,10 +1586,13 @@ impl Mesh {
                 (1, false) => u32::MAX,
                 (1, true) | (_, _) => highest,
             };
-            for (corner, (x, y, z)) in corners.into_iter().enumerate() {
-                // Corner `n` of the shade is vertex `n` here: both walk
+            for corner in quad_corner_order(quad) {
+                let (x, y, z) = corners[corner];
+                // Corner `n` of the shade is corner `n` of the quad: both walk
                 // `[(0,0), (1,0), (1,1), (0,1)]`, and `crate::shade::Shade`
-                // says so where it is defined.
+                // says so where it is defined. The ORDER the corners go out
+                // in is the winding's, so the shade is looked up by corner
+                // and not by position in the list.
                 let vertex = PackedVertex::lit(
                     x,
                     y,
@@ -1599,10 +1604,9 @@ impl Mesh {
                 );
                 vertices.push(if y == tops { vertex.on_top() } else { vertex });
             }
-            push_quad_indices(&mut indices, base, quad);
         }
 
-        (vertices, indices)
+        vertices
     }
 }
 
@@ -1615,15 +1619,15 @@ impl Mesh {
 /// so what keeps a smoothed surface free of cracks. See
 /// [`SubNodeGrid::surface_at`].
 #[must_use]
-fn fluid_buffers(quads: &[Quad], grid: &SubNodeGrid) -> (Vec<FluidVertex>, Vec<u32>) {
+fn fluid_buffers(quads: &[Quad], grid: &SubNodeGrid) -> Vec<FluidVertex> {
     {
         let mut vertices = Vec::with_capacity(quads.len() * 4);
-        let mut indices = Vec::with_capacity(quads.len() * 6);
         let per_axis = SUBNODES_PER_AXIS as usize;
 
         for quad in quads {
-            let base = u32::try_from(vertices.len()).unwrap_or(0);
-            for (corner, (x, y, z)) in quad_corners(quad).into_iter().enumerate() {
+            let corners = quad_corners(quad);
+            for corner in quad_corner_order(quad) {
+                let (x, y, z) = corners[corner];
                 // Which block row this vertex's surface belongs to. A vertex
                 // sits ON a plane between two cells, so a vertex at the very
                 // bottom of a block row is the top of the row beneath — take the
@@ -1701,10 +1705,9 @@ fn fluid_buffers(quads: &[Quad], grid: &SubNodeGrid) -> (Vec<FluidVertex>, Vec<u
                     flow,
                 ));
             }
-            push_quad_indices(&mut indices, base, quad);
         }
 
-        (vertices, indices)
+        vertices
     }
 }
 
@@ -1724,16 +1727,43 @@ fn quad_corners(quad: &Quad) -> [(u32, u32, u32); 4] {
     corners
 }
 
-/// Two triangles, wound so the quad faces outward whichever way it points.
+/// The order a quad's four corners go out in, as indices into
+/// [`quad_corners`], so that the one shared index pattern winds every face
+/// outward.
+///
+/// # One index buffer for every mesh in the world
+///
+/// Each quad is four vertices and the same six indices from its base — `0 1 2
+/// 0 2 3` — so the renderer keeps a single pattern buffer long enough for the
+/// largest mesh ([`quad_indices`]) and no mesh carries indices of its own.
+/// That is 24 bytes a quad and one pooled buffer per sub-mesh fewer; across a
+/// horizon of thousands of summaries, each paying at least a pool class for
+/// its indices, it was most of the VRAM a client held in geometry.
 ///
 /// The y axis's `(u, v, w)` mapping is an odd permutation, so its corners
-/// circulate the other way — see [`Mesh::to_buffers`].
-fn push_quad_indices(indices: &mut Vec<u32>, base: u32, quad: &Quad) {
+/// circulate the other way: what used to be a second index pattern is now a
+/// second corner order, and the two triangles are the same two triangles.
+#[must_use]
+pub const fn quad_corner_order(quad: &Quad) -> [usize; 4] {
     if quad.positive == (quad.axis != 1) {
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        [0, 1, 2, 3]
     } else {
-        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        [0, 3, 2, 1]
     }
+}
+
+/// The shared index pattern for `quads` quads of four vertices each.
+///
+/// What the renderer fills its one index buffer with; every chunk, summary,
+/// pane, leaf and pond is drawn through a prefix of it.
+#[must_use]
+pub fn quad_indices(quads: usize) -> Vec<u32> {
+    let mut indices = Vec::with_capacity(quads * 6);
+    for quad in 0..quads {
+        let base = u32::try_from(quad * 4).unwrap_or(u32::MAX);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    indices
 }
 
 /// A fluid vertex: 12 bytes.
@@ -2086,9 +2116,7 @@ impl Scratch {
     /// Resolves the fluid quads and hands back the finished mesh.
     fn finish(mut self, grid: &SubNodeGrid) -> Mesh {
         // Resolved here rather than carried as quads: see `Mesh::fluid_vertices`.
-        let (vertices, indices) = fluid_buffers(&self.fluid, grid);
-        self.mesh.fluid_vertices = vertices;
-        self.mesh.fluid_indices = indices;
+        self.mesh.fluid_vertices = fluid_buffers(&self.fluid, grid);
         self.mesh
     }
 }
@@ -2787,7 +2815,7 @@ fn model_instances_of(
     if !transparent.any_model() {
         return Vec::new();
     }
-    instances_of(materials, |material| transparent.is_model(material))
+    instances_of(materials, wet, |material| transparent.is_model(material))
 }
 
 /// The blocks whose light flickers, one entry per block, lowest material.
@@ -2799,7 +2827,7 @@ fn flicker_sources_of(
     if !transparent.any_flicker() {
         return Vec::new();
     }
-    instances_of(materials, |material| transparent.is_flicker(material))
+    instances_of(materials, wet, |material| transparent.is_flicker(material))
 }
 
 /// One entry per block holding a cell `wanted`, lowest material of them.
@@ -3283,7 +3311,6 @@ mod summary_tests {
             "faces: {}",
             mesh.fluid_vertices.len() / 4
         );
-        assert_eq!(mesh.fluid_indices.len(), 6);
         // And the same sea drawn without knowing the material is a slab,
         // as it was.
         let slab = mesh_summary(&sea, &[], |_, _| false);
@@ -3609,33 +3636,6 @@ mod tests {
         out
     }
 
-    /// Milk in one named block, at a level, and nothing anywhere else.
-    struct Pond {
-        block: LocalBlock,
-        depth: u8,
-        material: u16,
-    }
-
-    impl FluidFill for Pond {
-        fn fill(&self, x: i32, y: i32, z: i32) -> Option<(u16, u8)> {
-            (x == self.block.x as i32 && y == self.block.y as i32 && z == self.block.z as i32)
-                .then_some((self.material, self.depth))
-        }
-    }
-
-    #[test]
-    fn an_air_chunk_with_a_pond_in_it_is_still_meshed() {
-        // **The guard on the fast path, and the reason it is not optional.**
-        // `mesh_chunk` skips a chunk of pure air without scanning it, because
-        // most of the sky is exactly that and scanning 110,592 cells to produce
-        // nothing is the cost of a frame on a slow machine. But a pond sits in
-        // blocks that ARE air, so a `FluidFill` that answered `any()` wrongly
-        // would stop drawing water without stopping anything else.
-        //
-        // `Pond` inherits the trait's default of "yes, assume fluid", which is
-        // the safe answer for every caller that does not know — and this is
-        // what proves the default is doing its job.
-        let chunk = empty();
     #[test]
     fn a_wet_cell_is_in_no_set_but_the_fluids() {
         // **Reported from the window, for the third time: chunk borders drawn
@@ -3723,6 +3723,33 @@ mod tests {
         assert!(dry.fluid_vertices.is_empty());
     }
 
+    /// Milk in one named block, at a level, and nothing anywhere else.
+    struct Pond {
+        block: LocalBlock,
+        depth: u8,
+        material: u16,
+    }
+
+    impl FluidFill for Pond {
+        fn fill(&self, x: i32, y: i32, z: i32) -> Option<(u16, u8)> {
+            (x == self.block.x as i32 && y == self.block.y as i32 && z == self.block.z as i32)
+                .then_some((self.material, self.depth))
+        }
+    }
+
+    #[test]
+    fn an_air_chunk_with_a_pond_in_it_is_still_meshed() {
+        // **The guard on the fast path, and the reason it is not optional.**
+        // `mesh_chunk` skips a chunk of pure air without scanning it, because
+        // most of the sky is exactly that and scanning 110,592 cells to produce
+        // nothing is the cost of a frame on a slow machine. But a pond sits in
+        // blocks that ARE air, so a `FluidFill` that answered `any()` wrongly
+        // would stop drawing water without stopping anything else.
+        //
+        // `Pond` inherits the trait's default of "yes, assume fluid", which is
+        // the safe answer for every caller that does not know — and this is
+        // what proves the default is doing its job.
+        let chunk = empty();
         assert_eq!(
             chunk.is_uniform(),
             Some(tiamat_core::MaterialId::AIR),
@@ -4253,7 +4280,6 @@ mod tests {
             "stepping changed the geometry"
         );
         assert_eq!(stepped.fluid_vertices, one_shot.fluid_vertices);
-        assert_eq!(stepped.fluid_indices, one_shot.fluid_indices);
 
         // And it really was spread out rather than done in one go — otherwise
         // this would pass with `step` doing everything on its first call, which
@@ -4525,7 +4551,7 @@ mod tests {
             &NoGlass,
         );
 
-        let (vertices, _) = mesh.to_buffers();
+        let vertices = mesh.to_buffers();
         assert!(!vertices.is_empty(), "the column produced no geometry");
 
         let marked: Vec<&PackedVertex> = vertices.iter().filter(|v| v.top()).collect();
@@ -5369,7 +5395,7 @@ mod tests {
 
         // And the light reaches the vertex buffer, which is the half a shade
         // test on its own cannot see.
-        let (vertices, _) = mesh.to_buffers();
+        let vertices = mesh.to_buffers();
         let lit = vertices
             .iter()
             .filter(|vertex| vertex.face() == (1, true))
@@ -5484,7 +5510,8 @@ mod tests {
             &NoFluid,
             &NoGlass,
         );
-        let (vertices, indices) = mesh.to_buffers();
+        let vertices = mesh.to_buffers();
+        let indices = quad_indices(mesh.quads.len());
 
         assert_eq!(vertices.len(), mesh.quads.len() * 4);
         assert_eq!(indices.len(), mesh.quads.len() * 6);
@@ -5852,10 +5879,10 @@ pub fn mesh_summary(
     }
 
     let mut fluid_vertices = Vec::with_capacity(fluid_quads.len() * 4);
-    let mut fluid_indices = Vec::with_capacity(fluid_quads.len() * 6);
     for quad in &fluid_quads {
-        let base = u32::try_from(fluid_vertices.len()).unwrap_or(0);
-        for (corner, (x, y, z)) in quad_corners(quad).into_iter().enumerate() {
+        let corners = quad_corners(quad);
+        for corner in quad_corner_order(quad) {
+            let (x, y, z) = corners[corner];
             // A summary knows no surface height and no current: a cell of
             // fluid is full to its lattice, and still.
             fluid_vertices.push(FluidVertex::new(
@@ -5870,13 +5897,11 @@ pub fn mesh_summary(
                 (0, 0),
             ));
         }
-        push_quad_indices(&mut fluid_indices, base, quad);
     }
 
     Mesh {
         quads,
         fluid_vertices,
-        fluid_indices,
         // **Its sunlight is a shading term, not the sky's reach**
         // (`summary_shade`), so the fog may not read it as one. The sky's on
         // every face: the horizon is ground seen under the sky, and what of a

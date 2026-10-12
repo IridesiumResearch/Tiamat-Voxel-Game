@@ -154,6 +154,9 @@ pub struct Skinned {
     /// the field rather than a constant because mod-supplied models arrive
     /// through the same path.
     model: Model,
+    /// How far from its origin any vertex of the model reaches, in blocks,
+    /// with room for a pose: what a frustum test takes the figure to be.
+    radius: f32,
     /// Per-frame instances, grown when a frame needs more.
     instances: wgpu::Buffer,
     instance_capacity: usize,
@@ -189,6 +192,18 @@ impl Skinned {
     /// Uploads a model and builds everything that draws it.
     pub fn new(gpu: &Gpu, model: Model) -> Self {
         let vertices: Vec<GpuVertex> = model.vertices.iter().map(GpuVertex::from).collect();
+        // The rest pose's reach, half again for a limb swung out and a block
+        // for good measure: a box this test keeps costs a draw, one it
+        // wrongly drops is a mob that vanishes at the edge of the screen. In
+        // BLOCKS: a model's vertices are in cells, three to the block, and
+        // the shader is what divides (`skinned.wgsl`).
+        let reach = model
+            .vertices
+            .iter()
+            .map(|vertex| glam::Vec3::from(vertex.position).length())
+            .fold(0.0_f32, f32::max)
+            / tiamat_core::SUBNODES_PER_AXIS as f32;
+        let radius = reach * 1.5 + 1.0;
         let vertex_buffer = gpu
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -244,6 +259,7 @@ impl Skinned {
             indices: index_buffer,
             index_count: u32::try_from(model.indices.len()).unwrap_or(0),
             model,
+            radius,
             instances,
             instance_capacity: INITIAL_FIGURES,
             drawn: 0,
@@ -476,6 +492,12 @@ impl Skinned {
     #[must_use]
     pub const fn drawn(&self) -> usize {
         self.drawn
+    }
+
+    /// How far from its origin a figure of this model reaches, in blocks.
+    #[must_use]
+    pub const fn radius(&self) -> f32 {
+        self.radius
     }
 }
 

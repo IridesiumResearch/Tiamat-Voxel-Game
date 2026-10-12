@@ -137,6 +137,18 @@ fn embedded(name: &str) -> ServerHandle {
 /// second connection to a one-player server is refused as full, which looks
 /// exactly like whatever the test was actually about.
 fn embedded_for(name: &str, max_players: u32) -> ServerHandle {
+    let mods = reference_mods();
+    let enabled = bot::fixture::enabled_mods_for(&mods).expect("the reference mods' manifests");
+    embedded_with(name, max_players, mods, enabled)
+}
+
+/// A server over `mods_path`, whatever mods are there.
+fn embedded_with(
+    name: &str,
+    max_players: u32,
+    mods_path: PathBuf,
+    enabled_mods: Option<Vec<String>>,
+) -> ServerHandle {
     ServerHandle::start(&Settings {
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: scratch(&format!("{name}-world")),
@@ -145,9 +157,8 @@ fn embedded_for(name: &str, max_players: u32) -> ServerHandle {
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
-        mods_path: Some(reference_mods()),
-        enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())
-            .expect("the reference mods' manifests"),
+        mods_path: Some(mods_path),
+        enabled_mods,
         seed: Some(7),
         rcon: None,
         materials: Vec::new(),
@@ -155,6 +166,27 @@ fn embedded_for(name: &str, max_players: u32) -> ServerHandle {
     })
     .expect("the embedded server must start")
 }
+
+/// A server on a world of one mod whose `init.lua` is `lua`: terrain the
+/// reference mods do not make, for the tests that need a horizon of it.
+fn embedded_on(name: &str, lua: &str) -> ServerHandle {
+    let root = scratch(&format!("{name}-mods"));
+    let dir = root.join("ground");
+    std::fs::create_dir_all(&dir).expect("mod dir");
+    std::fs::write(
+        dir.join("mod.toml"),
+        "id = \"ground\"\nname = \"Ground\"\nversion = \"0.1.0\"\nlicense = \"GPL-3.0-only\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(dir.join("init.lua"), lua).expect("script");
+    embedded_with(name, 1, root, None)
+}
+
+/// A flat floor everywhere, at the height the player spawns on.
+const FLAT_GROUND: &str = "local rock = game.register_block{ id = \"rock\" }\n\
+     game.register_on_generate(function(buf, pos)\n\
+     \x20   buf:fill_below_heightmap(game.flat_heightmap(0), rock)\n\
+     end)\n";
 
 /// Builds the client the way `main.rs` does, without the window.
 fn client(name: &str, server: &ServerHandle, gpu: Gpu) -> App {
@@ -2957,6 +2989,61 @@ fn a_broken_block_does_not_hand_the_dig_straight_to_the_one_behind_it() {
     }
 
     app.stop_digging();
+}
+
+#[test]
+fn summaries_past_the_fog_are_held_back_and_built_when_the_fog_reaches_them() {
+    // **VRAM** (2026-10-12): the horizon is streamed to 32 chunks and the fog
+    // is total at 24 by default, so a third more summaries than could ever
+    // reach the frame were meshed and uploaded. Past the fog's reach a
+    // summary is held, not built; shrink the fog and more are held, widen it
+    // and they come back through the stale queue.
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    // A floor under the whole horizon: the reference mods' world is mostly
+    // air, whose summaries are empty and never built at all.
+    let server = embedded_on("fogged-horizon", FLAT_GROUND);
+    let mut app = client("fogged-horizon", &server, gpu);
+    app.set_fog_chunks(2);
+    assert!(
+        run_frames(&mut app, |app| app.summaries_beyond_fog() > 0),
+        "with the fog two chunks out, no summary was ever held back: {} held, {:?}",
+        app.summaries_held(),
+        app.warnings()
+    );
+    // Let the rest of the horizon land and be judged, so the count below is
+    // the settled one and not the first summary to arrive: frames until two
+    // seconds pass with nothing changing. Wall-clock seconds, because frames
+    // here are as fast as the machine and sixty of them is no time at all.
+    let mut last = (app.summaries_held(), app.summaries_beyond_fog());
+    let mut changed = Instant::now();
+    let deadline = Instant::now() + PATIENCE;
+    while changed.elapsed() < Duration::from_secs(2) {
+        assert!(Instant::now() < deadline, "the horizon never settled");
+        assert!(app.pump_network(), "the connection ended");
+        app.remesh();
+        app.build_horizon();
+        app.advance(Input::default(), 1.0 / 60.0);
+        let now = (app.summaries_held(), app.summaries_beyond_fog());
+        if now != last {
+            last = now;
+            changed = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let held_back = app.summaries_beyond_fog();
+
+    // The widest fog there is reaches thirty-two chunks sideways, past the
+    // whole horizon: what was held for being too far OUT comes back and is
+    // built. What was held for being too far UP or DOWN stays held — the
+    // fog's vertical reach is the view's, which the fog setting does not
+    // widen — so the claim is fewer, not none.
+    app.set_fog_chunks(32);
+    assert!(
+        run_frames(&mut app, |app| app.summaries_beyond_fog() < held_back),
+        "all {held_back} held summaries stayed held with the fog at 32 chunks"
+    );
 }
 
 #[test]

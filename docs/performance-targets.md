@@ -168,6 +168,28 @@ this is where to look first.
   chunks and is not any more. The bound exists because a teleport or a fresh
   start can make thousands of chunks resident at once; what a tick does not
   reach it takes on the next one.
+- **Client VRAM is accounted for on the overlay** (2026-10-12, reported from
+  the window as a card "pegged the whole time"). The debug overlay's `VRAM`
+  line sums what the renderer can see: live geometry at its allocated size
+  beside the bytes written, the pool's idle buffers, the atlas, the depth
+  buffer, the post chain and the shared buffers, and how many summaries are
+  held back unbuilt past the fog. What changed with it:
+  - **One index buffer for every mesh.** Every quad is four vertices and the
+    same six indices, so the renderer keeps one pattern buffer and no mesh
+    carries indices: 24 bytes a quad and a pooled buffer per sub-mesh fewer,
+    across every chunk and summary resident.
+  - **Pool classes at 1.5x steps from 2 KiB**, where they were powers of two
+    from 4 KiB: no buffer is more than half again what it holds, and the
+    thousands of few-hundred-byte horizon summaries stop paying 4 KiB each.
+  - **Summaries past the fog are not built.** The fog is total at its reach
+    in every lighting mode, so a summary wholly beyond it cannot be seen; it
+    is held and judged again when the fog widens or the camera moves.
+  - **Figures are frustum-culled**, against the camera and the cascades: an
+    entity neither seen nor casting is neither posed nor drawn.
+  - The biome corners of a chunk are cached per column instead of being
+    sixteen map probes per drawn chunk per frame.
+  The real-card reading is the gate: `[H]` the overlay's `VRAM` line on the
+  reporter's machine, before and after.
 - **Memory is bounded by where the players are.** Once a second the tick
   sweeps for chunks outside every player's view distance plus two chunks (in
   the space that player is in) and unloads them, at most 32 a tick: the

@@ -3919,6 +3919,57 @@ fn player_at(offset: [f32; 3]) -> client::render::skinned::Figure {
 }
 
 #[test]
+fn a_figure_behind_the_camera_is_neither_posed_nor_drawn() {
+    // **Entity culling** (2026-10-12): every entity in the detail radius was
+    // skinned on the CPU and sent through every pass whether or not it was on
+    // screen, and most of a crowd is behind the camera. Classic lighting, so
+    // there are no cascades to keep a figure for its shadow; what is kept is
+    // what the camera sees, plus the player's own body, which is posed for
+    // its blob and its cascades whatever the camera does.
+    let Some(gpu) = gpu() else { return };
+    let mut renderer = Renderer::new(gpu, RenderMode::Textured, WIDTH, HEIGHT).expect("renderer");
+    renderer.set_lighting_mode(client::config::LightingMode::Classic);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    let camera = Camera {
+        position: Position::from_world(0.0, 10.0, 0.0),
+        ..Camera::default()
+    };
+    // The default camera looks along +z: one figure ahead, one behind.
+    renderer.set_entities(vec![
+        player_at([0.0, -1.0, 8.0]),
+        player_at([0.0, -1.0, -8.0]),
+    ]);
+    renderer.set_player(None);
+    target.capture(&mut renderer, &camera).expect("capture");
+    assert_eq!(
+        renderer.figures_drawn(),
+        1,
+        "two figures, one behind the camera: one should be posed and drawn"
+    );
+
+    // Both ahead: both drawn, so the count above was not a coincidence.
+    renderer.set_entities(vec![
+        player_at([0.0, -1.0, 8.0]),
+        player_at([3.0, -1.0, 12.0]),
+    ]);
+    target.capture(&mut renderer, &camera).expect("capture");
+    assert_eq!(renderer.figures_drawn(), 2);
+
+    // And the player's own figure, behind the camera as it is in first
+    // person, is always posed.
+    renderer.set_entities(vec![player_at([0.0, -1.0, -8.0])]);
+    renderer.set_player(Some(player_at([0.0, -1.6, -0.3])));
+    target.capture(&mut renderer, &camera).expect("capture");
+    assert_eq!(
+        renderer.figures_drawn(),
+        1,
+        "the entity behind is culled and the player's own body is kept"
+    );
+    renderer.set_entities(Vec::new());
+    renderer.set_player(None);
+}
+
+#[test]
 fn the_players_own_figure_is_actually_drawn_and_actually_casts() {
     // Reported from the window as "I am not seeing any shadow on me", which has
     // two possible causes and they need telling apart: the player is not being

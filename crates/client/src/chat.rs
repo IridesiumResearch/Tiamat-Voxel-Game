@@ -41,10 +41,17 @@ struct Line {
     fade_at: Instant,
 }
 
-/// The lines, oldest first.
+/// The lines, oldest first, and the state of the box they are typed in.
 #[derive(Debug, Default)]
 pub struct ChatLog {
     lines: VecDeque<Line>,
+    /// Whether the chat box is open.
+    pub open: bool,
+    /// Whether the box has just opened and should take the keyboard — true
+    /// exactly once per opening; see `App::take_chat_focus`.
+    pub focus: bool,
+    /// What has been typed and not yet sent.
+    pub draft: String,
 }
 
 impl ChatLog {

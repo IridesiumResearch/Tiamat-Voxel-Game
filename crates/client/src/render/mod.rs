@@ -504,10 +504,39 @@ struct Instance {
     corners: [[f32; 4]; 4],
 }
 
+/// Where a renderer's VRAM goes, in bytes — [`Renderer::vram`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Vram {
+    /// Chunk and summary geometry, every live buffer at its allocated size.
+    pub geometry: u64,
+    /// Of that, the bytes actually written; the rest is the pool's rounding.
+    pub written: u64,
+    /// Buffers the pool holds idle for reuse.
+    pub idle: u64,
+    /// The world atlas, mips included.
+    pub atlas: u64,
+    /// The depth buffer.
+    pub depth: u64,
+    /// Beautiful's post chain: the float targets, the bloom and the cascades.
+    pub post: u64,
+    /// The shared index pattern and the chunk instance array.
+    pub shared: u64,
+}
+
+impl Vram {
+    /// Everything accounted for, together.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.geometry + self.idle + self.atlas + self.depth + self.post + self.shared
+    }
+}
+
 /// A chunk's mesh, on the GPU.
 struct ChunkMesh {
     vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    /// Indices into the renderer's shared pattern (`Renderer::quad_indices`):
+    /// six a quad. No mesh holds indices of its own — see
+    /// `mesher::quad_indices`.
     index_count: u32,
     /// The fluid half, drawn in a second blended pass after every chunk's
     /// opaque geometry. `None` for the overwhelming majority of chunks, which
@@ -546,7 +575,6 @@ struct SpriteMesh {
 /// One chunk's transparent fluid geometry.
 struct FluidMesh {
     vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
     index_count: u32,
 }
 
@@ -576,7 +604,6 @@ struct WorldPass<'a> {
 /// layouts do not match.
 struct GlassMesh {
     vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
     index_count: u32,
 }
 
@@ -600,9 +627,11 @@ const CHUNK_BORDER_CAPACITY: usize = 512 * 12 * 2;
 ///
 /// Chunk meshes in open terrain are startlingly small — a flat surface greedily
 /// merges to a handful of quads, so a few hundred bytes is typical. Rounding
-/// those up to 4 KiB costs a rounding error of VRAM and collapses almost every
-/// chunk into one size class, which is what makes the pool hit.
-const MIN_BUFFER_BYTES: u64 = 4 * 1024;
+/// those up collapses almost every such chunk into one size class, which is
+/// what makes the pool hit. 2 KiB rather than the 4 it was: a horizon is
+/// thousands of summaries of a few hundred bytes each, and the rounding on
+/// every one of them was no longer a rounding error.
+const MIN_BUFFER_BYTES: u64 = 2 * 1024;
 
 /// How much VRAM the pool may hold in buffers nothing is using, in bytes.
 ///
@@ -634,10 +663,12 @@ const POOL_CAPACITY_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Default)]
 struct BufferPool {
     /// Free vertex buffers by capacity, largest class last.
+    ///
+    /// Vertex buffers only: the indices every mesh is drawn through are one
+    /// shared pattern the renderer owns (`mesher::quad_indices`), so there is
+    /// no index buffer to pool.
     vertices: BTreeMap<u64, Vec<wgpu::Buffer>>,
-    /// Free index buffers by capacity.
-    indices: BTreeMap<u64, Vec<wgpu::Buffer>>,
-    /// Bytes currently held idle across both maps.
+    /// Bytes currently held idle.
     idle_bytes: u64,
     /// Buffers created over this renderer's lifetime.
     created: u64,
@@ -645,77 +676,64 @@ struct BufferPool {
     reused: u64,
 }
 
-/// Which of the two pools a buffer belongs to.
-///
-/// Vertex and index buffers are not interchangeable — a buffer's usage flags
-/// are fixed when it is created, and handing an `INDEX` buffer back as a vertex
-/// buffer is a validation error, not a slow path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BufferKind {
-    Vertex,
-    Index,
-}
-
-impl BufferKind {
-    const fn usage(self) -> wgpu::BufferUsages {
-        // `COPY_DST` is what makes reuse possible at all: a pooled buffer is
-        // filled with `write_buffer` rather than at creation, and a buffer
-        // without this flag can only ever be written once, when it is made.
-        match self {
-            Self::Vertex => wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_DST),
-            Self::Index => wgpu::BufferUsages::INDEX.union(wgpu::BufferUsages::COPY_DST),
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Vertex => "chunk-vertices",
-            Self::Index => "chunk-indices",
-        }
-    }
-}
-
 impl BufferPool {
     /// The capacity class that holds `bytes`.
     ///
-    /// Powers of two from [`MIN_BUFFER_BYTES`], so the number of classes stays
+    /// Powers of two from [`MIN_BUFFER_BYTES`] with a class halfway between
+    /// each pair — 2, 3, 4, 6, 8, 12, 16 KiB… — so the number of classes stays
     /// small and a buffer freed by one chunk fits the next chunk of roughly the
-    /// same size. Exact-fit classes would make almost every request a miss.
+    /// same size, while no buffer is more than half again as big as what it
+    /// holds. Plain powers of two left up to half of every buffer empty, and
+    /// across a horizon of thousands of meshes that was real VRAM. Exact-fit
+    /// classes would make almost every request a miss.
     fn class_for(bytes: u64) -> u64 {
         let mut class = MIN_BUFFER_BYTES;
-        while class < bytes {
+        loop {
+            if class >= bytes {
+                return class;
+            }
+            let half = class + class / 2;
+            if half >= bytes {
+                return half;
+            }
             class *= 2;
         }
-        class
     }
 
-    /// A buffer of at least `bytes`, from the pool if one fits.
-    fn take(&mut self, gpu: &Gpu, kind: BufferKind, bytes: u64) -> wgpu::Buffer {
+    /// A vertex buffer of at least `bytes`, from the pool if one fits.
+    ///
+    /// The exact class first; failing that, an idle buffer of the next class
+    /// up rather than a fresh allocation — the slack is bounded at two to one
+    /// and a creation is what the pool exists to avoid.
+    fn take(&mut self, gpu: &Gpu, bytes: u64) -> wgpu::Buffer {
         let class = Self::class_for(bytes);
-        let free = match kind {
-            BufferKind::Vertex => &mut self.vertices,
-            BufferKind::Index => &mut self.indices,
-        };
 
-        if let Some(bucket) = free.get_mut(&class)
-            && let Some(buffer) = bucket.pop()
-        {
-            self.idle_bytes = self.idle_bytes.saturating_sub(class);
+        let found = self
+            .vertices
+            .range_mut(class..=class * 2)
+            .find(|(_, bucket)| !bucket.is_empty())
+            .map(|(held, bucket)| (*held, bucket.pop()));
+        if let Some((held, Some(buffer))) = found {
+            self.idle_bytes = self.idle_bytes.saturating_sub(held);
             self.reused += 1;
             return buffer;
         }
 
         self.created += 1;
         gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(kind.label()),
+            label: Some("chunk-vertices"),
             size: class,
-            usage: kind.usage(),
+            // `COPY_DST` is what makes reuse possible at all: a pooled buffer
+            // is filled with `write_buffer` rather than at creation, and a
+            // buffer without this flag can only ever be written once, when it
+            // is made.
+            usage: wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
         })
     }
 
     /// Takes a retired buffer back, or drops it if the pool is full.
-    fn give(&mut self, kind: BufferKind, buffer: wgpu::Buffer) {
+    fn give(&mut self, buffer: wgpu::Buffer) {
         let class = buffer.size();
         if self.idle_bytes + class > POOL_CAPACITY_BYTES {
             // Dropped rather than kept. Letting the pool grow without bound
@@ -725,38 +743,116 @@ impl BufferPool {
             return;
         }
         self.idle_bytes += class;
-        let free = match kind {
-            BufferKind::Vertex => &mut self.vertices,
-            BufferKind::Index => &mut self.indices,
-        };
-        free.entry(class).or_default().push(buffer);
+        self.vertices.entry(class).or_default().push(buffer);
     }
 
-    /// Takes both of a retired mesh's buffers back.
+    /// Takes every one of a retired mesh's buffers back.
     fn give_mesh(&mut self, mesh: ChunkMesh) {
-        self.give(BufferKind::Vertex, mesh.vertices);
-        self.give(BufferKind::Index, mesh.indices);
+        self.give(mesh.vertices);
         if let Some(fluid) = mesh.fluid {
-            self.give(BufferKind::Vertex, fluid.vertices);
-            self.give(BufferKind::Index, fluid.indices);
+            self.give(fluid.vertices);
         }
-        // **And the glass, or a window leaks two buffers every time its chunk
-        // is remeshed** — which is every dig nearby, so it would leak steadily
+        // **And the glass, or a window leaks a buffer every time its chunk is
+        // remeshed** — which is every dig nearby, so it would leak steadily
         // rather than once.
         if let Some(glass) = mesh.glass {
-            self.give(BufferKind::Vertex, glass.vertices);
-            self.give(BufferKind::Index, glass.indices);
+            self.give(glass.vertices);
         }
         // And the foliage, for the same reason: a leaf chunk would otherwise
-        // leak two buffers on every remesh, which is every nearby dig.
+        // leak a buffer on every remesh, which is every nearby dig.
         if let Some(sprites) = mesh.sprites {
-            self.give(BufferKind::Vertex, sprites.instances);
+            self.give(sprites.instances);
         }
         if let Some(cutout) = mesh.cutout {
-            self.give(BufferKind::Vertex, cutout.vertices);
-            self.give(BufferKind::Index, cutout.indices);
+            self.give(cutout.vertices);
         }
     }
+}
+
+/// How many quads the shared index pattern is built for before anything asks.
+///
+/// 96 KiB of indices: more than a flat chunk ever draws, so a world of open
+/// country never rebuilds it, and nothing beside what one chiselled chunk
+/// would have carried on its own.
+const INITIAL_QUADS: usize = 4096;
+
+/// The one index pattern every chunk mesh is drawn through — see
+/// `mesher::quad_indices` — and how many quads it is long enough for.
+struct QuadIndices {
+    buffer: wgpu::Buffer,
+    capacity: usize,
+}
+
+impl QuadIndices {
+    fn new(gpu: &Gpu) -> Self {
+        Self {
+            buffer: build_quad_indices(gpu, INITIAL_QUADS),
+            capacity: INITIAL_QUADS,
+        }
+    }
+}
+
+/// The shared index pattern, long enough for `quads` quads.
+///
+/// **One index buffer for every mesh in the world** — see
+/// `mesher::quad_indices`. Created whole and written once; it is read by every
+/// chunk draw of every frame after.
+fn build_quad_indices(gpu: &Gpu, quads: usize) -> wgpu::Buffer {
+    let indices = crate::mesher::quad_indices(quads);
+    let bytes: &[u8] = bytemuck::cast_slice(&indices);
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("quad-indices"),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::INDEX.union(wgpu::BufferUsages::COPY_DST),
+        mapped_at_creation: false,
+    });
+    gpu.queue.write_buffer(&buffer, 0, bytes);
+    buffer
+}
+
+/// Six indices a quad: how many of the shared pattern a list of `vertices`
+/// vertices is drawn through.
+fn index_count_of(vertices: usize) -> u32 {
+    u32::try_from(vertices / 4 * 6).unwrap_or(0)
+}
+
+/// Each chunk column's biome colour, and the corners worked out from them.
+#[derive(Default)]
+struct ColumnTints {
+    /// A column's own tint, as `set_chunk_tint` was told it.
+    held: BTreeMap<(i32, i32), [u8; 3]>,
+    /// A column's four corner tints, as `Instance::corners` carries them,
+    /// filled on first use and forgotten when a tint near it changes.
+    corners: BTreeMap<(i32, i32), [[f32; 4]; 4]>,
+}
+
+/// The biome colour at the corner shared by the columns meeting at `(x, z)`:
+/// the mean of the four, so two chunks side by side compute the same value
+/// for the corners they share (Contract §8.5).
+fn corner_tint_of(tints: &BTreeMap<(i32, i32), [u8; 3]>, x: i32, z: i32) -> [f32; 3] {
+    let mut total = [0.0_f32; 3];
+    for (dx, dz) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+        let held = tints
+            .get(&(x + dx, z + dz))
+            .copied()
+            .unwrap_or(tiamat_core::proto::Tint::NEUTRAL);
+        for (sum, channel) in total.iter_mut().zip(held) {
+            // `128` is 1.0, the same scale a material's own tint uses, so a
+            // biome can ask for more than the texture's brightness as well
+            // as less. See `proto::Tint::NEUTRAL`.
+            *sum += tiamat_core::proto::Tint::channel(channel);
+        }
+    }
+    total.map(|sum| sum / 4.0)
+}
+
+/// A chunk column's four corners, in `Instance::corners` order.
+fn corner_tints_of(tints: &BTreeMap<(i32, i32), [u8; 3]>, x: i32, z: i32) -> [[f32; 4]; 4] {
+    let corner = |dx: i32, dz: i32| {
+        let colour = corner_tint_of(tints, x + dx, z + dz);
+        [colour[0], colour[1], colour[2], 0.0]
+    };
+    [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)]
 }
 
 /// The device, queue, and what we know about the adapter.
@@ -987,12 +1083,6 @@ pub struct Renderer {
     /// losing it, and vice versa: the two arrive together and are replaced
     /// independently.
     tints: TintTable,
-    /// What each fluid's material is drawn at, `(material, opacity)`.
-    ///
-    /// Held rather than folded straight into `tints` because the material
-    /// table can arrive after the fluid table and rebuilds those rows; see
-    /// [`Self::set_fluid_opacity`].
-    fluid_opacity: Vec<(u16, f32)>,
     chunks: BTreeMap<ChunkPos, ChunkMesh>,
     /// The model blocks of each resident chunk, from the mesh that chunk was
     /// last built with (Contract §8.6 "Found at remesh"). **Its own map rather
@@ -1005,7 +1095,7 @@ pub struct Renderer {
     /// Each chunk COLUMN's biome colour, keyed on `(x, z)`. See
     /// [`Self::set_chunk_tint`]. Distinct from `tints`, which is the per
     /// MATERIAL table: this one says what a place is, that one what a thing is.
-    biome_tints: BTreeMap<(i32, i32), [u8; 3]>,
+    biomes: ColumnTints,
     /// Each chunk column's own fog, and the grid of it around the camera the
     /// shaders read. See [`Self::set_chunk_fog`].
     place_fog: place_fog::PlaceFog,
@@ -1019,6 +1109,8 @@ pub struct Renderer {
     fog_here: place_fog::Uniforms,
     /// Retired chunk buffers, kept for reuse. See [`BufferPool`].
     pool: BufferPool,
+    /// The one index pattern every chunk mesh is drawn through.
+    quad_indices: QuadIndices,
     instances: wgpu::Buffer,
     instance_capacity: usize,
     depth: wgpu::TextureView,
@@ -1251,6 +1343,7 @@ impl Renderer {
             // Built here, before `gpu` moves in below: a struct's fields are
             // evaluated in the order they are written.
             depth: make_depth(&gpu, width, height),
+            quad_indices: QuadIndices::new(&gpu),
             hands,
             gpu,
             skinned,
@@ -1271,8 +1364,7 @@ impl Renderer {
             atlas_side: side,
             atlas: views,
             tints,
-            fluid_opacity: Vec::new(),
-            biome_tints: BTreeMap::new(),
+            biomes: ColumnTints::default(),
             chunks: BTreeMap::new(),
             model_blocks: BTreeMap::new(),
             flickering: Flickering::default(),
@@ -1674,6 +1766,65 @@ impl Renderer {
         self.post.as_ref().map_or(0, graph::Post::bytes)
     }
 
+    /// Where this renderer's VRAM goes, as far as it can account for it.
+    ///
+    /// **Allocated sizes, not written ones**, for the geometry: a pooled
+    /// buffer is its class, and the class is what the card holds. The HUD
+    /// shows this beside the written figure so the pool's slack is a number
+    /// somebody can read rather than a suspicion.
+    #[must_use]
+    pub fn vram(&self) -> Vram {
+        let geometry = self
+            .chunks
+            .values()
+            .map(|chunk| {
+                chunk.vertices.size()
+                    + chunk
+                        .fluid
+                        .as_ref()
+                        .map_or(0, |fluid| fluid.vertices.size())
+                    + chunk
+                        .glass
+                        .as_ref()
+                        .map_or(0, |glass| glass.vertices.size())
+                    + chunk
+                        .cutout
+                        .as_ref()
+                        .map_or(0, |cutout| cutout.vertices.size())
+                    + chunk
+                        .sprites
+                        .as_ref()
+                        .map_or(0, |sprites| sprites.instances.size())
+            })
+            .sum();
+        let side = u64::from(self.atlas_side);
+        Vram {
+            geometry,
+            written: self.mesh_bytes(),
+            idle: self.pool.idle_bytes,
+            // Four bytes a texel, and the mip chain a third again.
+            atlas: side * side * 4 * 4 / 3,
+            depth: u64::from(self.depth_size.0) * u64::from(self.depth_size.1) * 4,
+            post: self.post_bytes(),
+            shared: self.quad_indices.buffer.size() + self.instances.size(),
+        }
+    }
+
+    /// How many figures the last frame posed and drew, after culling.
+    ///
+    /// The player's own figure included when there is one: it is posed for
+    /// its shadow whether or not the world pass draws it.
+    #[must_use]
+    pub fn figures_drawn(&self) -> usize {
+        self.skinned.drawn()
+            + self
+                .figures
+                .passes
+                .values()
+                .map(skinned::Skinned::drawn)
+                .sum::<usize>()
+    }
+
     /// How many chunk meshes are resident.
     #[must_use]
     pub fn chunk_count(&self) -> usize {
@@ -1723,7 +1874,8 @@ impl Renderer {
         // independent and arrive in either order; rebuilding from the material
         // table alone would drop every fluid's opacity whenever a material
         // table landed second.
-        for (material, opacity) in &self.fluid_opacity {
+        let fluids = std::mem::take(&mut self.tints.fluids);
+        for (material, opacity) in &fluids {
             let slot = usize::from(*material);
             if slot >= tints.len() {
                 tints.resize(slot + 1, MaterialTint::none());
@@ -1733,6 +1885,7 @@ impl Renderer {
         self.tints = TintTable {
             buffer: upload_tints(&self.gpu, &tints),
             rows: tints,
+            fluids,
             any: u32::from(table.iter().any(|entry| entry.tint.is_some())),
             swaying: u32::from(table.iter().any(|entry| entry.sway)),
         };
@@ -1762,8 +1915,15 @@ impl Renderer {
     /// vertex carries: the mesher packs the material a block of it is drawn as,
     /// and nothing downstream of that knows which fluid put it there.
     pub fn set_fluid_opacity(&mut self, fluids: &[(u16, f32)]) {
-        self.fluid_opacity = fluids.to_vec();
+        self.tints.fluids = fluids.to_vec();
         let mut rows = std::mem::take(&mut self.tints.rows);
+        // **The whole table, not only the fluids named.** A material a
+        // previous table drew a fluid as keeps its row, and a row that kept
+        // its opacity would draw that material's next fluid at the last
+        // world's number. Zero is "unsaid", which falls back to the default.
+        for row in &mut rows {
+            row.params[3] = 0.0;
+        }
         for (material, opacity) in fluids {
             let slot = usize::from(*material);
             if slot >= rows.len() {
@@ -1858,7 +2018,16 @@ impl Renderer {
     /// a colour that changes costs nothing — no remesh, no upload, just a
     /// different number in next frame's instance.
     pub fn set_chunk_tint(&mut self, pos: ChunkPos, tint: [u8; 3]) {
-        self.biome_tints.insert((pos.x, pos.z), tint);
+        if self.biomes.held.insert((pos.x, pos.z), tint) == Some(tint) {
+            return;
+        }
+        // A column's colour reaches the corners of the nine columns round it,
+        // so those are the cached corners that have gone stale.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                self.biomes.corners.remove(&(pos.x + dx, pos.z + dz));
+            }
+        }
     }
 
     /// Records a chunk column's own fog — `game.register_chunk_fog` — or that
@@ -1917,13 +2086,6 @@ impl Renderer {
     /// How many particles the next frame draws.
     #[must_use]
     pub const fn particle_count(&self) -> u32 {
-        // **The whole table, not only the fluids named.** A material a
-        // previous table drew a fluid as keeps its row, and a row that kept
-        // its opacity would draw that material's next fluid at the last
-        // world's number. Zero is "unsaid", which falls back to the default.
-        for row in &mut rows {
-            row.params[3] = 0.0;
-        }
         self.particles.count()
     }
 
@@ -1987,13 +2149,35 @@ impl Renderer {
     /// instances and the same palette, which is what makes a figure appear in
     /// the same place in the world and in its own shadow — posing per pass
     /// would let the two disagree by a frame.
-    fn prepare_figures(&mut self) {
+    fn prepare_figures(&mut self, culled: &Culled) {
+        // **Only what is seen or casts a shadow** — `Culled::shows_figure`.
+        // The player's own figure rides last in the humanoid list, after the
+        // `entity_figures`, and stays whatever the frustum says: in first
+        // person it is behind the camera by definition and is what the blob
+        // and the cascades anchor to.
         let figures = std::mem::take(&mut self.figures.humanoid);
-        self.skinned.prepare(&self.gpu, &figures);
+        let radius = self.skinned.radius();
+        let mut shown: Vec<skinned::Figure> = figures
+            .iter()
+            .take(self.entity_figures)
+            .filter(|figure| culled.shows_figure(figure.offset, radius))
+            .copied()
+            .collect();
+        shown.extend(figures.iter().skip(self.entity_figures).copied());
+        self.skinned.prepare(&self.gpu, &shown);
         self.figures.humanoid = figures;
+
         let posed = std::mem::take(&mut self.figures.by_model);
         for (id, pass) in &mut self.figures.passes {
-            pass.prepare(&self.gpu, posed.get(id).map_or(&[][..], Vec::as_slice));
+            let radius = pass.radius();
+            let shown: Vec<skinned::Figure> = posed
+                .get(id)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .filter(|figure| culled.shows_figure(figure.offset, radius))
+                .copied()
+                .collect();
+            pass.prepare(&self.gpu, &shown);
         }
         self.figures.by_model = posed;
     }
@@ -2075,36 +2259,6 @@ impl Renderer {
         self.fog_here
     }
 
-    /// The colour at one chunk-column CORNER, as the mean of the four columns
-    /// that meet there.
-    ///
-    /// This is what makes the field continuous. Two chunks side by side share
-    /// two corners, and both compute the same mean for them, so the colour
-    /// runs across the boundary with no seam — which the flat per-chunk colour
-    /// this replaces could not do: that draws the world as 16-block squares,
-    /// which reads worse than the hard biome edge it was meant to soften.
-    ///
-    /// Columns that have not arrived count as white, so the field fades
-    /// towards no colour at the edge of what is loaded rather than towards
-    /// black.
-    fn corner_tint(&self, x: i32, z: i32) -> [f32; 3] {
-        let mut total = [0.0_f32; 3];
-        for (dx, dz) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
-            let held = self
-                .biome_tints
-                .get(&(x + dx, z + dz))
-                .copied()
-                .unwrap_or(tiamat_core::proto::Tint::NEUTRAL);
-            for (sum, channel) in total.iter_mut().zip(held) {
-                // `128` is 1.0, the same scale a material's own tint uses, so a
-                // biome can ask for more than the texture's brightness as well
-                // as less. See `proto::Tint::NEUTRAL`.
-                *sum += tiamat_core::proto::Tint::channel(channel);
-            }
-        }
-        total.map(|sum| sum / 4.0)
-    }
-
     /// Uploads a chunk's mesh, replacing any previous one.
     ///
     /// An empty mesh **removes** the chunk rather than storing a zero-length
@@ -2117,10 +2271,6 @@ impl Renderer {
             return;
         }
 
-        let (vertices, indices) = mesh.to_buffers();
-        let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
-        let index_bytes: &[u8] = bytemuck::cast_slice(&indices);
-
         // The mesh being replaced gives its buffers back BEFORE the new ones
         // are asked for, so a remesh in place — the common case after a dig —
         // hands the same buffers straight back and allocates nothing at all.
@@ -2128,89 +2278,58 @@ impl Renderer {
             self.pool.give_mesh(previous);
         }
 
-        let vertex_buffer =
-            self.pool
-                .take(&self.gpu, BufferKind::Vertex, vertex_bytes.len() as u64);
-        let index_buffer = self
-            .pool
-            .take(&self.gpu, BufferKind::Index, index_bytes.len() as u64);
-        self.gpu.queue.write_buffer(&vertex_buffer, 0, vertex_bytes);
-        self.gpu.queue.write_buffer(&index_buffer, 0, index_bytes);
+        // **One index buffer for every mesh** — `mesher::quad_indices`. Each
+        // list is four vertices a quad, drawn through a prefix of the shared
+        // pattern, so the one thing to see to is that the pattern is long
+        // enough for the largest of them.
+        let vertices = mesh.to_buffers();
+        let glass_vertices = (!mesh.has_no_glass()).then(|| mesh.glass_buffers());
+        let cutout_vertices = (!mesh.has_no_cutout()).then(|| mesh.cutout_buffers());
+        let longest = [
+            vertices.len(),
+            mesh.fluid_vertices.len(),
+            glass_vertices.as_ref().map_or(0, Vec::len),
+            cutout_vertices.as_ref().map_or(0, Vec::len),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        self.ensure_quads(longest / 4);
 
-        // The fluid half, when there is one. Its own buffers from the same
+        let mut used_bytes = 0;
+        let mut upload = |pool: &mut BufferPool, bytes: &[u8]| -> wgpu::Buffer {
+            let buffer = pool.take(&self.gpu, bytes.len() as u64);
+            self.gpu.queue.write_buffer(&buffer, 0, bytes);
+            used_bytes += bytes.len() as u64;
+            buffer
+        };
+
+        let vertex_buffer = upload(&mut self.pool, bytemuck::cast_slice(&vertices));
+
+        // The fluid half, when there is one. Its own buffer from the same
         // pool: a chunk with no milk in it allocates nothing here and the
         // `Option` is what says so, rather than a zero-length buffer that the
         // draw loop would then have to skip every frame.
-        let mut fluid = None;
-        let mut fluid_bytes = 0;
-        if !mesh.has_no_fluid() {
-            let vertex_bytes: &[u8] = bytemuck::cast_slice(&mesh.fluid_vertices);
-            let index_bytes: &[u8] = bytemuck::cast_slice(&mesh.fluid_indices);
-            let vertices = self
-                .pool
-                .take(&self.gpu, BufferKind::Vertex, vertex_bytes.len() as u64);
-            let indices = self
-                .pool
-                .take(&self.gpu, BufferKind::Index, index_bytes.len() as u64);
-            self.gpu.queue.write_buffer(&vertices, 0, vertex_bytes);
-            self.gpu.queue.write_buffer(&indices, 0, index_bytes);
-            fluid_bytes = (vertex_bytes.len() + index_bytes.len()) as u64;
-            fluid = Some(FluidMesh {
-                vertices,
-                indices,
-                index_count: u32::try_from(mesh.fluid_indices.len()).unwrap_or(0),
-            });
-        }
+        let fluid = (!mesh.has_no_fluid()).then(|| FluidMesh {
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(&mesh.fluid_vertices)),
+            index_count: index_count_of(mesh.fluid_vertices.len()),
+        });
 
         // The transparent half, on exactly the fluid pattern above and for the
         // same reason: a chunk with no glass allocates nothing, and the
         // `Option` says so rather than a zero-length buffer the draw loop would
         // skip every frame.
-        let mut glass = None;
-        let mut glass_bytes = 0;
-        if !mesh.has_no_glass() {
-            let (glass_vertices, glass_indices) = mesh.glass_buffers();
-            let vertex_bytes: &[u8] = bytemuck::cast_slice(&glass_vertices);
-            let index_bytes: &[u8] = bytemuck::cast_slice(&glass_indices);
-            let vertices = self
-                .pool
-                .take(&self.gpu, BufferKind::Vertex, vertex_bytes.len() as u64);
-            let indices = self
-                .pool
-                .take(&self.gpu, BufferKind::Index, index_bytes.len() as u64);
-            self.gpu.queue.write_buffer(&vertices, 0, vertex_bytes);
-            self.gpu.queue.write_buffer(&indices, 0, index_bytes);
-            glass_bytes = (vertex_bytes.len() + index_bytes.len()) as u64;
-            glass = Some(GlassMesh {
-                vertices,
-                indices,
-                index_count: u32::try_from(glass_indices.len()).unwrap_or(0),
-            });
-        }
+        let glass = glass_vertices.map(|glass| GlassMesh {
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(&glass)),
+            index_count: index_count_of(glass.len()),
+        });
 
-        // And the foliage, on the same pattern again. Its buffers are the
+        // And the foliage, on the same pattern again. Its buffer is the
         // world's own vertex, like glass — only the pipeline differs.
-        let mut cutout = None;
-        let mut cutout_bytes = 0;
-        if !mesh.has_no_cutout() {
-            let (cutout_vertices, cutout_indices) = mesh.cutout_buffers();
-            let vertex_bytes: &[u8] = bytemuck::cast_slice(&cutout_vertices);
-            let index_bytes: &[u8] = bytemuck::cast_slice(&cutout_indices);
-            let vertices = self
-                .pool
-                .take(&self.gpu, BufferKind::Vertex, vertex_bytes.len() as u64);
-            let indices = self
-                .pool
-                .take(&self.gpu, BufferKind::Index, index_bytes.len() as u64);
-            self.gpu.queue.write_buffer(&vertices, 0, vertex_bytes);
-            self.gpu.queue.write_buffer(&indices, 0, index_bytes);
-            cutout_bytes = (vertex_bytes.len() + index_bytes.len()) as u64;
-            cutout = Some(GlassMesh {
-                vertices,
-                indices,
-                index_count: u32::try_from(cutout_indices.len()).unwrap_or(0),
-            });
-        }
+        let cutout = cutout_vertices.map(|cutout| GlassMesh {
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(&cutout)),
+            index_count: index_count_of(cutout.len()),
+        });
 
         let (sprites, sprite_bytes) = self.upload_sprites(pos, mesh);
 
@@ -2218,20 +2337,41 @@ impl Renderer {
             pos,
             ChunkMesh {
                 vertices: vertex_buffer,
-                indices: index_buffer,
-                index_count: u32::try_from(indices.len()).unwrap_or(0),
+                index_count: index_count_of(vertices.len()),
                 fluid,
                 glass,
                 cutout,
                 sprites,
-                used_bytes: (vertex_bytes.len() + index_bytes.len()) as u64
-                    + fluid_bytes
-                    + cutout_bytes
-                    + sprite_bytes
-                    + glass_bytes,
+                used_bytes: used_bytes + sprite_bytes,
                 open_sky: mesh.open_sky,
             },
         );
+    }
+
+    /// Binds what every chunk draw shares: the instance array in slot 1 and
+    /// the one index pattern (`mesher::quad_indices`). Once per pass, and
+    /// again after anything that bound its own.
+    fn bind_chunk_buffers(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+        pass.set_index_buffer(
+            self.quad_indices.buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+    }
+
+    /// Makes the shared index pattern long enough for a mesh of `quads`.
+    ///
+    /// Doubled rather than fitted, so a world filling in rebuilds it a handful
+    /// of times in a session and never once per slightly bigger chunk.
+    fn ensure_quads(&mut self, quads: usize) {
+        if quads <= self.quad_indices.capacity {
+            return;
+        }
+        let capacity = quads.next_power_of_two().max(INITIAL_QUADS);
+        self.quad_indices = QuadIndices {
+            buffer: build_quad_indices(&self.gpu, capacity),
+            capacity,
+        };
     }
 
     /// Replaces a chunk's model blocks with the mesh's, whether or not the
@@ -2325,7 +2465,8 @@ impl Renderer {
         // world had not served yet — the same parked-renderer bug that once
         // mixed two worlds' chunk meshes.
         self.place_fog.clear();
-        self.biome_tints.clear();
+        self.biomes.held.clear();
+        self.biomes.corners.clear();
     }
 
     /// Sets the blob shadows to draw this frame.
@@ -2712,6 +2853,32 @@ struct Culled {
     cutout_far: Vec<(ChunkPos, u32)>,
     /// Where the player's own body sits in the instance array.
     body: u32,
+    /// The camera's frustum, for culling what is not a chunk.
+    frustum: Option<Frustum>,
+    /// And each shadow cascade's, for what casts without being seen.
+    cascades: Vec<Frustum>,
+}
+
+impl Culled {
+    /// Whether a figure standing at `at`, camera-relative in blocks and
+    /// reaching `radius` every way, is seen or casts a shadow this frame.
+    ///
+    /// **A figure that is neither is not posed and not drawn.** Every entity
+    /// in the detail radius was skinned on the CPU and sent through all three
+    /// passes whether or not it was on screen — most of a crowd is behind the
+    /// camera. With no frustum (a renderer that has not culled yet) every
+    /// figure is kept, which is what every figure was.
+    fn shows_figure(&self, at: [f32; 3], radius: f32) -> bool {
+        let reach = glam::Vec3::splat(radius);
+        let at = glam::Vec3::from(at);
+        let (min, max) = (at - reach, at + reach);
+        self.frustum
+            .is_none_or(|frustum| frustum.intersects_box(min, max))
+            || self
+                .cascades
+                .iter()
+                .any(|cascade| cascade.intersects_box(min, max))
+    }
 }
 
 /// How far, in blocks from the camera to a chunk's centre, sprites (grass,
@@ -2799,10 +2966,16 @@ impl Renderer {
                 culled.casters.push((*pos, instance));
             }
             let side = tiamat_core::CHUNK_BLOCKS as i32;
-            let corner = |dx: i32, dz: i32| {
-                let colour = self.corner_tint(pos.x + dx, pos.z + dz);
-                [colour[0], colour[1], colour[2], 0.0]
-            };
+            // **Cached per column, not looked up per frame.** A corner is the
+            // mean of four columns' tints, so a chunk's four were sixteen map
+            // probes a frame, for every chunk drawn — thousands of them with a
+            // horizon in view — and the answer never changes until a tint
+            // does (`set_chunk_tint` is what forgets it).
+            let corners = *self
+                .biomes
+                .corners
+                .entry((pos.x, pos.z))
+                .or_insert_with(|| corner_tints_of(&self.biomes.held, pos.x, pos.z));
             instances.push(Instance {
                 offset: [
                     offset.x,
@@ -2816,7 +2989,7 @@ impl Renderer {
                     (pos.z * side) as f32,
                     0.0,
                 ],
-                corners: [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)],
+                corners,
             });
         }
         self.drawn = culled.visible.len();
@@ -2848,6 +3021,8 @@ impl Renderer {
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
         }
         culled.body = instances.len().saturating_sub(1) as u32;
+        culled.frustum = Some(frustum);
+        culled.cascades = cascades;
 
         culled
     }
@@ -3056,11 +3231,13 @@ impl Renderer {
             if !any {
                 // Set once, and only when there is glass in view at all: a world
                 // with no windows must not pay a pipeline switch every frame.
+                // The index buffer with it: the figures drawn before this
+                // bound their own.
                 pass.set_pipeline(pipeline);
+                self.bind_chunk_buffers(pass);
                 any = true;
             }
             pass.set_vertex_buffer(0, glass.vertices.slice(..));
-            pass.set_index_buffer(glass.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..glass.index_count, 0, *instance..*instance + 1);
         }
     }
@@ -3155,9 +3332,7 @@ impl Renderer {
             }
         }
         let bytes: &[u8] = bytemuck::cast_slice(&instances);
-        let buffer = self
-            .pool
-            .take(&self.gpu, BufferKind::Vertex, bytes.len() as u64);
+        let buffer = self.pool.take(&self.gpu, bytes.len() as u64);
         self.gpu.queue.write_buffer(&buffer, 0, bytes);
         (
             Some(SpriteMesh {
@@ -3233,10 +3408,10 @@ impl Renderer {
                 // The same gate as glass: a world without leaves pays no
                 // pipeline switch.
                 pass.set_pipeline(pipeline);
+                self.bind_chunk_buffers(pass);
                 any = true;
             }
             pass.set_vertex_buffer(0, cutout.vertices.slice(..));
-            pass.set_index_buffer(cutout.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..cutout.index_count, 0, *instance..*instance + 1);
         }
     }
@@ -3268,10 +3443,10 @@ impl Renderer {
                 // Set once, and only when there is milk in view at all: a dry
                 // world must not pay a pipeline switch every frame for nothing.
                 pass.set_pipeline(pipeline);
+                self.bind_chunk_buffers(pass);
                 wet = true;
             }
             pass.set_vertex_buffer(0, fluid.vertices.slice(..));
-            pass.set_index_buffer(fluid.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..fluid.index_count, 0, *instance..*instance + 1);
         }
     }
@@ -3309,13 +3484,12 @@ impl Renderer {
         // Two pipelines inside one pass is the fix and also the safer shape:
         // there is no second `render` call to get the load op wrong in.
         shadows.render(encoder, |pass, cascade| {
-            pass.set_vertex_buffer(1, self.instances.slice(..));
+            self.bind_chunk_buffers(pass);
             for (pos, instance) in &culled.casters {
                 let Some(mesh) = self.chunks.get(pos) else {
                     continue;
                 };
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, *instance..*instance + 1);
             }
             // Figures, in their own pipeline. **A mob with no shadow floats**,
@@ -3451,7 +3625,7 @@ impl Renderer {
         // instances and the same palette, which is what makes a figure appear
         // in the same place in the world and in its own shadow — posing per
         // pass would let the two disagree by a frame.
-        self.prepare_figures();
+        self.prepare_figures(&culled);
 
         let mut encoder = self
             .gpu
@@ -3495,14 +3669,13 @@ impl Renderer {
             if let Some(shadows) = self.post.as_ref().and_then(graph::Post::shadows) {
                 pass.set_bind_group(1, shadows.sample_bind(), &[]);
             }
-            pass.set_vertex_buffer(1, self.instances.slice(..));
+            self.bind_chunk_buffers(&mut pass);
 
             for (pos, instance) in &culled.visible {
                 let Some(mesh) = self.chunks.get(pos) else {
                     continue;
                 };
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 // The instance range picks this chunk's offset out of the
                 // shared array — one buffer write per frame instead of one per
                 // chunk.
@@ -5220,6 +5393,7 @@ fn build_atlas_bindings(
         buffer: upload_tints(gpu, &[MaterialTint::none()]),
         rows: vec![MaterialTint::none()],
         swaying: 0,
+        fluids: Vec::new(),
         any: 0,
     };
     let bind_group = make_bind_group(
@@ -5251,6 +5425,10 @@ struct TintTable {
     /// so rebuilding from one alone would drop what the other said. Keeping
     /// the rows is far cheaper than keeping both messages.
     rows: Vec<MaterialTint>,
+    /// What each fluid's material is drawn at, `(material, opacity)`: the
+    /// fluid table's half of the rows, kept to put back over a material
+    /// table that lands after it — see `Renderer::set_fluid_opacity`.
+    fluids: Vec<(u16, f32)>,
     /// Uploaded to the shader as `Globals::tint_any`. A `u32` because that is
     /// what a uniform carries.
     any: u32,
@@ -5476,6 +5654,104 @@ fn make_depth_with(
         view_formats: &[],
     });
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    #[test]
+    fn a_class_is_never_more_than_half_again_what_it_holds() {
+        // Powers of two with the halfway class between each pair, from the
+        // minimum: what bounds the pool's slack at 1.5x where it was 2x.
+        assert_eq!(BufferPool::class_for(0), MIN_BUFFER_BYTES);
+        assert_eq!(BufferPool::class_for(1), MIN_BUFFER_BYTES);
+        assert_eq!(BufferPool::class_for(MIN_BUFFER_BYTES), MIN_BUFFER_BYTES);
+        assert_eq!(
+            BufferPool::class_for(MIN_BUFFER_BYTES + 1),
+            MIN_BUFFER_BYTES * 3 / 2
+        );
+        assert_eq!(
+            BufferPool::class_for(MIN_BUFFER_BYTES * 3 / 2),
+            MIN_BUFFER_BYTES * 3 / 2
+        );
+        assert_eq!(
+            BufferPool::class_for(MIN_BUFFER_BYTES * 3 / 2 + 1),
+            MIN_BUFFER_BYTES * 2
+        );
+        assert_eq!(BufferPool::class_for(98_000), 65_536 * 3 / 2);
+        assert_eq!(BufferPool::class_for(100_000), 131_072);
+        for bytes in (1..2_000_000).step_by(997) {
+            let class = BufferPool::class_for(bytes);
+            assert!(class >= bytes, "{bytes} does not fit in {class}");
+            assert!(
+                class <= (bytes * 3 / 2).max(MIN_BUFFER_BYTES),
+                "{bytes} was given {class}, more than half again"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod figure_cull_tests {
+    use super::*;
+
+    /// A camera at the origin looking down -z, 70 degrees across.
+    fn looking_down_z() -> Frustum {
+        let projection = glam::camera::rh::proj::directx::perspective(
+            70.0_f32.to_radians(),
+            4.0 / 3.0,
+            0.1,
+            500.0,
+        );
+        let view = glam::camera::rh::view::look_at_mat4(
+            glam::Vec3::ZERO,
+            glam::Vec3::NEG_Z,
+            glam::Vec3::Y,
+        );
+        Frustum::from_view_projection(projection * view)
+    }
+
+    #[test]
+    fn a_figure_behind_the_camera_is_not_shown_and_one_in_front_is() {
+        let culled = Culled {
+            frustum: Some(looking_down_z()),
+            ..Culled::default()
+        };
+        assert!(culled.shows_figure([0.0, 0.0, -10.0], 2.0), "in front");
+        assert!(!culled.shows_figure([0.0, 0.0, 10.0], 2.0), "behind");
+        assert!(
+            !culled.shows_figure([60.0, 0.0, -10.0], 2.0),
+            "well off to the side"
+        );
+        // Its reach is what keeps a figure at the edge of the screen: a mob
+        // whose feet are just off screen still has a head on it.
+        assert!(
+            culled.shows_figure([0.0, 0.0, 1.0], 2.0),
+            "straddling the near plane"
+        );
+    }
+
+    #[test]
+    fn a_caster_is_shown_for_its_shadow_and_a_renderer_that_has_not_culled_shows_all() {
+        let mut culled = Culled {
+            frustum: Some(looking_down_z()),
+            ..Culled::default()
+        };
+        assert!(!culled.shows_figure([0.0, 0.0, 10.0], 2.0));
+        // A cascade looking the other way: the figure casts into it.
+        let projection =
+            glam::camera::rh::proj::directx::orthographic(-50.0, 50.0, -50.0, 50.0, 0.1, 200.0);
+        let view =
+            glam::camera::rh::view::look_at_mat4(glam::Vec3::ZERO, glam::Vec3::Z, glam::Vec3::Y);
+        culled
+            .cascades
+            .push(Frustum::from_view_projection(projection * view));
+        assert!(culled.shows_figure([0.0, 0.0, 10.0], 2.0), "it casts");
+
+        let uncut = Culled::default();
+        assert!(uncut.shows_figure([0.0, 0.0, 10.0], 2.0));
+    }
 }
 
 #[cfg(test)]
