@@ -63,6 +63,8 @@ struct Post {
     // turn as (cos, sin), and the frame's pixel in radians, the numbers
     // `clouds.wgsl` draws them with. Appended, for `fog_here`'s reason.
     stars: vec4<f32>,
+    // The sun's disc, painted back after the fog: see `fog_main`.
+    disc: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> post: Post;
@@ -545,7 +547,25 @@ fn fog_main(input: VertexOut) -> @location(0) vec4<f32> {
     let starred = bowed
         + stars_along(view_ray(input.uv), post.stars.w) * STAR_HEADROOM * open_sky;
 
-    return vec4<f32>(starred, source_texel.a);
+    // **And the sun's disc, after the fog** (weather W37), for the bow's
+
+    // reason: a sky pixel sits at the far plane, where the fog is total, so
+
+    // whatever `sky_along` painted there is painted over — the disc with it,
+
+    // and what showed in its place was the fog's own glow, dark at sunset.
+
+    // The same disc the cloud pass paints in the other modes, on the pixels
+
+    // nothing stands in front of.
+
+    let toward_sun = -normalize(post.sun_direction.xyz);
+
+    let disc = smoothstep(0.9994, 0.9997, dot(view_ray(input.uv), toward_sun)) * open_sky;
+
+    let sunned = mix(starred, post.disc.rgb, disc);
+
+    return vec4<f32>(sunned, source_texel.a);
 }
 
 // The last pass: the fogged frame (particles and lightning already over it) plus

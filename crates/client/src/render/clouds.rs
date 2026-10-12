@@ -245,6 +245,9 @@ struct Uniforms {
     rainbow: [f32; 4],
     rainbow_bands: [f32; 4],
     rainbow_light: [f32; 4],
+    /// The sun's disc colour, as `sky_along` paints it. Appended, so nothing
+    /// before it moved.
+    disc: [f32; 4],
 }
 
 /// Texels a side of the cover map's textures: the biggest map a mod may
@@ -428,6 +431,10 @@ pub struct Frame {
     pub rainbow: super::rainbow::Uniform,
     /// The sun's colour.
     pub sun: [f32; 3],
+    /// What the sun's disc is painted: the sun's colour at the brightness
+    /// the atmosphere leaves it, apart from `sun`, which the light's
+    /// intensity has already scaled (weather W37).
+    pub disc: [f32; 3],
     /// The sky's colour.
     pub sky: [f32; 3],
     /// Where distance fog is total, in blocks.
@@ -756,6 +763,7 @@ impl Pass {
             rainbow: frame.rainbow.antisolar,
             rainbow_bands: frame.rainbow.bands,
             rainbow_light: frame.rainbow.light,
+            disc: [frame.disc[0], frame.disc[1], frame.disc[2], 0.0],
             quality: [
                 quality.reach(),
                 quality.detail_reach(),
@@ -1856,7 +1864,8 @@ mod tests {
             occupancy,
             rainbow,
             rainbow_bands,
-            rainbow_light
+            rainbow_light,
+            disc
         );
         assert_eq!(fields.len(), rust.len(), "{fields:?}");
         let mut at = 0;

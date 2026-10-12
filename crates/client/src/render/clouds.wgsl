@@ -110,6 +110,8 @@ struct Clouds {
     rainbow: vec4<f32>,
     rainbow_bands: vec4<f32>,
     rainbow_light: vec4<f32>,
+    // The sun's disc, as painted: see `sky_along`.
+    disc: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> clouds: Clouds;
@@ -1590,8 +1592,14 @@ fn sky_along(direction: vec3<f32>) -> vec3<f32> {
     colour = colour + clouds.sun.xyz * pow(alignment, 128.0) * 0.42 * headroom;
     // And the disc. Small, and deliberately not a texture: it is the one
     // object in the sky whose SIZE a player judges everything else against.
+    // **The disc is not the light** (weather W37, "the sun seems to be a dark
+    // circle"). `sun` is the sun's colour scaled by the light's intensity,
+    // which a sunset keyframe takes to a half: painted at that the disc came
+    // out darker than the sunset sky round it. The disc is the sun's colour
+    // at the brightness the atmosphere leaves it, with only a weather
+    // modifier's dimming on it — `Renderer::set_sun_disc`.
     let disc = smoothstep(0.9994, 0.9997, alignment);
-    colour = mix(colour, clouds.sun.xyz * 1.6, disc);
+    colour = mix(colour, clouds.disc.xyz, disc);
     // The stars, behind everything: only where this pass draws at the
     // frame's own resolution. At a lower one `resolve_main` adds them, so
     // a star stays a point rather than a block of pixels. The rainbow with

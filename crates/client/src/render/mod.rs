@@ -769,6 +769,11 @@ impl BufferPool {
     }
 }
 
+/// How much brighter than its colour the sun's disc is painted: over white,
+/// so it is the brightest thing in the sky at any hour and blooms in
+/// Beautiful. What `sky_along` always painted it at.
+pub const SUN_DISC_GAIN: f32 = 1.6;
+
 /// How many quads the shared index pattern is built for before anything asks.
 ///
 /// 96 KiB of indices: more than a flat chunk ever draws, so a world of open
@@ -1176,6 +1181,12 @@ pub struct Renderer {
     light_floor: f32,
     /// The sun's colour now.
     sun_colour: [f32; 4],
+    /// How bright the sun's disc is painted, as a share of its colour at
+    /// `SUN_DISC_GAIN` — weather W37. The light's intensity is not it: a
+    /// sunset keyframe halves the light and the disc stays the brightest
+    /// thing in the sky; only a weather modifier dims it, and only the
+    /// caller knows which is which. One until told.
+    sun_disc: f32,
     /// Which way the light that shades the world travels, for the cascades,
     /// the facing test, the cloud shade and the sky's glow: the sun by day
     /// and the moon by night (`Sky::light_direction`). Set by the sky with the
@@ -1335,7 +1346,6 @@ impl Renderer {
 
         // The engine's own rig, built in Rust and uploaded once. A mod-supplied
         // model goes through the same constructor — see `core::model`.
-        let hands = viewmodel::Viewmodel::new(&gpu, &views.world, &sampler, target);
         let skinned = skinned::Skinned::new(&gpu, tiamat_core::model::humanoid());
         let skinned_pipeline = skinned::colour_pipeline(&gpu, &skinned, &bind_layout, mode, target);
 
@@ -1344,7 +1354,7 @@ impl Renderer {
             // evaluated in the order they are written.
             depth: make_depth(&gpu, width, height),
             quad_indices: QuadIndices::new(&gpu),
-            hands,
+            hands: viewmodel::Viewmodel::new(&gpu, &views.world, &sampler, target),
             gpu,
             skinned,
             skinned_pipeline,
@@ -1402,6 +1412,7 @@ impl Renderer {
             sun_intensity: 1.0,
             light_floor: 0.0,
             sun_colour: [1.0, 1.0, 1.0, 1.0],
+            sun_disc: 1.0,
             sun_direction: NOON,
             rainbow_sun: NOON,
             stars: (0.0, (1.0, 0.0)),
@@ -1450,6 +1461,16 @@ impl Renderer {
         self.sun_intensity = intensity.clamp(0.0, 1.0);
         self.sun_colour = [colour[0], colour[1], colour[2], 1.0];
         self.sun_direction = direction;
+    }
+
+    /// How bright the sun's disc is painted, `0.0..=1.0` of its colour at
+    /// [`SUN_DISC_GAIN`] — weather W37. See [`Self::sun_disc`].
+    pub fn set_sun_disc(&mut self, brightness: f32) {
+        self.sun_disc = if brightness.is_finite() {
+            brightness.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
     }
 
     /// Sets the least the frame is lit at, `0.0..=1.0` — weather ask W32.
@@ -2233,6 +2254,11 @@ impl Renderer {
                 self.sun_colour[0] * self.sun_intensity,
                 self.sun_colour[1] * self.sun_intensity,
                 self.sun_colour[2] * self.sun_intensity,
+            ],
+            disc: [
+                self.sun_colour[0] * SUN_DISC_GAIN * self.sun_disc,
+                self.sun_colour[1] * SUN_DISC_GAIN * self.sun_disc,
+                self.sun_colour[2] * SUN_DISC_GAIN * self.sun_disc,
             ],
             sky: self.sky_colour,
             fog_end: self.fog_end,
@@ -3103,6 +3129,11 @@ impl Renderer {
                 grade: self.grade,
                 place_fog: self.fog_here,
                 cave_fog: self.cave_fog,
+                disc: [
+                    self.sun_colour[0] * SUN_DISC_GAIN * self.sun_disc,
+                    self.sun_colour[1] * SUN_DISC_GAIN * self.sun_disc,
+                    self.sun_colour[2] * SUN_DISC_GAIN * self.sun_disc,
+                ],
                 rainbow: self.rainbow_uniform(),
                 stars: [
                     self.stars.0,

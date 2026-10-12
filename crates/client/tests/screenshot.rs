@@ -6939,6 +6939,7 @@ fn the_cloud_shader_compiles_and_a_deck_prepares() {
         star_turn: (1.0, 0.0),
         rainbow: client::render::rainbow::Uniform::NONE,
         sun: [1.0, 0.86, 0.62],
+        disc: [1.0, 0.86, 0.62],
         sky: [0.42, 0.58, 0.85],
         fog_end: 3000.0,
         pixel_angle: 1.0 / f32::from(u16::try_from(HEIGHT).unwrap_or(240)),
@@ -7009,6 +7010,111 @@ fn low_deck() -> tiamat_core::atmosphere::CloudLayer {
         colour: [1.0; 3],
         shade: [0.42, 0.44, 0.58],
     }
+}
+
+#[test]
+fn the_suns_disc_is_the_brightest_thing_in_the_sky_in_every_mode() {
+    // **Weather W37, reported from the window: "the sun seems to be a dark
+    // circle rather than a white (or orange at sunset) one."** The disc is
+    // `sky_along`'s in `clouds.wgsl`, mixed in at 1.6 times the sun's colour;
+    // whatever came after it was turning that into something dark. Looked at
+    // straight on, at noon and at dusk, in each lighting mode: the disc must
+    // be brighter than the sky an eighth of the frame beside it, and at dusk
+    // it must be the keyframe's orange and not the sky's blue.
+    let Some(gpu) = gpu() else { return };
+    // An empty world and no deck: a low sun is looked at along the horizon,
+    // and the fixed scene's ground, or a deck's slabs, would be what the frame
+    // held there.
+    let mut renderer = prepare(gpu, &[], RenderMode::Textured);
+    let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
+    renderer.set_clouds(client::render::clouds::Deck {
+        layer: None,
+        clouds: Some(tiamat_core::atmosphere::Clouds {
+            cover: 0.0,
+            darkness: 0.0,
+            base: None,
+            ease_ticks: 0,
+            stratocumulus: 0.0,
+            altocumulus: 0.0,
+            cumulonimbus: 0.0,
+        }),
+        quality: client::render::clouds::Quality::Medium,
+        seed: 4242,
+    });
+    let luma = |c: [f32; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let mut wrong: Vec<String> = Vec::new();
+    // Core Sky's own noon and sunset keyframes: at sunset the light is at a
+    // half and the sky is nine tenths red, which is exactly where a disc
+    // painted at the light's intensity came out darker than the sky.
+    for (hour, sky, colour, intensity, pitch) in [
+        (
+            "noon",
+            [0.50, 0.70, 1.00],
+            [1.0, 1.0, 1.0],
+            1.0_f32,
+            1.2_f32,
+        ),
+        ("sunset", [0.90, 0.45, 0.28], [1.0, 0.55, 0.30], 0.5, 0.08),
+    ] {
+        renderer.set_sky(sky, 384.0);
+        renderer.set_sun_disc(intensity.max(0.85));
+        // The sun's light travels the way the camera looks, so the disc sits
+        // at the centre of the frame.
+        let camera = Camera {
+            position: Position::from_world(24.0, 18.0, 20.0),
+            pitch,
+            ..Camera::default()
+        };
+        let forward = camera.forward();
+        for mode in [
+            client::config::LightingMode::Simple,
+            client::config::LightingMode::Classic,
+            client::config::LightingMode::Beautiful,
+        ] {
+            renderer.set_lighting_mode(mode);
+            renderer.set_sun(intensity, colour, [-forward.x, -forward.y, -forward.z]);
+            let frame = target.capture(&mut renderer, &camera).expect("capture");
+            let centre = average(
+                &frame,
+                WIDTH / 2 - 1,
+                HEIGHT / 2 - 1,
+                WIDTH / 2 + 2,
+                HEIGHT / 2 + 2,
+            );
+            let beside = average(
+                &frame,
+                WIDTH / 2 + WIDTH / 8,
+                HEIGHT / 2 - 2,
+                WIDTH / 2 + WIDTH / 8 + 4,
+                HEIGHT / 2 + 2,
+            );
+            println!("{hour} {mode:?}: disc {centre:?} sky beside {beside:?}");
+            if let Ok(dir) = std::env::var("TIAMAT_DUMP_DISC") {
+                let mut bytes = Vec::new();
+                {
+                    let mut encoder = png::Encoder::new(&mut bytes, frame.width, frame.height);
+                    encoder.set_color(png::ColorType::Rgba);
+                    encoder.set_depth(png::BitDepth::Eight);
+                    let mut writer = encoder.write_header().expect("header");
+                    writer.write_image_data(&frame.rgba).expect("data");
+                }
+                let path = std::path::Path::new(&dir).join(format!("disc-{hour}-{mode:?}.png"));
+                std::fs::write(&path, &bytes).expect("write");
+            }
+            if luma(centre) <= luma(beside) + 0.05 {
+                wrong.push(format!(
+                    "{hour} {mode:?}: the sun's disc {centre:?} is not brighter than the sky \
+                     beside it {beside:?}"
+                ));
+            }
+            if hour == "sunset" && centre[0] <= centre[2] + 0.1 {
+                wrong.push(format!(
+                    "{hour} {mode:?}: the disc {centre:?} is not the sun's orange"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[test]

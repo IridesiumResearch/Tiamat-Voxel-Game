@@ -108,6 +108,9 @@ struct Uniforms {
     /// much of the catalog shows, the day's turn as (cos, sin), and the
     /// frame's pixel in radians. **Appended**, for `place_fog`'s reason.
     stars: [f32; 4],
+    /// The sun's disc colour, painted back over the sky after the fog —
+    /// weather W37. Appended, so nothing before it moved.
+    disc: [f32; 4],
 }
 
 /// The shared buffers the passes read besides their own uniforms: the place
@@ -152,6 +155,8 @@ pub struct Frame {
     /// into the scene's alpha; see `SKY_MARK` and `CAVE_MARK` in
     /// `post.wgsl`.
     pub cave_fog: [f32; 3],
+    /// The sun's disc, as `clouds::Frame::disc` carries it (weather W37).
+    pub disc: [f32; 3],
     /// The rainbow painted on the sky — weather ask W30. Mode 3 adds it in
     /// the composite, after the fog that would otherwise paint it over.
     pub rainbow: super::rainbow::Uniform,
@@ -876,6 +881,7 @@ impl Post {
                 fog_up: frame.fog_up,
                 place_fog: frame.place_fog,
                 cave_fog: [frame.cave_fog[0], frame.cave_fog[1], frame.cave_fog[2], 0.0],
+                disc: [frame.disc[0], frame.disc[1], frame.disc[2], 0.0],
                 rainbow: frame.rainbow,
                 stars: frame.stars,
             }),

@@ -51,6 +51,13 @@ pub const HUD_FONT: &[u8] = include_bytes!("../assets/third-party/go-font/Go-Mon
 /// knob that can be added when something wants one.
 const UNDERWATER_VISIBILITY: f32 = 16.0;
 
+/// The least of its colour the sun's disc is painted at, whatever the
+/// keyframe's light intensity — weather W37. Core Sky's sunset keyframe lights
+/// the world at a half and paints the sky at nine tenths red; at this floor
+/// the disc stays the brightest thing in it, and the moon's blue by night
+/// shows as a disc where the light comes from.
+const SUN_DISC_FLOOR: f32 = 0.85;
+
 /// The least a body under a fluid can see, in blocks, whatever the fluid.
 ///
 /// Not zero: a fog that is total at no distance is a division the shader has
@@ -5529,7 +5536,16 @@ impl App {
         // horizon does not tint the view from under the water.
         self.weather.modifier.advance(dt);
         let modifier = self.weather.modifier.current();
-        let mut moment = crate::sky::modified(self.sky.moment(), &modifier);
+        let keyframed = self.sky.moment();
+        // **The sun's disc is not the light** (weather W37). A sunset
+        // keyframe halves the light's intensity and the disc, painted at the
+        // light's intensity, came out darker than the sunset sky round it.
+        // The disc keeps the brightness the atmosphere leaves it — the
+        // keyframe's own intensity floored at `SUN_DISC_FLOOR` — and only a
+        // weather modifier dims it, as it dims the rest.
+        self.renderer
+            .set_sun_disc(keyframed.intensity.max(SUN_DISC_FLOOR) * modifier.intensity);
+        let mut moment = crate::sky::modified(keyframed, &modifier);
         // The modifier's say over the stars, eased (engine ask World 44).
         moment.stars = self.weather.modifier.stars_over(moment.stars);
         // And lightning over that: a moment's light, no relight.
