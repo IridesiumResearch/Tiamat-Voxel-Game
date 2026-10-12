@@ -12,13 +12,38 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W34 and W35, filed 2026-10-12. W36 filed 2026-10-12 landed the same day (engine 3394bdb3), awaiting the eye. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W37, filed 2026-10-13; W34 and W35, filed 2026-10-12. W36 filed 2026-10-12 landed the same day (engine 3394bdb3), awaiting the eye. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 
 
 
+
+## W37. The sun is a dark disc (2026-10-13)
+
+**Seen.** The designer, playing 0.4.0: "the sun seems to be a dark circle
+rather than a white (or orange at sunset) one." Which lighting mode, and
+whether at every hour, is not yet known here; check all three.
+
+**Why it is not Weather's.** On a clear day Weather sends no sky modifier at
+all (clear has no intensity, so `sky_for` sends nil), and its cloud deck is
+0.06 cumulus and 0.08 altocumulus, so the disc is the pass's alone: `sky_along`
+in `clouds.wgsl` mixes towards `clouds.sun.xyz * 1.6` inside
+`smoothstep(0.9994, 0.9997, alignment)`. Something after that turns a value
+brighter than white into a dark one — candidates from here, unconfirmed:
+the composite or tonemap clamping or wrapping a component over 1 (the disc
+is the only thing in the frame written at 1.6x the sun), the bloom
+threshold, mode 3's fog over a painted sky (W29 blends by sky light, and the
+sky has none, so the disc may be pulled to `cave_fog`'s dark), or the
+0.4.0 moon handing the light's direction to the uniform the disc reads, so
+the disc is drawn where the moon is meant to be.
+
+**Ask.** The sun's disc drawn bright — white by day, the keyframe's sun
+colour (orange at dusk) low down — in every lighting mode, with storm
+darkness and a sky modifier dimming it as they dim the rest. Gate: a clear
+noon and a clear dusk, looking at the sun, in each mode: the disc is the
+brightest thing in the sky and the colour of the keyframe's sun.
 ## W36. A rain puddle draws as a full block of water (2026-10-12): LANDED 2026-10-12 (engine 3394bdb3)
 
 **From the engine, 2026-10-12.** The cube was GLASS, not water. The
