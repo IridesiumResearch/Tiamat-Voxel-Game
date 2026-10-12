@@ -335,6 +335,39 @@ pub struct StampBlock {
     pub mask: u32,
 }
 
+impl StampBlock {
+    /// This block turned `quarters` quarter turns about the vertical through
+    /// the root block's centre.
+    ///
+    /// **The turn a placed shape facing East makes** (see
+    /// [`crate::inventory::Facing`]): one turn takes `+z` to `+x` and `+x` to
+    /// `-z`, so the offset `(dx, dz)` becomes `(dz, -dx)` and the cell
+    /// `(x, y, z)` of the mask becomes `(z, y, 2 - x)`. The vertical is never
+    /// touched.
+    ///
+    /// **The offset and the mask turn together, or the structure tears.** A
+    /// slab on a block's `-x` face, turned, has to end up on the `+z` face of
+    /// the block its offset moved to; the two are one rigid turn of the
+    /// structure's cells only if both are the same turn, so the mask goes
+    /// through [`crate::inventory::turned`] — the one statement of that
+    /// permutation, which a placed stair already uses — and the offset is the
+    /// same turn at the scale of blocks. A permutation and a sign: nothing for
+    /// charter rule 4 to object to, and four turns are the identity.
+    #[must_use]
+    pub fn turned(self, quarters: u32) -> Self {
+        let (mut dx, mut dz) = (self.dx, self.dz);
+        for _ in 0..quarters % 4 {
+            (dx, dz) = (dz, dx.saturating_neg());
+        }
+        Self {
+            dx,
+            dz,
+            mask: crate::inventory::turned(self.mask, quarters),
+            ..self
+        }
+    }
+}
+
 /// A structure built once and stamped many times: a tree, a boulder, a snag.
 ///
 /// **Built once, in Lua, from a list of blocks; stamped natively.** A tree is
@@ -374,6 +407,20 @@ impl Schematic {
     #[must_use]
     pub fn blocks(&self) -> &[StampBlock] {
         &self.blocks
+    }
+
+    /// The blocks turned `quarters` quarter turns about the vertical through
+    /// the root — see [`StampBlock::turned`] for which way.
+    ///
+    /// In the order given, which is the order they are written in: a later
+    /// block over an earlier one at the same place lands over it whichever way
+    /// the structure faces.
+    #[must_use]
+    pub fn turned(&self, quarters: u32) -> Vec<StampBlock> {
+        self.blocks
+            .iter()
+            .map(|block| block.turned(quarters))
+            .collect()
     }
 
     /// How many blocks it writes.
@@ -4170,5 +4217,130 @@ mod tests {
             dirt > 0,
             "no slab crossed the seam; the test proves nothing"
         );
+    }
+
+    /// Every cell a list of stamp blocks fills, in sub-nodes from the root
+    /// block's corner, with what it is made of.
+    fn cells_of(blocks: &[StampBlock]) -> std::collections::BTreeSet<(i32, i32, i32, u16)> {
+        let mut cells = std::collections::BTreeSet::new();
+        for block in blocks {
+            for index in 0..SUBNODES_PER_BLOCK {
+                if block.mask & (1 << index) != 0 {
+                    let (x, y, z) = crate::block::subnode_offset(index);
+                    cells.insert((
+                        3 * block.dx + x as i32,
+                        3 * block.dy + y as i32,
+                        3 * block.dz + z as i32,
+                        block.material.0,
+                    ));
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn a_stamp_block_turned_four_times_is_itself() {
+        // A permutation and a sign, so four of them come back where they
+        // started — for every cell on its own and for masks of several.
+        let mut masks: Vec<u32> = (0..SUBNODES_PER_BLOCK).map(|bit| 1 << bit).collect();
+        masks.extend([FULL_MASK, 0x1C0_E07, 0xFC_7E3F, 0x124_9249, 0b1011]);
+        for mask in masks {
+            for (dx, dz) in [(0, 0), (3, -1), (-4, 7), (12, 0), (0, -9)] {
+                let block = StampBlock {
+                    dx,
+                    dy: 2,
+                    dz,
+                    material: DIRT,
+                    mask,
+                };
+                assert_eq!(block.turned(4), block, "four turns at once moved {block:?}");
+                let stepped = (0..4).fold(block, |turning, _| turning.turned(1));
+                assert_eq!(stepped, block, "four single turns moved {block:?}");
+                assert_eq!(
+                    block.turned(1).mask.count_ones(),
+                    mask.count_ones(),
+                    "a turn changed how much of the block there is"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_quarter_turn_takes_plus_z_to_plus_x_for_offsets_and_cells_alike() {
+        // The documented convention, by example: the block one north of the
+        // root (+z) goes one east (+x), and the cell (0, 1, 2) on its +z face
+        // goes to (2, 1, 2), on the +x face.
+        let block = StampBlock {
+            dx: 0,
+            dy: 5,
+            dz: 1,
+            material: DIRT,
+            mask: 1 << subnode_index(0, 1, 2),
+        };
+        let turned = block.turned(1);
+        assert_eq!((turned.dx, turned.dy, turned.dz), (1, 5, 0));
+        assert_eq!(turned.mask, 1 << subnode_index(2, 1, 2));
+        // And +x goes to -z.
+        let east = StampBlock {
+            dx: 1,
+            dz: 0,
+            ..block
+        }
+        .turned(1);
+        assert_eq!((east.dx, east.dz), (0, -1));
+    }
+
+    #[test]
+    fn a_turned_schematic_is_the_same_cells_turned_rigidly() {
+        // The property that matters to a mod: turning the offsets and the
+        // masks separately is one rigid turn of the whole structure's cells
+        // about the root block's centre, which in sub-nodes from its corner
+        // is (sx, sz) to (sz, 2 - sx). A mask turned the other way from its
+        // offset would pass both tests above and tear every slab off its
+        // block here.
+        let schematic = Schematic::new(vec![
+            StampBlock {
+                dx: 0,
+                dy: 0,
+                dz: 0,
+                material: STONE,
+                mask: FULL_MASK,
+            },
+            StampBlock {
+                dx: 2,
+                dy: 1,
+                dz: -1,
+                material: DIRT,
+                mask: 0x124_9249,
+            },
+            StampBlock {
+                dx: -3,
+                dy: -1,
+                dz: 4,
+                material: DIRT,
+                mask: 0b1011,
+            },
+            StampBlock {
+                dx: 1,
+                dy: 2,
+                dz: 1,
+                material: STONE,
+                mask: 1 << subnode_index(2, 0, 1),
+            },
+        ]);
+        let mut expected = cells_of(schematic.blocks());
+        for quarters in 1..4 {
+            expected = expected
+                .into_iter()
+                .map(|(sx, sy, sz, material)| (sz, sy, 2 - sx, material))
+                .collect();
+            assert_eq!(
+                cells_of(&schematic.turned(quarters)),
+                expected,
+                "{quarters} turns are not the structure turned whole"
+            );
+        }
+        assert_eq!(schematic.turned(0), schematic.blocks().to_vec());
     }
 }

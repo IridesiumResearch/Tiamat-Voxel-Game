@@ -4150,7 +4150,8 @@ function game.density(spec) end
 ---point is on and how far — a coastline, land where it is positive and the
 ---cliff rising over its first few blocks.
 
----A structure built once, from a list of blocks, for `buf:scatter` to stamp.
+---A structure built once, from a list of blocks, for `buf:scatter` to stamp —
+---or `game.stamp_schematic`, at run time.
 ---
 ---Each block is `{dx, dy, dz, material, mask}`: an offset from the root in
 ---blocks, a numeric material id, and a 27-bit mask of the cells written
@@ -4205,7 +4206,51 @@ function game.schematic(blocks) end
 ---@return Tiamat.Schematic
 function game.schematic_shapes(shapes) end
 
----A structure for `buf:scatter`. See `game.schematic`.
+---Writes a schematic into the running world with its root at `pos`, turned,
+---paced across ticks — the structure a generator scatters, built once at load,
+---stamped by an event long after the ground was made: a wreck at the end of a
+---rainbow, a ruin a quest uncovers.
+---
+---**Written as `buf:scatter` writes it.** A block whose mask is whole replaces
+---the block there (air clears it); a partial mask sets the cells it names and
+---keeps every other cell the block held — a merge write, so a hull's keel sits
+---IN the ground rather than in a footprint of air. Air in a partial mask
+---carves those cells. Blocks go in the order you listed them, so a later block
+---lands over an earlier one at the same place. A `whole` material is written
+---as its own shape with a whole mask; a partial mask of one writes nothing
+---(Sub-Node Contract §7.5).
+---
+---**`turn` is 0 to 3 quarter turns about the vertical through the root**,
+---default 0. One turn takes `+z` to `+x` and `+x` to `-z` — the way a shape
+---placed facing east turns — so an offset `(dx, dz)` becomes `(dz, -dx)`, and
+---every mask turns with its block: cell `(x, y, z)` becomes `(z, y, 2 - x)`.
+---Four turns are none.
+---
+---`domain` is the space, defaulting to `pos.domain` and then the overworld.
+---
+---Returns whether the stamp was ACCEPTED, as `game.plans.stamp` does: the
+---engine paces it with the plans, a few hundred blocks a tick, so a structure
+---of a few hundred blocks lands within a few ticks and one of thousands builds
+---itself over a second or two. `false` when there is no world yet (worldgen,
+---registration) or too many stamps are already waiting — wait and ask again.
+---
+---A mistake is an error naming the field: a `turn` that is not 0 to 3, a
+---`domain` that names no domain, an option it does not know, a `pos` that is
+---not whole blocks, or a `schematic` that did not come from `game.schematic` or
+---`game.schematic_shapes`.
+---
+---```lua
+---local WRECK = game.schematic(blocks)          -- once, at load
+---game.stamp_schematic(WRECK, { x = 120, y = 64, z = -40 }, { turn = rng:below(4) })
+---```
+---@param schematic Tiamat.Schematic From `game.schematic` or `game.schematic_shapes`.
+---@param pos { x: integer, y: integer, z: integer, domain: string? } Where the root block goes.
+---@param options { domain: string?, turn: integer? }?
+---@return boolean accepted
+function game.stamp_schematic(schematic, pos, options) end
+
+---A structure for `buf:scatter` and `game.stamp_schematic`. See
+---`game.schematic`.
 ---@class Tiamat.Schematic
 local Schematic = {}
 

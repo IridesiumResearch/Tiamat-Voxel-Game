@@ -19,6 +19,13 @@
 //! tick, and it is why `game.plans.stamp` returns "accepted" rather than
 //! "done".
 //!
+//! **A schematic stamped at run time rides the same queue** (weather ask
+//! W35): `game.stamp_schematic` hands its blocks, already turned, to
+//! [`Stamps`] beside the plans, under the same budget and the same limit on
+//! how many may wait. Only what each block becomes differs — a plan replaces
+//! the blocks it names (Sub-Node Contract §7.3), and a schematic merges by
+//! cell, as `buf:scatter` writes it (§7.4).
+//!
 //! # Saving is immediate, and does not need the debounce storage has
 //!
 //! A mod's `game.storage` is written back on the same debounced save the chunks
@@ -31,6 +38,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use tiamat_core::detgen::StampBlock;
 use tiamat_core::plan::{Plan, PlanError};
 use tiamat_core::proto::Edit;
 use tiamat_core::{BlockPos, BlockView};
@@ -91,22 +99,121 @@ impl Names {
 struct Stamping {
     domain: String,
     at: BlockPos,
-    plan: Plan,
-    /// How many of the plan's cells have been queued.
+    source: Source,
+    /// How many of the source's cells have been queued.
     ///
     /// Advanced only when a whole cell got onto the queue. A cell that ran out
     /// of room half way is re-emitted from its start next tick, which is safe
     /// because every edit it makes is an idempotent write — and re-emitting
     /// from the START is what keeps a mixed block's layers in their order.
     next: usize,
-    /// Positions whose block has already been replaced this stamp.
+}
+
+/// What a stamp writes.
+enum Source {
+    /// A plan: each block it names is replaced (Sub-Node Contract §7.3).
+    Plan {
+        plan: Plan,
+        /// Positions whose block has already been replaced this stamp.
+        ///
+        /// A mixed block is several cells at one position (see
+        /// [`tiamat_core::plan`]): the first REPLACES the block and the rest
+        /// add their cells to it. Without this the second material would wipe
+        /// the first, and the block would come out holding whichever material
+        /// was captured last.
+        opened: BTreeSet<[u16; 3]>,
+    },
+    /// A schematic's blocks, already turned, in the order they are written:
+    /// merged by cell, as `buf:scatter` writes them (§7.4) — see
+    /// [`schematic_writes`].
+    Schematic(Vec<StampBlock>),
+}
+
+impl Source {
+    /// How many cells it holds: what `next` counts towards.
+    fn len(&self) -> usize {
+        match self {
+            Self::Plan { plan, .. } => plan.len(),
+            Self::Schematic(blocks) => blocks.len(),
+        }
+    }
+}
+
+/// One thing a stamp puts on the edit queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Write {
+    /// An edit, applied as it stands.
+    Edit(Edit),
+    /// Cells added to whatever the block holds (Sub-Node Contract §7.4),
+    /// resolved where the queue is drained, because what it becomes depends
+    /// on what the block holds then.
+    Merge {
+        pos: BlockPos,
+        material: u16,
+        occupancy: u32,
+    },
+}
+
+impl Write {
+    /// What it is charged against [`BLOCKS_PER_TICK`]: the most edits it can
+    /// become.
     ///
-    /// A mixed block is several cells at one position (see
-    /// [`tiamat_core::plan`]): the first REPLACES the block and the rest add
-    /// their cells to it. Without this the second material would wipe the
-    /// first, and the block would come out holding whichever material was
-    /// captured last.
-    opened: BTreeSet<[u16; 3]>,
+    /// **A merge is charged a cell each**, though into air or its own
+    /// material it is one edit: into a block of another material it is one
+    /// `Edit::SubNode` per cell (§7.4), and the budget is a bound on what a
+    /// tick may apply, so it is charged the case that costs most. A wreck of a
+    /// few hundred blocks still lands in a handful of ticks.
+    fn cost(&self) -> usize {
+        match self {
+            Self::Edit(_) => 1,
+            Self::Merge { occupancy, .. } => occupancy.count_ones() as usize,
+        }
+    }
+}
+
+/// Puts one block's writes on the queue, charging each to `budget` and
+/// counting it in `queued`.
+///
+/// `false` when the block must wait for the next tick: its writes would
+/// overrun what is left of this tick's budget, or the edit queue filled part
+/// way through them. The caller leaves its cursor on the block, so it is
+/// re-emitted from its start — safe, because every write is idempotent, and
+/// from the START so a mixed block's layers keep their order.
+///
+/// **"This tick's", not "this call's".** The pump steps the same stamp again
+/// while budget is left, so a test of what THIS call had queued let a block
+/// that did not fit go on the second call — a tick over its budget by up to a
+/// block's worth, every tick a merge-heavy stamp ran. A block costs at most
+/// 27, far under a whole tick's budget, so one that waits always fits the
+/// next; the exception, a budget nothing has been spent from, is kept so a
+/// stamp can never wait for ever.
+fn queue_block(
+    domain: &str,
+    writes: &[Write],
+    queue: &dyn EditQueue,
+    budget: &mut usize,
+    queued: &mut usize,
+) -> bool {
+    let cost: usize = writes.iter().map(Write::cost).sum();
+    if cost > *budget && *budget < BLOCKS_PER_TICK {
+        return false;
+    }
+    for write in writes {
+        let accepted = match write {
+            Write::Edit(edit) => queue.queue_seed(domain, edit.clone()),
+            Write::Merge {
+                pos,
+                material,
+                occupancy,
+            } => queue.queue_merge(domain, *pos, *material, *occupancy),
+        };
+        if !accepted {
+            return false;
+        }
+        *queued += write.cost();
+        *budget = budget.saturating_sub(write.cost());
+    }
+    true
 }
 
 /// The stamps waiting to be applied.
@@ -135,6 +242,24 @@ impl Stamps {
 
     /// Puts a plan in the queue. `false` when too many are already waiting.
     fn accept(&self, domain: &str, at: BlockPos, plan: Plan) -> bool {
+        self.enqueue(
+            domain,
+            at,
+            Source::Plan {
+                plan,
+                opened: BTreeSet::new(),
+            },
+        )
+    }
+
+    /// Puts a schematic's blocks, already turned, in the queue — the same
+    /// queue and the same refusal as a plan. See
+    /// [`tiamat_core::plan::Access::stamp_schematic`].
+    fn accept_schematic(&self, domain: &str, at: BlockPos, blocks: Vec<StampBlock>) -> bool {
+        self.enqueue(domain, at, Source::Schematic(blocks))
+    }
+
+    fn enqueue(&self, domain: &str, at: BlockPos, source: Source) -> bool {
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
@@ -144,9 +269,8 @@ impl Stamps {
         pending.push_back(Stamping {
             domain: domain.to_owned(),
             at,
-            plan,
+            source,
             next: 0,
-            opened: BTreeSet::new(),
         });
         true
     }
@@ -173,19 +297,20 @@ impl Stamps {
             let Some(stamping) = pending.front_mut() else {
                 break;
             };
-            let placed = stamping.step(queue, &self.names.by_name, &mut budget);
+            let placed = stamping.step(queue, &self.names, &mut budget);
             queued += placed;
-            if stamping.next >= stamping.plan.len() {
+            if stamping.next >= stamping.source.len() {
                 debug!(
                     domain = %stamping.domain,
-                    blocks = stamping.plan.len(),
-                    "a stamped plan is fully queued"
+                    blocks = stamping.source.len(),
+                    "a stamp is fully queued"
                 );
                 pending.pop_front();
             } else if placed == 0 {
-                // The queue is full, not the budget. Nothing else in the
-                // pending list would fare any better, so stop rather than
-                // spinning over stamps that all fail the same way.
+                // The queue is full, or the next block is bigger than what is
+                // left of the budget. Nothing else in the pending list would
+                // fare any better until next tick, so stop rather than
+                // spinning over stamps that all wait the same way.
                 break;
             }
         }
@@ -195,18 +320,30 @@ impl Stamps {
 
 impl Stamping {
     /// Queues as many of this stamp's remaining cells as `budget` allows.
-    fn step(
+    fn step(&mut self, queue: &dyn EditQueue, names: &Names, budget: &mut usize) -> usize {
+        match self.source {
+            Source::Plan { .. } => self.step_plan(queue, &names.by_name, budget),
+            Source::Schematic(_) => self.step_schematic(queue, &names.by_id, budget),
+        }
+    }
+
+    /// [`Self::step`] for a plan: each cell replaces its block, or layers
+    /// onto one this stamp already replaced.
+    fn step_plan(
         &mut self,
         queue: &dyn EditQueue,
         by_name: &BTreeMap<String, u16>,
         budget: &mut usize,
     ) -> usize {
+        let Source::Plan { plan, opened } = &mut self.source else {
+            return 0;
+        };
         let mut queued = 0;
-        for cell in self.plan.cells().skip(self.next) {
+        for cell in plan.cells().skip(self.next) {
             if *budget == 0 {
                 break;
             }
-            let Some(name) = self.plan.palette().get(cell.material as usize) else {
+            let Some(name) = plan.palette().get(cell.material as usize) else {
                 self.next += 1;
                 continue;
             };
@@ -225,38 +362,134 @@ impl Stamping {
                 self.at.y + i32::from(cell.at[1]),
                 self.at.z + i32::from(cell.at[2]),
             );
-            let opened = self.opened.contains(&cell.at);
-            let edits = block_edits(pos, material, cell.occupancy, opened);
-            if edits.len() > *budget && queued > 0 {
-                // Leave a mixed block's layers for a tick with room for all of
-                // them, rather than splitting one across two. `queued > 0`
-                // because a cell that does not fit in a budget nothing has
-                // spent yet must go anyway — otherwise a stamp behind another
-                // one could wait for ever. That overshoots by at most 26
-                // edits, the most cells a block has beyond the first.
+            let writes: Vec<Write> =
+                block_edits(pos, material, cell.occupancy, opened.contains(&cell.at))
+                    .into_iter()
+                    .map(Write::Edit)
+                    .collect();
+            // Leave a mixed block's layers for a tick with room for all of
+            // them, rather than splitting one across two; and on a full edit
+            // queue `next` stays where it is, so this cell is re-emitted from
+            // its start next tick.
+            if !queue_block(&self.domain, &writes, queue, budget, &mut queued) {
                 break;
             }
-
-            let mut all = true;
-            for edit in &edits {
-                if queue.queue_seed(&self.domain, edit.clone()) {
-                    queued += 1;
-                    *budget = budget.saturating_sub(1);
-                } else {
-                    all = false;
-                    break;
-                }
-            }
-            if !all {
-                // The edit queue is full. `next` stays where it is, so this
-                // cell is re-emitted from its start next tick.
-                break;
-            }
-            self.opened.insert(cell.at);
+            opened.insert(cell.at);
             self.next += 1;
         }
         queued
     }
+
+    /// [`Self::step`] for a schematic: each block merged by cell, in the
+    /// order given — see [`schematic_writes`].
+    fn step_schematic(
+        &mut self,
+        queue: &dyn EditQueue,
+        by_id: &BTreeMap<u16, String>,
+        budget: &mut usize,
+    ) -> usize {
+        let Source::Schematic(blocks) = &self.source else {
+            return 0;
+        };
+        let mut queued = 0;
+        for block in blocks.iter().skip(self.next) {
+            if *budget == 0 {
+                break;
+            }
+            let writes = schematic_writes(self.at, block, by_id, queue);
+            if !writes.is_empty() && !queue_block(&self.domain, &writes, queue, budget, &mut queued)
+            {
+                break;
+            }
+            self.next += 1;
+        }
+        queued
+    }
+}
+
+/// The writes that put one block of a schematic into the world, exactly as
+/// `buf:scatter` writes it into a chunk being generated.
+///
+/// **A merge write by cell** (Sub-Node Contract §7.4), which is what the
+/// scatter does and what a schematic means — a trunk's base sits IN the
+/// surface block rather than replacing it with trunk and air:
+///
+/// - A whole mask replaces the block: one [`Edit::Block`], the write a
+///   generator's `set_block` is. Air clears the block, and a `whole` material
+///   is written as its own shape, as every block-resolution write of one is
+///   (§7.5).
+/// - A partial mask sets the cells it names to the material and keeps every
+///   other cell the block held: a [`Write::Merge`], resolved against the block
+///   where the queue is drained, through the implementation a player's
+///   placement uses.
+/// - A partial mask of AIR carves those cells: one [`Edit::SubNode`] each,
+///   which is the scatter's own per-cell write. Not a merge, because "add air
+///   to this block" has no union for the merge to take.
+///
+/// And two writes the scatter would make that the running world refuses, each
+/// skipped and said so rather than stalling the stamp behind a write that will
+/// never be accepted: part of a `whole` material (§7.5 — "written as its
+/// shape, or not at all"), and a material this world never registered. A
+/// block whose offset would leave the world's coordinates is skipped too; the
+/// script API refuses those before they get here.
+fn schematic_writes(
+    at: BlockPos,
+    block: &StampBlock,
+    by_id: &BTreeMap<u16, String>,
+    queue: &dyn EditQueue,
+) -> Vec<Write> {
+    let mask = block.mask & tiamat_core::block::OCCUPANCY_FULL;
+    let material = block.material.0;
+    if mask == 0 {
+        return Vec::new();
+    }
+    let air = block.material == tiamat_core::MaterialId::AIR;
+    if !air && !by_id.contains_key(&material) {
+        debug!(
+            material,
+            "a stamped schematic names a material nothing registered"
+        );
+        return Vec::new();
+    }
+    let (Some(x), Some(y), Some(z)) = (
+        at.x.checked_add(block.dx),
+        at.y.checked_add(block.dy),
+        at.z.checked_add(block.dz),
+    ) else {
+        return Vec::new();
+    };
+    let pos = BlockPos::new(x, y, z);
+    if mask == tiamat_core::block::OCCUPANCY_FULL {
+        return vec![Write::Edit(Edit::Block { pos, material })];
+    }
+    if air {
+        return (0..tiamat_core::block::SUBNODES_PER_BLOCK)
+            .filter(|index| mask & (1 << index) != 0)
+            .map(|index| {
+                let (dx, dy, dz) = tiamat_core::block::subnode_offset(index);
+                Write::Edit(Edit::SubNode {
+                    pos: pos.subnode(dx as i32, dy as i32, dz as i32),
+                    material,
+                })
+            })
+            .collect();
+    }
+    if queue.is_whole(material) {
+        tracing::warn!(
+            material,
+            x,
+            y,
+            z,
+            "a stamped schematic names part of a whole material; a whole material is written as \
+             its own shape, with a full mask (Sub-Node Contract §7.5)"
+        );
+        return Vec::new();
+    }
+    vec![Write::Merge {
+        pos,
+        material,
+        occupancy: mask,
+    }]
 }
 
 /// The edits that put one plan cell into the world.
@@ -300,11 +533,34 @@ fn block_edits(pos: BlockPos, material: u16, occupancy: u32, opened: bool) -> Ve
 pub trait EditQueue: Send + Sync {
     /// Queues one edit. `false` when the queue is full.
     fn queue_seed(&self, domain: &str, edit: Edit) -> bool;
+
+    /// Queues cells to be added to whatever a block holds (Sub-Node Contract
+    /// §7.4). `false` when the queue is full.
+    fn queue_merge(&self, domain: &str, pos: BlockPos, material: u16, occupancy: u32) -> bool;
+
+    /// Whether a material is `whole` (Sub-Node Contract §7.5): written as its
+    /// own shape or not at all, so never merged and never written a cell at a
+    /// time.
+    ///
+    /// Asked before a write rather than learned from a refusal, because a
+    /// refusal and a full queue are both `false`, and a stamp that read a
+    /// write that can never land as "wait for room" would wait for ever and
+    /// hold up every stamp behind it.
+    fn is_whole(&self, material: u16) -> bool;
 }
 
 impl EditQueue for crate::transport::Shared {
     fn queue_seed(&self, domain: &str, edit: Edit) -> bool {
         Self::queue_seed(self, domain, edit)
+    }
+
+    fn queue_merge(&self, domain: &str, pos: BlockPos, material: u16, occupancy: u32) -> bool {
+        Self::queue_merge(self, domain, pos, material, occupancy)
+    }
+
+    fn is_whole(&self, material: u16) -> bool {
+        self.whole_shape(tiamat_core::MaterialId(material))
+            .is_some()
     }
 }
 
@@ -508,6 +764,10 @@ impl tiamat_core::plan::Access for Shared {
     fn stamp(&self, domain: &str, at: BlockPos, plan: Plan) -> bool {
         self.stamps.accept(domain, at, plan)
     }
+
+    fn stamp_schematic(&self, domain: &str, at: BlockPos, blocks: Vec<StampBlock>) -> bool {
+        self.stamps.accept_schematic(domain, at, blocks)
+    }
 }
 
 #[cfg(test)]
@@ -560,10 +820,12 @@ mod tests {
         )
     }
 
-    /// An edit queue a test can read back, refusing after `room` edits.
+    /// An edit queue a test can read back, refusing after `room` writes.
     struct Slate {
-        taken: std::sync::Mutex<Vec<(String, Edit)>>,
+        taken: std::sync::Mutex<Vec<(String, Write)>>,
         room: std::sync::Mutex<usize>,
+        /// The materials this queue's world calls `whole`.
+        whole: Vec<u16>,
     }
 
     impl Slate {
@@ -571,6 +833,7 @@ mod tests {
             Self {
                 taken: std::sync::Mutex::new(Vec::new()),
                 room: std::sync::Mutex::new(room),
+                whole: Vec::new(),
             }
         }
 
@@ -579,13 +842,23 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .iter()
-                .map(|(_, edit)| edit.clone())
+                .filter_map(|(_, write)| match write {
+                    Write::Edit(edit) => Some(edit.clone()),
+                    Write::Merge { .. } => None,
+                })
                 .collect()
         }
-    }
 
-    impl EditQueue for Slate {
-        fn queue_seed(&self, domain: &str, edit: Edit) -> bool {
+        fn writes(&self) -> Vec<Write> {
+            self.taken
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(_, write)| write.clone())
+                .collect()
+        }
+
+        fn take(&self, domain: &str, write: Write) -> bool {
             let mut room = self.room.lock().expect("lock");
             if *room == 0 {
                 return false;
@@ -594,8 +867,29 @@ mod tests {
             self.taken
                 .lock()
                 .expect("lock")
-                .push((domain.to_owned(), edit));
+                .push((domain.to_owned(), write));
             true
+        }
+    }
+
+    impl EditQueue for Slate {
+        fn queue_seed(&self, domain: &str, edit: Edit) -> bool {
+            self.take(domain, Write::Edit(edit))
+        }
+
+        fn queue_merge(&self, domain: &str, pos: BlockPos, material: u16, occupancy: u32) -> bool {
+            self.take(
+                domain,
+                Write::Merge {
+                    pos,
+                    material,
+                    occupancy,
+                },
+            )
+        }
+
+        fn is_whole(&self, material: u16) -> bool {
+            self.whole.contains(&material)
         }
     }
 
@@ -824,6 +1118,187 @@ mod tests {
             "a ninth stamp was accepted"
         );
         assert_eq!(stamps.waiting(), MAX_PENDING);
+        // A schematic waits in the same line, so it is the same refusal.
+        assert!(
+            !stamps.accept_schematic(
+                tiamat_core::domain::OVERWORLD,
+                BlockPos::new(0, 0, 0),
+                slab(1),
+            ),
+            "a schematic jumped a full queue"
+        );
+    }
+
+    /// A schematic of `blocks` whole blocks of the first test material, in a
+    /// row along x.
+    fn slab(blocks: usize) -> Vec<StampBlock> {
+        (0..blocks)
+            .map(|dx| StampBlock {
+                dx: i32::try_from(dx).expect("a short row"),
+                dy: 0,
+                dz: 0,
+                material: tiamat_core::MaterialId(2),
+                mask: tiamat_core::block::OCCUPANCY_FULL,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_schematic_is_written_as_the_scatter_writes_it() {
+        // `buf:scatter` writes a whole mask as the block and a partial one cell
+        // by cell into whatever the block held. At run time that is a replace
+        // and a merge (Contract §7.4), in the schematic's own order, at the
+        // root plus each offset.
+        let (_, names, ids) = world("schematic-writes");
+        let (stone, wood, glass) = (ids[0], ids[1], ids[2]);
+        let stamps = Stamps::new(std::sync::Arc::new(names));
+        let slate = Slate {
+            whole: vec![glass.get()],
+            ..Slate::with_room(64)
+        };
+        let full = tiamat_core::block::OCCUPANCY_FULL;
+        let air = MaterialId::AIR;
+        let block = |dx, dy, dz, material: MaterialId, mask| StampBlock {
+            dx,
+            dy,
+            dz,
+            material,
+            mask,
+        };
+        let at = BlockPos::new(10, 20, 30);
+        assert!(stamps.accept_schematic(
+            tiamat_core::domain::OVERWORLD,
+            at,
+            vec![
+                block(0, 0, 0, stone, full),
+                block(1, 0, 0, wood, 0b111),
+                block(2, 0, 0, air, full),
+                block(3, -1, 0, air, 0b11),
+                // Part of a whole material, which nothing may write: skipped
+                // rather than waited on.
+                block(4, 0, 0, glass, 0b1),
+                // A material nothing registered: skipped.
+                block(5, 0, 0, MaterialId(999), full),
+                // A whole material written whole: its shape is the queue's
+                // business.
+                block(6, 0, 0, glass, full),
+                // A later block over an earlier one lands over it.
+                block(0, 0, 0, wood, 1 << 26),
+                // No cells at all.
+                block(7, 0, 0, wood, 1 << 27),
+            ],
+        ));
+        stamps.pump(&slate);
+
+        let cell = |pos: BlockPos, x, y, z| Edit::SubNode {
+            pos: pos.subnode(x, y, z),
+            material: air.get(),
+        };
+        assert_eq!(
+            slate.writes(),
+            vec![
+                Write::Edit(Edit::Block {
+                    pos: BlockPos::new(10, 20, 30),
+                    material: stone.get(),
+                }),
+                Write::Merge {
+                    pos: BlockPos::new(11, 20, 30),
+                    material: wood.get(),
+                    occupancy: 0b111,
+                },
+                Write::Edit(Edit::Block {
+                    pos: BlockPos::new(12, 20, 30),
+                    material: air.get(),
+                }),
+                Write::Edit(cell(BlockPos::new(13, 19, 30), 0, 0, 0)),
+                Write::Edit(cell(BlockPos::new(13, 19, 30), 1, 0, 0)),
+                Write::Edit(Edit::Block {
+                    pos: BlockPos::new(16, 20, 30),
+                    material: glass.get(),
+                }),
+                Write::Merge {
+                    pos: BlockPos::new(10, 20, 30),
+                    material: wood.get(),
+                    occupancy: 1 << 26,
+                },
+            ]
+        );
+        assert_eq!(stamps.waiting(), 0, "the stamp did not finish");
+    }
+
+    #[test]
+    fn a_schematic_is_paced_as_a_plan_is_and_a_merge_is_charged_its_cells() {
+        // The point of handing a schematic to this queue rather than writing it
+        // where the mod asked: a structure of a few hundred blocks lands over a
+        // few ticks, each under the budget.
+        let (_, names, _) = world("schematic-pacing");
+        let stamps = Stamps::new(std::sync::Arc::new(names));
+        let slate = Slate::with_room(usize::MAX);
+        let blocks = BLOCKS_PER_TICK + 44;
+        assert!(stamps.accept_schematic(
+            tiamat_core::domain::OVERWORLD,
+            BlockPos::new(0, 0, 0),
+            slab(blocks),
+        ));
+        assert_eq!(stamps.pump(&slate), BLOCKS_PER_TICK);
+        assert_eq!(stamps.pump(&slate), 44);
+        assert_eq!(stamps.waiting(), 0);
+        assert_eq!(slate.writes().len(), blocks, "the stamp lost blocks");
+
+        // A merge can become a cell edit per cell, so it is charged its cells:
+        // two layers is eighteen, and fourteen of them fill a tick's 256 to
+        // 252 — the fifteenth waits rather than overrunning it.
+        let two_layers = 0x3_FFFF;
+        let merges: Vec<StampBlock> = slab(20)
+            .into_iter()
+            .map(|block| StampBlock {
+                mask: two_layers,
+                ..block
+            })
+            .collect();
+        let slate = Slate::with_room(usize::MAX);
+        assert!(stamps.accept_schematic(
+            tiamat_core::domain::OVERWORLD,
+            BlockPos::new(0, 0, 0),
+            merges,
+        ));
+        assert_eq!(stamps.pump(&slate), 14 * 18);
+        assert_eq!(slate.writes().len(), 14);
+        assert_eq!(stamps.pump(&slate), 6 * 18);
+        assert_eq!(slate.writes().len(), 20, "the stamp lost blocks");
+        assert_eq!(stamps.waiting(), 0);
+    }
+
+    #[test]
+    fn a_full_edit_queue_makes_a_schematic_wait_rather_than_lose_blocks() {
+        let (_, names, _) = world("schematic-full");
+        let stamps = Stamps::new(std::sync::Arc::new(names));
+        let slate = Slate::with_room(10);
+        assert!(stamps.accept_schematic(
+            tiamat_core::domain::OVERWORLD,
+            BlockPos::new(0, 0, 0),
+            slab(30),
+        ));
+        assert_eq!(stamps.pump(&slate), 10, "it should fill the room there was");
+        assert_eq!(stamps.pump(&slate), 0, "a full queue took more anyway");
+        assert_eq!(stamps.waiting(), 1, "the rest of the schematic was dropped");
+
+        *slate.room.lock().expect("lock") = 20;
+        assert_eq!(stamps.pump(&slate), 20, "the rest did not resume");
+        assert_eq!(stamps.waiting(), 0);
+        let rows: Vec<i32> = slate
+            .edits()
+            .iter()
+            .filter_map(|edit| match edit {
+                Edit::Block { pos, .. } => Some(pos.x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            (0..30).collect::<Vec<_>>(),
+            "a block was lost or repeated"
+        );
     }
 
     /// What a capture costs, as a share of the tick it happens inside.

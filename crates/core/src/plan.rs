@@ -343,6 +343,39 @@ pub trait Access: Send + Sync {
     /// which a caller finds out by looking at the world over the next few
     /// ticks. `false` means too many stamps are already pending.
     fn stamp(&self, domain: &str, at: crate::BlockPos, plan: Plan) -> bool;
+
+    /// Asks for a schematic's blocks to be written into the world with its
+    /// root at `at`, paced as [`Access::stamp`] is and answering the same way.
+    ///
+    /// **Here, beside the plan's stamp, because it is the same queue.** A
+    /// schematic built once at load was stamped only by `buf:scatter`, inside
+    /// a generator, so a structure that belongs to an EVENT — a wreck at the
+    /// end of a rainbow, long after its ground was made — had to be written a
+    /// block at a time by the mod's own pacing (weather ask W35). Pacing is
+    /// the engine's job for the reason the trait docs give, so this hands the
+    /// blocks to the queue a plan already goes through.
+    ///
+    /// **Written as `buf:scatter` writes them, not as a plan is.** A plan
+    /// replaces each block it names (Sub-Node Contract §7.3); a schematic is a
+    /// merge write by cell (§7.4): a whole mask replaces the block, and a
+    /// partial one sets the cells it names and keeps every other cell the
+    /// block held. In the order given, so a later block lands over an earlier
+    /// one at the same place.
+    ///
+    /// `blocks` are already turned, and their materials are this session's
+    /// runtime ids — what `game.schematic` was built from.
+    ///
+    /// Defaulted to refusing, for a store that has not learned about
+    /// schematics.
+    fn stamp_schematic(
+        &self,
+        domain: &str,
+        at: crate::BlockPos,
+        blocks: Vec<crate::detgen::StampBlock>,
+    ) -> bool {
+        let _ = (domain, at, blocks);
+        false
+    }
 }
 
 #[cfg(test)]
