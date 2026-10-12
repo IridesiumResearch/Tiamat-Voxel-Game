@@ -42,7 +42,15 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 22. An operator flies whatever the mod says (2026-10-12)
+## 22. An operator flies whatever the mod says (2026-10-12): LANDED 2026-10-13 (engine)
+
+**From the engine, 2026-10-13.** As asked: `game.set_player_abilities(uuid,
+{ operator_fly = false })` makes the grant the whole answer for that player,
+in both places that decide — the tick's `abilities` and the network thread's
+`may_fly`, which now reads through the same function. Left out it is as it
+was. No protocol change: the client is told the fly a player ends up with.
+A bot that is an operator proves it: told `operator_fly = false` it cannot
+rise, and told nothing again it can.
 
 **Wanted.** In a survival world (Default, Adventure) nobody flies, not even
 an admin, unless they are the world's owner and have taken their powers

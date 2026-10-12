@@ -672,8 +672,11 @@ impl PlayerSim {
             .granted
             .unwrap_or(tiamat_core::phys::Abilities::DEFAULT)
             .sanitised();
+        // **A grant may say no to an operator** (Life ask 22): the operator
+        // list used to be OR-ed in whatever the mod said, so an admin flew
+        // in a survival world and no mod could stop them.
         tiamat_core::phys::Abilities {
-            fly: granted.fly || operator,
+            fly: granted.fly || (operator && granted.operator_fly),
             ..granted
         }
     }
@@ -2711,14 +2714,19 @@ impl Shared {
     /// agreeing is not a coincidence: both read the same grant.
     #[must_use]
     pub fn may_fly(&self, uuid: &PlayerUuid) -> bool {
-        if self.operators.contains(uuid) {
-            return true;
-        }
+        let operator = self.operators.contains(uuid);
+        // Through `abilities`, so a grant that says no to an operator (Life
+        // ask 22) is heard here as it is on the tick. A player with no body
+        // yet is an operator or not, as before.
         self.bodies
             .lock()
             .ok()
-            .and_then(|bodies| bodies.get(uuid).map(|player| player.abilities(false).fly))
-            .unwrap_or(false)
+            .and_then(|bodies| {
+                bodies
+                    .get(uuid)
+                    .map(|player| player.abilities(operator).fly)
+            })
+            .unwrap_or(operator)
     }
 
     pub fn ensure_inventory(&self, uuid: PlayerUuid) {

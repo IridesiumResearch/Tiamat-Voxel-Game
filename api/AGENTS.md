@@ -20,6 +20,10 @@ If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
 
+- **A grant may say no to an operator's flight** (2026-10-13, Life ask 22).
+  `game.set_player_abilities(uuid, { operator_fly = false })` makes the grant
+  the whole answer for that player: the operator list no longer OR-s flight
+  in. Left out, nothing changes.
 - **A cover never stands on a passable cell** (2026-10-12, World ask 46).
   `buf:fill_cover` takes a cell whose material is `passable` as neither
   ground nor empty, so one call's grass is not the next call's floor and is

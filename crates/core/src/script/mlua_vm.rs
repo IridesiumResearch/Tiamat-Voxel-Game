@@ -5269,6 +5269,7 @@ impl MluaVm {
                         };
                         Some(crate::phys::Abilities {
                             fly: flag("fly", default.fly),
+                            operator_fly: flag("operator_fly", default.operator_fly),
                             speed,
                             sprint: flag("sprint", default.sprint),
                             wind_sky: flag("wind_sky", default.wind_sky),
@@ -11461,7 +11462,14 @@ const CLOUD_STATE_FIELDS: [&str; 8] = [
 /// Checked so a typo is an error rather than a silent default, for the reason
 /// `register_fluid` gives: a misspelled field is a mod that thinks it
 /// configured something.
-const ABILITY_FIELDS: [&str; 5] = ["fly", "speed", "sprint", "wind_sky", "gravity"];
+const ABILITY_FIELDS: [&str; 6] = [
+    "fly",
+    "operator_fly",
+    "speed",
+    "sprint",
+    "wind_sky",
+    "gravity",
+];
 
 /// Options `game.mount` accepts, checked for the same reason.
 const MOUNT_FIELDS: [&str; 2] = ["seat", "sneak_dismounts"];

@@ -353,12 +353,26 @@ pub struct Intent {
 /// on the wire and multiplied, never re-derived, so both ends have the same
 /// bits. `sanitised` is what keeps a mod's NaN out of a body's position.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a grant is a set of yes-or-no answers a mod gives about one player, and \
+              `operator_fly` is the fourth (Life ask 22); a state machine here would be \
+              one more thing for a mod to learn"
+)]
 pub struct Abilities {
     /// Whether this player may fly.
     ///
     /// OR-ed with the operator list by the server before it is sent, so what
     /// arrives here is the answer rather than one half of it.
     pub fly: bool,
+    /// Whether the operator list may grant this player flight over the
+    /// grant — Life ask 22. An operator flew in any world, because the
+    /// server OR-ed `fly` with the operator list and a mod could grant
+    /// flight but never withhold it; in a survival world the admin's flight
+    /// is a cheat the mod wants said out loud. `false` makes the grant the
+    /// whole answer for this player. Not on the wire: the client is told
+    /// the fly it ends up with.
+    pub operator_fly: bool,
     /// Multiplier on every gait's top speed, and on the acceleration that
     /// reaches it.
     ///
@@ -406,6 +420,7 @@ impl Abilities {
     /// What every player has until a mod says otherwise.
     pub const DEFAULT: Self = Self {
         fly: false,
+        operator_fly: true,
         speed: 1.0,
         sprint: true,
         wind_sky: true,

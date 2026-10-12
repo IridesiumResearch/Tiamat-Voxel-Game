@@ -70,6 +70,10 @@ game.register_on_chat(function(event)
     elseif event.text == "normal" then
         game.set_player_abilities(event.player, nil)
         return ""
+    elseif event.text == "grounded" then
+        -- Life ask 22: a survival world's rule, even for an operator.
+        game.set_player_abilities(event.player, { operator_fly = false })
+        return ""
     elseif event.text == "measure" then
         local body = game.entity(game.player_entity(event.player))
         flights[event.player] = { floor = body.pos.y, top = body.pos.y, air = 0, landed = false }
@@ -108,15 +112,21 @@ end)
 }
 
 fn start(name: &str) -> ServerHandle {
+    // **Deliberately empty.** The whole point of ask 9 is that a mod can
+    // grant flight to somebody who is NOT an operator.
+    start_operated(name, Vec::new())
+}
+
+/// The same server, with `operators` on its operator list (their UUIDs in hex)
+/// — for Life ask 22, where the point is a mod withholding flight from one.
+fn start_operated(name: &str, operators: Vec<String>) -> ServerHandle {
     ServerHandle::start(&Settings {
         bind_addr: "127.0.0.1:0".parse().expect("loopback"),
         world_path: scratch(&format!("{name}-world")),
         identity_path: None,
         max_players: 2,
         allowlist: Allowlist::open(),
-        // **Deliberately empty.** The whole point of ask 9 is that a mod can
-        // grant flight to somebody who is NOT an operator.
-        operators: Vec::new(),
+        operators,
         view_distance: ViewDistance::MINIMUM,
         mods_path: Some(write_mod(&format!("{name}-mods"))),
         enabled_mods: None,
@@ -239,6 +249,74 @@ fn a_mod_can_grant_flight_to_somebody_who_is_not_an_operator() {
 /// them. The key is pressed for one tick and released, because a held one
 /// launches again the moment the body lands.
 /// The newest notice starting `prefix` that arrived after the first `seen`.
+#[test]
+fn a_mod_can_withhold_flight_from_an_operator() {
+    // **Life ask 22.** An operator flew in any world: the server OR-ed the
+    // operator list in whatever the mod granted, so a mod could grant flight
+    // and never withhold it, and every admin could press the fly key in a
+    // survival world. `operator_fly = false` makes the grant the whole answer.
+    let identity = Identity::generate().expect("identity");
+    let server = start_operated("grounded", vec![identity.uuid_as_root().to_hex()]);
+    block_on(async {
+        let mut bot = Bot::connect(server.local_addr(), identity, server.cert_fingerprint())
+            .await
+            .expect("connect");
+        bot.join("Admin").await.expect("join");
+        bot.sleep_ticks(10).await;
+        let span = tiamat_core::CHUNK_SUBNODES as f32;
+        let rise = |before: &bot::client::PlayerPosition, after: &bot::client::PlayerPosition| {
+            (after.chunk.y - before.chunk.y) as f32 * span + (after.local[1] - before.local[1])
+        };
+
+        // An operator, told nothing: flies, as every operator always has.
+        let before = bot
+            .walk([0.0; 3], actions::FLY | actions::JUMP, 40)
+            .await
+            .expect("walk");
+        let after = bot
+            .walk([0.0; 3], actions::FLY | actions::JUMP, 40)
+            .await
+            .expect("walk");
+        assert!(
+            rise(&before, &after) > 5.0,
+            "the control: an operator told nothing rose only {} cells",
+            rise(&before, &after)
+        );
+
+        // Grounded by the mod: the fly key does nothing, operator or not.
+        bot.chat("grounded").await.expect("chat");
+        bot.sleep_ticks(10).await;
+        let landed = bot.walk([0.0; 3], 0, 60).await.expect("settle");
+        let held = bot
+            .walk([0.0; 3], actions::FLY | actions::JUMP, 40)
+            .await
+            .expect("walk");
+        assert!(
+            rise(&landed, &held) < 2.0,
+            "an operator the mod grounded rose {} cells holding the fly key",
+            rise(&landed, &held)
+        );
+
+        // And told nothing again, the operator list speaks once more.
+        bot.chat("normal").await.expect("chat");
+        bot.sleep_ticks(10).await;
+        let before = bot
+            .walk([0.0; 3], actions::FLY | actions::JUMP, 40)
+            .await
+            .expect("walk");
+        let after = bot
+            .walk([0.0; 3], actions::FLY | actions::JUMP, 40)
+            .await
+            .expect("walk");
+        assert!(
+            rise(&before, &after) > 5.0,
+            "the grant lifted, the operator flies again"
+        );
+        bot.disconnect().await;
+    });
+    assert!(server.stop());
+}
+
 fn notice_after(bot: &Bot, seen: usize, prefix: &str) -> Option<String> {
     bot.notices()
         .into_iter()

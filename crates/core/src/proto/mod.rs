@@ -2582,6 +2582,8 @@ impl From<AbilitiesDef> for crate::phys::Abilities {
     fn from(def: AbilitiesDef) -> Self {
         Self {
             fly: def.fly,
+            // Not on the wire: the client is told the fly it ends up with.
+            operator_fly: true,
             speed: def.speed,
             sprint: def.sprint,
             wind_sky: def.wind_sky,

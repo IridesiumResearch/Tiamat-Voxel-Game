@@ -2452,6 +2452,12 @@ function game.is_operator(player) end
 ---player does not rubber-band. An unknown field is an error, so a typo is not a
 ---setting you think you made. Forgotten when the player leaves.
 ---
+---**`operator_fly`** (Life ask 22): whether the server's operator list may
+---grant this player flight over your grant. It may, unless you say `false`;
+---then `fly` is the whole answer for this player, operator or not. A survival
+---world sends `operator_fly = false` to everybody and `fly = true` to the one
+---who has taken their powers in front of the server.
+---
 ---Returns `false` for a player who is not here.
 ---
 ---```lua
@@ -2464,7 +2470,7 @@ function game.is_operator(player) end
 ---})
 ---```
 ---@param player string The player's UUID, in hex.
----@param abilities { fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean?, gravity: number? }|nil
+---@param abilities { fly: boolean?, operator_fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean?, gravity: number? }|nil
 ---@return boolean told
 function game.set_player_abilities(player, abilities) end
 
