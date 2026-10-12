@@ -97,6 +97,60 @@ fn bindings_file() -> std::path::PathBuf {
 /// Starting window size.
 const DEFAULT_SIZE: (u32, u32) = (1280, 720);
 
+/// Keeps every panic in `crash.log` under the data directory, as well as on
+/// stderr.
+///
+/// **Reported from the community as "the game just insta crashes"** — on
+/// joining a LAN world from another machine — and nothing to read. A crash on
+/// Windows or inside the macOS bundle leaves nothing behind: the console is
+/// hidden, and the message goes with it. This keeps the message and where it
+/// panicked, the version and the platform, and a backtrace, APPENDED so the
+/// next run's crash does not erase the last one's. The hook that was there
+/// still runs first, so stderr says what it always said.
+fn log_panics_to(data: &std::path::Path) {
+    let path = data.join("crash.log");
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".to_owned());
+        let location = info.location().map_or_else(
+            || "an unknown place".to_owned(),
+            |at| format!("{}:{}:{}", at.file(), at.line(), at.column()),
+        );
+        let entry = crash_entry(
+            &message,
+            &location,
+            &std::backtrace::Backtrace::force_capture().to_string(),
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = file.write_all(entry.as_bytes());
+        }
+    }));
+}
+
+/// One crash, as `crash.log` records it.
+fn crash_entry(message: &str, location: &str, backtrace: &str) -> String {
+    let when = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    format!(
+        "---- Tiamat {} on {} {} at unix {when} ----\n{message}\nat {location}\n{backtrace}\n\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -137,6 +191,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                        "carried the data directory across from the old name");
     }
     std::fs::create_dir_all(&data)?;
+    log_panics_to(&data);
 
     // The identity is created on first run and never leaves this machine
     // unless the player asks for its recovery phrase (charter rule 13).
@@ -3044,6 +3099,14 @@ fn window_icon() -> Option<winit::window::Icon> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_crash_entry_names_the_build_the_platform_the_message_and_the_place() {
+        let entry = super::crash_entry("the sky fell", "src/sky.rs:12:4", "0: here\n1: there");
+        assert!(entry.starts_with(&format!("---- Tiamat {} on ", env!("CARGO_PKG_VERSION"))));
+        assert!(entry.contains(std::env::consts::OS));
+        assert!(entry.contains("the sky fell\nat src/sky.rs:12:4\n0: here\n1: there\n\n"));
+    }
+
     #[test]
     fn a_mods_options_fold_under_its_own_heading_in_the_order_they_arrived() {
         // The settings page lists mods, each a dropdown of its own options
