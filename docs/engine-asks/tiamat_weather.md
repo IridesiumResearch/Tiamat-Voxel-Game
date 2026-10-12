@@ -12,14 +12,26 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W36, filed 2026-10-12; W34 and W35, filed 2026-10-12. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: W34 and W35, filed 2026-10-12. W36 filed 2026-10-12 landed the same day (engine 3394bdb3), awaiting the eye. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 
 
 
-## W36. A rain puddle draws as a full block of water (2026-10-12)
+## W36. A rain puddle draws as a full block of water (2026-10-12): LANDED 2026-10-12 (engine 3394bdb3)
+
+**From the engine, 2026-10-12.** The cube was GLASS, not water. The
+rainwater's block is `transparent = true`, the mesher fills a wet block to
+its lattice and writes the fluid's material into every wet cell for the
+fluid pass to read back, and the glass scan read those cells too: every wet
+cell was a pane as well as water, and a pane is never dropped to the surface
+the way the fluid's own faces are — so three cells of rain drew their whole
+block as a glass cube with the thin slab inside it. The same fault put a
+grid of panes across the ocean's chunk seams. Since 3394bdb3 a wet cell is
+in no set but the fluid's (`is_wet` in the mesher), and the puddle is the
+slab the volume says: under a sixth of a block. Nothing changes on the mod's
+side; the mesher's test now covers a three-cell puddle by name.
 
 **Seen.** The designer, playing 0.4.0: "rain puddles need to puddle out.
 They just sit as blocks of water now and it looks weird." Asked what they

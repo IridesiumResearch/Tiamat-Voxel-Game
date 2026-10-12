@@ -3702,6 +3702,30 @@ mod tests {
             as_sprites.billboards.len()
         );
 
+        // A thin puddle too — weather W36, "rain puddles sit as blocks of
+        // water": three cells of rain in a block of air drew the whole block
+        // as a glass cube, because a wet block is full on the lattice and the
+        // glass faces were never dropped to the surface the fluid's are.
+        let puddle = Pond {
+            block: LocalBlock::new(8, 8, 8),
+            depth: 3,
+            material: water.get(),
+        };
+        let thin = mesh_chunk(
+            &chunk,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &puddle,
+            &Glass(water),
+        );
+        assert!(
+            thin.glass_quads.is_empty(),
+            "a puddle was boxed in glass: {} panes",
+            thin.glass_quads.len()
+        );
+        assert!(!thin.fluid_vertices.is_empty(), "and it is still drawn");
+
         // And a DRY cell of the same material is still what it declares: the
         // guard is on the cell, not on the material.
         let mut pane = empty();
