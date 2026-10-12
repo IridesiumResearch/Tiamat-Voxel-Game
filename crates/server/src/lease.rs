@@ -636,7 +636,15 @@ impl path::Access for Shared {
         // search, so there is nothing here worth taking out of the tick's
         // pathfinding budget — and a mob that could not steer because somebody
         // else had searched would stop walking for no reason it could see.
-        Some(path::steer(&world.solid(domain), from, to, height.max(1)))
+        // Through the same materials a body walks through (Contract §2), or a
+        // mob would plan round the grass it walks through.
+        Some(path::steer(
+            &world.solid(domain),
+            &self.passable,
+            from,
+            to,
+            height.max(1),
+        ))
     }
 
     fn find_path(
@@ -677,7 +685,8 @@ impl path::Access for Shared {
             ..options
         };
 
-        let (route, spent) = path::search_counted(&world.solid(domain), from, to, &options);
+        let (route, spent) =
+            path::search_counted(&world.solid(domain), &self.passable, from, to, &options);
         // A saturating subtract, spelled out. `fetch_update` says this in one
         // call and is deprecated on nightly in favour of a `try_update` that
         // stable does not have yet — and the fuzz job builds this crate on

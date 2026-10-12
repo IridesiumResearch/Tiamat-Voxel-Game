@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::block::BlockView;
 use crate::coords::BlockPos;
+use crate::material::MaterialId;
 use crate::phys::ChunkLookup;
 
 /// Expansions a search will make when the caller does not say.
@@ -205,8 +206,17 @@ const LOOK_AHEAD: f64 = 0.5;
 ///
 /// `height` is the body's height in blocks, for the headroom test — a mob that
 /// jumped into a ceiling would bounce in place for ever.
+///
+/// `passable` is the materials a body walks through, sorted — Sub-Node
+/// Contract §2 and §6. A tuft of grass is not a step and not a wall.
 #[must_use]
-pub fn steer(chunks: &impl ChunkLookup, from: [f64; 3], to: [f64; 3], height: i32) -> Steer {
+pub fn steer(
+    chunks: &impl ChunkLookup,
+    passable: &[u16],
+    from: [f64; 3],
+    to: [f64; 3],
+    height: i32,
+) -> Steer {
     let (dx, dz) = (to[0] - from[0], to[2] - from[2]);
     let flat = dx * dx + dz * dz;
     if flat <= ARRIVAL * ARRIVAL {
@@ -233,7 +243,11 @@ pub fn steer(chunks: &impl ChunkLookup, from: [f64; 3], to: [f64; 3], height: i3
     ];
     let jump = match block_at(ahead) {
         Some(front) => {
-            let view = Passability { chunks, height };
+            let view = Passability {
+                chunks,
+                height,
+                passable,
+            };
             // **Only a rise the step cannot take** — Life ask 12. The old rule
             // jumped whenever the block ahead was not `passable`, and
             // `passable` means "no floor cells", so a single cell of floor —
@@ -279,6 +293,21 @@ fn block_at(at: [f64; 3]) -> Option<BlockPos> {
 struct Passability<'a, C: ChunkLookup> {
     chunks: &'a C,
     height: i32,
+    /// Materials a body walks through, sorted. See [`walkable`].
+    passable: &'a [u16],
+}
+
+/// Whether a cell of `material` is one a body walks through.
+///
+/// **Sub-Node Contract §2: a `passable` material stops nothing** — and §6
+/// reads the floor layer through the same rule, or a mob would plan round a
+/// tuft of grass the physics lets it walk through, and refuse to stand where
+/// it is already standing. Reported from the window as "some grass is
+/// causing collision glitches": the body passed, and the route did not.
+///
+/// `passable` is sorted, as both ends build it.
+fn walkable(material: MaterialId, passable: &[u16]) -> bool {
+    material.is_air() || passable.binary_search(&material.get()).is_ok()
 }
 
 impl<C: ChunkLookup> Passability<'_, C> {
@@ -321,7 +350,7 @@ impl<C: ChunkLookup> Passability<'_, C> {
                 continue;
             };
             for y in (0..crate::SUBNODES_PER_AXIS).rev() {
-                if !view.subnode_at(x, y, z).is_air() {
+                if !walkable(view.subnode_at(x, y, z), self.passable) {
                     // The TOP of that cell, in world cells.
                     let surface = f64::from(here.y) * cells + f64::from(y) + 1.0;
                     top = Some(top.map_or(surface, |best: f64| best.max(surface)));
@@ -342,20 +371,7 @@ impl<C: ChunkLookup> Passability<'_, C> {
     }
 
     fn passable(&self, block: BlockPos) -> bool {
-        let Some(chunk) = self.chunks.chunk(block.chunk()) else {
-            return false;
-        };
-        match chunk.get_block(block) {
-            None => false,
-            Some(BlockView::Uniform(material)) => material.is_air(),
-            Some(BlockView::Partial {
-                material,
-                occupancy,
-            }) => material.is_air() || occupancy & FLOOR_CELLS == 0,
-            Some(BlockView::Mixed(cells)) => (0..crate::SUBNODES_PER_AXIS)
-                .flat_map(|z| (0..crate::SUBNODES_PER_AXIS).map(move |x| (x, z)))
-                .all(|(x, z)| cells[crate::block::subnode_index(x, 0, z)].is_air()),
-        }
+        floor_is_clear(self.chunks, self.passable, block)
     }
 
     fn standable(&self, block: BlockPos) -> bool {
@@ -377,8 +393,14 @@ impl<C: ChunkLookup> Passability<'_, C> {
 /// geometry, and refusing to look would leave it stuck for ever. The **goal**
 /// does: a route to somewhere the body could not stand is not a route.
 #[must_use]
-pub fn search(chunks: &impl ChunkLookup, from: BlockPos, to: BlockPos, options: &Options) -> Route {
-    search_counted(chunks, from, to, options).0
+pub fn search(
+    chunks: &impl ChunkLookup,
+    passable: &[u16],
+    from: BlockPos,
+    to: BlockPos,
+    options: &Options,
+) -> Route {
+    search_counted(chunks, passable, from, to, options).0
 }
 
 /// The same search, and what it cost.
@@ -390,6 +412,7 @@ pub fn search(chunks: &impl ChunkLookup, from: BlockPos, to: BlockPos, options: 
 #[must_use]
 pub fn search_counted(
     chunks: &impl ChunkLookup,
+    passable: &[u16],
     from: BlockPos,
     to: BlockPos,
     options: &Options,
@@ -407,6 +430,7 @@ pub fn search_counted(
     let world = Terrain {
         chunks,
         height: options.height.max(1),
+        passable,
         known: std::cell::RefCell::new(BTreeMap::new()),
         footing: std::cell::RefCell::new(BTreeMap::new()),
     };
@@ -518,12 +542,41 @@ const FLOOR_CELLS: u32 = 0b111 | (0b111 << 9) | (0b111 << 18);
 /// from one mob**. With it, the nine-cell test happens once per block for the
 /// life of the search.
 ///
+/// Contract §6: whether a block's bottom sub-node layer — the nine cells at
+/// local `y == 0` — holds nothing a body is stopped by.
+///
+/// **An absent chunk is not passable**, which is the charter-wide rule that
+/// absence reads as solid — a mob does not plan a route through terrain the
+/// server has not generated. A cell of a `passable` material is clear, by
+/// [`walkable`]: the floor layer is read as the step reads it.
+fn floor_is_clear(chunks: &impl ChunkLookup, passable: &[u16], block: BlockPos) -> bool {
+    let Some(chunk) = chunks.chunk(block.chunk()) else {
+        return false;
+    };
+    match chunk.get_block(block) {
+        None => false,
+        Some(BlockView::Uniform(material)) => walkable(material, passable),
+        Some(BlockView::Partial {
+            material,
+            occupancy,
+        }) => walkable(material, passable) || occupancy & FLOOR_CELLS == 0,
+        // Two or more materials, so there is no single mask to test and the
+        // cells have to be read. The rare form, and the only one that pays
+        // for itself.
+        Some(BlockView::Mixed(cells)) => (0..crate::SUBNODES_PER_AXIS)
+            .flat_map(|z| (0..crate::SUBNODES_PER_AXIS).map(move |x| (x, z)))
+            .all(|(x, z)| walkable(cells[crate::block::subnode_index(x, 0, z)], passable)),
+    }
+}
+
 /// A `BTreeMap` and not a `HashMap`: nothing here iterates it, so the ordering
 /// is not what charter rule 4 is worried about, but a random-seeded hasher in
 /// simulation code is a habit worth not having.
 struct Terrain<'a, S: ChunkLookup> {
     chunks: &'a S,
     height: i32,
+    /// Materials a body walks through, sorted. See [`walkable`].
+    passable: &'a [u16],
     /// Blocks already tested for passability, and what they answered.
     known: std::cell::RefCell<BTreeMap<BlockPos, bool>>,
     /// The same for standability, which `steps` asks about twenty times per
@@ -561,23 +614,7 @@ impl<S: ChunkLookup> Terrain<'_, S> {
     /// absence reads as solid — a mob does not plan a route through terrain the
     /// server has not generated.
     fn test_passable(&self, block: BlockPos) -> bool {
-        let Some(chunk) = self.chunks.chunk(block.chunk()) else {
-            return false;
-        };
-        match chunk.get_block(block) {
-            None => false,
-            Some(BlockView::Uniform(material)) => material.is_air(),
-            Some(BlockView::Partial {
-                material,
-                occupancy,
-            }) => material.is_air() || occupancy & FLOOR_CELLS == 0,
-            // Two or more materials, so there is no single mask to test and the
-            // cells have to be read. The rare form, and the only one that pays
-            // for itself.
-            Some(BlockView::Mixed(cells)) => (0..crate::SUBNODES_PER_AXIS)
-                .flat_map(|z| (0..crate::SUBNODES_PER_AXIS).map(move |x| (x, z)))
-                .all(|(x, z)| cells[crate::block::subnode_index(x, 0, z)].is_air()),
-        }
+        floor_is_clear(self.chunks, self.passable, block)
     }
 
     /// Whether a body with its feet in this block would stand there.
@@ -671,7 +708,7 @@ mod tests {
         }
 
         // Walking east into the step: jump.
-        let at_step = steer(&world, [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
+        let at_step = steer(&world, &[], [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
         assert!(at_step.jump, "a one-block step was not climbed");
         assert!(at_step.walk[0] > 0.9, "and it should still be walking east");
         assert!(!at_step.arrived);
@@ -679,11 +716,11 @@ mod tests {
         // Open ground, same direction: no jump. A mob that jumped its way
         // across a field would look ridiculous, and this is the assertion that
         // stops "always jump" passing the test above.
-        let open = steer(&world, [1.0, 1.0, 2.0], [3.0, 1.0, 2.0], 2);
+        let open = steer(&world, &[], [1.0, 1.0, 2.0], [3.0, 1.0, 2.0], 2);
         assert!(!open.jump, "it jumped on flat ground");
 
         // Arrived: no steering left, and said so.
-        let there = steer(&world, [1.0, 1.0, 2.0], [1.2, 1.0, 2.1], 2);
+        let there = steer(&world, &[], [1.0, 1.0, 2.0], [1.2, 1.0, 2.1], 2);
         assert!(there.arrived);
         assert!(
             there.walk.iter().all(|axis| axis.abs() < f32::EPSILON),
@@ -710,7 +747,7 @@ mod tests {
             world = world.lip(BlockPos::new(4, 1, z), 1);
         }
 
-        let at_lip = steer(&world, [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
+        let at_lip = steer(&world, &[], [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
         assert!(
             !at_lip.jump,
             "a one-cell lip was jumped at; the step climbs it for nothing"
@@ -725,7 +762,7 @@ mod tests {
         for z in 0..8 {
             taller = taller.lip(BlockPos::new(4, 1, z), 2);
         }
-        let at_step = steer(&taller, [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
+        let at_step = steer(&taller, &[], [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
         assert!(at_step.jump, "two cells is more than the step can take");
     }
 
@@ -742,7 +779,7 @@ mod tests {
                 world = world.solid(BlockPos::new(4, y, z));
             }
         }
-        let at_wall = steer(&world, [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
+        let at_wall = steer(&world, &[], [3.6, 1.0, 2.0], [8.0, 1.0, 2.0], 2);
         assert!(
             !at_wall.jump,
             "it tried to jump a two-block wall, which it cannot clear"
@@ -811,6 +848,19 @@ mod tests {
             self
         }
 
+        /// A whole block of `material`: a tuft, when the material is passable.
+        fn plant(mut self, block: BlockPos, material: MaterialId) -> Self {
+            let pos = block.chunk();
+            let chunk = self
+                .0
+                .entry(pos)
+                .or_insert_with(|| Chunk::new(pos, MaterialId::AIR));
+            chunk
+                .set_block(block, BlockValue::Uniform(material))
+                .expect("the block is in the chunk it names");
+            self
+        }
+
         /// A flat floor across one block layer of the chunk at the origin.
         fn floor(mut self, y: i32, from: i32, to: i32) -> Self {
             for z in from..=to {
@@ -863,6 +913,64 @@ mod tests {
     }
 
     #[test]
+    fn a_passable_material_is_walked_through_and_not_jumped_at() {
+        // **Reported from the window: "some grass is causing collision
+        // glitches."** The physics walks a body through a `passable` material
+        // (Sub-Node Contract §2) and the route search did not: a block of
+        // tall grass was a wall to `find_path` and a step to `steer`, so a
+        // mob in a meadow could find no route out of the block it stood in,
+        // and one walking into a tuft hopped at it.
+        const GRASS: MaterialId = MaterialId(9);
+        let through = [GRASS.get()];
+
+        // A band of grass two blocks tall across the whole room at x = 4: too
+        // tall to climb, so to a search that cannot pass it the far side is
+        // unreachable — which is the control.
+        let mut meadow = field();
+        for y in 1..3 {
+            for z in 0..16 {
+                meadow = meadow.plant(BlockPos::new(4, y, z), GRASS);
+            }
+        }
+        let from = BlockPos::new(1, 1, 8);
+        let to = BlockPos::new(8, 1, 8);
+        let options = Options::default();
+        assert!(
+            matches!(search(&meadow, &[], from, to, &options), Route::Unreachable),
+            "the control: a wall of a material that is NOT passable stops the search"
+        );
+        let route = found(search(&meadow, &through, from, to, &options));
+        assert!(
+            route.iter().any(|block| block.x == 4 && block.y == 1),
+            "the route goes through the grass, not over it: {route:?}"
+        );
+        // And a mob standing IN the grass has somewhere to start from.
+        let out = found(search(
+            &meadow,
+            &through,
+            BlockPos::new(4, 1, 8),
+            to,
+            &options,
+        ));
+        assert_eq!(out.first(), Some(&BlockPos::new(4, 1, 8)));
+
+        // A one-block band is a step to a steer that cannot pass it, and
+        // nothing at all to one that can.
+        let mut tufts = field();
+        for z in 0..16 {
+            tufts = tufts.plant(BlockPos::new(4, 1, z), GRASS);
+        }
+        let hop = steer(&tufts, &[], [3.6, 1.0, 8.0], [8.0, 1.0, 8.0], 2);
+        assert!(
+            hop.jump,
+            "the control: a block of something solid is jumped"
+        );
+        let walk = steer(&tufts, &through, [3.6, 1.0, 8.0], [8.0, 1.0, 8.0], 2);
+        assert!(!walk.jump, "it jumped at a tuft of grass");
+        assert!(walk.walk[0] > 0.9, "and kept walking east");
+    }
+
+    #[test]
     fn the_floor_mask_is_the_floor() {
         // The mask is written as a literal for speed, so it is checked against
         // the canonical index formula here. A mask one bit out would make some
@@ -882,6 +990,7 @@ mod tests {
         let world = field();
         let route = found(search(
             &world,
+            &[],
             BlockPos::new(1, 1, 1),
             BlockPos::new(5, 1, 1),
             &Options::default(),
@@ -906,6 +1015,7 @@ mod tests {
         }
         let route = found(search(
             &world,
+            &[],
             BlockPos::new(1, 1, 1),
             BlockPos::new(5, 1, 1),
             &Options::default(),
@@ -928,6 +1038,7 @@ mod tests {
         assert_eq!(
             search(
                 &world,
+                &[],
                 BlockPos::new(1, 1, 1),
                 BlockPos::new(5, 1, 1),
                 &Options::default()
@@ -942,6 +1053,7 @@ mod tests {
         let world = field().solid(BlockPos::new(3, 1, 1));
         let route = found(search(
             &world,
+            &[],
             BlockPos::new(1, 1, 1),
             BlockPos::new(5, 1, 1),
             &Options::default(),
@@ -960,6 +1072,7 @@ mod tests {
         assert_eq!(
             search(
                 &walled,
+                &[],
                 BlockPos::new(1, 1, 1),
                 BlockPos::new(5, 1, 1),
                 &Options {
@@ -986,12 +1099,13 @@ mod tests {
         let to = BlockPos::new(6, 1, 1);
 
         assert!(matches!(
-            search(&world, from, to, &Options::default()),
+            search(&world, &[], from, to, &Options::default()),
             Route::Found(_)
         ));
         assert_eq!(
             search(
                 &world,
+                &[],
                 from,
                 to,
                 &Options {
@@ -1015,13 +1129,14 @@ mod tests {
         let to = BlockPos::new(5, 1, 1);
 
         assert_eq!(
-            search(&world, from, to, &Options::default()),
+            search(&world, &[], from, to, &Options::default()),
             Route::Unreachable,
             "a two-block body fitted through one block of headroom"
         );
         assert!(matches!(
             search(
                 &world,
+                &[],
                 from,
                 to,
                 &Options {
@@ -1047,13 +1162,13 @@ mod tests {
         let from = BlockPos::new(1, 1, 1);
         let to = BlockPos::new(5, 1, 1);
         assert_eq!(
-            found(search(&world, from, to, &Options::default())).len(),
+            found(search(&world, &[], from, to, &Options::default())).len(),
             5,
             "a block with a clear floor blocked the way"
         );
 
         let floored = world.cell(BlockPos::new(3, 1, 1).subnode(1, 0, 1));
-        let route = found(search(&floored, from, to, &Options::default()));
+        let route = found(search(&floored, &[], from, to, &Options::default()));
         assert!(
             !route.contains(&BlockPos::new(3, 1, 1)),
             "one cell on the floor did not make the block an obstacle: {route:?}"
@@ -1074,6 +1189,7 @@ mod tests {
         assert_eq!(
             search(
                 &world,
+                &[],
                 BlockPos::new(1, 1, 1),
                 BlockPos::new(5, 1, 1),
                 &Options {
@@ -1111,12 +1227,24 @@ mod tests {
         let world = field();
         let from = BlockPos::new(1, 1, 1);
         assert_eq!(
-            search(&world, from, BlockPos::new(5, 0, 1), &Options::default()),
+            search(
+                &world,
+                &[],
+                from,
+                BlockPos::new(5, 0, 1),
+                &Options::default()
+            ),
             Route::Unreachable,
             "a route was found into solid ground"
         );
         assert_eq!(
-            search(&world, from, BlockPos::new(5, 6, 1), &Options::default()),
+            search(
+                &world,
+                &[],
+                from,
+                BlockPos::new(5, 6, 1),
+                &Options::default()
+            ),
             Route::Unreachable,
             "a route was found into thin air"
         );
@@ -1131,6 +1259,7 @@ mod tests {
         assert_eq!(
             search(
                 &world,
+                &[],
                 BlockPos::new(1, 1, 1),
                 BlockPos::new(20, 1, 1),
                 &Options::default()
@@ -1145,6 +1274,7 @@ mod tests {
         assert_eq!(
             search(
                 &world,
+                &[],
                 BlockPos::new(1, 1, 1),
                 BlockPos::new(MAX_SPAN_BLOCKS + 2, 1, 1),
                 &Options::default()
@@ -1162,12 +1292,14 @@ mod tests {
         let world = field();
         let once = found(search(
             &world,
+            &[],
             BlockPos::new(1, 1, 1),
             BlockPos::new(9, 1, 9),
             &Options::default(),
         ));
         let again = found(search(
             &world,
+            &[],
             BlockPos::new(1, 1, 1),
             BlockPos::new(9, 1, 9),
             &Options::default(),
@@ -1183,6 +1315,7 @@ mod tests {
         let world = field().solid(BlockPos::new(4, 1, 4));
         let route = found(search(
             &world,
+            &[],
             BlockPos::new(1, 1, 1),
             BlockPos::new(8, 1, 8),
             &Options::default(),
@@ -1191,6 +1324,7 @@ mod tests {
         let terrain = Terrain {
             chunks: &world,
             height: options.height,
+            passable: &[],
             known: std::cell::RefCell::new(BTreeMap::new()),
             footing: std::cell::RefCell::new(BTreeMap::new()),
         };

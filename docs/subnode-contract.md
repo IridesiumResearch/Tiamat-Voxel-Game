@@ -628,6 +628,11 @@ Navigation is **block resolution**. Deliberately dead simple:
 
 - A `Partial` or `Mixed` block is an obstacle **unless its bottom sub-node layer
   (the 9 cells at `y == 0`) is empty**, in which case it is walkable-through.
+- **A cell of a `passable` material counts as empty here** (added 2026-10-12),
+  for the floor test and for the rise a steer looks at: the route reads the
+  floor exactly as §2's step does, so a mob walks through the grass it is
+  routed through and is never routed round a tuft its body would pass. Before
+  this a block of tall grass was a wall to `find_path` and a step to `steer`.
 - No sub-node pathfinding. No partial-cost traversal.
 
 Entities may therefore fail to path through gaps a player can squeeze into. That
