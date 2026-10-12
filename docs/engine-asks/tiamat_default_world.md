@@ -32,6 +32,27 @@ fills: half of all new worlds were dirt with no biome claim, with air holes
 and solid boxes. `generate.lua`'s float branch in `seed_int` no longer runs
 and can go.
 
+## 46. A cover stands on another call's cover (2026-10-12)
+
+**Seen.** The designer's playtest: "grass should not grow on bushes or
+flowers, only ground; no ground cover should grow on other ground cover."
+`fill_cover` never stands a run on one THIS call wrote, but a run an
+earlier call wrote is ground to it, and every biome lays its grass, its
+flowers and its plants in separate calls (one material a call). Counted
+over 2,880 chunks in every ring: ferns on monstera, grass on dead
+sagebrush, lunaria and wheat on grass, some 350 cells of it.
+
+**What the mod does meanwhile.** `shape.exclusive_takes`: every cover's
+take in a chunk is made flat in y and cut out of the columns every cover
+before it took. It works (none left but a pitcher plant's edge), and it
+costs: each take carries all the takes before it, about 7% of a chunk
+across the world and 30% in a meadow that lays four covers.
+
+**Smallest change.** In `fill_cover`, a passable cell is not ground: a run
+stands only on a cell whose material collides. Every plant the mods lay
+as cover is `passable`, so that one rule is the whole ask, and the mod's
+workaround goes.
+
 ## 45. A chunk's fog has a top and no bottom (2026-10-01): LANDED 2026-10-02 (engine 5d20328, protocol 84), awaiting the eye
 
 **Seen.** The designer, in the Veined Silver Gallery (a dark cave, 2.1 to
