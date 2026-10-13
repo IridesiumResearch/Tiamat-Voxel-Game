@@ -222,10 +222,15 @@ fn chiselled_spares_place_back_as_a_partial_block() {
                     let want = taken;
                     let started = tokio::time::Instant::now();
                     while held(&bot, stone) < want {
+                        // Said with everything the server told this bot, so
+                        // the one CI run in fifty that stalls here says why
+                        // rather than only that it did (milestone 0.5.0, T2).
                         assert!(
                             started.elapsed() < deadline,
-                            "cell {want} never yielded; held {} units",
-                            held(&bot, stone)
+                            "cell {want} never yielded; held {} units; notices {:?}; last messages {:?}",
+                            held(&bot, stone),
+                            bot.notices(),
+                            bot.received().iter().rev().take(12).collect::<Vec<_>>()
                         );
                         bot.await_inventory(deadline).await.expect("credit");
                     }

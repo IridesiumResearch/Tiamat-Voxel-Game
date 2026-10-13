@@ -362,6 +362,24 @@ impl Stamping {
                 self.at.y + i32::from(cell.at[1]),
                 self.at.z + i32::from(cell.at[2]),
             );
+            // **Part of a whole material is skipped, not waited on.** The
+            // edit queue refuses a partial cell of a `whole` material
+            // (Sub-Node Contract §7.5), and a refusal reads the same as a
+            // full queue here — so a plan holding one waited for ever, and
+            // every stamp behind it with it. The schematic path has had this
+            // rule since it landed; found landing it (milestone 0.5.0, T4).
+            if cell.occupancy != tiamat_core::block::OCCUPANCY_FULL && queue.is_whole(material) {
+                tracing::warn!(
+                    material = %name,
+                    x = pos.x,
+                    y = pos.y,
+                    z = pos.z,
+                    "a stamped plan holds part of a whole material; skipped, a whole material is \
+                     written only as its own shape with a full mask (Sub-Node Contract §7.5)"
+                );
+                self.next += 1;
+                continue;
+            }
             let writes: Vec<Write> =
                 block_edits(pos, material, cell.occupancy, opened.contains(&cell.at))
                     .into_iter()
@@ -1141,6 +1159,41 @@ mod tests {
                 mask: tiamat_core::block::OCCUPANCY_FULL,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_plan_holding_part_of_a_whole_material_skips_it_rather_than_waiting() {
+        // Found landing W35: the edit queue refuses a partial cell of a
+        // `whole` material, the plan stamp read the refusal as a full queue,
+        // and the stamp — and every stamp behind it — waited for ever. The
+        // cell is skipped and the rest of the plan lands.
+        let (_, names, ids) = world("plan-whole");
+        let (stone, glass) = (ids[0], ids[2]);
+        let stamps = Stamps::new(std::sync::Arc::new(names));
+        let slate = Slate {
+            whole: vec![glass.get()],
+            ..Slate::with_room(64)
+        };
+        let mut plan = Plan::new([4, 4, 4]).expect("a valid size");
+        plan.set([0, 0, 0], MATERIALS[2], 0b1).expect("in bounds");
+        plan.set([1, 0, 0], MATERIALS[0], tiamat_core::block::OCCUPANCY_FULL)
+            .expect("in bounds");
+        let at = BlockPos::new(10, 20, 30);
+        assert!(stamps.accept(tiamat_core::domain::OVERWORLD, at, plan));
+        stamps.pump(&slate);
+        assert_eq!(
+            slate.edits(),
+            vec![Edit::Block {
+                pos: BlockPos::new(11, 20, 30),
+                material: stone.get(),
+            }],
+            "the stone lands; the part of a whole material is skipped"
+        );
+        assert_eq!(
+            stamps.waiting(),
+            0,
+            "the stamp finished rather than waiting for ever"
+        );
     }
 
     #[test]
