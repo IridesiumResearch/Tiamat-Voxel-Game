@@ -20,6 +20,7 @@
 //! power went out, which is the state nothing can recover from without a fresh
 //! download.
 
+use crate::signing::Signer;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -105,8 +106,9 @@ impl Install {
         })
     }
 
-    /// Says what is here, for `--status`.
-    pub fn report(&self) {
+    /// Says what is here, for `--status`; `launcher` is what the system says
+    /// of this launcher's own signature.
+    pub fn report(&self, launcher: &Signer) {
         let version = if self.state.version.is_empty() {
             "unknown"
         } else {
@@ -124,6 +126,7 @@ impl Install {
                 "no (a build that applies no updates)"
             }
         );
+        println!("signed      {launcher}");
         println!(
             "staged      {}",
             if self.staged().join("update.json").exists() {
@@ -155,14 +158,38 @@ impl Install {
     /// 3. refuse anything not newer than what is installed;
     /// 4. check the archive against the hash in the signed manifest;
     /// 5. unpack it into a fresh directory, with every cap in `archive`;
-    /// 6. rename `current` to `previous` and the new tree to `current`;
-    /// 7. write the new state, and only then remove the staged files.
+    /// 6. ask the system who signed every executable in it, and refuse
+    ///    one not signed by this launcher's own identity (`signing`);
+    /// 7. rename `current` to `previous` and the new tree to `current`;
+    /// 8. write the new state, and only then remove the staged files.
+    ///
+    /// `launcher` is what the system says of this launcher's own signature,
+    /// which is what step 6 holds the update to.
     ///
     /// # Errors
     ///
     /// [`InstallError::Refused`] when a check fails — and the installed
     /// version is left exactly as it was.
-    pub fn apply_staged(&self, trusted_key: Option<&str>) -> Result<Option<String>, InstallError> {
+    pub fn apply_staged(
+        &self,
+        trusted_key: Option<&str>,
+        launcher: &Signer,
+    ) -> Result<Option<String>, InstallError> {
+        self.apply_staged_with(trusted_key, launcher, &crate::signing::signer_of)
+    }
+
+    /// [`Self::apply_staged`] with the system's reading of a signature
+    /// supplied, so a test can say what the system would.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply_staged`].
+    pub fn apply_staged_with(
+        &self,
+        trusted_key: Option<&str>,
+        launcher: &Signer,
+        signer_of: &dyn Fn(&Path) -> Signer,
+    ) -> Result<Option<String>, InstallError> {
         let staged = self.staged();
         let manifest_path = staged.join("update.json");
         if !manifest_path.exists() {
@@ -215,6 +242,10 @@ impl Install {
         // inner `current`, wherever it is.
         let unpacked = find_current(&incoming)
             .ok_or_else(|| InstallError::Refused("the update holds no `current`".to_owned()))?;
+        if let Err(err) = verify_os_signatures(&unpacked, launcher, signer_of) {
+            let _ = std::fs::remove_dir_all(&incoming);
+            return Err(err);
+        }
 
         let previous = self.previous();
         let current = self.current();
@@ -421,6 +452,28 @@ const EXE: &str = ".exe";
 /// What an executable is called here.
 #[cfg(not(windows))]
 const EXE: &str = "";
+
+/// Step 6 of [`Install::apply_staged`]: every executable the update
+/// carries must be signed by the identity this launcher is signed by, as
+/// the system reads both. A launcher with no identity holds an update to
+/// nothing, which is what every launcher did before this check existed.
+fn verify_os_signatures(
+    unpacked: &Path,
+    launcher: &Signer,
+    signer_of: &dyn Fn(&Path) -> Signer,
+) -> Result<(), InstallError> {
+    if !matches!(launcher, Signer::Identity(_)) {
+        return Ok(());
+    }
+    let found: Vec<(PathBuf, Signer)> = crate::signing::executables_in(unpacked)
+        .into_iter()
+        .map(|path| {
+            let signer = signer_of(&path);
+            (path, signer)
+        })
+        .collect();
+    crate::signing::check(launcher, &found).map_err(InstallError::Refused)
+}
 
 /// The `current` directory inside an unpacked archive.
 ///

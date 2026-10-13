@@ -158,12 +158,15 @@ fn run(
     launch: bool,
     passthrough: &[String],
 ) -> Result<std::process::ExitCode, InstallError> {
-    let root = install_root()?;
+    let (root, exe) = install_root()?;
     let install = Install::open(&root)?;
+    // What the system says of this launcher's own signature, which is what
+    // an update is held to (`updater::signing`).
+    let launcher = updater::signing::signer_of(&exe);
 
     match command {
         Command::Status => {
-            install.report();
+            install.report(&launcher);
             return Ok(std::process::ExitCode::SUCCESS);
         }
         Command::Rollback => {
@@ -177,7 +180,7 @@ fn run(
     // **A staged update is applied before anything starts**, and a failure to
     // apply one is not a failure to play: the version that is already here
     // still works, so this says what went wrong and carries on.
-    match install.apply_staged(RELEASE_KEY) {
+    match install.apply_staged(RELEASE_KEY, &launcher) {
         Ok(Some(version)) => println!("updated to {version}"),
         Ok(None) => {}
         Err(err) => {
@@ -193,13 +196,14 @@ fn run(
     install.launch(passthrough)
 }
 
-/// Where this launcher is, which is where the install is.
+/// Where this launcher is, which is where the install is, and the launcher
+/// itself.
 ///
 /// The executable's own directory rather than the working directory: a
 /// shortcut, a Finder double-click and a terminal all start a program with a
 /// different idea of where it is, and only one of them is right. Inside a
 /// macOS bundle it is the directory holding the `.app`; see [`root_of`].
-fn install_root() -> Result<PathBuf, InstallError> {
+fn install_root() -> Result<(PathBuf, PathBuf), InstallError> {
     let exe = std::env::current_exe().map_err(|source| InstallError::Io {
         what: "find this program".to_owned(),
         source,
@@ -210,7 +214,7 @@ fn install_root() -> Result<PathBuf, InstallError> {
             "macOS is running this app from a temporary read-only copy".to_owned(),
         ));
     }
-    Ok(root_of(&exe))
+    Ok((root_of(&exe), exe))
 }
 
 /// The install root for a launcher at `exe`.

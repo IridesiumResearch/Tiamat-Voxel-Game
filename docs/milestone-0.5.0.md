@@ -58,7 +58,7 @@ is the mod agents in their own repositories.
 | S1 Windows: a code-signing identity. Azure Trusted Signing is the recommended route (a monthly subscription, no hardware token, works with `signtool` in CI); an OV certificate from a CA is the alternative | designer | a purchase and an identity check, days of lead time |
 | S2 macOS: an Apple Developer Program membership and a Developer ID Application certificate, exported for CI; notarisation through `notarytool` | designer | a purchase, a day |
 | S3 The release workflow signs the Windows executables and the macOS bundle and notarises the bundle, every step gated on the secrets existing so an unsigned build still works; `check-archive.sh` verifies the signatures — **landed 2026-10-13** (`docs/distribution.md` §8a names the secrets); inert until S1 and S2 exist, and its first run on a real certificate is the proof | engine | medium |
-| S4 The launcher and the updater verify that a staged update is signed by the same identity before applying it, on top of the manifest's Ed25519 signature | engine | medium |
+| S4 The launcher and the updater verify that a staged update is signed by the same identity before applying it, on top of the manifest's Ed25519 signature — **landed 2026-10-13** (`crates/updater/src/signing.rs`: the system's own tool reads both signatures, the team on macOS and the certificate subject on Windows; an unsigned launcher holds an update to nothing); `SIGNING_REQUIRED` in the release workflow fails a leg that lost its secrets once signing has begun; its first real exercise is the second signed release | engine | medium |
 | S5 Release notes drop the "unsigned binaries" known limit | engine | tiny |
 
 ### 3. Performance — the three changes that carry the milestone

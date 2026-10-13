@@ -375,10 +375,21 @@ builds with downloads; an EV certificate skips the wait and costs more.
 --strict Tiamat.app` and `spctl --assess --type execute Tiamat.app`; on
 Windows, `signtool verify /pa tiamat.exe`. The release workflow does both.
 
-**Not yet**: the updater does not verify the operating-system signature of a
-staged update before applying it (milestone 0.5.0, S4); it verifies §2's
-signature and the hashes, which is the trust that matters, and the signed
-bytes are what it downloads.
+**The launcher holds an update to its own signature** (milestone 0.5.0, S4;
+`crates/updater/src/signing.rs`). After §2's signature and the hashes, and
+before the renames, it asks the system who signed the launcher itself —
+`codesign` on a Mac, `Get-AuthenticodeSignature` on Windows — and applies the
+update only when the system says every executable in it was signed by the
+same identity: the Developer ID's team on macOS, the certificate's subject on
+Windows (a subject, not a thumbprint, because Trusted Signing issues a fresh
+certificate each time). A launcher with no identity — a developer's build, a
+release from before the certificates — applies updates on §2 alone, as it
+always did. `tiamat --status` prints what the system says of the launcher.
+**Which means that once a signed launcher has shipped, every later release
+must be signed**, or signed launchers refuse it: set the repository variable
+`SIGNING_REQUIRED` to `true` with the first signed release, and a release
+leg that has lost its secrets fails instead of shipping an update nobody can
+apply.
 
 ## 9. Deliberately not done yet
 

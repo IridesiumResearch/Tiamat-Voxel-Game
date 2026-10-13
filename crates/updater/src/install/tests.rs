@@ -16,6 +16,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use tiamat_core::release::{Artifact, Manifest, SCHEMA, to_hex};
 
 use super::*;
+use crate::signing::Signer as OsSigner;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("tiamat-install-tests").join(name);
@@ -129,7 +130,10 @@ fn a_signed_newer_update_is_applied_and_the_old_one_is_kept() {
 
     let install = Install::open(&root).expect("open");
     let applied = install
-        .apply_staged(Some(&to_hex(signer.verifying_key().as_bytes())))
+        .apply_staged(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &OsSigner::None,
+        )
         .expect("a signed, newer update applies");
 
     assert_eq!(applied.as_deref(), Some("0.2.0"));
@@ -163,7 +167,7 @@ fn an_update_this_build_cannot_verify_changes_nothing() {
     stage(&root, &key(2), "0.2.0", |_| {});
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&trusted))
+        .apply_staged(Some(&trusted), &OsSigner::None)
         .expect_err("another key's signature");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.1.0");
@@ -176,7 +180,7 @@ fn an_update_this_build_cannot_verify_changes_nothing() {
     std::fs::write(&path, text.replace("0.2.0", "0.3.0")).expect("edit");
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&trusted))
+        .apply_staged(Some(&trusted), &OsSigner::None)
         .expect_err("an edited manifest");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.1.0");
@@ -188,7 +192,7 @@ fn an_update_this_build_cannot_verify_changes_nothing() {
         .expect("swap the archive");
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&trusted))
+        .apply_staged(Some(&trusted), &OsSigner::None)
         .expect_err("a swapped archive");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.1.0");
@@ -198,7 +202,7 @@ fn an_update_this_build_cannot_verify_changes_nothing() {
     stage(&root, &signer, "0.1.0", |_| {});
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&trusted))
+        .apply_staged(Some(&trusted), &OsSigner::None)
         .expect_err("a downgrade");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.2.0");
@@ -209,7 +213,7 @@ fn an_update_this_build_cannot_verify_changes_nothing() {
     stage(&root, &signer, "0.2.0", |_| {});
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(None)
+        .apply_staged(None, &OsSigner::None)
         .expect_err("a build with no release key");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.1.0");
@@ -225,7 +229,10 @@ fn a_release_without_a_build_for_this_machine_is_refused() {
 
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&to_hex(signer.verifying_key().as_bytes())))
+        .apply_staged(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &OsSigner::None,
+        )
         .expect_err("no build for this target");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.1.0");
@@ -256,7 +263,7 @@ fn the_key_rotates_only_to_the_successor_the_last_manifest_named() {
     stage(&root, &new, "0.2.0", |_| {});
     Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&trusted))
+        .apply_staged(Some(&trusted), &OsSigner::None)
         .expect("the committed successor signs the next release");
     assert_eq!(installed_version(&root), "version 0.2.0");
 
@@ -277,7 +284,7 @@ fn the_key_rotates_only_to_the_successor_the_last_manifest_named() {
     stage(&root, &key(4), "0.2.0", |_| {});
     let err = Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&trusted))
+        .apply_staged(Some(&trusted), &OsSigner::None)
         .expect_err("a key nobody committed to");
     assert!(matches!(err, InstallError::Refused(_)), "{err}");
     assert_eq!(installed_version(&root), "version 0.1.0");
@@ -290,7 +297,10 @@ fn a_rollback_puts_the_previous_version_back() {
     stage(&root, &signer, "0.2.0", |_| {});
     Install::open(&root)
         .expect("open")
-        .apply_staged(Some(&to_hex(signer.verifying_key().as_bytes())))
+        .apply_staged(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &OsSigner::None,
+        )
         .expect("applies");
     assert_eq!(installed_version(&root), "version 0.2.0");
 
@@ -321,7 +331,10 @@ fn a_staged_update_that_was_refused_is_discarded_rather_than_retried_for_ever() 
     let install = Install::open(&root).expect("open");
     assert!(
         install
-            .apply_staged(Some(&to_hex(key(1).verifying_key().as_bytes())))
+            .apply_staged(
+                Some(&to_hex(key(1).verifying_key().as_bytes())),
+                &OsSigner::None
+            )
             .is_err()
     );
 
@@ -333,7 +346,10 @@ fn a_staged_update_that_was_refused_is_discarded_rather_than_retried_for_ever() 
     assert_eq!(
         Install::open(&root)
             .expect("open")
-            .apply_staged(Some(&to_hex(key(1).verifying_key().as_bytes())))
+            .apply_staged(
+                Some(&to_hex(key(1).verifying_key().as_bytes())),
+                &OsSigner::None
+            )
             .expect("nothing staged"),
         None
     );
@@ -346,9 +362,109 @@ fn an_empty_directory_is_an_install_with_nothing_in_it_rather_than_an_error() {
     let root = scratch("fresh");
     let install = Install::open(&root).expect("a fresh directory opens");
     assert_eq!(install.state.version, "");
-    assert_eq!(install.apply_staged(None).expect("nothing staged"), None);
+    assert_eq!(
+        install
+            .apply_staged(None, &OsSigner::None)
+            .expect("nothing staged"),
+        None
+    );
     assert!(matches!(
         install.launch(&[]).expect_err("nothing to run"),
         InstallError::NothingToRun
     ));
+}
+
+#[test]
+fn a_signed_launcher_refuses_an_update_its_own_identity_did_not_sign() {
+    let signer = key(1);
+    let root = installed("os-signature-refused", "0.1.0");
+    stage(&root, &signer, "0.2.0", |_| {});
+    let launcher = OsSigner::Identity("ABCDE12345".to_owned());
+    // The system says the update's client is unsigned.
+    let unsigned = |_: &Path| OsSigner::None;
+
+    let install = Install::open(&root).expect("open");
+    let err = install
+        .apply_staged_with(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &launcher,
+            &unsigned,
+        )
+        .expect_err("an unsigned update under a signed launcher is refused");
+    assert!(
+        matches!(&err, InstallError::Refused(why) if why.contains("unsigned") && why.contains("client")),
+        "refused for the signature, naming the file: {err}"
+    );
+    assert_eq!(installed_version(&root), "version 0.1.0", "nothing moved");
+    assert!(!root.join("previous").exists());
+    assert!(
+        !root.join("incoming").exists(),
+        "the unpacked tree is cleaned up"
+    );
+
+    // And one signed by somebody else is refused the same way.
+    let someone_else = |_: &Path| OsSigner::Identity("ZZZZZ00000".to_owned());
+    let err = install
+        .apply_staged_with(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &launcher,
+            &someone_else,
+        )
+        .expect_err("another identity's update is refused");
+    assert!(matches!(&err, InstallError::Refused(why) if why.contains("ZZZZZ00000")));
+    assert_eq!(installed_version(&root), "version 0.1.0");
+}
+
+#[test]
+fn a_signed_launcher_applies_an_update_its_own_identity_signed() {
+    let signer = key(1);
+    let root = installed("os-signature-applied", "0.1.0");
+    stage(&root, &signer, "0.2.0", |_| {});
+    let launcher = OsSigner::Identity("ABCDE12345".to_owned());
+    let asked = std::cell::RefCell::new(Vec::new());
+    let same = |path: &Path| {
+        asked
+            .borrow_mut()
+            .push(path.file_name().unwrap().to_string_lossy().into_owned());
+        OsSigner::Identity("ABCDE12345".to_owned())
+    };
+
+    let install = Install::open(&root).expect("open");
+    let applied = install
+        .apply_staged_with(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &launcher,
+            &same,
+        )
+        .expect("the same identity's update applies");
+    assert_eq!(applied.as_deref(), Some("0.2.0"));
+    assert_eq!(installed_version(&root), "version 0.2.0");
+    assert!(
+        asked
+            .borrow()
+            .iter()
+            .any(|name| name == &format!("client{EXE}")),
+        "the client was asked about: {:?}",
+        asked.borrow()
+    );
+}
+
+#[test]
+fn an_unsigned_launcher_applies_an_update_on_the_manifests_signature_alone() {
+    let signer = key(1);
+    let root = installed("os-signature-unsigned-launcher", "0.1.0");
+    stage(&root, &signer, "0.2.0", |_| {});
+    // Nothing the system says about the update matters when the launcher
+    // has no identity: this is every launcher before certificates existed.
+    let rejects_everything = |_: &Path| OsSigner::Invalid("modified".to_owned());
+
+    let install = Install::open(&root).expect("open");
+    let applied = install
+        .apply_staged_with(
+            Some(&to_hex(signer.verifying_key().as_bytes())),
+            &OsSigner::None,
+            &rejects_everything,
+        )
+        .expect("applies");
+    assert_eq!(applied.as_deref(), Some("0.2.0"));
 }

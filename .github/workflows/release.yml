@@ -76,6 +76,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # **Once a signed launcher has shipped, an unsigned release is one it
+      # refuses** (milestone 0.5.0, S4): the launcher applies an update only
+      # when the system says its executables carry the launcher's own
+      # signing identity. Set the repository variable SIGNING_REQUIRED to
+      # `true` with the first signed release, and a leg that has lost its
+      # secrets fails here instead of shipping an update nobody can apply.
+      - name: Signing is required once it has begun
+        if: vars.SIGNING_REQUIRED == 'true' && ((runner.os == 'macOS' && env.HAVE_APPLE_SIGNING != 'true') || (runner.os == 'Windows' && env.HAVE_AZURE_SIGNING != 'true' && env.HAVE_PFX_SIGNING != 'true'))
+        shell: bash
+        run: |
+          echo "::error::SIGNING_REQUIRED is true and this leg has no signing secrets; a signed launcher would refuse the result"
+          exit 1
+
       - name: The tag and the workspace version must agree
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash

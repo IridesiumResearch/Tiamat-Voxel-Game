@@ -9,3 +9,4 @@
 
 pub mod archive;
 pub mod install;
+pub mod signing;
