@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-12: 22** (an operator's flight a mod cannot withhold). 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-13: none.** 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at

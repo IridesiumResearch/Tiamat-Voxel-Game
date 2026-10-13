@@ -12,7 +12,7 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: W37, filed 2026-10-13; W34 and W35, filed 2026-10-12. W36 filed 2026-10-12 landed the same day (engine 3394bdb3), awaiting the eye. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
+Open: none. W37 filed and landed 2026-10-13 (engine b37bfa5e), awaiting the eye; W34 and W35 filed 2026-10-12 landed 2026-10-13 (engine ae2dbece and 75a0132e), W34 awaiting the eye. W36 filed 2026-10-12 landed the same day (engine 3394bdb3), awaiting the eye. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
 W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
