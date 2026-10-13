@@ -14,11 +14,45 @@ does — and `scripts/check-stubs.sh` fails the engine's build if a `game.*`
 function exists that it does not document. **It cannot fall behind the engine.**
 If something is not in there, it does not exist; do not invent it.
 
+## The API's version, and how a function leaves it
+
+The mod API has a version of its own, `major.minor`, apart from the engine's.
+**1.0 is the API as frozen at engine 0.5.0.** `game.api_version` holds it at
+run time, and the header of [`stubs/game.lua`](stubs/game.lua) names the
+version the stubs describe; the engine's CI fails if the two differ, so the
+stubs you vendored say which API you wrote against.
+
+The rule the number carries:
+
+- **Within a major, nothing you can call goes away or changes its meaning
+  without a deprecation first.** New functions, new optional fields, new
+  events a mod may ignore: the minor goes up, and the list below names the
+  minor each arrived in.
+- **A deprecation is announced, then waited out.** A function, field or
+  option on its way out gets `---@deprecated Since API 1.x, goes in 1.y:
+  use ...` on its stub (your editor strikes it through) and an entry in the
+  list below, in the same release. It keeps working, unchanged, for at least
+  one minor release after the one that deprecated it. The release that
+  removes it raises the minor again; calling it then is a Lua error, which
+  disables the mod as any error does, so read the list before moving a mod
+  to a new engine.
+- **The major goes up only to break that rule on purpose**, and none is
+  planned.
+
+A mod that needs a later minor than the engine it is loaded into can say so
+and stop: `if game.api_version < "1.2" then error("needs API 1.2") end`
+during registration disables the mod with that reason in the server log,
+which beats a `nil` call halfway through a tick. (String comparison works
+until a minor reaches 10; compare numbers from `string.match` if you want
+to be exact.)
+
 ## What changed since engine 0.3.0
 
 If the copy of this file in your mod is older than this list, re-vendor
 `api/` from the engine's `main` and read the sections named here. Each item
 is a mechanism a mod may now use; none of them changes a mod that ignores it.
+Everything listed is in API 1.0; from 1.1 on, an entry names the minor it
+arrived in, and a deprecation is an entry here too.
 
 - **A schematic stamped at run time** (2026-10-13, weather ask W35).
   `game.stamp_schematic(schematic, pos, { turn, domain })` writes a
@@ -1829,4 +1863,7 @@ It describes behaviour that changes. When the engine changes something a mod
 author relies on, this file changes in the same commit — the same rule
 `scripts/check-stubs.sh` enforces mechanically for the stubs, applied by hand to
 the prose. If it contradicts [`stubs/game.lua`](stubs/game.lua), the stubs are
-right and this is stale: fix it.
+right and this is stale: fix it. A deprecation is announced here and on the
+stub in one commit, as the version rule above requires, and the version in the
+stubs' header moves in the release that adds or removes something — never in
+between, because a mod compares against it.

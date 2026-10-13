@@ -2492,3 +2492,35 @@ end }
         "regenerating one instance changed it"
     );
 }
+
+#[test]
+fn a_mod_reads_the_api_version_the_engine_reports() {
+    // A mod can refuse an engine whose API it was not written for, and the
+    // number it compares against is the header of the stubs it vendored;
+    // `scripts/check-stubs.sh` keeps that header equal to this constant.
+    let version = tiamat_core::script::API_VERSION;
+    assert_eq!(version.split('.').count(), 2, "major.minor");
+    let root = scratch("api-version");
+    write_mod(
+        &root,
+        "checker",
+        "",
+        &format!(
+            "if game.api_version ~= '{version}' then \
+             error('api ' .. tostring(game.api_version)) end"
+        ),
+    );
+    write_mod(
+        &root,
+        "wants_more",
+        "",
+        "if game.api_version < '99.0' then error('needs API 99.0') end",
+    );
+    let host = host_for(&root);
+    let failed: Vec<&str> = host.failed().iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        failed,
+        vec!["wants_more"],
+        "the mod that read the version loads; the one that wanted a later one stops itself"
+    );
+}

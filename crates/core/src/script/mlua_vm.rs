@@ -9491,6 +9491,8 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("mod_id", mod_id)
             .map_err(|err| self.vm_error(&err))?;
+        game.set("api_version", crate::script::API_VERSION)
+            .map_err(|err| self.vm_error(&err))?;
         Ok(())
     }
 

@@ -45,6 +45,20 @@ pub use vm::{
     WorldEdit, resolve_tool_speeds,
 };
 
+/// The version of the mod API, `major.minor`, separate from the engine's.
+///
+/// `1.0` is the API as frozen at engine 0.5.0. A mod reads it as
+/// `game.api_version`; the header of `api/stubs/game.lua` names the version
+/// the stubs describe, and `scripts/check-stubs.sh` fails CI if the two
+/// differ. The rule the number carries, written for mod authors in
+/// `api/AGENTS.md`: within a major, nothing a mod can call goes away or
+/// changes meaning without a deprecation first — a `---@deprecated` line on
+/// the stub naming the minor it was deprecated in, the minor it goes in and
+/// what to use instead — and at least one minor release in which it still
+/// works as it did. Additions raise the minor. Raising the major is the
+/// deliberate breaking of that rule, and none is planned.
+pub const API_VERSION: &str = "1.0";
+
 #[cfg(feature = "script")]
 mod budget;
 

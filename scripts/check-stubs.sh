@@ -93,8 +93,38 @@ for documented in $(grep -oE '^function game\.[A-Za-z_]+' "$STUBS" | sed 's/^fun
     fi
 done
 
+# The version the stubs describe is the version the engine reports. The two
+# are one number in two files, which is the kind of thing that drifts.
+stub_version=$(grep -oE '^-- API version: [0-9]+\.[0-9]+' "$STUBS" | head -1 | sed 's/.*: //')
+engine_version=$(grep -oE 'pub const API_VERSION: &str = "[0-9]+\.[0-9]+"' crates/core/src/script/mod.rs \
+    | sed 's/.*"\(.*\)"/\1/')
+if [ -z "$stub_version" ] || [ -z "$engine_version" ]; then
+    status=1
+    echo "API VERSION NOT FOUND: stubs '$stub_version', engine '$engine_version'."
+    echo "  $STUBS carries '-- API version: X.Y' in its header and"
+    echo "  crates/core/src/script/mod.rs 'pub const API_VERSION: &str = \"X.Y\";'."
+    echo
+elif [ "$stub_version" != "$engine_version" ]; then
+    status=1
+    echo "API VERSION DISAGREES: $STUBS says $stub_version, the engine says $engine_version."
+    echo "  A mod compares game.api_version against the header of the stubs it vendored."
+    echo
+fi
+
+# A deprecation says since when, until when, and what instead — the whole
+# rule, on the line the editor shows struck through.
+malformed=$(grep -nE '^---@deprecated' "$STUBS" \
+    | grep -vE '^[0-9]+:---@deprecated Since API [0-9]+\.[0-9]+, goes in [0-9]+\.[0-9]+: ' || true)
+if [ -n "$malformed" ]; then
+    status=1
+    echo "DEPRECATION WITHOUT ITS TERMS in $STUBS:"
+    echo "$malformed" | sed 's/^/  /'
+    echo "  The form is: ---@deprecated Since API 1.x, goes in 1.y: use \`game.other\` instead."
+    echo
+fi
+
 if [ "$status" -eq 0 ]; then
-    echo "API stubs: OK ($documented_count entries documented)"
+    echo "API stubs: OK ($documented_count entries documented, API version $stub_version)"
 fi
 
 exit "$status"

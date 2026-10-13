@@ -28,6 +28,12 @@ so it cannot quietly fall behind the engine the way hand-written API docs do.
 That makes it the one file worth reading end to end before writing a mod — and
 the one worth handing to a tool that is going to write one with you.
 
+**The API has a version**, `major.minor`, separate from the engine's: 1.0 is
+the API as frozen at engine 0.5.0, `game.api_version` reports it, the stubs'
+header names the version they describe, and CI keeps the two equal. The rule
+behind it — nothing goes away within a major without a deprecation first and a
+minor release of grace — is in [`AGENTS.md`](AGENTS.md), "The API's version".
+
 **[`template/`](template/)** — a mod to start from: the manifest, an
 `init.lua` touring the API (a block, a tool, a sound, an action, a dialog, an
 entity), a texture, a sound, a README walkthrough and an editor config pointed

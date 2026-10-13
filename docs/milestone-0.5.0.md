@@ -79,7 +79,7 @@ on hills and caves.
 
 | item | who | size |
 |---|---|---|
-| A1 `api/` carries a version and a deprecation rule: a function is marked deprecated for one minor release before it goes, and the stub says so | engine | small |
+| A1 `api/` carries a version and a deprecation rule: a function is marked deprecated for one minor release before it goes, and the stub says so — **landed 2026-10-13**: API 1.0, `game.api_version`, the stubs' header, the rule in `AGENTS.md`; `check-stubs.sh` holds the two numbers equal and every `---@deprecated` to its terms | engine | small |
 | A2 `AGENTS.md` gains a reference section, by area, beside the dated "what's new" list; the stubs stay the source of truth | engine | medium |
 | A3 A conformance run the mod repositories call from their CI: `tiamat-server --check-mods`, the fixture bot joining with the mod enabled | engine (the script), mods (the workflows) | small |
 | A4 Vendored stubs refreshed in every mod at the frozen version | mods | tiny |

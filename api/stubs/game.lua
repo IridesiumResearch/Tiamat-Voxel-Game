@@ -34,6 +34,21 @@
 --
 -- This file describes what exists. `scripts/check-stubs.sh` fails CI if the
 -- engine registers something this file does not document.
+--
+-- =========================================================================
+-- API version: 1.0
+-- =========================================================================
+--
+-- The version of the API this file describes, which `game.api_version`
+-- reports at run time; CI fails if the two differ. `1.0` is the API as frozen
+-- at engine 0.5.0. Within a major version nothing a mod can call goes away or
+-- changes its meaning without a deprecation first: a
+-- `---@deprecated Since API 1.x, goes in 1.y: use ...` line on the stub (your
+-- editor strikes it through), an entry in AGENTS.md's "What changed" list,
+-- and at least one minor release in which it still works as it did.
+-- Additions raise the minor. Re-vendor this file from the engine's `main`
+-- when you move to a new engine release: what it says is what that engine
+-- does.
 
 ---@meta
 
@@ -600,6 +615,7 @@ function Stream:next_bool() end
 ---@field ITEMS_PER_STACK integer How many of a thing one inventory slot holds. 90. Anything over it spills into the next slot rather than being refused, so this is what a recipe means by "a stack" and never a limit on what a player may own.
 ---@field AIR integer The numeric id of air. Always 0.
 ---@field mod_id string Your mod's id, and your registration namespace.
+---@field api_version string The version of the mod API this engine speaks, `"major.minor"`; `"1.0"` is the API frozen at engine 0.5.0. The header of this file names the version it describes, and the engine's CI keeps the two equal. A mod written against a later minor may refuse an older engine here (`error` during registration disables the mod with a reason in the log); one written against an earlier minor needs nothing. The rule behind the number is in AGENTS.md, "The API's version".
 ---@field world_seed integer? The world's seed — the same number a generator's `pos.seed` carries — for sampling a density or a map outside a generator (`density:at(x, y, z, game.world_seed)` to aim a spawn at the ground). `nil` during registration, which runs before the world opens; set in every VM, the generation workers' included, by the time anything else runs.
 game = {}
 
