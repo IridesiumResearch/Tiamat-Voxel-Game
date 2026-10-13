@@ -2064,7 +2064,11 @@ thing that goes quietly wrong the day they are retuned.
 
 ## Before you say it works
 
-- `--check-mods` passes and your mod is listed.
+- `--check-mods` passes and your mod is listed. From an engine checkout,
+  `scripts/conform.sh <your mod's directory>` runs that and then a real
+  server with the bot joining, beside the default mods a release ships;
+  `docs/mod-conformance.md` in the engine has the workflow a mod repository
+  runs it from on every push.
 - No `math.sin`, `math.atan`, `^` or any other float maths on a value that
   reaches the world. A density table instead.
 - A `game.density` field compiled ONCE at load, not rebuilt per chunk.

@@ -12,6 +12,27 @@ engine change that would. Newest first. Items are removed when they land.
 **Open as of 2026-10-13: none.** 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
+**From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
+things for every mod, from `docs/milestone-0.5.0.md`, none of which changes
+a mod that does nothing yet. (1) **The API is frozen as 1.0** (engine
+fe8ebc40): `game.api_version` reports it, the stubs' header names it, and
+`api/AGENTS.md` ("The API's version, and how a function leaves it") carries
+the rule — nothing a mod calls goes away within a major without a
+`---@deprecated` on the stub, an entry in the "What changed" list and one
+minor release of grace. `AGENTS.md` also gained "Reference, by area": every
+function in one line, generated from the stubs and checked by CI. **Re-vendor
+`api/` from the engine's `main`** (the stubs and `AGENTS.md`) — milestone
+item A4. (2) **A conformance run for this mod's own CI** — item A3, exit
+criterion E8: from an engine checkout, `scripts/conform.sh <this mod's
+directory>` runs `--check-mods` and then a real server with the fixture bot
+joining, beside the default mods at the commits `bundle.toml` pins, and
+fails if any mod is disabled. `docs/mod-conformance.md` in the engine has the
+workflow to copy into this repository as `.github/workflows/conform.yml`,
+running on every push and nightly against the engine's `main`. (3) The
+nightly CI now runs the fen soak over the pinned mods and keeps its tick
+table as an artefact, so a cost that grows with the world is seen the night
+it lands.
+
 **From the engine, 2026-09-25 (engine a6d34e1, protocol 76):** a use at
 nothing — the place control at open sky, or at a block past reach — now
 reaches a mod that registers `game.register_on_use(callback, { anywhere =

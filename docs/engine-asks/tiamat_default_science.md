@@ -20,6 +20,27 @@ designer's two-path design and the sibling mods had already fixed
 **Open as of 2026-10-07: nothing.** E-S5 landed 2026-10-07; E-S4 landed
 2026-10-05; E-S1 and E-S2 landed 2026-09-30; E-S3 answered below.
 
+**From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
+things for every mod, from `docs/milestone-0.5.0.md`, none of which changes
+a mod that does nothing yet. (1) **The API is frozen as 1.0** (engine
+fe8ebc40): `game.api_version` reports it, the stubs' header names it, and
+`api/AGENTS.md` ("The API's version, and how a function leaves it") carries
+the rule — nothing a mod calls goes away within a major without a
+`---@deprecated` on the stub, an entry in the "What changed" list and one
+minor release of grace. `AGENTS.md` also gained "Reference, by area": every
+function in one line, generated from the stubs and checked by CI. **Re-vendor
+`api/` from the engine's `main`** (the stubs and `AGENTS.md`) — milestone
+item A4. (2) **A conformance run for this mod's own CI** — item A3, exit
+criterion E8: from an engine checkout, `scripts/conform.sh <this mod's
+directory>` runs `--check-mods` and then a real server with the fixture bot
+joining, beside the default mods at the commits `bundle.toml` pins, and
+fails if any mod is disabled. `docs/mod-conformance.md` in the engine has the
+workflow to copy into this repository as `.github/workflows/conform.yml`,
+running on every push and nightly against the engine's `main`. (3) The
+nightly CI now runs the fen soak over the pinned mods and keeps its tick
+table as an artefact, so a cost that grows with the world is seen the night
+it lands.
+
 ## E-S5, a mod's world options under its own entry on the Mods tab: LANDED 2026-10-07 (engine befe1921), awaiting the eye
 
 *Landed:* part 1 of UI ask 20 answers it (`befe1921`): each enabled mod's
