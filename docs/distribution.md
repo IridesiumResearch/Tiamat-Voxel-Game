@@ -321,15 +321,71 @@ download makes real:
    a client that has been offline for three versions verifies against the
    current one regardless.
 
+## 8a. Signing the executables
+
+Decided in scope for 0.5.0 by the designer on 2026-10-13. The operating
+system's trust is a second signature beside ours: §2's Ed25519 signature is
+what the *updater* trusts, and it does not care what Gatekeeper or
+SmartScreen think; a Developer ID and an Authenticode signature are what the
+*player's machine* trusts on the first download. Both, or the README keeps
+telling players to clear a quarantine flag and click "Run anyway".
+
+**How it is built.** `package.sh` has two phases: `--stage-only` builds and
+lays the release out under `dist/<name>/`, and `--archive-from <that dir>`
+writes the README and the file manifest and makes the archive. The release
+workflow signs between the two, so the manifest hashes the signed bytes.
+Each signing step runs only when its secrets exist; without them the build
+is the unsigned one it always was, and the README says so. A signing step
+leaves `.signed` in the stage, which the archive phase reads for the README
+and removes. `check-archive.sh` verifies the signatures where the tools
+exist: the Windows leg's zip with `signtool`, the macOS legs' tarball with
+`codesign` and Gatekeeper's own `spctl` assessment.
+
+**macOS** (`scripts/sign-macos.sh`): the client, the server and the launcher
+inside `Tiamat.app` are signed with the hardened runtime and a timestamp,
+then the bundle; the three go to Apple for notarisation in one step, and the
+ticket is stapled to the app. Needs an Apple Developer Program membership and
+a *Developer ID Application* certificate. Secrets:
+
+| secret | what |
+|---|---|
+| `APPLE_CERT_P12_BASE64` | the certificate and its private key, exported from Keychain Access as a `.p12`, base64-encoded |
+| `APPLE_CERT_PASSWORD` | the password given on export |
+| `APPLE_SIGNING_IDENTITY` | the certificate's name, `Developer ID Application: Iridesium (TEAMID)` |
+| `APPLE_ID`, `APPLE_TEAM_ID` | an Apple ID on the team, and the ten-character team id |
+| `APPLE_APP_PASSWORD` | an app-specific password for that Apple ID (appleid.apple.com → Sign-In and Security), for `notarytool` |
+
+**Windows**, two routes. *Azure Trusted Signing* is the recommended one: a
+monthly subscription, no hardware token, an identity validation of the
+organisation, and a GitHub action that signs in place. It needs an Azure app
+registration with the *Trusted Signing Certificate Profile Signer* role on
+the account. Secrets: `AZURE_SIGNING_TENANT_ID`, `AZURE_SIGNING_CLIENT_ID`,
+`AZURE_SIGNING_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT` (the region's
+endpoint, such as `https://eus.codesigning.azure.net`),
+`AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE`. The alternative is an OV
+code-signing certificate from a CA as a `.pfx` (`scripts/sign-windows.ps1`),
+with `WINDOWS_SIGN_PFX_BASE64` and `WINDOWS_SIGN_PFX_PASSWORD`; it is used
+only when the Azure secrets are absent. Either way SmartScreen's reputation
+builds with downloads; an EV certificate skips the wait and costs more.
+
+**Checking a signed release by hand**: on a Mac, `codesign --verify --deep
+--strict Tiamat.app` and `spctl --assess --type execute Tiamat.app`; on
+Windows, `signtool verify /pa tiamat.exe`. The release workflow does both.
+
+**Not yet**: the updater does not verify the operating-system signature of a
+staged update before applying it (milestone 0.5.0, S4); it verifies §2's
+signature and the hashes, which is the trust that matters, and the signed
+bytes are what it downloads.
+
 ## 9. Deliberately not done yet
 
 Recorded so a later reader knows these were decided rather than forgotten:
 
-- **Code signing and notarisation.** Unsigned for this round (decided
-  2026-09-21). macOS testers clear the quarantine flag once; Windows shows a
-  SmartScreen warning. **Our own signature check is unaffected** — it does not
-  depend on the operating system's opinion of the binary. Revisit before any
-  public release.
+- **Code signing and notarisation.** Unsigned through 0.4.x (decided
+  2026-09-21); in scope for 0.5.0, and the pipeline is in place (§8a) and
+  turns on when the identities exist. **Our own signature check is
+  unaffected** — it does not depend on the operating system's opinion of
+  the binary.
 - **Delta updates.** A full archive per release, which is tens of megabytes a
   tester downloads each time. Worth doing when releases outpace patience.
 - **A launcher with a window.** The launcher reports through the client's own

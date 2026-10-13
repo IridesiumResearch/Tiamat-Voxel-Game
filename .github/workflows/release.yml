@@ -65,6 +65,14 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
     runs-on: ${{ matrix.os }}
+    # **Signing turns itself on when the secrets exist** (milestone 0.5.0,
+    # S3). A secret cannot be tested in an `if`, so each is folded into a
+    # job-level flag here. Without them the build is the unsigned one it
+    # always was, and the README says so.
+    env:
+      HAVE_APPLE_SIGNING: ${{ secrets.APPLE_CERT_P12_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
+      HAVE_AZURE_SIGNING: ${{ secrets.AZURE_SIGNING_TENANT_ID != '' && secrets.AZURE_SIGNING_CLIENT_ID != '' && secrets.AZURE_SIGNING_CLIENT_SECRET != '' && secrets.AZURE_SIGNING_ENDPOINT != '' && secrets.AZURE_SIGNING_ACCOUNT != '' && secrets.AZURE_SIGNING_PROFILE != '' }}
+      HAVE_PFX_SIGNING: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 != '' && secrets.WINDOWS_SIGN_PFX_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -117,7 +125,83 @@ jobs:
             echo "::warning::will not look for updates. Set it under Settings ->"
             echo "::warning::Secrets and variables -> Actions -> Variables."
           fi
-          bash scripts/package.sh --target ${{ matrix.target }} --channel "$channel"
+          bash scripts/package.sh --target ${{ matrix.target }} --channel "$channel" --stage-only
+
+      # --- signing, between the stage and the archive --------------------
+      #
+      # The signature changes the executables' bytes, so it goes between the
+      # two phases of package.sh: the file manifest and the archive are made
+      # from the signed files. Each step runs only when its secrets exist;
+      # docs/distribution.md §8a says what each secret is and where it comes
+      # from.
+
+      - name: Import the Developer ID certificate
+        if: runner.os == 'macOS' && env.HAVE_APPLE_SIGNING == 'true'
+        shell: bash
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 16)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$APPLE_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$(security list-keychains -d user | tr -d '" ')"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign and notarise (macOS)
+        if: runner.os == 'macOS' && env.HAVE_APPLE_SIGNING == 'true'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash scripts/sign-macos.sh "$(ls -d dist/tiamat-*-${{ matrix.target }})"
+
+      - name: Sign (Windows, Azure Trusted Signing)
+        if: runner.os == 'Windows' && env.HAVE_AZURE_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist
+          files-folder-filter: exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Record the Azure signature for the archive
+        if: runner.os == 'Windows' && env.HAVE_AZURE_SIGNING == 'true'
+        shell: bash
+        run: touch "$(ls -d dist/tiamat-*-${{ matrix.target }})/.signed"
+
+      - name: Sign (Windows, certificate file)
+        if: runner.os == 'Windows' && env.HAVE_AZURE_SIGNING != 'true' && env.HAVE_PFX_SIGNING == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+          TIAMAT_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGN_PFX_BASE64))
+          $env:TIAMAT_SIGN_PFX = $pfx
+          $stage = (Get-ChildItem dist -Directory -Filter "tiamat-*-${{ matrix.target }}" | Select-Object -First 1).FullName
+          try { & pwsh -File scripts/sign-windows.ps1 -Stage $stage; if ($LASTEXITCODE -ne 0) { throw "signing failed" } }
+          finally { Remove-Item $pfx -Force -ErrorAction SilentlyContinue }
+
+      - name: Archive
+        shell: bash
+        run: bash scripts/package.sh --archive-from "$(ls -d dist/tiamat-*-${{ matrix.target }})"
 
       # Counsel's rule: look inside the archive a tester will download, rather
       # than trusting the configuration that produced it. Every licence file,

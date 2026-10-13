@@ -20,6 +20,8 @@ target=""
 channel="dev"
 out="dist"
 allow_missing_mods=0
+stage_only=0
+archive_from=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -27,12 +29,21 @@ while [ $# -gt 0 ]; do
         --channel) channel="${2:?--channel needs a name}"; shift 2 ;;
         --out) out="${2:?--out needs a directory}"; shift 2 ;;
         --allow-missing-mods) allow_missing_mods=1; shift ;;
+        # **Two phases, with room for a signature between them.** A signing
+        # step changes the bytes of every executable, so the file manifest
+        # and the archive have to come after it: `--stage-only` builds and
+        # lays the release out under `<out>/<name>/` and stops;
+        # `--archive-from <that dir>` writes the README and the manifest and
+        # makes the archive. Without either, both phases run, as before.
+        --stage-only) stage_only=1; shift ;;
+        --archive-from) archive_from="${2:?--archive-from needs a staged directory}"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 
-if [ -z "$target" ]; then
-    echo "usage: scripts/package.sh --target <triple> [--channel <name>]" >&2
+if [ -z "$target" ] && [ -z "$archive_from" ]; then
+    echo "usage: scripts/package.sh --target <triple> [--channel <name>] [--stage-only]" >&2
+    echo "       scripts/package.sh --archive-from <staged dir>" >&2
     exit 2
 fi
 
@@ -43,9 +54,21 @@ source scripts/lib/macos-app.sh
 
 version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
 commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
-name="tiamat-${version}-${target}"
-stage="${out}/${name}"
+if [ -n "$archive_from" ]; then
+    # Picking up a stage somebody signed: everything the first phase decided
+    # is in its `.stage` record, so the archive says what the build said.
+    stage="${archive_from%/}"
+    [ -f "$stage/.stage" ] || { echo "error: ${stage} is not a staged release (no .stage record)" >&2; exit 2; }
+    # shellcheck disable=SC1091
+    source "$stage/.stage"
+    name="$(basename "$stage")"
+    out="$(dirname "$stage")"
+else
+    name="tiamat-${version}-${target}"
+    stage="${out}/${name}"
+fi
 
+stage_build() {
 echo "==> building ${name} (channel ${channel})"
 
 # **The stamp is an environment variable read at compile time**, which is what
@@ -242,21 +265,56 @@ echo "==> release record"
     echo "- \`MANIFEST.txt\` — every file in this archive with its SHA-256."
 } > "$stage/current/RELEASE.md"
 
+# What the archive phase needs to know about this stage, for a run that
+# signs between the two. Removed before archiving.
+{
+    echo "target=\"${target}\""
+    echo "channel=\"${channel}\""
+    echo "version=\"${version}\""
+    echo "commit=\"${commit}\""
+} > "$stage/.stage"
+}
+
+if [ -z "$archive_from" ]; then
+    stage_build
+fi
+if [ "$stage_only" -eq 1 ]; then
+    echo "==> staged at ${stage}; sign it, then: scripts/package.sh --archive-from ${stage}"
+    exit 0
+fi
+suffix=""
+case "$target" in *windows*) suffix=".exe" ;; esac
+# A signing step leaves `.signed` behind (scripts/sign-macos.sh, the release
+# workflow's Windows steps): the README then stops telling the player their
+# operating system will object.
+signed=0
+[ -f "$stage/.signed" ] && signed=1
+
 # --- how to run it ---------------------------------------------------------
 case "$target" in
     *apple-darwin*) launcher_line="Tiamat.app        the launcher: it applies updates and starts the game" ;;
     *) launcher_line="tiamat${suffix}    the launcher: it applies updates and starts the game" ;;
 esac
+if [ "$signed" -eq 1 ]; then
+    trust_line="This build is signed and notarised; your operating system opens it as it opens any other."
+    mac_first="  Open Tiamat.app (drag it to the Dock to keep it there)."
+    win_warn="  Nothing else to install: the C runtime is built in."
+else
+    trust_line="This is a test build. It is not signed, so your operating system will say so."
+    mac_first="  The first time only, clear the quarantine flag:
+      xattr -dr com.apple.quarantine .
+  then open Tiamat.app (drag it to the Dock to keep it there).
+  Without that, macOS refuses to open it and says it is damaged. It is not."
+    win_warn="  SmartScreen will warn about an unrecognised app. More info -> Run anyway.
+  Nothing else to install: the C runtime is built in."
+fi
 cat > "$stage/README.txt" <<EOF
 Tiamat ${version} (${channel}${commit:+, ${commit:0:7}})
 
-This is a test build. It is not signed, so your operating system will say so.
+${trust_line}
 
 macOS
-  The first time only, clear the quarantine flag:
-      xattr -dr com.apple.quarantine .
-  then open Tiamat.app (drag it to the Dock to keep it there).
-  Without that, macOS refuses to open it and says it is damaged. It is not.
+${mac_first}
   Keep Tiamat.app and the current folder together, and move the whole folder
   (to Applications or your home folder) before you open the app: macOS runs an
   app straight out of Downloads from a read-only copy that cannot see current/.
@@ -265,8 +323,7 @@ Windows
   Extract the whole zip first (right-click it, Extract All), then open
   tiamat.exe from the extracted folder. Opened from inside the zip, Windows
   copies out that one file alone, with no game beside it to start.
-  SmartScreen will warn about an unrecognised app. More info -> Run anyway.
-  Nothing else to install: the C runtime is built in.
+${win_warn}
 
 Linux
   ./tiamat${suffix}
@@ -289,6 +346,7 @@ EOF
 
 # --- the file manifest (§7) -------------------------------------------------
 # Last, because it hashes everything above it.
+rm -f "$stage/.stage" "$stage/.signed"
 echo "==> file manifest"
 python3 scripts/file-manifest.py "$stage" "$stage/current/MANIFEST.txt"
 

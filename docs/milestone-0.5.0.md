@@ -47,7 +47,7 @@ is the mod agents in their own repositories.
 | T1 The badge queue is published once per tick, so a network pass never reads it mid-tick (`show_over` has flaked four times on macOS; the race is real) — **landed 2a7c1db7** | engine | small |
 | T2 `placement::chiselled_spares` is understood and fixed, not retried (flaked on Windows twice) — not reproduced on one starved core (10 of 10 passed); the stall now reports every notice and the last messages, so the next CI failure names its cause | engine | small |
 | T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts | engine | small |
-| T4 The plan-stamp stall: a plan holding a partial cell of a `whole` material must not wait for ever (`plans.rs`, found landing W35) | engine | small |
+| T4 The plan-stamp stall: a plan holding a partial cell of a `whole` material must not wait for ever (`plans.rs`, found landing W35) — **landed fa5ddd51** | engine | small |
 | T5 The two unsigned mod-side commits on main are the designer's call: rewrite with sign-off or document the exception once | designer | tiny |
 | T6 Invisible walls: act on the first `client.log` that shows one; the reload, the held edits and both logs landed in 0.4.1 | engine, as reports come | unknown |
 
@@ -57,7 +57,7 @@ is the mod agents in their own repositories.
 |---|---|---|
 | S1 Windows: a code-signing identity. Azure Trusted Signing is the recommended route (a monthly subscription, no hardware token, works with `signtool` in CI); an OV certificate from a CA is the alternative | designer | a purchase and an identity check, days of lead time |
 | S2 macOS: an Apple Developer Program membership and a Developer ID Application certificate, exported for CI; notarisation through `notarytool` | designer | a purchase, a day |
-| S3 The release workflow signs the Windows executables and the macOS bundle and notarises the bundle, every step gated on the secrets existing so an unsigned build still works; `check-archive.sh` verifies the signatures | engine | medium |
+| S3 The release workflow signs the Windows executables and the macOS bundle and notarises the bundle, every step gated on the secrets existing so an unsigned build still works; `check-archive.sh` verifies the signatures — **landed 2026-10-13** (`docs/distribution.md` §8a names the secrets); inert until S1 and S2 exist, and its first run on a real certificate is the proof | engine | medium |
 | S4 The launcher and the updater verify that a staged update is signed by the same identity before applying it, on top of the manifest's Ed25519 signature | engine | medium |
 | S5 Release notes drop the "unsigned binaries" known limit | engine | tiny |
 

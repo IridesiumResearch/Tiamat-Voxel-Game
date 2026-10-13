@@ -122,6 +122,44 @@ if [ "$suffix" = ".exe" ]; then
         fi
     done
 fi
+# **Signatures, where the tools to check them exist.** A signed build is
+# what milestone 0.5.0 ships; an unsigned one is still a build, so a missing
+# signature is a warning and a bad one is a failure. The Windows leg checks
+# its zip with signtool, the macOS legs their tarball with codesign and
+# Gatekeeper's own assessment; a Linux machine checking another leg's
+# archive has neither tool and says nothing.
+if [ -d "$root/Tiamat.app" ] && command -v codesign >/dev/null 2>&1; then
+    if codesign --verify --deep --strict "$root/Tiamat.app" 2>/dev/null; then
+        ok "Tiamat.app is signed"
+        for exe in "$root/current/client" "$root/current/server"; do
+            [ -f "$exe" ] || continue
+            if codesign --verify --strict "$exe" 2>/dev/null; then ok "${exe#"$root/"} is signed"
+            else fail "${exe#"$root/"} is not signed although Tiamat.app is"; fi
+        done
+        if spctl --assess --type execute "$root/Tiamat.app" 2>/dev/null; then ok "Gatekeeper accepts Tiamat.app (notarised)"
+        else fail "Gatekeeper refuses Tiamat.app: signed but not notarised, or not stapled"; fi
+    else
+        warn "Tiamat.app is not signed; a player clears the quarantine flag by hand"
+    fi
+fi
+if [ "$suffix" = ".exe" ]; then
+    signtool=""
+    if command -v signtool >/dev/null 2>&1; then signtool="signtool"
+    else
+        for candidate in "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe; do
+            [ -f "$candidate" ] && signtool="$candidate"
+        done
+    fi
+    if [ -n "$signtool" ]; then
+        for exe in "$root/tiamat.exe" "$root"/current/*.exe; do
+            [ -f "$exe" ] || continue
+            rel="${exe#"$root/"}"
+            if "$signtool" verify /pa /q "$exe" >/dev/null 2>&1; then ok "$rel is signed"
+            else warn "$rel is not signed; SmartScreen will warn"; fi
+        done
+    fi
+fi
+
 need "current/LICENSE"
 need "current/LICENSE.EXCEPTION"
 need "current/THIRD-PARTY.md"
