@@ -208,26 +208,49 @@ fn a_first_join_registers_a_new_identity() {
 }
 
 #[test]
-fn a_second_identity_cannot_take_a_bound_name() {
-    let (server, _dir) = start("name-theft");
+fn a_second_identity_with_a_bound_name_joins_as_its_next_variant() {
+    // Two fresh installs are both `player`: the second must still get in.
+    // Reported from the window as "an insta crash" on a LAN join — it was a
+    // refusal, `player` being the host's. The name stays first-come: the
+    // guest joins as `player 2`, is told so, and keeps it on reconnect.
+    let (server, _dir) = start("name-shared");
 
     block_on(async {
-        let mut alice = connect(&server, Identity::generate().expect("identity")).await;
-        alice.join("Alice").await.expect("Alice joins");
+        let mut host = connect(&server, Identity::generate().expect("identity")).await;
+        host.join("player").await.expect("the host joins");
 
-        let mut thief = connect(&server, Identity::generate().expect("identity")).await;
-        let err = thief.join("Alice").await.expect_err("the name is taken");
-
+        let guest_identity = Identity::generate().expect("identity");
+        let guest_uuid = guest_identity.uuid_as_root();
+        // The same key again later: an identity is its seed (charter rule 13).
+        let guest_seed = guest_identity.seed();
+        let mut guest = connect(&server, guest_identity).await;
+        guest
+            .join("player")
+            .await
+            .expect("the guest joins under a variant");
+        let told = guest
+            .recv_until(|m| matches!(m, ServerMessage::Chat { from: None, .. }))
+            .await
+            .expect("told the name");
         assert!(
-            matches!(
-                err,
-                bot::BotError::Refused {
-                    reason: DisconnectReason::NameTaken { .. }
-                }
-            ),
-            "expected a NameTaken refusal, got {err}"
+            matches!(&told, ServerMessage::Chat { text, .. } if text.contains("`player 2`")),
+            "the guest should be told they are `player 2`, got {told:?}"
         );
-        alice.disconnect().await;
+        {
+            let identities = server.shared().identities.lock().await;
+            assert_eq!(identities.name_holder("player 2"), Some(guest_uuid));
+            assert_ne!(identities.name_holder("player"), Some(guest_uuid));
+        }
+        guest.disconnect().await;
+
+        // Back again with the same key and the same plain name: still 2.
+        let mut again = connect(&server, Identity::from_seed(&guest_seed)).await;
+        again.join("player").await.expect("the guest rejoins");
+        let identities = server.shared().identities.lock().await;
+        assert_eq!(identities.name_holder("player 2"), Some(guest_uuid));
+        drop(identities);
+        again.disconnect().await;
+        host.disconnect().await;
     });
 
     server.stop();

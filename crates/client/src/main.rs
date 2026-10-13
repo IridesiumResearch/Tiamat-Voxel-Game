@@ -109,7 +109,12 @@ fn client_log_file() -> Option<std::fs::File> {
     std::fs::create_dir_all(&data).ok()?;
     let path = data.join("client.log");
     let previous = data.join("client.1.log");
-    if path.exists() {
+    // **An empty log is not a run worth keeping.** An installed client
+    // started on its own hands itself to the launcher before it logs a line
+    // (`handover`), and that run's empty log was pushing the one before it
+    // — the run that crashed — out of `client.1.log`.
+    let wrote_something = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0);
+    if wrote_something {
         let _ = std::fs::rename(&path, &previous);
     }
     std::fs::File::create(path).ok()

@@ -403,6 +403,9 @@ pub struct Session {
     nonce: Option<[u8; NONCE_BYTES]>,
     claimed_key: Option<ed25519_dalek::VerifyingKey>,
     claimed_name: Option<String>,
+    /// The name the client asked for, when it was bound to a variant of it
+    /// instead — told to the player on joining, then forgotten.
+    renamed_from: Option<String>,
     uuid: Option<PlayerUuid>,
 }
 
@@ -421,6 +424,7 @@ impl Session {
             nonce: None,
             claimed_key: None,
             claimed_name: None,
+            renamed_from: None,
             uuid: None,
         }
     }
@@ -642,7 +646,7 @@ impl Session {
         &mut self,
         message: &ClientMessage,
         context: &JoinContext<'_>,
-        registry: &IdentityRegistry,
+        _registry: &IdentityRegistry,
     ) -> Response {
         let ClientMessage::Hello {
             protocol_version,
@@ -675,19 +679,12 @@ impl Session {
             });
         };
 
-        // The name is checked here, BEFORE the challenge, so a client learns it
-        // cannot have the name without doing the signing work. The check is
-        // against the claimed key's identity, and it is re-checked after
-        // verification — a claim is not a proof, and the pre-check is only a
-        // courtesy.
-        if let Some(holder) = registry.name_holder(display_name) {
-            let claimed_identity = registry.identity_of_key(&key);
-            if claimed_identity != Some(holder) {
-                return self.close_with(DisconnectReason::NameTaken {
-                    name: display_name.clone(),
-                });
-            }
-        }
+        // The name is not checked here. It used to be, before the challenge,
+        // so a client learnt it could not have a taken name without doing
+        // the signing work — but a taken name is no longer a refusal: the
+        // proven identity gets the next free variant of it after the
+        // challenge (`IdentityRegistry::bind_name_or_next`), and there is
+        // nothing to learn before then.
 
         let Ok(nonce) = generate_nonce() else {
             return self.close_with(DisconnectReason::AuthFailed {
@@ -781,11 +778,18 @@ impl Session {
             registry.insert(KeySet::new(key, None, context.now));
         }
 
-        // Re-check the name against the PROVEN identity. The pre-check in
-        // `handle_hello` used a claimed key; this one is authoritative.
+        // Bind the name to the PROVEN identity — or the next free variant of
+        // it, when somebody else wears it here: every fresh install is
+        // `player`, and a LAN of two must not be a host and a guest who
+        // cannot join. The player is told which name they got, below.
         let name = self.claimed_name.clone().unwrap_or_default();
-        match registry.bind_name(&name, uuid) {
-            Ok(()) => {}
+        match registry.bind_name_or_next(&name, uuid, NAME_VARIANTS) {
+            Ok(bound) => {
+                if bound != name {
+                    self.renamed_from = Some(name);
+                }
+                self.claimed_name = Some(bound);
+            }
             Err(RegistryError::NameTaken { .. }) => {
                 return self.close_with(DisconnectReason::NameTaken { name });
             }
@@ -814,13 +818,25 @@ impl Session {
             });
         };
         self.phase = Phase::InWorld;
-        Response::reply(ServerMessage::JoinWorld {
+        let mut response = Response::reply(ServerMessage::JoinWorld {
             player_uuid: *uuid.as_bytes(),
             spawn: context.spawn,
             tick: context.tick,
             may_fly: context.may_fly,
             seed: context.seed,
-        })
+        });
+        // **Told, once in the world, which name they wear here.** A notice
+        // from nobody, like a server's, so a guest called `player 2` is not
+        // left wondering why the chat does not say `player`.
+        if let (Some(asked), Some(bound)) = (self.renamed_from.take(), self.claimed_name.as_ref()) {
+            response.send.push(ServerMessage::Chat {
+                from: None,
+                text: format!(
+                    "`{asked}` is already somebody else's name on this server; you are `{bound}` here"
+                ),
+            });
+        }
+        response
     }
 
     /// Refuses a message that arrived in the wrong phase.
@@ -976,6 +992,10 @@ impl Session {
 /// **Order is load-bearing and pinned by tests on both sides of the wire**
 /// (`session`'s own index assertions and `bot/tests/join_flow.rs` by name).
 /// Appending is the only edit that does not renumber everything after it.
+/// How many numbered variants of a taken name are tried before a refusal —
+/// `name 2` to `name 99`. See [`IdentityRegistry::bind_name_or_next`].
+const NAME_VARIANTS: usize = 99;
+
 fn join_burst(context: &JoinContext<'_>) -> Response {
     Response {
         send: vec![
@@ -1562,8 +1582,10 @@ mod tests {
     }
 
     #[test]
-    fn a_second_identity_cannot_take_a_bound_name() {
-        // The identity-theft case: Bob presents Alice's name with his own key.
+    fn a_second_identity_wears_the_next_variant_of_a_bound_name() {
+        // Bob presents Alice's name with his own key. He does not get it —
+        // the name stays Alice's, first-come — and he is not refused either:
+        // he joins as `Alice 2` and is told so.
         let alice = Identity::generate().expect("generate");
         let bob = Identity::generate().expect("generate");
         let mut registry = IdentityRegistry::default();
@@ -1575,15 +1597,16 @@ mod tests {
         assert_eq!(alice_session.phase(), Phase::InWorld);
 
         let (bob_session, sent) = join(&bob, "Alice", &mut registry, &allowlist);
-        assert_eq!(bob_session.phase(), Phase::Closed);
+        assert_eq!(bob_session.phase(), Phase::InWorld);
+        assert_eq!(bob_session.display_name(), Some("Alice 2"));
+        assert_eq!(registry.name_holder("Alice"), Some(alice.uuid_as_root()));
+        assert_eq!(registry.name_holder("Alice 2"), Some(bob.uuid_as_root()));
         assert!(
             sent.iter().any(|m| matches!(
                 m,
-                ServerMessage::Disconnect {
-                    reason: DisconnectReason::NameTaken { .. }
-                }
+                ServerMessage::Chat { from: None, text } if text.contains("`Alice 2`")
             )),
-            "Bob should be refused by name, got {sent:?}"
+            "Bob should be told the name he wears, got {sent:?}"
         );
     }
 

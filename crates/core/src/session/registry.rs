@@ -226,6 +226,58 @@ impl IdentityRegistry {
         }
     }
 
+    /// Binds `name`, or the next free numbered variant of it — `name 2`,
+    /// `name 3`, … up to `most` — and answers the name that was bound.
+    ///
+    /// **Why a variant rather than a refusal.** Every fresh install calls
+    /// its player `player`, so two of them on one LAN were a host and a
+    /// guest who could not join: the guest was refused for wearing the
+    /// host's name, with nothing on the screen saying what to change
+    /// (reported from the window as a crash on joining). A name is still
+    /// bound to one identity first-come (charter rule 13), the identity
+    /// that got the variant keeps it on every reconnect, and the caller
+    /// tells the player which name they wear here.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::NameTaken`] if every variant up to `most` is held by
+    /// somebody else, or would not fit [`crate::proto::MAX_NAME_BYTES`].
+    pub fn bind_name_or_next(
+        &mut self,
+        name: &str,
+        uuid: PlayerUuid,
+        most: usize,
+    ) -> Result<String, RegistryError> {
+        // The identity's own earlier variant first: a guest who was
+        // `player 2` yesterday is `player 2` today, not `player 3`.
+        if let Some(own) = self.name_of(&uuid)
+            && (own == name || is_variant_of(own, name))
+        {
+            let own = own.to_owned();
+            self.bind_name(&own, uuid)?;
+            return Ok(own);
+        }
+        match self.bind_name(name, uuid) {
+            Ok(()) => return Ok(name.to_owned()),
+            Err(RegistryError::NameTaken { .. }) => {}
+            Err(err) => return Err(err),
+        }
+        for n in 2..=most {
+            let variant = format!("{name} {n}");
+            if variant.len() > crate::proto::MAX_NAME_BYTES {
+                break;
+            }
+            match self.bind_name(&variant, uuid) {
+                Ok(()) => return Ok(variant),
+                Err(RegistryError::NameTaken { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(RegistryError::NameTaken {
+            name: name.to_owned(),
+        })
+    }
+
     /// Releases a name. **Admin operation** (RCON `rename`).
     pub fn release_name(&mut self, name: &str) {
         if self.names.remove(name).is_some() {
@@ -321,6 +373,15 @@ impl KeyLookup for IdentityRegistry {
     fn identity_of(&self, key: &VerifyingKey) -> Option<PlayerUuid> {
         self.identity_of_key(key)
     }
+}
+
+/// Whether `candidate` is `name` followed by a space and a number — the
+/// shape [`IdentityRegistry::bind_name_or_next`] hands out.
+fn is_variant_of(candidate: &str, name: &str) -> bool {
+    candidate
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -442,6 +503,64 @@ mod tests {
             Err(RegistryError::NameTaken { .. })
         ));
         assert_eq!(registry.name_holder("Shared"), Some(alice));
+    }
+
+    #[test]
+    fn a_taken_name_binds_as_its_next_free_variant_and_sticks() {
+        // Two fresh installs called `player`: the second is `player 2`, a
+        // third `player 3`; each keeps its variant on reconnect, and the
+        // first keeps the plain name. Past the limit, refused as before.
+        let host = identity().uuid_as_root();
+        let guest = identity().uuid_as_root();
+        let third = identity().uuid_as_root();
+        let mut registry = IdentityRegistry::default();
+
+        assert_eq!(
+            registry
+                .bind_name_or_next("player", host, 99)
+                .expect("host"),
+            "player"
+        );
+        assert_eq!(
+            registry
+                .bind_name_or_next("player", guest, 99)
+                .expect("guest"),
+            "player 2"
+        );
+        assert_eq!(
+            registry
+                .bind_name_or_next("player", third, 99)
+                .expect("third"),
+            "player 3"
+        );
+        // Reconnecting with the plain name again: the same variant.
+        assert_eq!(
+            registry
+                .bind_name_or_next("player", guest, 99)
+                .expect("guest again"),
+            "player 2"
+        );
+        assert_eq!(
+            registry
+                .bind_name_or_next("player", host, 99)
+                .expect("host again"),
+            "player"
+        );
+        assert_eq!(registry.name_holder("player 2"), Some(guest));
+        // Nothing left to try: a refusal, as it always was.
+        let fourth = identity().uuid_as_root();
+        assert!(matches!(
+            registry.bind_name_or_next("player", fourth, 3),
+            Err(RegistryError::NameTaken { .. })
+        ));
+        // A new name releases the variant, as any rename does.
+        assert_eq!(
+            registry
+                .bind_name_or_next("Guest", guest, 99)
+                .expect("renamed"),
+            "Guest"
+        );
+        assert_eq!(registry.name_holder("player 2"), None);
     }
 
     #[test]
