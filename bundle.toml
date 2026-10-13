@@ -10,46 +10,46 @@
 id = "tiamat_default_craft"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Craft.git"
 path = "mods/tiamat_default_craft"
-commit = "5c7b92c2805761c3dce0818fb2ec85b8cf23815f"
+commit = "c56f9e2d6737320b6a99299ee4bdc7059bc0df29"
 
 [[mod]]
 id = "tiamat_default_life"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Life.git"
 path = "mods/tiamat_default_life"
-commit = "f52e538ab427ca12380b94b862e27358a41138a5"
+commit = "f911218e581b53858ec89106ca19a1cf0a995334"
 
 [[mod]]
 id = "tiamat_default_magic"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Magic.git"
 path = "mods/tiamat_default_magic"
-commit = "edc175866c831cb7360683c800d39b76a989abf2"
+commit = "ac38d60d0dc7af31529aea2d7e4f7d4aca331a08"
 
 [[mod]]
 id = "tiamat_default_progress"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Progress.git"
 path = "mods/tiamat_default_progress"
-commit = "c391fde0504f6dbeea147a31be863db0bed17456"
+commit = "1df022c3f256a54c4ec075c96e0da4a140e3a013"
 
 [[mod]]
 id = "tiamat_default_science"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Science.git"
 path = "mods/tiamat_default_science"
-commit = "ae1b71a9d95fd27e3bd97d4e10bc5c6bdc7d72d1"
+commit = "580def1656bf5fb0124906a2d36eede864646d94"
 
 [[mod]]
 id = "tiamat_default_ui"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_UI.git"
 path = "mods/tiamat_default_ui"
-commit = "8385296c344a6e2b447042790442ed56f755108d"
+commit = "5af89d7e8441395ec2edab6ea65dcb52d3fa0e5e"
 
 [[mod]]
 id = "tiamat_default_world"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_World.git"
 path = "mods/tiamat_default_world"
-commit = "793c76036100de18d85f4be5eadea55c3b80fdc7"
+commit = "37f95380dfe9caacb0baa96a79f50ff3b5aaea57"
 
 [[mod]]
 id = "tiamat_weather"
 repo = "https://github.com/IridesiumResearch/Tiamat_Default_Weather.git"
 path = "mods/tiamat_weather"
-commit = "604b8e30e6544cfa5031ee8f4c044caa98f19b14"
+commit = "3fae7750ae90384c9d1135f72e139574761de130"
