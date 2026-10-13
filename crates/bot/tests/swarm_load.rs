@@ -19,7 +19,14 @@
 //! ```console
 //! cargo test -p bot --test swarm_load --release -- --ignored --nocapture
 //! ```
+//!
+//! `SWARM_BOTS` and `SWARM_SECONDS` set the count and the length (twenty for
+//! sixty seconds by default; the nightly soak runs fifty for five minutes,
+//! which is the performance target's player count), and `SWARM_OUT` names a
+//! directory to write the tick table into as `table.txt`, so a nightly keeps
+//! it as an artefact.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,6 +56,14 @@ fn rss_kib() -> Option<u64> {
     None
 }
 
+/// An environment knob, or its default when unset or unparsable.
+fn knob<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 /// The reference mods, which register the tools and generate the terrain.
 fn reference_mods() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -60,8 +75,8 @@ fn reference_mods() -> PathBuf {
 #[test]
 #[ignore = "takes about a minute; CI runs it explicitly"]
 fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
-    const BOTS: u32 = 20;
-    const SECONDS: u64 = 60;
+    let bots: u32 = knob("SWARM_BOTS", 20);
+    let seconds: u64 = knob("SWARM_SECONDS", 60);
 
     let dir = std::env::temp_dir().join("tiamat-swarm-load");
     let _ = std::fs::remove_dir_all(&dir);
@@ -111,12 +126,12 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
 
     let results = runtime.block_on(async {
         let mut handles = Vec::new();
-        for index in 0..BOTS {
+        for index in 0..bots {
             handles.push(tokio::spawn(bot::wander(
                 addr,
                 format!("load{index}"),
                 index,
-                Duration::from_secs(SECONDS),
+                Duration::from_secs(seconds),
                 u64::from(index).wrapping_mul(0x9E37_79B9) | 1,
             )));
         }
@@ -138,27 +153,38 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
         &samples,
         control.over_budget_ticks(),
         control.dropped(),
-        BOTS,
-        SECONDS,
+        bots,
+        seconds,
     );
     let rss_after_load = rss_kib();
 
-    println!("{}", report.to_table());
-    println!("  bots healthy: {healthy}/{BOTS}");
+    let mut summary = report.to_table();
+    let _ = writeln!(summary, "  bots healthy: {healthy}/{bots}");
     // Which phase the worst tick spent itself on, so a nightly failure names a
     // cause rather than handing whoever reads it a bisect.
     if let Some(phases) = control.slowest_phases() {
-        println!("  the slowest tick: {phases}");
+        let _ = writeln!(summary, "  the slowest tick: {phases}");
     }
     for failure in &failures {
-        println!("  failure: {failure}");
+        let _ = writeln!(summary, "  failure: {failure}");
     }
     if let (Some(before), Some(after)) = (rss_after_warmup, rss_after_load) {
-        println!("  RSS: {before} KiB after warmup, {after} KiB after load");
+        let _ = writeln!(
+            summary,
+            "  RSS: {before} KiB after warmup, {after} KiB after load"
+        );
+    }
+    println!("{summary}");
+    // Written before the assertions, so a failed gate still leaves the table
+    // that says why.
+    if let Some(out) = std::env::var_os("SWARM_OUT") {
+        let out = PathBuf::from(out);
+        std::fs::create_dir_all(&out).expect("out dir");
+        std::fs::write(out.join("table.txt"), &summary).expect("table");
     }
 
     assert_eq!(
-        healthy, BOTS,
+        healthy, bots,
         "every bot should finish; failures: {failures:?}"
     );
     assert!(
@@ -189,7 +215,7 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     let ticks = report.ticks.max(1) as u64;
     assert!(
         report.over_budget * 10 < ticks,
-        "{} of {ticks} ticks ran over the {TICK_DURATION:?} budget under {BOTS} bots. A \
+        "{} of {ticks} ticks ran over the {TICK_DURATION:?} budget under {bots} bots. A \
          tenth of a run over budget is a server that cannot keep up, not a noisy runner. \
          Mean was {} and p99 {}.",
         report.over_budget,

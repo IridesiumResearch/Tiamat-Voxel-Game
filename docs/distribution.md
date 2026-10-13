@@ -257,7 +257,10 @@ see `docs/licensing/mod-repo-checklist.md`); the packager refuses one that
 does not, loudly, because an archive quietly missing the notice for the mod
 that makes the game a game is worse than no archive. `--allow-missing-mods`,
 for a bare test build, leaves such a mod out rather than shipping it without
-its notice: the mod goes, not the rule.
+its notice: the mod goes, not the rule. The same helper serves a checkout
+with no repositories beside it: `scripts/fetch-mods.sh` puts every pinned mod
+into `game/` at its commit, leaving any symlink alone, which is how the
+nightly soak flies over the mods a release would ship.
 
 ## 7. Licences, and why this section is not optional
 

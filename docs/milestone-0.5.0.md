@@ -46,7 +46,7 @@ is the mod agents in their own repositories.
 |---|---|---|
 | T1 The badge queue is published once per tick, so a network pass never reads it mid-tick (`show_over` has flaked four times on macOS; the race is real) — **landed 2a7c1db7** | engine | small |
 | T2 `placement::chiselled_spares` is understood and fixed, not retried (flaked on Windows twice) — not reproduced on one starved core (10 of 10 passed); the stall now reports every notice and the last messages, so the next CI failure names its cause | engine | small |
-| T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts | engine | small |
+| T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts — **landed 2026-10-13** (`.github/workflows/nightly.yml`: the fen soak over the mods at `bundle.toml`'s commits via `scripts/fetch-mods.sh`, the swarm at twenty bots and at E1's fifty for five minutes, every table an artefact); the first nightly after it is the proof | engine | small |
 | T4 The plan-stamp stall: a plan holding a partial cell of a `whole` material must not wait for ever (`plans.rs`, found landing W35) — **landed fa5ddd51** | engine | small |
 | T5 The two unsigned mod-side commits on main are the designer's call: rewrite with sign-off or document the exception once | designer | tiny |
 | T6 Invisible walls: act on the first `client.log` that shows one; the reload, the held edits and both logs landed in 0.4.1 | engine, as reports come | unknown |

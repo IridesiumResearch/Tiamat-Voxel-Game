@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Iridesium
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# The slow checks: benchmarks and sustained load.
+# The slow checks: benchmarks, sustained load, and the two soaks.
 #
 # Separate from `ci.yml` on purpose. These take minutes and are noisy on shared
 # runners, and a gate that makes every push slow is a gate people route around.
@@ -49,6 +49,7 @@ jobs:
   swarm-load:
     name: swarm load (20 bots)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -58,7 +59,93 @@ jobs:
       # rather than the engine. `--ignored` because the test opts out of the
       # fast loop a developer runs twenty times an hour.
       - name: Twenty bots for sixty seconds
+        env:
+          SWARM_OUT: target/swarm
         run: cargo test -p bot --test swarm_load --release -- --ignored --nocapture
+
+      # The tick table, kept whether or not the gate passed: a red run is
+      # exactly when it is worth reading.
+      - name: Keep the tick table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-load-${{ github.sha }}
+          path: target/swarm/
+          if-no-files-found: warn
+
+  # Milestone 0.5.0, T3: the two soaks, in release, with their tables kept.
+  #
+  # The fast CI loop proves nothing about a server under its stated load for
+  # longer than a minute, and the fen soak that found the relight cost
+  # (docs/performance-state-2026-10-12.md) was run by hand on one machine. A
+  # shared runner is not the reference machine — the numbers that decide the
+  # milestone's exit criteria are read there — but a soak that starts failing
+  # or slowing here is a regression worth reading before it reaches one.
+  swarm-soak:
+    name: swarm soak (50 bots, five minutes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The performance target's player count (docs/performance-targets.md:
+      # fifty players, a 50 ms tick) at the swarm's own workload — walking,
+      # digging — for five minutes. The gates are the test's: a tenth of the
+      # ticks over budget, one stall at most, and bounded memory.
+      - name: Fifty bots for five minutes
+        env:
+          SWARM_BOTS: 50
+          SWARM_SECONDS: 300
+          SWARM_OUT: target/swarm
+        run: cargo test -p bot --test swarm_load --release -- --ignored --nocapture
+
+      - name: Keep the tick table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-soak-${{ github.sha }}
+          path: target/swarm/
+          if-no-files-found: warn
+
+  fen-soak:
+    name: fen soak (one player over the default mods)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The default mods are separate repositories, and a runner has none
+      # beside this checkout. Each is taken at the commit bundle.toml pins —
+      # what a release would ship — by the same helper the packaging uses.
+      - name: The default mods at their pinned commits
+        run: bash scripts/fetch-mods.sh
+
+      # One player flying over the World mod's fen for four minutes, then
+      # standing for two: the workload that put nine tenths of a tick in
+      # relighting before the light thread. Nothing is asserted; the table is
+      # the verdict, and it is kept below for a person to read.
+      - name: Fly over the fen
+        env:
+          FEN_OUT: target/fen
+        run: cargo test -p bot --test fen_soak --release -- --ignored --nocapture
+
+      # The soak passes quietly when a mod it needs is not in game/, which on
+      # a developer's machine is the right thing and here would be a green
+      # job that flew nothing. The table is the proof that it flew.
+      - name: The soak flew
+        run: test -s target/fen/table.txt && cat target/fen/table.txt
+
+      - name: Keep the tick table, the samples and the server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fen-soak-${{ github.sha }}
+          path: target/fen/
+          if-no-files-found: error
 
   lamp-load:
     name: lamp churn (20 bots)

@@ -36,9 +36,11 @@
 //!
 //! It runs for about seven minutes, and it needs the default mods, which are
 //! separate repositories: symlink `tiamat_default_world`, `_life`, `_ui`,
-//! `_craft`, `_progress` and `tiamat_weather` into `game/` first. With any
-//! enabled mod missing it names them and passes: the server would refuse to
-//! start, and without the world mod there is no fen to fly over.
+//! `_craft`, `_progress` and `tiamat_weather` into `game/` first, or run
+//! `scripts/fetch-mods.sh`, which takes each at the commit `bundle.toml` pins
+//! (what the nightly does). With any enabled mod missing it names them and
+//! passes: the server would refuse to start, and without the world mod there
+//! is no fen to fly over.
 //!
 //! ```console
 //! FEN_OUT=/tmp/fen cargo test --release -p bot --test fen_soak -- --ignored --nocapture
