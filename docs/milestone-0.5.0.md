@@ -110,3 +110,22 @@ compatibility window (the exact-version handshake stays).
 5. V1–V3, then the tag.
 
 This file is updated as items land, with the commit beside each.
+
+## Where it stands, 2026-10-13 (evening)
+
+Landed in the engine: T1, T2 (instrumented), T3, T4, S3, S4, P1, P2, A1,
+A2, A3's script. What is left, by who holds it:
+
+- **Designer.** T5 (the two unsigned mod-side commits). S1 and S2 (the
+  certificates; then set the repository variable `SIGNING_REQUIRED` to
+  `true` after the first signed release). The E2 reading on the reference
+  card with the overlay, which decides P3 and P5. V1, V2, V3, which decide
+  E5, E6, E7. The nightly's swarm soak is E1's trend; E1's own reading is
+  `SWARM_BOTS=50 SWARM_SECONDS=300 cargo test --release -p bot --test
+  swarm_load -- --ignored --nocapture` on the reference machine.
+- **Mods.** A3's workflows (`docs/mod-conformance.md`), A4's re-vendor of
+  `api/`, P4 in World — asked on every sheet, dated 2026-10-13. E8 holds
+  when every default mod's CI runs the conformance workflow.
+- **Engine, conditional.** P3 if E2 fails on hills and caves; P5 if E2 needs
+  it; T6 on the first `client.log` that shows a wall; S5 and the release
+  notes at the tag. E3 is read off the Actions history before the tag.
