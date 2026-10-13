@@ -26,6 +26,7 @@
 //! neighbours draw.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use tiamat_core::fluid::FluidLayer;
 use tiamat_core::light::{Light, LightLayer};
@@ -104,7 +105,7 @@ pub struct Due {
 /// The client's chunks, and which of them need remeshing.
 #[derive(Debug, Default)]
 pub struct ChunkStore {
-    chunks: BTreeMap<ChunkPos, Chunk>,
+    chunks: BTreeMap<ChunkPos, Arc<Chunk>>,
     /// Each chunk COLUMN's biome colour, keyed on `(x, z)`.
     ///
     /// **Per column, not per chunk**, because a biome is a fact about a place
@@ -142,13 +143,13 @@ pub struct ChunkStore {
     /// arrive independently and either can outlive the other by a frame: light
     /// is its own message (protocol v8), and a lamp placed next door relights a
     /// chunk whose blocks did not change.
-    light: BTreeMap<ChunkPos, LightLayer>,
+    light: BTreeMap<ChunkPos, Arc<LightLayer>>,
     /// Fluid, for the chunks that have any.
     ///
     /// Absent rather than empty for a dry chunk, which is almost all of them:
     /// the map holds what there is milk in, so a world with one pond has one
     /// entry however far anybody walks.
-    fluid: BTreeMap<ChunkPos, FluidLayer>,
+    fluid: BTreeMap<ChunkPos, Arc<FluidLayer>>,
     /// What each registered fluid is drawn as, indexed by fluid id.
     ///
     /// Zero means "no fluid registered under that id", which is both the
@@ -177,6 +178,11 @@ pub struct ChunkStore {
     /// copy would poke through the fine one. Every path that adds to one takes
     /// the position out of the other.
     summaries: BTreeMap<ChunkPos, tiamat_core::lod::Summary>,
+    /// A count per chunk, bumped whenever it is marked for a remesh — its
+    /// own content, a neighbour's, its light, its fluid. What tells a mesh
+    /// made off the frame thread whether the chunk it was made from is still
+    /// the chunk (milestone 0.5.0, P2; see `meshwork`).
+    generation: BTreeMap<ChunkPos, u64>,
     /// Summaries whose mesh needs rebuilding.
     ///
     /// Its own set rather than `dirty`, because the two are rebuilt by
@@ -214,7 +220,7 @@ impl ChunkStore {
     /// The chunk at a position, if it is held.
     #[must_use]
     pub fn get(&self, pos: ChunkPos) -> Option<&Chunk> {
-        self.chunks.get(&pos)
+        self.chunks.get(&pos).map(Arc::as_ref)
     }
 
     /// Records one chunk column's biome colour.
@@ -253,7 +259,7 @@ impl ChunkStore {
     /// alongside the chunk rather than after it, and the two can arrive in
     /// either order.
     pub fn set_light(&mut self, pos: ChunkPos, layer: LightLayer) {
-        self.light.insert(pos, layer);
+        self.light.insert(pos, Arc::new(layer));
         self.mark(pos);
         // **And its neighbours**, because smooth lighting reads across the
         // boundary: a face in the next chunk takes part of its corner light
@@ -350,20 +356,53 @@ impl ChunkStore {
     /// drawn as nothing rather than guessed at.
     #[must_use]
     pub fn fluid_fill(&self, value: tiamat_core::fluid::Fluid) -> Option<(u16, u8)> {
-        if value.is_empty() {
-            return None;
+        fluid_fill_in(&self.fluid_materials, value)
+    }
+
+    /// The store's generation for a chunk — see [`ChunkStore::mesh_input`].
+    #[must_use]
+    pub fn generation(&self, pos: ChunkPos) -> u64 {
+        self.generation.get(&pos).copied().unwrap_or(0)
+    }
+
+    /// Everything the mesher reads for one chunk, taken out of the store so
+    /// a worker can mesh it while the frame goes on (milestone 0.5.0, P2).
+    ///
+    /// Pointers, not copies: the chunk and its twenty-six neighbours, their
+    /// light and their fluid, as they are now. An edit on the frame thread
+    /// writes through copy-on-write, so the snapshot keeps what it was taken
+    /// from and the store's generation says the mesh is stale when it lands.
+    /// `None` for a chunk the store does not hold.
+    #[must_use]
+    pub fn mesh_input(&self, pos: ChunkPos) -> Option<MeshInput> {
+        let chunk = Arc::clone(self.chunks.get(&pos)?);
+        let mut around: Vec<Option<Arc<Chunk>>> = Vec::with_capacity(27);
+        let mut light: Vec<Option<Arc<LightLayer>>> = Vec::with_capacity(27);
+        let mut fluid: Vec<Option<Arc<FluidLayer>>> = Vec::with_capacity(27);
+        let mut summarised = [false; 6];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let at = ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+                    around.push(self.chunks.get(&at).cloned());
+                    light.push(self.light.get(&at).cloned());
+                    fluid.push(self.fluid.get(&at).cloned());
+                }
+            }
         }
-        let slot = usize::from(value.fluid().0);
-        let material = *self.fluid_materials.get(slot)?;
-        if material == 0 {
-            return None;
+        for (index, (dx, dy, dz)) in NEIGHBOUR_OFFSETS.iter().enumerate() {
+            let at = ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+            summarised[index] = !self.chunks.contains_key(&at) && self.summaries.contains_key(&at);
         }
-        // **The volume IS the depth**, in cells of 27 (Sub-Node Contract
-        // §4.1). The server used to send a per-level lookup table so the two
-        // ends could not disagree; the conversion it existed for is an identity
-        // now, and a table beside the value would be a second source of truth.
-        let depth = u8::try_from(value.volume()).unwrap_or(u8::MAX);
-        (depth > 0).then_some((material, depth))
+        Some(MeshInput {
+            pos,
+            chunk,
+            around,
+            light,
+            fluid,
+            summarised,
+            fluid_materials: self.fluid_materials,
+        })
     }
 
     /// Takes a chunk's fluid, as a whole layer.
@@ -381,7 +420,7 @@ impl ChunkStore {
         if layer.is_empty() {
             self.fluid.remove(&pos);
         } else {
-            self.fluid.insert(pos, layer);
+            self.fluid.insert(pos, Arc::new(layer));
         }
         self.mark(pos);
         self.mark_neighbours(pos);
@@ -630,7 +669,7 @@ impl ChunkStore {
         if self.summaries.remove(&pos).is_some() {
             self.stale.insert(pos);
         }
-        self.chunks.insert(pos, chunk);
+        self.chunks.insert(pos, Arc::new(chunk));
         self.mark(pos);
         self.mark_neighbours(pos);
     }
@@ -815,7 +854,7 @@ impl ChunkStore {
 
     fn write_block(&mut self, pos: BlockPos, value: BlockValue) -> bool {
         let chunk_pos = pos.chunk();
-        let Some(chunk) = self.chunks.get_mut(&chunk_pos) else {
+        let Some(chunk) = self.chunks.get_mut(&chunk_pos).map(Arc::make_mut) else {
             return false;
         };
         if chunk.set_block(pos, value).is_err() {
@@ -836,7 +875,7 @@ impl ChunkStore {
 
     fn set_subnode(&mut self, pos: SubNodePos, material: MaterialId) -> bool {
         let chunk_pos = pos.chunk();
-        let Some(chunk) = self.chunks.get_mut(&chunk_pos) else {
+        let Some(chunk) = self.chunks.get_mut(&chunk_pos).map(Arc::make_mut) else {
             return false;
         };
         if chunk.set_subnode(pos, material).is_err() {
@@ -890,6 +929,9 @@ impl ChunkStore {
     /// Held is checked on the way out rather than here: a chunk can be marked
     /// and then unloaded before the remesh runs.
     fn mark(&mut self, pos: ChunkPos) {
+        // Every reason to remesh is a new generation, so a mesh in flight
+        // for the old one is known to be stale when it lands.
+        *self.generation.entry(pos).or_insert(0) += 1;
         if self.urgent_marks {
             self.urgent.insert(pos);
         } else {
@@ -913,7 +955,7 @@ impl ChunkStore {
         let mut summarised = [false; 6];
         for (index, (dx, dy, dz)) in NEIGHBOUR_OFFSETS.iter().enumerate() {
             let at = ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
-            sides[index] = self.chunks.get(&at);
+            sides[index] = self.chunks.get(&at).map(Arc::as_ref);
             // **A side past the detail radius is never going to arrive in
             // full.** It holds a summary and the horizon pass draws it, so
             // walling against it would hide the terrain it is drawing. See
@@ -1025,7 +1067,7 @@ impl tiamat_core::phys::ChunkLookup for ChunkStore {
 /// approximating it.
 impl tiamat_core::phys::FluidLookup for ChunkStore {
     fn fluid_layer(&self, pos: ChunkPos) -> Option<&FluidLayer> {
-        self.fluid.get(&pos)
+        self.fluid.get(&pos).map(Arc::as_ref)
     }
 }
 
@@ -1037,6 +1079,152 @@ impl tiamat_core::phys::FluidLookup for ChunkStore {
 pub struct ChunkLight<'a> {
     store: &'a ChunkStore,
     pos: ChunkPos,
+}
+
+/// What a fluid value fills a block with: the material it is drawn as and
+/// its depth in cells, or nothing for an empty value or a fluid the table
+/// does not draw.
+///
+/// **The volume IS the depth**, in cells of 27 (Sub-Node Contract §4.1).
+/// The server used to send a per-level lookup table so the two ends could
+/// not disagree; the conversion it existed for is an identity now, and a
+/// table beside the value would be a second source of truth.
+fn fluid_fill_in(
+    materials: &[u16; tiamat_core::fluid::MAX_FLUIDS + 1],
+    value: tiamat_core::fluid::Fluid,
+) -> Option<(u16, u8)> {
+    if value.is_empty() {
+        return None;
+    }
+    let slot = usize::from(value.fluid().0);
+    let material = *materials.get(slot)?;
+    if material == 0 {
+        return None;
+    }
+    let depth = u8::try_from(value.volume()).unwrap_or(u8::MAX);
+    (depth > 0).then_some((material, depth))
+}
+
+/// One chunk and everything the mesher reads around it, owned, so a mesh
+/// worker needs nothing from the store — see [`ChunkStore::mesh_input`].
+///
+/// Reads through it answer exactly as [`ChunkLight`] and [`ChunkFluid`] do
+/// from the store, including for the absent: a neighbour not held reads as
+/// dark and as solid, as it does on the frame thread.
+pub struct MeshInput {
+    /// Which chunk.
+    pub pos: ChunkPos,
+    /// The chunk itself.
+    pub chunk: Arc<Chunk>,
+    /// The 3×3×3 neighbourhood, the chunk in the middle, indexed
+    /// `(dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)`.
+    around: Vec<Option<Arc<Chunk>>>,
+    /// Their light, the same way.
+    light: Vec<Option<Arc<LightLayer>>>,
+    /// Their fluid, the same way.
+    fluid: Vec<Option<Arc<FluidLayer>>>,
+    /// Which face neighbours are held as summaries — see
+    /// [`Neighbours::summarised`].
+    summarised: [bool; 6],
+    /// The fluid table, for what a fluid is drawn as.
+    fluid_materials: [u16; tiamat_core::fluid::MAX_FLUIDS + 1],
+}
+
+impl MeshInput {
+    /// The neighbourhood index of the chunk holding a block at chunk-local
+    /// coordinates that may run one chunk past the edges, or `None` further
+    /// out than the snapshot reaches.
+    fn slot(&self, x: i32, y: i32, z: i32) -> Option<(usize, tiamat_core::BlockPos)> {
+        let span = tiamat_core::CHUNK_BLOCKS as i32;
+        let (dx, dy, dz) = (x.div_euclid(span), y.div_euclid(span), z.div_euclid(span));
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return None;
+        }
+        let index = usize::try_from((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)).ok()?;
+        let world = tiamat_core::BlockPos::new(
+            self.pos.x * span + x,
+            self.pos.y * span + y,
+            self.pos.z * span + z,
+        );
+        Some((index, world))
+    }
+
+    /// The face neighbours, borrowed from the snapshot, as the mesher takes
+    /// them.
+    #[must_use]
+    pub fn neighbours(&self) -> Neighbours<'_> {
+        let mut sides = [None; 6];
+        for (index, (dx, dy, dz)) in NEIGHBOUR_OFFSETS.iter().enumerate() {
+            let slot = usize::try_from((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)).unwrap_or(13);
+            sides[index] = self.around.get(slot).and_then(|chunk| chunk.as_deref());
+        }
+        Neighbours {
+            sides,
+            summarised: self.summarised,
+        }
+    }
+
+    fn fluid_at(&self, x: i32, y: i32, z: i32) -> tiamat_core::fluid::Fluid {
+        let Some((slot, world)) = self.slot(x, y, z) else {
+            return tiamat_core::fluid::Fluid::EMPTY;
+        };
+        self.fluid
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map_or(tiamat_core::fluid::Fluid::EMPTY, |layer| {
+                layer.get(world.local())
+            })
+    }
+}
+
+impl crate::shade::BlockLight for MeshInput {
+    fn at(&self, x: i32, y: i32, z: i32) -> Light {
+        let Some((slot, world)) = self.slot(x, y, z) else {
+            return Light::DARK;
+        };
+        self.light
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map_or(Light::DARK, |layer| layer.get(world.local()))
+    }
+}
+
+impl crate::mesher::FluidFill for MeshInput {
+    fn any(&self) -> bool {
+        // The chunk and its six face neighbours, as `ChunkFluid::any`.
+        let faces = [13usize, 4, 22, 10, 16, 12, 14];
+        faces.into_iter().any(|slot| {
+            self.fluid
+                .get(slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|layer| !layer.is_empty())
+        })
+    }
+
+    fn solid(&self, x: i32, y: i32, z: i32) -> bool {
+        let Some((slot, world)) = self.slot(x, y, z) else {
+            return true;
+        };
+        self.around
+            .get(slot)
+            .and_then(Option::as_ref)
+            .is_none_or(|chunk| {
+                chunk
+                    .get_block(world)
+                    .is_some_and(|block| !block.is_empty())
+            })
+    }
+
+    fn fill(&self, x: i32, y: i32, z: i32) -> Option<(u16, u8)> {
+        let (material, depth) = fluid_fill_in(&self.fluid_materials, self.fluid_at(x, y, z))?;
+        if !self.fluid_at(x, y + 1, z).is_empty() {
+            return Some((
+                material,
+                u8::try_from(tiamat_core::UNITS_PER_BLOCK).unwrap_or(u8::MAX),
+            ));
+        }
+        Some((material, depth))
+    }
 }
 
 impl crate::shade::BlockLight for ChunkLight<'_> {

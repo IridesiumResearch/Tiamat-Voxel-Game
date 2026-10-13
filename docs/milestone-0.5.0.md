@@ -66,7 +66,7 @@ is the mod agents in their own repositories.
 | item | who | size |
 |---|---|---|
 | P1 Relight off the tick: a light thread relights every arrival and edit from a per-tick snapshot of the chunks, in tick order; the tick records events and hands them over. Measured before at nine tenths of a sprinting player's tick — **landed 2026-10-13**: the fen soak's flying tick fell from 12–13 ms to 3.7–3.9 ms, the thread kept up (see `docs/performance-state-2026-10-12.md`, addendum) | engine | large |
-| P2 Meshing off the frame thread: a mesh job takes a snapshot of the chunk, its six neighbours and its light, runs on a worker, and the frame thread only uploads. The streaming bottleneck and the flying frame pacing | engine | large |
+| P2 Meshing off the frame thread: a mesh job takes a snapshot of the chunk, its neighbours, their light and fluid, runs on a worker pool, and the frame thread only snapshots and uploads; an edit's chunks still mesh on the frame so no hole is ever shown — **landed 2026-10-13** (`crates/client/src/meshwork.rs`; a test holds a worker's mesh equal to the frame's). E2's frame pacing on the designer's card is the proof | engine | large |
 | P3 Chunk occlusion: a chunk enclosed by its neighbours' solid faces, or under the column cover, is not drawn for a camera above ground | engine | medium |
 | P4 The World mod's chunk at 50–100 ms: fewer octaves, smooth detail where sampled is not seen | mods (World) | medium |
 | P5 Beautiful's defaults, if E2 needs them: 1024² cascades, two instead of three | engine, designer's judgement on the look | small |

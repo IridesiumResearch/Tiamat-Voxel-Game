@@ -148,6 +148,13 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// Chunks remeshed per frame. See the module docs.
 pub const REMESH_BUDGET: usize = 4;
 
+/// How many streaming chunks a frame hands the mesh workers at most
+/// (milestone 0.5.0, P2). A snapshot costs the frame a few dozen pointer
+/// clones, so the bound is about the queue, not the frame: more than the
+/// workers can take up before the camera moves on would mesh far chunks
+/// first.
+pub const MESH_SUBMISSIONS_PER_FRAME: usize = 16;
+
 /// How long a frame may spend remeshing before it stops and finishes next
 /// frame.
 ///
@@ -544,20 +551,6 @@ const fn flight_line(may_fly: bool, flying: bool) -> &'static str {
         (true, false) => "  · not flying (N)",
         (false, _) => "",
     }
-}
-
-/// A chunk's mesh, part-built, waiting for the next frame.
-///
-/// **What makes the remesh budget a budget.** `REMESH_TIME_BUDGET` is checked
-/// between chunks, so before this it could stop the client starting another
-/// chunk and could do nothing about the one already running — and a single lit
-/// chiselled chunk costs 2.96 ms on a developer machine, over the whole budget
-/// by itself. See `mesher::MeshJob`.
-struct InFlight {
-    /// Which chunk, so a later edit to it can be noticed.
-    pos: ChunkPos,
-    /// The work so far.
-    job: mesher::MeshJob,
 }
 
 /// Where one frame's time went, in milliseconds.
@@ -1323,7 +1316,7 @@ pub struct App {
     /// Charter rule 14 lives in `crate::fonts`: a font file is a parser running
     /// on bytes a server chose.
     pub fonts: crate::fonts::Fonts,
-    transparent: mesher::Sight,
+    transparent: std::sync::Arc<mesher::Sight>,
     /// The whole and model materials: aimed at, a whole one outlines and locks
     /// the dig onto the block whatever the tool's brush (Contract §7.5, §8.6).
     block_models: BlockModels,
@@ -1348,7 +1341,10 @@ pub struct App {
     /// begun until this one is finished. Holding several would multiply the
     /// memory a snapshot costs (a `SubNodeGrid` is about 280 KiB) to buy
     /// nothing — the frame has one budget however many jobs share it.
-    meshing: Option<InFlight>,
+    /// The mesh workers, and which chunks are on them (milestone 0.5.0, P2).
+    mesh_pool: crate::meshwork::MeshPool,
+    /// Chunks with a job on the workers, by the generation it was taken at.
+    in_flight: BTreeMap<ChunkPos, u64>,
     /// The locally predicted body, once the world has been joined.
     ///
     /// `None` before the join, and until then the camera free-flies — there is
@@ -1530,14 +1526,15 @@ impl App {
             step_sounds: std::collections::BTreeMap::new(),
             hosting: None,
             seed: None,
-            transparent: mesher::Sight::default(),
+            transparent: std::sync::Arc::new(mesher::Sight::default()),
             block_models: BlockModels::default(),
             icon_art: IconArt::default(),
             passable: Vec::new(),
             friction: Vec::new(),
             pictures: crate::pictures::Pictures::new(),
             fonts: crate::fonts::Fonts::new(),
-            meshing: None,
+            mesh_pool: crate::meshwork::MeshPool::new(crate::meshwork::MeshPool::default_workers()),
+            in_flight: BTreeMap::new(),
             may_fly: false,
             abilities: tiamat_core::phys::Abilities::DEFAULT,
             flying: false,
@@ -2754,7 +2751,7 @@ impl App {
         // decided when drawing — transparency changes which faces exist at all
         // (Contract §8.1) — so this has to be settled before anything meshes.
         // It arrives with the material table, which is before the join.
-        self.transparent = mesher::Sight {
+        self.transparent = std::sync::Arc::new(mesher::Sight {
             glass: table
                 .iter()
                 .filter(|entry| entry.transparent)
@@ -2794,7 +2791,7 @@ impl App {
                 .filter(|entry| entry.flicker.is_some())
                 .map(|entry| entry.id)
                 .collect(),
-        };
+        });
         // A model material is whole by implication (§8.6).
         self.block_models.whole = table
             .iter()
@@ -5127,187 +5124,107 @@ impl App {
         true
     }
 
-    /// Steps one chunk's mesh until it is finished or the frame is out of time.
-    ///
-    /// `Ok` is a finished mesh; `Err` gives the job back to be parked for the
-    /// next frame. A `None` deadline means "finish it now, whatever it costs",
-    /// which is what an urgent chunk gets — see the call site.
-    ///
-    /// Associated rather than a method because the caller is holding a borrow
-    /// of `self.store` for the light while this runs.
-    fn drive(
-        flight: InFlight,
-        light: &impl crate::shade::BlockLight,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(ChunkPos, mesher::Mesh), Box<InFlight>> {
-        let InFlight { pos, mut job } = flight;
-        loop {
-            if job.step(light) {
-                return Ok((pos, job.finish(light)));
-            }
-            // Checked AFTER a step, so every visit does some work: a deadline
-            // already past when the job arrives would otherwise park it again
-            // untouched, for ever, and the chunk would never be drawn.
-            if let Some(started) = deadline
-                && started.elapsed() >= REMESH_TIME_BUDGET
-            {
-                // Boxed: the job owns a `SubNodeGrid`, so an unboxed `Err` would
-                // make every `Ok` return carry its size too.
-                return Err(Box::new(InFlight { pos, job }));
-            }
-        }
+    /// Runs a job to the end, for a chunk that must be drawn this frame.
+    fn drive(job: mesher::MeshJob, light: &impl crate::shade::BlockLight) -> mesher::Mesh {
+        crate::meshwork::drive(job, light)
     }
 
-    /// Remeshes chunks nearest the camera, within [`REMESH_BUDGET`] and
-    /// [`REMESH_TIME_BUDGET`].
-    ///
-    /// Returns how many were rebuilt.
+    /// Remeshes what is due: an edit's chunks here and now, whatever they
+    /// cost, and the streaming chunks on the mesh workers, with what the
+    /// workers finished since last frame uploaded first (milestone 0.5.0,
+    /// P2; see `meshwork`). Returns how many meshes reached the renderer.
     pub fn remesh(&mut self) -> usize {
-        // The store's coordinates, not the camera's, or a displaced camera
-        // makes "nearest first" order the queue from 50,000 blocks away.
-        let centre = self.camera_chunk();
-        let due = self.store.take_dirty(centre, REMESH_BUDGET);
-        if due.positions.is_empty() {
-            return 0;
-        }
-
-        // Meshing and upload are timed SEPARATELY, because they are different
-        // problems with different fixes and one number could not tell them
-        // apart. That ambiguity cost a whole round trip: a 15.6 ms remesh was
-        // read as mesh upload on the strength of how little geometry was
-        // resident, and the split then showed it was 15.1 ms of meshing and
-        // 0.1 ms of upload. Mesh cost scales with the CELLS SCANNED — all
-        // 110,592 of them, every time — and not at all with how small the
-        // resulting mesh is, which is exactly the inference that went wrong.
         let started = std::time::Instant::now();
         let mut meshing = std::time::Duration::ZERO;
         let mut rebuilt = 0;
 
-        // **A job the last frame ran out of time on is finished first.**
-        //
-        // It is not in `due` — the requeue puts back the chunks AFTER it, not
-        // it — so nothing else would ever pick it up, and without this the
-        // chunk that was hardest to mesh is the one that never gets drawn.
-        //
-        // Unless its chunk is due again, in which case the snapshot it holds is
-        // of a world that has moved on: an edit landed while it was parked, and
-        // finishing it would draw the block that was just dug. Dropped, and the
-        // loop below builds it afresh.
-        if let Some(flight) = self.meshing.take()
-            && !due.positions.contains(&flight.pos)
-        {
-            let mesh_started = std::time::Instant::now();
-            let outcome = if self.config.lighting_mode.uses_propagated_light() {
-                let light = self.store.light_for(flight.pos);
-                Self::drive(flight, &light, Some(started))
-            } else {
-                Self::drive(flight, &FLAT_DAYLIGHT, Some(started))
-            };
-            meshing += mesh_started.elapsed();
-            match outcome {
-                Ok((at, mesh)) => {
-                    self.upload_chunk(at, mesh);
-                    rebuilt += 1;
-                }
-                // Still not done. Put back everything this frame was going to
-                // do — none of it has been started — and try again next frame.
-                Err(parked) => {
-                    self.meshing = Some(*parked);
-                    self.store.requeue(&due.positions);
-                    self.pacing.remesh(
-                        started.elapsed().as_secs_f32() * 1000.0,
-                        meshing.as_secs_f32() * 1000.0,
-                        0,
-                    );
-                    return 0;
-                }
+        // **What the workers finished.** A result for a chunk the store has
+        // marked since, or no longer holds, is dropped: the chunk is dirty
+        // again and a fresh job follows, or it is gone.
+        for done in self.mesh_pool.drain() {
+            if self.in_flight.get(&done.pos) == Some(&done.generation) {
+                self.in_flight.remove(&done.pos);
             }
+            if self.store.generation(done.pos) != done.generation
+                || self.store.get(done.pos).is_none()
+            {
+                continue;
+            }
+            self.upload_chunk(done.pos, done.mesh);
+            rebuilt += 1;
         }
 
+        // The store's coordinates, not the camera's, or a displaced camera
+        // makes "nearest first" order the queue from 50,000 blocks away.
+        let centre = self.camera_chunk();
+        let due = self.store.take_dirty(centre, MESH_SUBMISSIONS_PER_FRAME);
+        if due.positions.is_empty() {
+            self.pacing
+                .remesh(started.elapsed().as_secs_f32() * 1000.0, 0.0, rebuilt);
+            return rebuilt;
+        }
+        // **Every mode meshes against the real light, mode 1 included.** A
+        // constant would merge faces across every shadow edge and leave the
+        // mode unable to tell a cave from a field. See `LightingMode::Simple`.
+        let flat = !self.config.lighting_mode.uses_propagated_light();
+
         for (index, pos) in due.positions.iter().enumerate() {
-            let Some(chunk) = self.store.get(*pos) else {
+            if index < due.urgent {
+                // **An urgent chunk is finished here, whatever it costs.**
+                // Those are what one frame's edits touched, and a chunk drawn
+                // without the neighbour whose face its edit exposed is a hole
+                // through the world. A worker would show that hole for the
+                // frame or two the job took.
+                let mesh_started = std::time::Instant::now();
+                let mesh = {
+                    let Some(chunk) = self.store.get(*pos) else {
+                        continue;
+                    };
+                    let neighbours = self.store.neighbours(*pos);
+                    let fluid = self.store.fluid_for(*pos);
+                    let light = self.store.light_for(*pos);
+                    match mesher::MeshJob::start(
+                        chunk,
+                        &neighbours,
+                        ABSENT_POLICY,
+                        &fluid,
+                        self.transparent.as_ref(),
+                    ) {
+                        None => mesher::Mesh::default(),
+                        Some(job) if flat => Self::drive(job, &FLAT_DAYLIGHT),
+                        Some(job) => Self::drive(job, &light),
+                    }
+                };
+                meshing += mesh_started.elapsed();
+                // Whatever a worker still owes this chunk is older than this.
+                self.in_flight.remove(pos);
+                self.upload_chunk(*pos, mesh);
+                rebuilt += 1;
+                continue;
+            }
+            // **Streaming chunks go to the workers**, nearest first, as many
+            // as the pool can take up before the camera moves on; the rest
+            // wait in the dirty set where the next frame orders them again.
+            if self.mesh_pool.backlog() >= self.mesh_pool.capacity() {
+                self.store.requeue(&due.positions[index..]);
+                break;
+            }
+            let generation = self.store.generation(*pos);
+            let Some(input) = self.store.mesh_input(*pos) else {
                 continue;
             };
-            let neighbours = self.store.neighbours(*pos);
-
-            let mesh_started = std::time::Instant::now();
-            // **Every mode meshes against the real light now, mode 1 included.**
-            //
-            // It used to take a flat daylight constant. That was not a shortcut
-            // in the shader's sense — the mesher may only merge two faces whose
-            // corner light agrees, so real light splits quads along every shadow
-            // edge, and a constant put the merge rate and the vertex count back
-            // exactly where Task 08 left them.
-            //
-            // What it also did was leave mode 1 unable to tell a cave from a
-            // field, because "am I underground" is a question only the stored
-            // sunlight answers. There is no cheaper way to ask it. See
-            // `LightingMode::Simple`.
-            let fluid = self.store.fluid_for(*pos);
-            let light = self.store.light_for(*pos);
-
-            // **An urgent chunk is finished here, whatever it costs.** Those
-            // are what one frame's edits touched, and a chunk drawn without the
-            // neighbour whose face its edit exposed is a hole through the
-            // world — the report the urgent set exists for. Parking one to save
-            // a millisecond would show that hole until a later frame took it
-            // up. Everything after them is streaming, whose old mesh is still
-            // right, so those may be interrupted.
-            let deadline = (index >= due.urgent).then_some(started);
-            let flight = match mesher::MeshJob::start(
-                chunk,
-                &neighbours,
-                ABSENT_POLICY,
-                &fluid,
-                &self.transparent,
-            ) {
-                // Empty air: no job, no work, and the empty mesh still has to be
-                // set so a chunk that was emptied stops drawing what it was.
-                None => Ok((*pos, mesher::Mesh::default())),
-                Some(job) => {
-                    let flight = InFlight { pos: *pos, job };
-                    if self.config.lighting_mode.uses_propagated_light() {
-                        Self::drive(flight, &light, deadline)
-                    } else {
-                        Self::drive(flight, &FLAT_DAYLIGHT, deadline)
-                    }
-                }
-            };
-            meshing += mesh_started.elapsed();
-
-            let (at, mesh) = match flight {
-                Ok(finished) => finished,
-                // Out of time part-way through. Park it, put the chunks after
-                // this one back, and let the next frame resume rather than
-                // start again — restarting would spend the whole budget
-                // re-treading the same chunk and never reach the end of it.
-                Err(parked) => {
-                    self.meshing = Some(*parked);
-                    self.store.requeue(&due.positions[index + 1..]);
-                    break;
-                }
-            };
-            self.upload_chunk(at, mesh);
-            rebuilt += 1;
-
-            // A count is not a budget on a machine you have not measured.
-            // Four chunks is half a millisecond in release on a fast desktop
-            // and twelve in a debug build; charter rule 18's minimum spec is a
-            // six-core i5, so the fixed count that is comfortable here is not
-            // comfortable everywhere. Time is the thing actually being
-            // protected, so time is what this spends. At least one chunk
-            // always goes through — a budget that can rebuild nothing would let
-            // a slow frame stop the world filling in for ever.
-            // **Never inside the urgent run.** Those are the chunks one
-            // frame's edits touched, and a chunk drawn without the neighbour
-            // whose face its edit exposed is a hole through the world — the
-            // report this ordering exists for. Everything after them is
-            // streaming and light, which can wait a frame without leaving a
-            // gap because their old meshes are still right.
-            if index + 1 >= due.urgent
-                && started.elapsed() >= REMESH_TIME_BUDGET
-                && index + 1 < due.positions.len()
-            {
+            self.in_flight.insert(*pos, generation);
+            self.mesh_pool.submit(crate::meshwork::Job {
+                pos: *pos,
+                generation,
+                input,
+                flat,
+                sight: std::sync::Arc::clone(&self.transparent),
+            });
+            // Time is the thing being protected, so time is what this spends:
+            // a frame that has given the mesher its share stops here and the
+            // rest go back in order.
+            if started.elapsed() >= REMESH_TIME_BUDGET && index + 1 < due.positions.len() {
                 self.store.requeue(&due.positions[index + 1..]);
                 break;
             }
@@ -7872,14 +7789,11 @@ mod tests {
     }
 
     #[test]
-    fn a_job_makes_progress_even_when_the_budget_is_already_spent() {
-        // **The invariant that stops a parked job parking for ever.** `drive`
-        // checks the deadline AFTER a step, not before. Checked first, a chunk
-        // that arrived in a frame whose budget was already gone would be handed
-        // straight back untouched — every frame, for ever — and the chunk that
-        // is hardest to mesh would be the one never drawn.
-        //
-        // This is that case exactly: a deadline already long past.
+    fn a_chunk_an_edit_touched_is_meshed_to_the_end_on_the_frame() {
+        // The urgent path: a job driven here runs to the end whatever it
+        // costs, and the floor it was given comes out as quads. The parking
+        // this test used to exercise is gone with the inline streaming
+        // remesh (milestone 0.5.0, P2): streaming chunks mesh on the workers.
         use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
         let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0), MaterialId::AIR);
@@ -7890,7 +7804,6 @@ mod tests {
                     .expect("in chunk");
             }
         }
-
         let job = mesher::MeshJob::start(
             &chunk,
             &mesher::Neighbours::open(),
@@ -7899,39 +7812,10 @@ mod tests {
             &mesher::NoGlass,
         )
         .expect("this chunk is not empty air");
-
-        // `checked_sub` because an `Instant` near the start of the process
-        // clock cannot go back four budgets; the fallback is now, which still
-        // reads as expired by the time the first step returns.
-        let expired = std::time::Instant::now()
-            .checked_sub(REMESH_TIME_BUDGET * 4)
-            .unwrap_or_else(std::time::Instant::now);
-        let mut flight = InFlight {
-            pos: ChunkPos::new(0, 0, 0),
-            job,
-        };
-        let mut visits = 0;
-        let mesh = loop {
-            visits += 1;
-            assert!(
-                visits < 10_000,
-                "the job never finished: it is not progressing"
-            );
-            match App::drive(flight, &FLAT_DAYLIGHT, Some(expired)) {
-                Ok((_, mesh)) => break mesh,
-                Err(parked) => flight = *parked,
-            }
-        };
-
-        // It really did have to be driven many times — otherwise the deadline
-        // was not being honoured at all and this proves nothing about parking.
-        assert!(
-            visits > 10,
-            "an expired deadline should yield after each step, took {visits} visits"
-        );
+        let mesh = App::drive(job, &FLAT_DAYLIGHT);
         assert!(
             !mesh.quads.is_empty(),
-            "and the mesh it eventually produced should be the real one"
+            "a floor of thirty-six blocks meshed to nothing"
         );
     }
 

@@ -53,6 +53,7 @@ pub mod icons;
 pub mod input;
 pub mod launcher;
 pub mod mesher;
+pub mod meshwork;
 pub mod net;
 pub mod particles;
 pub mod pictures;
