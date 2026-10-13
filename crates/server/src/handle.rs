@@ -417,7 +417,7 @@ fn unload_some(
     world: &mut crate::world::World,
     population: &std::sync::RwLock<crate::ent::Population>,
     fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
-    lighting: &std::sync::RwLock<crate::light::Lights>,
+    light_events: &mut crate::lightwork::Events,
 ) -> usize {
     let mut frozen: Vec<(String, tiamat_core::ChunkPos, Vec<tiamat_core::ent::Entity>)> =
         Vec::new();
@@ -425,7 +425,6 @@ fn unload_some(
     {
         let mut mobs = population.write().expect("entity lock");
         let mut ponds = fluidics.write().expect("fluid lock");
-        let mut lit = lighting.write().expect("lighting lock");
         while unloaded < MAX_UNLOADS_PER_TICK
             && let Some((domain, pos)) = queue.pop_front()
         {
@@ -442,9 +441,9 @@ fn unload_some(
             if let Some(fluid) = ponds.get_mut(&domain) {
                 fluid.forget(pos);
             }
-            if let Some(light) = lit.get_mut(&domain) {
-                light.forget(pos);
-            }
+            // Its light goes with it, on the light thread, after whatever
+            // that thread still owes this chunk — see `lightwork`.
+            light_events.push(&domain, crate::lightwork::Event::Forget(pos));
         }
     }
     if !frozen.is_empty()
@@ -692,29 +691,6 @@ fn flush_containers(
     }
 }
 
-fn broadcast_light(
-    shared: &Shared,
-    domain: &str,
-    lighting: &crate::light::Lighting,
-    touched: &std::collections::BTreeSet<tiamat_core::ChunkPos>,
-) {
-    for pos in touched {
-        let Some(layer) = lighting.layer(*pos) else {
-            continue;
-        };
-        // Scoped, like every other message about a place: light belongs to the
-        // terrain under it, and the same position is different terrain in
-        // another space.
-        shared.broadcast_in(
-            domain,
-            ServerMessage::ChunkLight {
-                pos: *pos,
-                light: tiamat_core::light::codec::encode(layer),
-            },
-        );
-    }
-}
-
 /// What one tick's worth of chunk serving did, and where the time went.
 ///
 /// The tick already says `serving 95.8ms` when it loses its budget, and that
@@ -735,19 +711,11 @@ struct ServeReport {
     generating: Duration,
     /// Time relighting what was served.
     lighting: Duration,
-    /// The pieces of `lighting`, which was one number until the soak of
-    /// 2026-09-28 measured 3–4 ms a chunk against a 217 µs bench and nothing
-    /// could say where the rest went. The relight itself.
-    relight: Duration,
-    /// Sending the light to everybody holding the chunk.
-    broadcast: Duration,
     /// Waiting for the lighting and fluid locks.
     locks: Duration,
     /// Reading the chunk's fluid into the simulation, a database row, before
     /// it is lit — lava is a light source.
     fluid_load: Duration,
-    /// Chunks answered as dark from their palette, with no relight at all.
-    dark: usize,
     /// Requests handed to the generation workers this tick.
     to_workers: usize,
     /// Chunks the workers handed back this tick, adopted and served.
@@ -770,19 +738,15 @@ impl ServeReport {
     fn line(&self) -> String {
         let ms = |took: Duration| took.as_secs_f64() * 1000.0;
         format!(
-            "{} chunks, {} summaries, {} deferred; gen {:.1}ms, light {:.1}ms \
-             (relight {:.1}ms, broadcast {:.1}ms, locks {:.1}ms, fluid load {:.1}ms; \
-             {} dark for free); {} to workers, {} back, {} waiting",
+            "{} chunks, {} summaries, {} deferred; gen {:.1}ms, light handover {:.1}ms \
+             (locks {:.1}ms, fluid load {:.1}ms); {} to workers, {} back, {} waiting",
             self.chunks,
             self.summaries,
             self.deferred,
             ms(self.generating),
             ms(self.lighting),
-            ms(self.relight),
-            ms(self.broadcast),
             ms(self.locks),
             ms(self.fluid_load),
-            self.dark,
             self.to_workers,
             self.from_workers,
             self.waiting,
@@ -793,8 +757,6 @@ impl ServeReport {
     /// tick runs over, so the phase list does not.
     fn note(&self, phases: &mut sim::Phases) {
         phases.quiet_part("serving", "gen", self.generating);
-        phases.quiet_part("serving", "relight", self.relight);
-        phases.quiet_part("serving", "broadcast", self.broadcast);
         phases.quiet_part("serving", "locks", self.locks);
         phases.quiet_part("serving", "fluid load", self.fluid_load);
     }
@@ -907,9 +869,9 @@ fn serve_chunk_requests(
     shared: &Shared,
     world: &mut crate::world::World,
     source: &mut dyn crate::world::ChunkSource,
-    lighting: &std::sync::RwLock<crate::light::Lights>,
+    dark_solid: &crate::light::DarkSolid,
+    light_events: &mut crate::lightwork::Events,
     fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
-    control: &Control,
     budget: Duration,
     mut workers: Option<&mut crate::worldgen::Pool>,
     parked: &mut Parked,
@@ -988,12 +950,11 @@ fn serve_chunk_requests(
                         }));
             } else {
                 serve_one_chunk(
-                    shared,
                     world,
                     source,
-                    lighting,
+                    dark_solid,
+                    light_events,
                     fluidics,
-                    control,
                     request,
                     Some((done.tint, done.fog)),
                     &mut report,
@@ -1116,12 +1077,11 @@ fn serve_chunk_requests(
             continue;
         }
         serve_one_chunk(
-            shared,
             world,
             source,
-            lighting,
+            dark_solid,
+            light_events,
             fluidics,
-            control,
             request,
             None,
             &mut report,
@@ -1141,12 +1101,11 @@ fn serve_chunk_requests(
     reason = "the tick's state, threaded through rather than made global"
 )]
 fn serve_one_chunk(
-    shared: &Shared,
     world: &mut crate::world::World,
     source: &mut dyn crate::world::ChunkSource,
-    lighting: &std::sync::RwLock<crate::light::Lights>,
+    dark_solid: &crate::light::DarkSolid,
+    light_events: &mut crate::lightwork::Events,
     fluidics: &std::sync::RwLock<crate::fluid::Ponds>,
-    control: &Control,
     request: crate::transport::endpoint::ChunkRequest,
     looks: Option<([u8; 3], Option<tiamat_core::proto::ChunkFog>)>,
     report: &mut ServeReport,
@@ -1160,11 +1119,7 @@ fn serve_one_chunk(
             // lighting uses to answer a chunk as dark without a relight; the
             // streamer uses it to stop requesting what lies behind. One
             // definition, two savings — see `Lighting::is_dark_solid`.
-            sealed = lighting
-                .read()
-                .expect("lighting lock")
-                .get(&request.domain)
-                .is_some_and(|light| light.is_dark_solid(&chunk));
+            sealed = dark_solid.is_dark_solid(&chunk);
             world.db().chunk_blob(request.pos, &chunk).ok()
         }
         Err(err) => {
@@ -1223,42 +1178,15 @@ fn serve_one_chunk(
             }
             report.fluid_load += loading.elapsed();
         }
-        let waited = std::time::Instant::now();
-        let mut lit = lighting.write().expect("lighting lock");
-        // **The fluid of that space, read under the lighting lock and never the
-        // other way round.** A pond of lava is a light source (`light::Glowing`)
-        // and the pass has to see it. Every site that lights takes the two locks
-        // in this order; nothing takes the lighting lock while holding the fluid
-        // one, which is what keeps the pair acyclic.
-        let ponds = fluidics.read().expect("fluid lock");
-        report.locks += waited.elapsed();
-        let relit = std::time::Instant::now();
-        let dry = crate::light::Dry;
-        let glow: &dyn crate::light::Glowing = ponds
-            .get(&request.domain)
-            .map_or(&dry as &dyn crate::light::Glowing, |fluid| {
-                fluid as &dyn crate::light::Glowing
-            });
-        // The requester's own domain: a chunk is lit by the sky and the lamps
-        // of the space it is in.
-        let light = lit.of(&request.domain);
-        let touched = if light.holds(request.pos) {
-            std::iter::once(request.pos).collect()
-        } else {
-            control.note_full_relight();
-            let before = light.dark_shortcuts();
-            let touched = light.chunk_loaded_with_fluid(&request.domain, world, request.pos, glow);
-            report.dark += light.dark_shortcuts() - before;
-            touched
-        };
-        report.relight += relit.elapsed();
-        let sent = std::time::Instant::now();
-        broadcast_light(shared, &request.domain, light, &touched);
-        report.broadcast += sent.elapsed();
-        // **Before anything asks for the fluid lock for writing.** The layer
-        // this same function sends below takes it, and an `RwLock` is not
-        // reentrant: holding the read guard into that call is a deadlock.
-        drop(ponds);
+        // **The light is the light thread's** (milestone 0.5.0, P1): this
+        // chunk's arrival is recorded in tick order and lit after the tick,
+        // from a snapshot of the blocks as the tick leaves them. The fluid
+        // above was loaded first so the lava it glows by is in the pond
+        // store when the thread reads it.
+        light_events.push(
+            &request.domain,
+            crate::lightwork::Event::Arrived(request.pos),
+        );
         report.lighting += at.elapsed();
     }
     // Fluid travels with the chunk, and always — an empty layer is ONE byte,
@@ -1429,60 +1357,6 @@ fn unload_keep_distance(
 /// tick it reaches on the next, which is how relighting and chunk-serving are
 /// already bounded.
 const SAVE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
-
-/// How long one tick may spend relighting chunks that arrived from scratch.
-///
-/// The bound exists because a player teleporting or a server starting can make
-/// thousands of chunks resident at once, and an unbounded pass would spend the
-/// whole tick on terrain nobody is looking at yet. What it does not reach this
-/// tick it reaches on the next.
-///
-/// **Time, not a count, because a relight has no fixed cost.** This was a count
-/// of four, sized on a measured **1.47 ms** for the case that dominates a join —
-/// a chunk of air under open sky, with its neighbours resident — on the
-/// reference world: 5.9 ms, 12% of the tick, a bound worth having. Then a
-/// terrain mod shipped caves, and a full relight of a chunk riddled with them
-/// costs several times that: four of THOSE was **26 ms of light in a tick with
-/// every player standing still**, reported from the window. A count is a budget
-/// only while you know what one costs, which is the same lesson
-/// [`crate::transport::endpoint::SERVE_TIME_BUDGET`] records for serving, and
-/// the fix is the same: a clock, and a deadline to START by so the running
-/// average of this tick's relights says whether one more fits
-/// ([`another_relight_fits`]).
-///
-/// Eight milliseconds is a sixth of the budget, the same share the save pass
-/// takes ([`SAVE_BUDGET`]). One chunk is always relit, however long it costs,
-/// or a slow enough machine would never light anything.
-///
-/// Honest about what this bounds and what it does not: the macro benchmark's
-/// 22 ms ticks were never this pass — the chunks a joining player waits on are
-/// relit by the request path and charged to serving, and what fixed the
-/// benchmark was not relighting a chunk that already had light. This bound
-/// matters for the cases the benchmark does not cover: a teleport, a mod
-/// making unexplored terrain resident, and a structure pass generating the
-/// neighbours of every chunk it serves.
-const RELIGHT_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
-
-/// Whether one more relight fits in the budget, judged by this tick's own
-/// average so far.
-///
-/// A deadline to start by rather than a wall to stop at: with `done` relights
-/// behind it costing `spent` between them, the next is expected to cost their
-/// average, and it is refused if that would carry the pass past `budget`.
-/// Stopping only once the budget was gone would overshoot by one relight,
-/// which on cave terrain is most of the budget again. The first relight always
-/// fits — nothing is known about the cost yet, and a budget that can refuse
-/// everything is a chunk that stays black.
-fn another_relight_fits(
-    spent: std::time::Duration,
-    done: u32,
-    budget: std::time::Duration,
-) -> bool {
-    if done == 0 {
-        return true;
-    }
-    spent + spent / done <= budget
-}
 
 /// How many resident chunks get random ticks in one tick of the simulation.
 ///
@@ -3060,6 +2934,23 @@ impl ServerHandle {
                         ponds.set_washes_away(washes_away.clone());
                         ponds
                     }));
+                    // The palette-only rule the serve path asks per chunk,
+                    // kept as a copy so the tick never waits on the light
+                    // thread's lock for it; and the thread itself (milestone
+                    // 0.5.0, P1).
+                    let dark_solid = lighting.read().expect("lighting lock").dark_solid();
+                    let light_worker = match crate::lightwork::Worker::spawn(
+                        Arc::clone(&lighting),
+                        Arc::clone(&fluidics),
+                        Arc::clone(&shared),
+                        control.clone(),
+                    ) {
+                        Ok(worker) => worker,
+                        Err(err) => {
+                            error!("could not start the light thread: {err}");
+                            return;
+                        }
+                    };
                     // And the entities, behind the same kind of lock for the
                     // same reason: `game.spawn_entity` runs on this thread
                     // inside a tick.
@@ -3382,6 +3273,9 @@ impl ServerHandle {
                         // about two hundred of them.
                         sight.open_tick();
                         phases.restart();
+                        // What happened to the light this tick, for the light
+                        // thread once the tick is over (milestone 0.5.0, P1).
+                        let mut light_events = crate::lightwork::Events::default();
                         // Every block edited this tick, relit once at the end
                         // rather than four times in the middle. Batching is
                         // what makes the cost of a swarm of players placing
@@ -5518,9 +5412,9 @@ impl ServerHandle {
                             &shared,
                             &mut world,
                             &mut source,
-                            &lighting,
+                            &dark_solid,
+                            &mut light_events,
                             &fluidics,
-                            &control,
                             crate::transport::endpoint::SERVE_TIME_BUDGET,
                             workers.as_mut(),
                             &mut parked,
@@ -5638,49 +5532,16 @@ impl ServerHandle {
                                 phases.part("light", "fluid load", at.elapsed());
                             }
 
-                            let mut lit = lighting.write().expect("lighting lock");
-                            // Same order as everywhere else that lights.
-                            let ponds = fluidics.read().expect("fluid lock");
-                            let dry = crate::light::Dry;
-                            let glow: &dyn crate::light::Glowing = ponds
-                                .get(&domain)
-                                .map_or(&dry as &dyn crate::light::Glowing, |fluid| {
-                                    fluid as &dyn crate::light::Glowing
-                                });
-                            let light = lit.of(&domain);
-                            let mut touched = std::collections::BTreeSet::new();
-                            let started = std::time::Instant::now();
-                            let mut done = 0;
+                            // **Lit after the tick, in this order, by the
+                            // light thread** (milestone 0.5.0, P1). What this
+                            // loop used to do inline — and defer when it ran
+                            // out of budget, leaving chunks dark for a tick
+                            // or more — the thread does from a snapshot of
+                            // the blocks taken when the tick ends.
                             for pos in arrived {
-                                if light.holds(pos) {
-                                    continue;
-                                }
-                                if !another_relight_fits(
-                                    started.elapsed(),
-                                    done,
-                                    RELIGHT_TIME_BUDGET,
-                                ) {
-                                    // Put the rest back, in order, for the next
-                                    // tick. Dropping them would leave those
-                                    // chunks black for as long as they stayed
-                                    // loaded, which is the kind of bug that
-                                    // only shows up after a teleport.
-                                    world.defer_arrival(&domain, pos);
-                                    continue;
-                                }
-                                control.note_full_relight();
-                                touched.extend(light.chunk_loaded_with_fluid(
-                                    &domain, &world, pos, glow,
-                                ));
-                                done += 1;
+                                light_events.push(&domain, crate::lightwork::Event::Arrived(pos));
                             }
-                            drop(ponds);
-                            phases.part("light", "relight", started.elapsed());
-                            let at = std::time::Instant::now();
-                            broadcast_light(&shared, &domain, light, &touched);
-                            phases.part("light", "broadcast", at.elapsed());
                         }
-                        control.note_lit_chunks(lighting.read().expect("lighting lock").len());
 
                         phases.mark("light");
                         // **Punches, judged here and nowhere else.** A client
@@ -6492,36 +6353,18 @@ impl ServerHandle {
                         // relights every edit the tick made — digs, places,
                         // mods — and only happens to run after the fluid, so
                         // it is timed apart and counted by the blocks it had.
-                        let relighting = std::time::Instant::now();
+                        // **Relit by the light thread, after the tick**
+                        // (milestone 0.5.0, P1): every edit the tick made —
+                        // digs, places, mods — in the order it was made.
                         if !relight.is_empty() {
                             phases.count("fluid", "relit", relight.len() as u64);
-                            let mut lit = lighting.write().expect("lighting lock");
-                            // The fluid of that space, under the lighting lock
-                            // and never the other way round — see the serve
-                            // path. Lava lights what it stands in.
-                            let ponds = fluidics.read().expect("fluid lock");
-                            let dry = crate::light::Dry;
-                            let glow: &dyn crate::light::Glowing = ponds
-                                .get(tiamat_core::domain::OVERWORLD)
-                                .map_or(&dry as &dyn crate::light::Glowing, |fluid| {
-                                    fluid as &dyn crate::light::Glowing
-                                });
-                            // Every edit this tick happened in some space; each
-                            // relights its own.
-                            let mut touched = std::collections::BTreeSet::new();
-                            let light = lit.of(tiamat_core::domain::OVERWORLD);
                             for pos in relight.drain(..) {
-                                touched.extend(light.edited_with_fluid(
+                                light_events.push(
                                     tiamat_core::domain::OVERWORLD,
-                                    &world,
-                                    pos,
-                                    glow,
-                                ));
+                                    crate::lightwork::Event::Edited(pos),
+                                );
                             }
-                            drop(ponds);
-                            broadcast_light(&shared, tiamat_core::domain::OVERWORLD, light, &touched);
                         }
-                        phases.part("fluid", "relight", relighting.elapsed());
 
                         phases.mark("fluid");
 
@@ -6571,12 +6414,25 @@ impl ServerHandle {
                                 &mut world,
                                 &population,
                                 &fluidics,
-                                &lighting,
+                                &mut light_events,
                             );
                             control.note_unloaded(unloaded);
                         }
                         control.note_resident_chunks(world.cached());
                         phases.mark("unload");
+                        // **The tick's light, handed over.** One batch per
+                        // space, each with a snapshot of its chunks as they
+                        // stand now — after the edits and the unloads above —
+                        // and the events in the order they happened. The
+                        // thread lights them after this tick ends; nothing
+                        // below waits on it.
+                        if !light_events.is_empty() {
+                            let at = std::time::Instant::now();
+                            for batch in light_events.into_batches(tick, &world) {
+                                light_worker.send(batch);
+                            }
+                            phases.part("unload", "light handover", at.elapsed());
+                        }
                         // The day advances once per tick, and is broadcast at
                         // a rate a person can read rather than at the rate it
                         // changes. Twenty updates a second of a float nobody
@@ -6719,6 +6575,9 @@ impl ServerHandle {
                     });
 
                     let mut world = held.expect("the last tick put the world back");
+                    // The light thread finishes what it was handed and
+                    // stops; nothing after this sends it anything.
+                    light_worker.stop();
 
                     // The network thread is already stopped by the time this
                     // returns, so a blocking lock here cannot contend with a
@@ -7854,49 +7713,6 @@ fn build_theme(
             button: colour(&theme.colours.button),
             accent: colour(&theme.colours.accent),
         },
-    }
-}
-
-#[cfg(test)]
-mod relight_budget_tests {
-    use super::another_relight_fits;
-    use std::time::Duration;
-
-    #[test]
-    fn the_first_relight_always_fits_whatever_the_budget() {
-        // A budget that can refuse everything is a chunk that stays black.
-        assert!(another_relight_fits(Duration::ZERO, 0, Duration::ZERO));
-        assert!(another_relight_fits(
-            Duration::from_millis(40),
-            0,
-            Duration::from_millis(8)
-        ));
-    }
-
-    #[test]
-    fn the_next_relight_is_refused_when_its_expected_cost_would_overrun() {
-        // Two relights took 6 ms between them, so the next is expected to cost
-        // 3 ms: 6 + 3 = 9 is past an 8 ms budget, and it is refused. Stopping
-        // only once the budget was gone would have spent those 3 ms.
-        let budget = Duration::from_millis(8);
-        assert!(!another_relight_fits(Duration::from_millis(6), 2, budget));
-        // Four cheap ones at 1 ms each: 4 + 1 = 5 fits, and the pass goes on.
-        assert!(another_relight_fits(Duration::from_millis(4), 4, budget));
-        // Right on the line fits — the bound is the budget, not less than it.
-        assert!(another_relight_fits(Duration::from_millis(6), 3, budget));
-    }
-
-    #[test]
-    fn one_expensive_relight_stops_the_pass_where_a_count_would_not() {
-        // The case that made this a clock: a cave-riddled chunk at 6.5 ms.
-        // A count of four would have let three more through — 26 ms of a
-        // 50 ms tick, as reported. The clock refuses the second.
-        let budget = Duration::from_millis(8);
-        assert!(!another_relight_fits(
-            Duration::from_micros(6_500),
-            1,
-            budget
-        ));
     }
 }
 

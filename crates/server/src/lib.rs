@@ -32,6 +32,7 @@ pub mod handle;
 pub mod hud;
 pub mod lease;
 pub mod light;
+pub mod lightwork;
 pub mod mount;
 pub mod placing;
 pub mod plans;

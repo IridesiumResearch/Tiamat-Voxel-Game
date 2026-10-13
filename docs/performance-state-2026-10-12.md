@@ -138,3 +138,25 @@ the shape is known:
 What this document does not know: the frame time on the reporter's card by
 phase, which only the overlay there can say, and the minimum-spec server's
 real factor, which only a run on one can.
+
+## Addendum, 2026-10-13: relight off the tick (milestone 0.5.0, P1)
+
+The same soak, the same windows, with the light thread (`crates/server/src/lightwork.rs`):
+
+| window | mean tick, before | mean tick, after | serving (of it: relight) | resident chunks |
+|---|---|---|---|---|
+| spawn | 12.8 | 3.8 | 0.44 (0) | 1,976 |
+| fly 0–30 s | 12.1 | 3.7 | 0.65 (0) | 3,807 |
+| fly 30–120 s | 12.9–13.2 | 3.7–3.9 | 0.6–0.7 (0) | 4,292–4,529 |
+| standing | 3.5 | 2.4 | 0.30 (0) | 5,789 |
+
+One tick over budget in 2,850, as before. The thread never took longer
+than a tick for a tick's batch. What is left of a flying tick is fluid
+(0.5–0.9 ms), serving without its relight (0.6–0.7 ms), SQLite (0.7 ms)
+and the rest of the phases under 0.4 ms each; the corner that was worth
+cutting is cut, and the next largest is the fluid's hooks. Light reaches a
+client a few milliseconds later than it did, after the chunk rather than
+beside it, which the client always tolerated. The determinism argument is
+in the module's documentation: the thread runs the same passes over the
+same blocks in the same order, and `a_snapshot_lights_a_chunk_exactly_as_the_world_does`
+holds it to that.

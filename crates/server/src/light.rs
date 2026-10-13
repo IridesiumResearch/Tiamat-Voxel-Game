@@ -114,6 +114,17 @@ impl Lights {
     }
 
     /// One domain's light, created on first use.
+    /// The palette-only rule for a chunk that is dark without a relight, to
+    /// keep on the tick without taking this store's lock — see
+    /// [`DarkSolid`].
+    #[must_use]
+    pub fn dark_solid(&self) -> DarkSolid {
+        DarkSolid {
+            see_through: self.see_through.clone(),
+            emissions: self.emissions.clone(),
+        }
+    }
+
     pub fn of(&mut self, domain: &str) -> &mut Lighting {
         self.domains.entry(domain.to_owned()).or_insert_with(|| {
             Lighting::new(
@@ -159,6 +170,32 @@ impl tiamat_core::light::LightSource for Shared {
         // A space nothing has lit is dark, which is an answer.
         self.lighting.read().map_or(Light::DARK, |lighting| {
             lighting.get(domain).map_or(Light::DARK, |lit| lit.at(pos))
+        })
+    }
+}
+
+/// The rule [`Lighting::is_dark_solid`] applies, on its own.
+///
+/// **A copy the tick keeps**, because the serve path asks it for every
+/// chunk it answers and the store it came from is behind the lock the light
+/// thread holds while it relights (milestone 0.5.0, P1). Two tables that
+/// never change after the freeze, so a copy is the same answer.
+#[derive(Debug, Clone)]
+pub struct DarkSolid {
+    see_through: tiamat_core::light::SeeThrough,
+    emissions: tiamat_core::light::Emissions,
+}
+
+impl DarkSolid {
+    /// Whether a chunk is dark from its palette alone — one opaque, unlit
+    /// material through and through. The same three conditions as
+    /// [`Lighting::is_dark_solid`].
+    #[must_use]
+    pub fn is_dark_solid(&self, chunk: &tiamat_core::Chunk) -> bool {
+        chunk.is_uniform().is_some_and(|material| {
+            !material.is_air()
+                && !self.see_through.is(material)
+                && self.emissions.of(material).is_dark()
         })
     }
 }
@@ -303,6 +340,17 @@ impl Lighting {
         pos: ChunkPos,
         fluid: &dyn Glowing,
     ) -> BTreeSet<ChunkPos> {
+        self.chunk_loaded_in(world.solid(domain), pos, fluid)
+    }
+
+    /// The same, reading its blocks from any [`Terrain`]: the world on the
+    /// tick, a [`Snapshot`] on the light thread.
+    pub fn chunk_loaded_in<'t, T: Terrain<'t>>(
+        &mut self,
+        terrain: T,
+        pos: ChunkPos,
+        fluid: &dyn Glowing,
+    ) -> BTreeSet<ChunkPos> {
         self.layers.entry(pos).or_insert_with(LightLayer::dark);
         // **A chunk of one opaque, unlit material is dark, and knowing that
         // costs nothing.** Relighting it would darken all 4,096 blocks, scan
@@ -319,8 +367,8 @@ impl Lighting {
         // and the bright one; not see-through, because a chunk of glass is lit
         // straight through; and not emissive, because a chunk of lamps is lit
         // from within. The last two are the tables lighting already consults.
-        if world
-            .resident(domain, pos)
+        if terrain
+            .resident(pos)
             .is_some_and(|chunk| self.is_dark_solid(chunk))
         {
             self.dark_shortcuts += 1;
@@ -328,7 +376,7 @@ impl Lighting {
             touched.chunks.insert(pos);
             // Dark for free, but still a roof: rock arriving over a lit chunk
             // is the commonest way the sky under it goes away.
-            self.roof_over_below(domain, world, pos, &mut touched, fluid);
+            self.roof_over_below(terrain, pos, &mut touched, fluid);
             self.compact(&touched.chunks);
             return touched.chunks;
         }
@@ -353,10 +401,10 @@ impl Lighting {
         // client cannot tell "dark" from "not arrived yet", and every
         // underground chunk goes unreported.
         touched.chunks.insert(pos);
-        self.with_centre(domain, world, pos, &mut touched, fluid, |lit| {
+        self.with_centre(terrain, pos, &mut touched, fluid, |lit| {
             propagate::relight(lit, region);
         });
-        self.roof_over_below(domain, world, pos, &mut touched, fluid);
+        self.roof_over_below(terrain, pos, &mut touched, fluid);
         self.compact(&touched.chunks);
         touched.chunks
     }
@@ -372,10 +420,9 @@ impl Lighting {
     ///
     /// Nothing to do when the chunk below holds no light: it has not been lit
     /// yet, and when it is, the arrival will already be over it.
-    fn roof_over_below(
+    fn roof_over_below<'t, T: Terrain<'t>>(
         &mut self,
-        domain: &str,
-        world: &World,
+        terrain: T,
         pos: ChunkPos,
         touched: &mut Touched,
         fluid: &dyn Glowing,
@@ -390,7 +437,7 @@ impl Lighting {
             min: corner,
             max: BlockPos::new(corner.x + span, corner.y + span, corner.z + span),
         };
-        self.with_centre(domain, world, below, touched, fluid, |lit| {
+        self.with_centre(terrain, below, touched, fluid, |lit| {
             propagate::roofed(lit, region);
         });
     }
@@ -410,8 +457,19 @@ impl Lighting {
         pos: BlockPos,
         fluid: &dyn Glowing,
     ) -> BTreeSet<ChunkPos> {
+        self.edited_in(world.solid(domain), pos, fluid)
+    }
+
+    /// The same, reading its blocks from any [`Terrain`] — see
+    /// [`Lighting::chunk_loaded_in`].
+    pub fn edited_in<'t, T: Terrain<'t>>(
+        &mut self,
+        terrain: T,
+        pos: BlockPos,
+        fluid: &dyn Glowing,
+    ) -> BTreeSet<ChunkPos> {
         let mut touched = Touched::default();
-        self.with_centre(domain, world, pos.chunk(), &mut touched, fluid, |lit| {
+        self.with_centre(terrain, pos.chunk(), &mut touched, fluid, |lit| {
             propagate::edited(lit, pos);
         });
         self.compact(&touched.chunks);
@@ -429,18 +487,16 @@ impl Lighting {
     /// as done — [`Lighting::holds`] is what the tick's catch-up pass asks
     /// before relighting, so the chunk would stay black for as long as it stayed
     /// loaded.
-    fn with_centre(
+    fn with_centre<'t, T: Terrain<'t>>(
         &mut self,
-        domain: &str,
-        world: &World,
+        terrain: T,
         centre: ChunkPos,
         touched: &mut Touched,
         fluid: &dyn Glowing,
-        pass: impl FnOnce(&mut Lit<'_>),
+        pass: impl FnOnce(&mut Lit<'_, 't, T>),
     ) {
         let held = self.layers.remove(&centre);
         let lit_here = held.is_some();
-        let terrain = world.solid(domain);
         // Resolved BEFORE the struct takes ownership of the accessor: the
         // reference outlives it either way (`Solid::resident` is tied to the
         // world), but the borrow checker needs the read to happen first.
@@ -550,6 +606,37 @@ impl Glowing for Dry {
     }
 }
 
+/// Where a relight reads its blocks from.
+///
+/// **Two sources, one flood.** On the tick it is [`crate::world::Solid`],
+/// the world's own resident chunks; on the light thread it is a
+/// [`Snapshot`] of them taken at the end of a tick (milestone 0.5.0, P1).
+/// The flood does not know which, which is what keeps the two producing the
+/// same light from the same blocks. The reference is tied to the source's
+/// lifetime rather than to the borrow of `self`, so a pass can resolve one
+/// chunk and hold it across tens of thousands of reads — see [`Lit`].
+pub trait Terrain<'a>: Copy {
+    /// One chunk, if it is in memory. Never loads and never generates.
+    fn resident(&self, pos: ChunkPos) -> Option<&'a tiamat_core::Chunk>;
+}
+
+impl<'a> Terrain<'a> for crate::world::Solid<'a> {
+    fn resident(&self, pos: ChunkPos) -> Option<&'a tiamat_core::Chunk> {
+        Self::resident(self, pos)
+    }
+}
+
+/// The resident chunks of one space as they were at the end of a tick: what
+/// the light thread floods through. See [`crate::world::World::snapshot`].
+#[derive(Clone, Copy)]
+pub struct Snapshot<'a>(pub &'a HashMap<ChunkPos, std::sync::Arc<tiamat_core::Chunk>>);
+
+impl<'a> Terrain<'a> for Snapshot<'a> {
+    fn resident(&self, pos: ChunkPos) -> Option<&'a tiamat_core::Chunk> {
+        self.0.get(&pos).map(std::sync::Arc::as_ref)
+    }
+}
+
 /// The world and its light, as [`Neighbourhood`] wants to see them.
 ///
 /// # Why the chunk being relit is held apart from the others
@@ -579,8 +666,8 @@ impl Glowing for Dry {
 /// rejected on a measurement can become the right one once something else is
 /// removed — so re-measure a rejected idea after changing what it competed
 /// with, rather than trusting the note that rejected it. This one cost a year.
-struct Lit<'a> {
-    terrain: crate::world::Solid<'a>,
+struct Lit<'a, 't, T: Terrain<'t>> {
+    terrain: T,
     lighting: &'a mut Lighting,
     touched: &'a mut Touched,
     /// The chunk this pass is centred on, taken out of the map for the
@@ -601,13 +688,13 @@ struct Lit<'a> {
     /// `ChunkPos` division and a `HashMap` probe before reaching the blocks.
     /// The overwhelming majority are inside the centre, so resolving it once
     /// turns the probe into a comparison.
-    centre_blocks: Option<&'a tiamat_core::chunk::Chunk>,
+    centre_blocks: Option<&'t tiamat_core::chunk::Chunk>,
     /// The last non-centre chunk looked up, and it.
     ///
     /// One entry, because the rest of what a pass touches is the ring of
     /// neighbours it floods into and it works along one at a time. A bigger
     /// cache would be a second copy of the map it is standing in front of.
-    memo: std::cell::Cell<Option<(ChunkPos, &'a tiamat_core::chunk::Chunk)>>,
+    memo: std::cell::Cell<Option<(ChunkPos, &'t tiamat_core::chunk::Chunk)>>,
     /// The fluid this pass can see glowing. See [`Glowing`].
     fluid: &'a dyn Glowing,
     /// The last fluid layer looked up, by the same argument as `memo`.
@@ -621,9 +708,9 @@ struct Lit<'a> {
     any_falloff: bool,
 }
 
-impl<'a> Lit<'a> {
+impl<'a, 't, T: Terrain<'t>> Lit<'a, 't, T> {
     /// The blocks of whatever chunk `pos` is in, if it is resident.
-    fn blocks(&self, pos: ChunkPos) -> Option<&'a tiamat_core::chunk::Chunk> {
+    fn blocks(&self, pos: ChunkPos) -> Option<&'t tiamat_core::chunk::Chunk> {
         if pos == self.centre {
             return self.centre_blocks;
         }
@@ -638,7 +725,7 @@ impl<'a> Lit<'a> {
     }
 }
 
-impl Lit<'_> {
+impl<'a, 't, T: Terrain<'t>> Lit<'a, 't, T> {
     /// What the fluid standing in a block glows, if any of it does.
     ///
     /// **Gated on there being any emitting material at all**, which is one bool
@@ -740,7 +827,7 @@ impl Lit<'_> {
     }
 }
 
-impl Neighbourhood for Lit<'_> {
+impl<'a, 't, T: Terrain<'t>> Neighbourhood for Lit<'a, 't, T> {
     fn faces(&self, pos: BlockPos) -> Option<Faces> {
         // `resident` rather than `chunk`: propagation must never generate a
         // chunk. A flood reaching unexplored terrain would otherwise turn a
@@ -1176,6 +1263,85 @@ mod tests {
             0,
             "light passed a material no mod registered as transparent"
         );
+    }
+
+    #[test]
+    fn a_snapshot_lights_a_chunk_exactly_as_the_world_does() {
+        // **Milestone 0.5.0, P1.** The light thread floods through a
+        // snapshot of the chunks taken when the tick ends; the tick used to
+        // flood through the world itself. The same blocks must give the
+        // same light, block for block, for an arrival and for an edit — or
+        // the thread would be a different simulation and not a later one.
+        let mut world = world();
+        let pos = ChunkPos::new(0, 0, 0);
+        resident(&mut world, pos);
+        {
+            let chunk = world
+                .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
+                .expect("chunk");
+            for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                chunk.set_block_local(
+                    tiamat_core::coords::LocalBlock::from_index(index),
+                    BlockValue::Uniform(STONE),
+                );
+            }
+            for x in 4..12 {
+                for y in 4..12 {
+                    for z in 4..12 {
+                        chunk.set_block_local(
+                            tiamat_core::coords::LocalBlock::new(x, y, z),
+                            BlockValue::AIR,
+                        );
+                    }
+                }
+            }
+            chunk.set_block_local(
+                tiamat_core::coords::LocalBlock::new(8, 8, 8),
+                BlockValue::Uniform(LAMP),
+            );
+        }
+        let same = |a: &Lighting, b: &Lighting, what: &str| {
+            for index in 0..tiamat_core::BLOCKS_PER_CHUNK {
+                let local = tiamat_core::coords::LocalBlock::from_index(index);
+                let small = |n: u32| i32::try_from(n).expect("a local coordinate fits");
+                let at = BlockPos::new(small(local.x), small(local.y), small(local.z));
+                assert_eq!(a.at(at), b.at(at), "{what}: light differs at {at:?}");
+            }
+        };
+
+        let mut through_world = lighting();
+        through_world.chunk_loaded(tiamat_core::domain::OVERWORLD, &world, pos);
+        let mut through_snapshot = lighting();
+        let snapshot = world.snapshot(tiamat_core::domain::OVERWORLD);
+        through_snapshot.chunk_loaded_in(Snapshot(&snapshot), pos, &Dry);
+        assert_eq!(through_snapshot.at(BlockPos::new(8, 8, 8)).red(), MAX_LEVEL);
+        same(&through_world, &through_snapshot, "an arrival");
+
+        // Put the lamp out. The world's copy is written through the shared
+        // pointer, so the old snapshot keeps the lamp and a fresh one does
+        // not — which is what lets a tick edit while the thread reads.
+        world
+            .chunk(tiamat_core::domain::OVERWORLD, pos, &mut Empty)
+            .expect("chunk")
+            .set_block_local(
+                tiamat_core::coords::LocalBlock::new(8, 8, 8),
+                BlockValue::AIR,
+            );
+        assert!(
+            Snapshot(&snapshot)
+                .resident(pos)
+                .is_some_and(|old| matches!(
+                    old.get_block_local(tiamat_core::coords::LocalBlock::new(8, 8, 8)),
+                    tiamat_core::BlockView::Uniform(material) if material == LAMP
+                )),
+            "the old snapshot should still hold the lamp"
+        );
+        let lamp = BlockPos::new(8, 8, 8);
+        through_world.edited(tiamat_core::domain::OVERWORLD, &world, lamp);
+        let fresh = world.snapshot(tiamat_core::domain::OVERWORLD);
+        through_snapshot.edited_in(Snapshot(&fresh), lamp, &Dry);
+        assert_eq!(through_snapshot.at(lamp).red(), 0, "the lamp is out");
+        same(&through_world, &through_snapshot, "an edit");
     }
 
     #[test]

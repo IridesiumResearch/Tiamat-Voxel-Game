@@ -34,6 +34,7 @@
 //! chunks persist".
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tiamat_core::block::{BlockView, Cells, EMPTY_CELLS};
@@ -609,7 +610,13 @@ impl ChunkSource for Generator {
 #[derive(Default)]
 struct Space {
     /// Chunks currently in memory.
-    cache: HashMap<ChunkPos, Chunk>,
+    ///
+    /// **Shared, so the light thread can read them while the tick goes on**
+    /// (milestone 0.5.0, P1): [`World::snapshot`] clones the map of
+    /// pointers at the end of a tick, and an edit on the tick writes through
+    /// [`Arc::make_mut`], which copies a chunk only while a snapshot still
+    /// holds it — a handful of chunks a tick, never the world.
+    cache: HashMap<ChunkPos, Arc<Chunk>>,
     /// Chunks changed since the last save.
     ///
     /// Separate from the cache so a save iterates only what moved. A server
@@ -1021,7 +1028,23 @@ impl World {
 
     #[must_use]
     pub fn resident(&self, domain: &str, pos: ChunkPos) -> Option<&Chunk> {
-        self.domains.get(domain)?.cache.get(&pos)
+        self.domains.get(domain)?.cache.get(&pos).map(Arc::as_ref)
+    }
+
+    /// The resident chunks of one space as they are now, shared.
+    ///
+    /// What the light thread floods through for the events of this tick: a
+    /// clone of the map of pointers, a few hundred microseconds for a few
+    /// thousand chunks, and no chunk copied. A space nothing has touched is
+    /// an empty map.
+    #[must_use]
+    pub fn snapshot(&self, domain: &str) -> Arc<HashMap<ChunkPos, Arc<Chunk>>> {
+        Arc::new(
+            self.domains
+                .get(domain)
+                .map(|space| space.cache.clone())
+                .unwrap_or_default(),
+        )
     }
 
     /// Puts a chunk back on the arrival list.
@@ -1075,11 +1098,15 @@ impl World {
         let seed = *seed;
         let space = Self::space_of(domains, domain);
         if space.cache.contains_key(&pos) {
-            return Ok(space.cache.get_mut(&pos).expect("checked just above"));
+            // Copy-on-write: a chunk the light thread's snapshot still holds
+            // is copied here, once, and the snapshot keeps the old one.
+            return Ok(Arc::make_mut(
+                space.cache.get_mut(&pos).expect("checked just above"),
+            ));
         }
         match crate::sqlclock::Log::time(sql, "load chunk", || db.load_chunk_in(domain, pos))? {
             Some(chunk) => {
-                space.cache.insert(pos, chunk);
+                space.cache.insert(pos, Arc::new(chunk));
                 space.arrived.push(pos);
             }
             None => {
@@ -1090,10 +1117,12 @@ impl World {
                 Self::adopt_into(db, sql, space, domain, pos, generated, &fluid);
             }
         }
-        Ok(space
-            .cache
-            .get_mut(&pos)
-            .expect("just inserted if it was absent"))
+        Ok(Arc::make_mut(
+            space
+                .cache
+                .get_mut(&pos)
+                .expect("just inserted if it was absent"),
+        ))
     }
 
     /// Takes in a chunk generated elsewhere, as [`World::chunk`] would have
@@ -1164,7 +1193,7 @@ impl World {
         {
             tracing::error!(?pos, "could not store generated fluid: {err}");
         }
-        space.cache.insert(pos, chunk);
+        space.cache.insert(pos, Arc::new(chunk));
         space.arrived.push(pos);
     }
 
@@ -1194,7 +1223,7 @@ impl World {
         }
         match crate::sqlclock::Log::time(sql, "load chunk", || db.load_chunk_in(domain, pos))? {
             Some(chunk) => {
-                space.cache.insert(pos, chunk);
+                space.cache.insert(pos, Arc::new(chunk));
                 space.arrived.push(pos);
                 Ok(true)
             }
@@ -1665,7 +1694,7 @@ impl World {
                     );
                     continue;
                 };
-                batch.push((*pos, chunk));
+                batch.push((*pos, Arc::as_ref(chunk)));
             }
             // **One transaction for the whole domain, not one per chunk.** A
             // per-chunk transaction is a WAL commit per chunk, and this save
@@ -1976,7 +2005,7 @@ impl<'a> Solid<'a> {
     /// does exactly that, tens of thousands of times per relight.
     #[must_use]
     pub fn resident(&self, pos: ChunkPos) -> Option<&'a Chunk> {
-        self.space?.cache.get(&pos)
+        self.space?.cache.get(&pos).map(Arc::as_ref)
     }
 }
 

@@ -602,6 +602,10 @@ struct ControlInner {
     /// invisible in every other measurement — it produces the answer that was
     /// already there, at about 1.4 ms a chunk.
     full_relights: AtomicU64,
+    /// Microseconds the light thread has spent, cumulative (milestone 0.5.0, P1).
+    light_micros: AtomicU64,
+    /// Events the light thread has processed, cumulative.
+    light_events: AtomicU64,
     lit_chunks: AtomicU64,
     /// Chunks the unload sweep has taken out of memory since start, and how
     /// many are resident now. Together they say whether a long-running
@@ -702,6 +706,27 @@ impl Control {
     /// Records that a chunk was lit from scratch.
     pub fn note_full_relight(&self) {
         self.inner.full_relights.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one batch of the light thread's work: how long, how many
+    /// chunks lit from scratch, how many events. The relights are counted
+    /// by [`Control::note_full_relight`] as they happen.
+    pub fn note_light_work(&self, took: Duration, _relit: u64, events: u64) {
+        self.inner.light_micros.fetch_add(
+            u64::try_from(took.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.inner.light_events.fetch_add(events, Ordering::Relaxed);
+    }
+
+    /// Time the light thread has spent, in microseconds, and the events it
+    /// has processed, since the start.
+    #[must_use]
+    pub fn light_work(&self) -> (u64, u64) {
+        (
+            self.inner.light_micros.load(Ordering::Relaxed),
+            self.inner.light_events.load(Ordering::Relaxed),
+        )
     }
 
     /// Records chunks the worldgen workers generated for the tick.
