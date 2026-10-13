@@ -165,6 +165,236 @@ arrived in, and a deprecation is an entry here too.
 
 ---
 
+## Reference, by area
+
+Every function and method the stubs declare, one line each, grouped by what
+it is for — to find the one you need. Its contract is in
+[`stubs/game.lua`](stubs/game.lua): the options table, the fields, the
+reasons. This list is generated from the stubs by `scripts/api-reference.py`,
+and the engine's CI fails if the two disagree, so a function that is here
+exists and one that is not does not.
+
+<!-- api-reference:start -->
+
+### The `game` table's fields
+
+- `game.CHUNK_BLOCKS` (integer) — Blocks along each axis of a chunk.
+- `game.UNITS_PER_BLOCK` (integer) — Sub-node units in a block.
+- `game.OCCUPANCY_FULL` (integer) — Every one of a block's 27 sub-nodes, as a mask.
+- `game.ITEMS_PER_STACK` (integer) — How many of a thing one inventory slot holds.
+- `game.AIR` (integer) — The numeric id of air.
+- `game.mod_id` (string) — Your mod's id, and your registration namespace.
+- `game.api_version` (string) — The version of the mod API this engine speaks, `"major.minor"`; `"1.0"` is the API frozen at engine 0.5.0.
+- `game.world_seed` (integer?) — The world's seed — the same number a generator's `pos.seed` carries — for sampling a density or a map outside a generator (`density:at(x, y, z, game.world_seed)` to aim a spawn at the ground).
+
+### Your mod, and what it shares
+
+- `game.log(message)` — Writes a line to the server log, attributed to your mod.
+- `game.world_option(id)` — What this world chose for one of its mods' WORLD options, or `nil`.
+- `game.register_setting(spec)` — Offers the player an option, shown in the in-game settings screen.
+- `game.setting(player, id)` — What a player answered for one of your settings.
+- `game.export(exports)` — Publishes a table for the mods that depend on you to read.
+- `game.exports(mod_id)` — Another mod's exports, or `nil`.
+- `game.content_hash(file)` — The content hash of a file in your mod's directory, as 64 hex characters — for a dialog's `image` or `nine_slice` without pasting a hash by hand.
+
+### Registering blocks, items, fluids and tools
+
+- `game.register_block(spec)` — Registers a block.
+- `game.register_item(spec)` — Registers an ITEM: something a player can carry and cannot build with.
+- `game.register_fluid(spec)` — Registers a fluid.
+- `game.register_tool(spec)` — Registers a tool.
+- `game.get_block_id(id)` — Looks up a registered block's numeric id by its string id.
+- `game.block_of(material)` — The block id a numeric material belongs to: the inverse of `game.get_block_id`.
+- `game.fluid_id(name)` — A fluid's number for this session, by name — or `nil` for one nobody registered.
+- `game.hardness(material)` — What a block's registration said its hardness was, by numeric material: seconds to break with a bare hand, the default for a block that said nothing.
+- `game.tags(material)` — The tags a block was registered with, by numeric material — `{ "ore" }`, say — so a mod can class the world's blocks by rule rather than name them one by one.
+- `game.tagged(tag)` — The qualified ids of every block registered so far that carries a tag, in the order they were registered — the other direction from `game.tags`: not what a block is tagged, but which blocks a tag names.
+
+### Worldgen: generators and callbacks
+
+- `game.register_on_world_init(callback)` — Runs ONCE in a world's life, before the first chunk is generated.
+- `game.register_on_generate(callback)` — Registers a world generation callback.
+- `game.register_chunk_tint(callback)` — Gives one chunk its biome colour: a multiplier every TINTED material in it is drawn through.
+- `game.register_chunk_fog(callback)` — Gives one chunk's column its own fog — a rainforest's ground mist, a marsh's murk — on top of the sky's distance fog.
+- `game.noise_heightmap(pos, options)` — Generates a heightmap for a chunk from fractal noise.
+- `game.flat_heightmap(height)` — A heightmap with the same height in every column.
+- `game.rng_stream(pos, name)` — Opens a named random stream for a chunk.
+- `game.density(spec)` — Compiles a density field from a table of nested operations.
+- `game.map(spec)` — Fetches this mod's map by name, building an empty one the first time.
+- `game.schematic(blocks)` — A structure built once, from a list of blocks, for `buf:scatter` to stamp — or `game.stamp_schematic`, at run time.
+- `game.schematic_shapes(shapes)` — A structure CUT from shapes, for `buf:scatter` to stamp: paths with a thickness, ellipsoids and the named cells of single blocks, rasterised to the cell natively.
+
+### Worldgen: the chunk buffer
+
+- `buf:fill_all(material)` — Fills every block with one material.
+- `buf:fill_below_heightmap(heightmap, material)` — Fills every block below the given surface.
+- `buf:fill_density(density, material, options)` — Fills every block where a density field is POSITIVE.
+- `buf:fill_palette(density, bands, options)` — Fills from a density field through a table of materials, in ONE evaluation.
+- `buf:fill_layers(depth, code, layers)` — Paints the surface's layers from ONE terrain evaluation: `depth` is a density positive underground, like any fill's field, and `code` is a cheap second density whose value at each BLOCK, rounded, names which set of layers the block gets.
+- `buf:fill_cover(material, options)` — Stands a run of cells on every surface the buffer already holds: ground cover — grass, ferns, anything that grows UP from the ground.
+- `buf:fill_fluid_below(level, fluid)` — Fills every block below `level` with a fluid, around the terrain.
+- `buf:fill_fluid_terraced(spec)` — Fills a body of fluid whose level is its own in every column, and holds it there with lips: a river running downhill.
+- `buf:scatter(spec)` — Stamps structures on the surface, across chunk edges, at generation.
+- `buf:set_block(x, y, z, material)` — Sets one whole block.
+- `buf:set_world(x, y, z, material)` — Writes one block by WORLD position, ignoring anything outside this chunk.
+- `buf:set_subnode(bx, by, bz, sx, sy, sz, material)` — Sets one sub-node cell.
+- `buf:set_subnode_world(x, y, z, material)` — The same write at sub-node resolution, in world CELL coordinates — three to a block, so block `(1, 0, 0)`'s lowest corner cell is `(3, 0, 0)`.
+- `buf:is_expanded()` — Whether this buffer has expanded to sub-node resolution.
+
+### Worldgen: fields, maps, heightmaps and random streams
+
+- `density:len()` — How many operations it compiled to.
+- `density:bounds(pos)` — What this field can possibly be over one chunk, without evaluating it.
+- `density:at(x, y, z, seed)` — This field's value at ONE world position.
+- `map:side()` — Samples along one side.
+- `map:scale()` — Blocks per sample.
+- `map:noise(options)` — Fills the whole map with fractal noise, in WORLD coordinates.
+- `map:offset(by)` — Adds a constant to every sample.
+- `map:scale_by(by)` — Multiplies every sample by a constant.
+- `map:clamp(low, high)` — Bounds every sample to a range.
+- `map:blur(radius)` — Smooths the map with a box blur.
+- `map:combine(other, how)` — Combines another map into this one, sample for sample.
+- `map:fill(density, options)` — Replaces every value with a density field's, sampled on one plane.
+- `map:heightmap(pos)` — One chunk's worth of heights, sampled from this map.
+- `heightmap:len()` — Number of columns.
+- `stream:below(bound)` — A uniformly distributed integer in `0..bound-1`.
+- `stream:next_bool()` — A boolean with even odds.
+- `schematic:len()` — How many blocks it holds.
+
+### The world at run time
+
+- `game.get_block(position)` — What a block holds, right now.
+- `game.set_block(position, block, occupancy, options)` — Replaces a whole block, at runtime.
+- `game.get_fluid(position)` — What a block holds.
+- `game.set_fluid(position, spec)` — Puts fluid in a block, or takes it away.
+- `game.get_light(position)` — The light at a block, right now.
+- `game.surface_at(spec)` — The top of a column: the first occupied block at or below `from`, looking down at most `depth` blocks (default 64, at most 256), in one call.
+- `game.line_of_sight(from, to)` — Whether one point in the world can see another.
+- `game.find_path(from, to, options)` — A walkable route between two points, or why there is not one.
+- `game.stamp_schematic(schematic, pos, options)` — Writes a schematic into the running world with its root at `pos`, turned, paced across ticks — the structure a generator scatters, built once at load, stamped by an event long after the ground was made: a wreck at the end of a rainbow, a ruin a quest uncovers.
+- `game.time_of_day()` — Where the day stands: 0 at midnight, 0.5 at noon, wrapping at 1.
+- `game.set_time_of_day(time)` — Winds the day.
+
+### Block events: vetoes, handlers and ticks
+
+- `game.register_on_dig_start(callback)` — Registers a veto on digs BEGINNING: the tick a dig is first seen, before any of the block has come off.
+- `game.register_on_dig_complete(callback)` — Registers a veto on completed digs.
+- `game.register_on_place(callback)` — Registers a veto on placements.
+- `game.register_on_punch(callback)` — Registers a veto on punches.
+- `game.register_on_use(callback, options)` — Registers a handler for USING a block: the place control with nothing to place.
+- `game.register_on_use_entity(callback)` — Registers a handler for USING an entity: the place control with an entity nearer than any block along the player's own reach ray — getting on a horse, milking a cow, shearing a sheep, feeding a pig.
+- `game.register_on_fluid_flow(callback)` — Registers a listener for flows that could not happen.
+- `game.register_random_tick(material, callback)` — Registers what happens when a block of yours gets a turn.
+- `game.register_on_tick(callback)` — Registers a per-tick callback.
+
+### Players
+
+- `game.register_on_player_join(callback)` — Called when a player arrives in the world.
+- `game.register_on_player_leave(callback)` — Called when somebody leaves.
+- `game.register_on_player_move(callback)` — Called when a player's feet cross into another block.
+- `game.register_on_chat(callback)` — Called when a player says something in chat.
+- `game.chat_to(player, text)` — Sends one line of chat to one player.
+- `game.move_player(player, position)` — Puts a connected player somewhere else.
+- `game.push_player(player, impulse)` — Adds to a connected player's velocity, in cells per tick.
+- `game.set_player_abilities(player, abilities)` — Sets what one player may do: fly, how fast they move, whether they may sprint, and how heavy gravity is for them.
+- `game.is_operator(player)` — Whether the server already trusts this player with operator powers.
+- `game.looking_at(player)` — What a connected player's crosshair is on, within their reach.
+- `game.look_direction(player)` — Which way a player is looking, as a unit vector, and from which domain.
+- `game.heading(dx, dz)` — The heading of a direction across the ground, in radians.
+- `game.player_entity(player)` — The entity mirroring a connected player, by their UUID.
+
+### Inventories and containers
+
+- `game.register_view(spec)` — Registers an inventory view: a place stacks may sit, given to every player.
+- `game.set_main_slots(slots)` — Fixes the size of `player:main` for this server.
+- `game.set_slot_grain(units)` — Makes a plain right-click deal in whole blocks.
+- `game.inventory(player, view)` — What a player is carrying in one of their views.
+- `game.give(player, spec)` — Puts material into a player's inventory.
+- `game.take(player, spec)` — Takes material out of a player's inventory.
+- `game.held(player)` — What a player is holding: the stack in the hotbar slot they have selected.
+- `game.slot(player, view, n)` — The stack in one slot of a player's view, or nil for an empty slot, a view that does not exist, a slot past its end, or a player who is not connected.
+- `game.select_slot(player, slot)` — Selects one of a player's hotbar slots.
+- `game.get_tool(player)` — The tool a player is holding, or nil for a bare hand.
+- `game.set_tool(player, tool)` — Puts a tool in a player's hand.
+- `game.make_container(name, slots)` — Makes an inventory that belongs to the WORLD rather than to a player.
+- `game.open_container(name, player)` — Opens a container for a player, so a screen can show it.
+- `game.close_container(name, player)` — Closes a container, putting its contents back into the world.
+- `game.container(name)` — What is in a container, in the same shape `game.inventory` reports stacks, plus a `slot` on each — one-based, and the slot the stack is actually in.
+- `game.container_give(name, spec)` — Puts a stack into a container.
+- `game.container_take(name, spec)` — Takes material out of a container.
+- `game.break_container(name)` — Removes a container and hands back everything that was in it.
+- `game.container_holder(name)` — Who has a container open, as a player UUID in hex — or `nil` for nobody.
+- `game.containers(prefix)` — The names of the containers that exist, starting with `prefix`, in name order.
+
+### Screens: dialogs, the HUD, hover lines, fonts and pictures
+
+- `game.show_dialog(spec)` — Shows a dialog on a player's screen.
+- `game.update_dialog(spec)` — Replaces the contents of a dialog already open.
+- `game.close_dialog(spec)` — Closes a dialog you opened.
+- `game.register_on_dialog_event(callback)` — Called when a player acts in a dialog you opened: a button, a slot click, a text, a shape, a stack dropped outside the sheet.
+- `game.set_hover(player, lines)` — A line of yours under a stack's name, per player, wherever they hover a stack of that material: an `item_slot`, an `item_grid`, any screen's.
+- `game.set_hud(player, values)` — Sets what YOUR HUD script should show one player.
+- `game.register_hud_script(file)` — Registers a HUD script this mod wants clients to run.
+- `game.register_font(spec)` — Registers a font your interface can draw text in.
+- `game.register_picture(spec)` — Registers a picture, so every client fetches it on join, and answers its content hash as 64 hex characters.
+- `game.show_over(entity, spec)` — Hangs a row of pictures over an entity, following it.
+
+### Input
+
+- `game.register_action(spec)` — Registers a named input action.
+- `game.register_on_action(callback)` — Called when a player presses or releases one of YOUR registered actions.
+
+### Entities and riding
+
+- `game.register_model(spec)` — Registers a model entities can be drawn as.
+- `game.spawn_entity(spec)` — Puts an entity in the world.
+- `game.despawn_entity(id)` — Removes an entity.
+- `game.entity(id)` — Everything the engine knows about an entity, or nil if the id is stale.
+- `game.set_entity(id, spec)` — Changes an entity.
+- `game.entities_in_radius(position, radius, source)` — Every entity within `radius` blocks of a position, nearest first.
+- `game.register_on_entity_step(callback)` — Runs once per tick for every entity your mod spawned.
+- `game.steer_entity(id, target, gait)` — Walks an entity one tick toward a place, jumping over what is in the way.
+- `game.transfer_entity(id, domain, position)` — Asks for a body to be moved into another simulation space.
+- `game.mount(player, entity, options)` — Seats a connected player on an entity, so their keys drive it — Life ask 18.
+- `game.dismount(player)` — Gets a player off whatever they are riding.
+- `game.mounted(player)` — The entity a connected player is riding, or `nil`.
+- `game.register_on_dismount(callback)` — Called when a rider comes off their mount — Life ask 18.
+
+### Sound and particles
+
+- `game.register_sound(spec)` — Registers a sound.
+- `game.bind_sound(cue, sound)` — Binds a sound to a named event.
+- `game.cue(spec)` — Raises a cue, playing whatever is bound to it.
+- `game.play_sound(spec)` — Plays a sound for everyone close enough to hear it.
+- `game.play_loop(spec)` — Starts a looping sound.
+- `game.stop_loop(id)` — Stops a looping sound by the id you gave it.
+- `game.emit_particles(spec)` — Scatters a burst of short-lived sprites — sea spray, a drip, mist.
+
+### Sky, weather and stars
+
+- `game.register_sky(spec)` — Registers the sky: how long a day is, and what colour it goes.
+- `game.set_domain_sky(id, spec)` — The sky a domain has, set while the world runs: a woven world's own dawn without a per-player overlay.
+- `game.set_sky_modifier(player, modifier)` — Lays weather over one player's sky: a standing change to the keyframes, eased on their client.
+- `game.register_clouds(spec)` — Declares this world's cloud deck.
+- `game.set_clouds(uuid, spec)` — Sets how much cloud one player is under.
+- `game.set_precipitation(player, precipitation)` — Sets the rain around one player: an emitter their client runs.
+- `game.set_rainbow(player, rainbow)` — Puts a rainbow in one player's sky, or fades it out with `nil`.
+- `game.flash(spec)` — Lightning, seen: a moment's light added to the sun and sky of every player within `radius` of `pos` in its domain.
+- `game.lightning(spec)` — Lightning, drawn: a jagged, forked bolt from `from` to `to`, shown to every player within `radius` of `from` in its domain.
+- `game.stars()` — The star catalog: every star in this universe, in a fixed order.
+- `game.world_position()` — Where the overworld sits in the universe, in the frame the catalog speaks.
+- `game.star_in_view(player)` — The star a player is looking at, and how squarely.
+
+### Domains: simulation spaces
+
+- `game.register_domain(spec)` — Registers a simulation space, or a template for making them.
+- `game.create_domain(template, key, options)` — Makes an instance of a template, or hands back the one already there.
+- `game.destroy_domain(id)` — Removes an instance and everything stored in it.
+- `game.register_on_domain_enter(callback)` — Registers what happens before a body enters a simulation space.
+- `game.register_on_domain_exit(callback)` — Registers what happens before a body leaves a simulation space.
+
+<!-- api-reference:end -->
+
 ## What a mod is
 
 A directory with two files:

@@ -49,8 +49,9 @@ beside it, and checks it the way `--check-mods` would before handing it over.
 
 ## What is not here yet
 
-- Prose documentation. Until it exists, the stubs carry the reference material
-  in their doc comments, and [`../game/`](../game/) holds worked examples —
+- Prose guides beyond `AGENTS.md`. The stubs carry each function's contract in
+  its doc comment, `AGENTS.md` lists every function by area (generated from
+  the stubs, checked by CI), and [`../game/`](../game/) holds worked examples —
   every mod in it is written through this API and nothing else, which is a rule
   the build enforces rather than an intention.
 

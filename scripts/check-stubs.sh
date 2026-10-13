@@ -123,6 +123,12 @@ if [ -n "$malformed" ]; then
     echo
 fi
 
+# The reference section of api/AGENTS.md is generated from the stubs; a
+# function the stubs gained or lost since it was written fails here by name.
+if ! python3 -I scripts/api-reference.py --check; then
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "API stubs: OK ($documented_count entries documented, API version $stub_version)"
 fi
