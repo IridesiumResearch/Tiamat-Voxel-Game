@@ -346,6 +346,22 @@ pub struct Shared {
             std::collections::BTreeMap<u64, tiamat_core::particle::Badge>,
         >,
     >,
+    /// The badges this tick's mods have asked for so far, published into
+    /// [`Shared::badges`] once the tick is over.
+    ///
+    /// **Two maps, because a tick is not instantaneous.** A mod calling
+    /// `show_over` five times in one tick means the fifth; a network pass
+    /// that read the map between the fourth call and the fifth sent the
+    /// fourth, and the client drew a badge the mod had already replaced. Seen
+    /// four times on CI as "a stale badge was sent". The connections read
+    /// only what [`Shared::publish_badges`] has moved across, which the tick
+    /// does once, after every mod has had its say.
+    pub badges_pending: std::sync::Mutex<
+        std::collections::BTreeMap<
+            PlayerUuid,
+            std::collections::BTreeMap<u64, tiamat_core::particle::Badge>,
+        >,
+    >,
 
     /// Entity messages waiting for one player.
     ///
@@ -3243,7 +3259,7 @@ impl Shared {
     /// the bound is on how many DIFFERENT entities one player is shown at
     /// once, not on how often a mod asks, because asking again is free.
     pub fn queue_badge(&self, uuid: &PlayerUuid, badge: tiamat_core::particle::Badge) -> bool {
-        let Ok(mut queues) = self.badges.lock() else {
+        let Ok(mut queues) = self.badges_pending.lock() else {
             return false;
         };
         let queue = queues.entry(*uuid).or_default();
@@ -3252,6 +3268,27 @@ impl Shared {
         }
         queue.insert(badge.entity, badge);
         true
+    }
+
+    /// Publishes this tick's badges for the connections to send.
+    ///
+    /// Called by the tick once every mod has run — see
+    /// [`Shared::badges_pending`]. The newest badge per entity wins over one
+    /// a connection has not collected yet, which is the latest-state rule
+    /// the map exists for.
+    pub fn publish_badges(&self) {
+        let Ok(mut pending) = self.badges_pending.lock() else {
+            return;
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let Ok(mut published) = self.badges.lock() else {
+            return;
+        };
+        for (uuid, badges) in std::mem::take(&mut *pending) {
+            published.entry(uuid).or_default().extend(badges);
+        }
     }
 
     /// Takes the badges waiting for one player.
@@ -4544,6 +4581,47 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_ticks_badges_reach_a_connection_as_one_state_and_the_newest_wins() {
+        // The `show_over` flake, four times on macOS: a mod calling five
+        // times in a tick meant the fifth, and a network pass between the
+        // fourth call and the fifth sent the fourth. Nothing is readable
+        // until the tick publishes, and then only the newest per entity.
+        let shared = shared();
+        let uuid = PlayerUuid::from_bytes([3; 32]);
+        let badge = |count: u8| tiamat_core::particle::Badge {
+            entity: 7,
+            picture: [0x5A; 32],
+            count,
+            seconds: 1.0,
+            size: 0.3,
+            colour: [255, 255, 255, 255],
+        };
+        for count in (1..=5).rev() {
+            assert!(shared.queue_badge(&uuid, badge(count)));
+            assert!(
+                shared.take_badges(&uuid).is_empty(),
+                "a connection read a badge before the tick had published"
+            );
+        }
+        shared.publish_badges();
+        let sent = shared.take_badges(&uuid);
+        assert_eq!(sent.len(), 1, "one entity, one badge: {sent:?}");
+        assert_eq!(
+            sent[0].count, 1,
+            "the last call of the tick is the one sent"
+        );
+        assert!(shared.take_badges(&uuid).is_empty(), "taken once");
+        // A badge a connection has not collected yet is replaced by a newer
+        // tick's, never queued behind it.
+        shared.queue_badge(&uuid, badge(4));
+        shared.publish_badges();
+        shared.queue_badge(&uuid, badge(2));
+        shared.publish_badges();
+        let sent = shared.take_badges(&uuid);
+        assert_eq!(sent.iter().map(|b| b.count).collect::<Vec<_>>(), vec![2]);
+    }
+
     pub(super) fn shared() -> Shared {
         Shared {
             identities: Mutex::new(IdentityRegistry::default()),
@@ -4597,6 +4675,7 @@ mod tests {
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             badges: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            badges_pending: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),

@@ -2771,6 +2771,7 @@ impl ServerHandle {
             notices: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             particles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             badges: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            badges_pending: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             entity_messages: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             hud_values: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sky_modifiers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -6655,6 +6656,10 @@ impl ServerHandle {
                         // spent the budget. Built only for a tick that has
                         // already lost it.
                         phases.mark("saving");
+                        // **This tick's badges go out as one state**, now
+                        // that every mod has had its say — see
+                        // `Shared::badges_pending`.
+                        shared.publish_badges();
                         let took = phases.total();
                         // Every database call the tick made, filed under the
                         // phase it started in; and the tick into the running
