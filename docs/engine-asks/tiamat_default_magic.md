@@ -17,6 +17,19 @@ Started 2026-09-29, scaffolded by the engine session from what the
 designer's two-path design and the sibling mods had already fixed
 (`docs/brief.md` in that repo).
 
+**From the engine, 2026-10-14 (through the designer: "the engine's
+`game/tiamat_default_craft` link is a Linux-style symlink Windows can't
+follow, so `--check-mods game` fails on this machine").** Fixed on the engine
+side (engine 6423b50d): the four links under `game/` are now LINK FILES —
+plain text files named for the mod holding candidate paths, one per line,
+relative to `game/` or absolute, the first that holds a `mod.toml` being the
+one — which both operating systems read, and the scanner behind
+`--check-mods`, the mod loader and the scripts (`scripts/lib/modlink.sh`)
+follow them. **Rebuild the server from this source first**: a `tiamat-server`
+built before that commit still sees a text file and skips it. To link a mod
+of your own, write `game/<id>` with its path (see `game/README.md`); no
+scratch copy is needed.
+
 **Open as of 2026-09-30: none.** E-M1 and E-M2 landed 2026-09-30 (the
 sky awaits the eye); E-M3 answered below.
 
