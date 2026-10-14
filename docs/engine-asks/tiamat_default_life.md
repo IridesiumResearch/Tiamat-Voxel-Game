@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-14: 23** (a player wears a mod's character, swims and crawls). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-14: 23** (players wear a mod's model and their own skins, swim and crawl). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
@@ -63,14 +63,16 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 23. A player wears a mod's character, swims and crawls (2026-10-14): OPEN
+## 23. Players wear a mod's model and their own skins, swim and crawl (2026-10-14, revised the same day): OPEN
 
-**Wanted.** Three things the designer asked for together, because a
-character a player picks has to be drawn doing everything a player does:
+**Wanted.** Three things the designer asked for together, because the body
+a player is drawn as has to be drawn doing everything a player does:
 
-1. **Custom characters with their own skins**, picked before the game on
-   the start screen's Mods tab (a `[[setting]]` dropdown in `mod.toml`,
-   one option per character), and worn by that player for everyone to see.
+1. **One player model, the mod's, with skins.** Every player is drawn as
+   the same model, Life's, not the engine's humanoid. What varies is the
+   SKIN: the mod's default, one of the mod's own, or **a skin the player
+   made**, chosen before the game, **if the server's host allows custom
+   skins**. A host who does not sees everyone in the mod's skins.
 2. **A swimming animation** that plays when a player swims.
 3. **Crawling**: a player can get into a passage one block high, lying
    down, with a crawling animation, and stands back up where there is room.
@@ -83,6 +85,12 @@ character a player picks has to be drawn doing everything a player does:
   player as the last of the humanoid's figures). `set_entity` has no
   `model`, a player's body is stepped from its own inputs, and nothing in
   `stubs/game.lua` names a player's look.
+- *A player's own skin.* It is a file on the PLAYER's machine, and nothing
+  a mod runs can reach one: the start screen runs no Lua, a `[[setting]]`
+  answers an option, not a file, and every picture the engine moves goes
+  from the server to the client, never back. Accepting a picture from a
+  player, checking it, and passing it on to everyone else is the engine's,
+  and so is the host's say over whether it happens at all.
 - *Swimming.* `anim_from_motion` (`server/src/transport/endpoint.rs`)
   returns SWING, SNEAK, IDLE, RUN or WALK and never `AnimTag::SWIM`, so a
   swimming player is drawn walking, though the humanoid has a `swim` clip
@@ -94,17 +102,37 @@ character a player picks has to be drawn doing everything a player does:
 
 **Smallest change.** In three parts, each useful alone.
 
-1. `game.set_player_model(uuid, model, { texture })`: the player's body is
-   drawn as a registered model (`"my_mod:knight"`) by everyone, the player
-   too in third person; `nil` gives the humanoid back. Its clips are matched
-   to the tags by name as a creature's are. The collider, the eye height and
-   the first-person hand are unchanged: this is the look, not the body.
-   `texture` names a PNG the mod declared at load (for example a `skins`
-   list on `register_model`, pushed by hash like the model's own), so many
-   skins share ONE model: each skin as its own `register_model` would spend
-   the server's 64 models, and Life and its siblings use about 50 already.
-   Not persisted; a mod sets it again on join, which is where it reads the
-   player's `[[setting]]` anyway.
+1. **The model, the skin, and the host's say.**
+   - `game.register_player_model{ model = "my_mod:person" }`, registration
+     only, one per world (the last mod in load order, as a theme): every
+     player is drawn as that registered model, by everyone, the player too in
+     third person, its clips matched to the tags by name as a creature's
+     are. The collider, the eye height and the first-person hand are
+     unchanged: this is the look, not the body, so the model must be the
+     collider's size (5.4 cells by 1.8). None registered: the humanoid, as
+     now.
+   - `game.set_player_skin(uuid, file | nil)`: a PNG in the mod's directory,
+     declared at load (a `skins` list on `register_player_model`, pushed by
+     hash like the model's own skin), drawn on that player's model with the
+     model's UVs; `nil` is the model's own `texture`. One model, many skins,
+     one of the server's 64 models.
+   - **A player's own skin**, from the client: a "Skin" picker in the
+     client's own settings (the start screen's, since no Lua runs there)
+     keeps a PNG the player chose. On join the client offers its hash; a
+     server that allows custom skins fetches the bytes once, decodes them
+     through the picture caps (charter rule 14) and the model's skin size
+     (a skin drawn for another layout is refused, with a word to the
+     player), and pushes them by hash to everyone who sees that player.
+     The join event carries `skin` (the hash, or nil), and a mod may still
+     overrule it with `set_player_skin`.
+   - **The host's switch**: `allow_custom_skins` in `server.toml`, off by
+     default. Off, nothing is fetched from any client and every player wears
+     what the mod gives them. `game.custom_skins_allowed()` tells a mod
+     which, so it can say so. A host who allows them is showing every
+     player a picture another player drew, which is why it is the host's
+     call and why off is the default.
+   - Nothing about a skin is persisted by the engine; the client offers its
+     skin at every join.
 2. `anim_from_motion` answers `AnimTag::SWIM` for a player who is swimming
    (submerged above the feet and not standing on the bottom, by whatever
    test the swim physics already makes), after the swing and before the
@@ -122,11 +150,12 @@ character a player picks has to be drawn doing everything a player does:
    `game.entity(body).crawling` would let a mod read it (no sprinting while
    crawling, say).
 
-Life would then ship characters as a `.glb` with its skins beside it, a
-`[[setting]]` listing them, and a `set_player_model` on join. The model
-spec for an artist is the creature one: feet at y = 0, +Z forward, 5.4
-cells tall and 1.8 wide to match the collider, clips `idle`, `walk`,
-`run`, `swing`, `swim`, `sneak` and now `crawl`.
+Life would then ship ONE player model with a default skin and a few of
+its own, register it as the player model, and publish its skin template
+(the UV layout as a PNG) so a player can paint their own. The model spec
+for an artist is the creature one: feet at y = 0, +Z forward, 5.4 cells
+tall and 1.8 wide to match the collider, clips `idle`, `walk`, `run`,
+`swing`, `swim`, `sneak` and now `crawl`.
 
 ## 22. An operator flies whatever the mod says (2026-10-12): LANDED 2026-10-13 (engine)
 
