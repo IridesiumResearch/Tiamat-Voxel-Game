@@ -542,6 +542,7 @@ fn entity_messages(
                 anim: spawn.anim.0,
                 tint: spawn.tint,
                 model: spawn.model,
+                skin: spawn.skin,
                 collider: spawn.collider.map(|box_| [box_.width, box_.height]),
                 item: spawn.item.as_ref().map(|stack| shared.wire_stack(stack)),
                 hands: [
@@ -619,6 +620,19 @@ fn entity_messages(
             })
             .collect();
         messages.push(ServerMessage::EntityArmed { entities });
+    }
+
+    if !update.relooked.is_empty() {
+        let entities = update
+            .relooked
+            .into_iter()
+            .map(|look| tiamat_core::proto::EntityLook {
+                id: look.id.0,
+                model: look.model,
+                skin: look.skin,
+            })
+            .collect();
+        messages.push(ServerMessage::EntityLooked { entities });
     }
 
     messages
@@ -1944,6 +1958,52 @@ impl ServerHandle {
             .collect();
         info!(models = model_table.len(), "model table built");
 
+        // The bodies players wear (Life ask 23): each must name a model in
+        // the table just built — a body naming nothing is dropped, with an
+        // error, so a player is drawn as the humanoid rather than as nothing
+        // — and its skins are hashed like the model's own texture, a missing
+        // file dropped with a warning.
+        let player_models: Vec<crate::transport::PlayerModelDef> = host
+            .as_ref()
+            .map(|loaded| loaded.vm().registered_player_models())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|body| {
+                if !model_table.iter().any(|entry| entry.id == body.model) {
+                    error!(
+                        mod_id = %body.mod_id,
+                        body = %body.id,
+                        model = %body.model,
+                        "player model names a model nobody registered; players will not wear it"
+                    );
+                    return None;
+                }
+                let skins = body
+                    .skins
+                    .iter()
+                    .filter_map(|path| {
+                        let hash = content_index.hash_of(&body.mod_id, path);
+                        if hash.is_none() {
+                            warn!(
+                                mod_id = %body.mod_id,
+                                body = %body.id,
+                                path = %path,
+                                "player model declares a skin that is not in the mod directory; \
+                                 it cannot be worn"
+                            );
+                        }
+                        hash.map(|hash| (path.clone(), hash))
+                    })
+                    .collect();
+                Some(crate::transport::PlayerModelDef {
+                    id: body.id,
+                    model: body.model,
+                    skins,
+                })
+            })
+            .collect();
+        info!(bodies = player_models.len(), "player models built");
+
         // A block drawn as a model (Contract §8.6) names one by id, and the
         // model may have been registered after the block, so this is where
         // the name can first be checked. A name nobody registered is an error
@@ -2597,6 +2657,7 @@ impl ServerHandle {
             font_table,
             picture_table,
             model_table,
+            player_models,
             theme,
             cloud_layer,
             sound_bindings,
@@ -3036,6 +3097,7 @@ impl ServerHandle {
                                 std::sync::Arc::clone(&population),
                                 std::sync::Arc::clone(&shared.bodies),
                                 std::sync::Arc::clone(&domains),
+                                shared.player_models.clone(),
                             ));
                             entity_access = Some(std::sync::Arc::clone(&access));
                             host.vm_mut().set_entity_access(access);
@@ -3814,6 +3876,7 @@ impl ServerHandle {
                                 for (uuid, player) in bodies.iter() {
                                     present.insert(*uuid);
                                     let turn = std::f32::consts::TAU;
+                                    let (model, skin) = shared.look_of(player);
                                     mobs.sync_player(
                                         *uuid,
                                         tiamat_core::ent::Transform {
@@ -3855,6 +3918,8 @@ impl ServerHandle {
                                         // and is never persisted with the body.
                                         shared.hands_of(uuid),
                                         player.crawling,
+                                        model,
+                                        skin,
                                     );
                                 }
                                 // **Leaving dismounts** (Life ask 18). The
@@ -5295,6 +5360,43 @@ impl ServerHandle {
                         // here, so a move never runs one mod's hook underneath
                         // another mod's call — and so a request made mid-tick
                         // is safe by construction rather than by care.
+                        // **What each player's own body is drawn as**, for
+                        // third person (Life ask 23): their mirror is never
+                        // streamed to them, so this is its own message, sent
+                        // like the abilities — at join, and when a mod
+                        // changes it, after the mods have run.
+                        {
+                            let unsent: Vec<(
+                                tiamat_core::PlayerUuid,
+                                Option<String>,
+                                Option<tiamat_core::proto::ContentHash>,
+                            )> = shared.bodies.lock().map_or_else(
+                                |_| Vec::new(),
+                                |mut bodies| {
+                                    bodies
+                                        .iter_mut()
+                                        .filter(|(_, player)| !player.look_sent)
+                                        .map(|(uuid, player)| {
+                                            player.look_sent = true;
+                                            let (model, skin) = shared.look_of(player);
+                                            (*uuid, model, skin)
+                                        })
+                                        .collect()
+                                },
+                            );
+                            for (uuid, model, skin) in unsent {
+                                shared.push_entity_messages(
+                                    &uuid,
+                                    std::iter::once(
+                                        tiamat_core::proto::ServerMessage::PlayerLook {
+                                            model,
+                                            skin,
+                                        },
+                                    ),
+                                );
+                            }
+                        }
+
                         for request in entity_access
                             .as_ref()
                             .map(|access| access.take_transfers())

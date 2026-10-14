@@ -1290,6 +1290,10 @@ pub struct App {
     /// otherwise, which is also what a server with no mod that sets them
     /// leaves it at.
     abilities: tiamat_core::phys::Abilities,
+    /// What this player's own body is drawn as in third person (Life ask
+    /// 23): a mod's model and skin, as the server said, or `None` for the
+    /// engine's rig. Their mirror is never streamed to them, so this is told.
+    own_look: Option<crate::render::Look>,
     /// Whether flight is on.
     flying: bool,
     /// What the connection reported about the server's certificate.
@@ -1537,6 +1541,7 @@ impl App {
             in_flight: BTreeMap::new(),
             may_fly: false,
             abilities: tiamat_core::phys::Abilities::DEFAULT,
+            own_look: None,
             flying: false,
             world_paused: false,
             stride: 0.0,
@@ -3227,7 +3232,11 @@ impl App {
                 self.hotbar.get(self.selected).cloned().flatten(),
                 self.offhand(),
             ];
-            props.extend(self.hand_props(figure, &held));
+            let look = self
+                .own_look
+                .clone()
+                .filter(|look| self.renderer.has_model(&look.model));
+            props.extend(self.hand_props(look.as_ref(), figure, &held));
         }
         props.extend(self.other_hand_props());
         self.renderer.set_props(&props);
@@ -3244,11 +3253,19 @@ impl App {
         let cells = f64::from(tiamat_core::SUBNODES_PER_AXIS);
         let mut props = Vec::new();
         for (id, entity) in self.entities.iter() {
-            if entity.hands.iter().all(Option::is_none)
-                || entity.model.as_deref() != Some(tiamat_core::ent::HUMANOID_MODEL)
-            {
+            // Anything with hands and a model the client can place a joint on:
+            // the engine's rig, or a mod's model with joints named like its
+            // (Life ask 23, a player in a mod's body).
+            let Some(model) = entity.model.as_deref() else {
+                continue;
+            };
+            if entity.hands.iter().all(Option::is_none) {
                 continue;
             }
+            let look = (model != tiamat_core::ent::HUMANOID_MODEL).then(|| crate::render::Look {
+                model: model.to_owned(),
+                skin: entity.skin,
+            });
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
@@ -3278,7 +3295,7 @@ impl App {
                     .light_on_body(feet, entity.collider.map_or(0.0, |size| size[1])),
                 tint: pose.tint,
             };
-            props.extend(self.hand_props(&figure, &entity.hands));
+            props.extend(self.hand_props(look.as_ref(), &figure, &entity.hands));
         }
         props
     }
@@ -3286,13 +3303,14 @@ impl App {
     /// The boxes one figure's hands hold.
     fn hand_props(
         &self,
+        look: Option<&crate::render::Look>,
         figure: &crate::render::skinned::Figure,
         held: &[Option<tiamat_core::proto::StackDef>; 2],
     ) -> Vec<crate::render::Prop> {
         let mut props = Vec::new();
         for (joint, stack) in [("hand.r", &held[0]), ("hand.l", &held[1])] {
             let Some(stack) = stack else { continue };
-            let Some(joint) = self.renderer.attachment(figure, joint) else {
+            let Some(joint) = self.renderer.attachment_on(look, figure, joint) else {
                 continue;
             };
             let cell_tiles = self.cell_tiles(stack);
@@ -4243,6 +4261,7 @@ impl App {
                 self.forget_model_icons(&id);
                 self.renderer.set_model_texture(&id, &image);
             }
+            crate::net::Event::Skin { hash, image } => self.renderer.set_skin(hash, &image),
             // Unreachable by construction: the caller matched these three. An
             // arm rather than an `unreachable!`, because a fourth asset added
             // to the caller and forgotten here should do nothing rather than
@@ -4972,8 +4991,13 @@ impl App {
             Event::Picture { .. }
             | Event::Font { .. }
             | Event::Model { .. }
-            | Event::ModelTexture { .. } => {
+            | Event::ModelTexture { .. }
+            | Event::Skin { .. } => {
                 self.adopt_asset(event);
+            }
+            Event::EntityLooked(entities) => self.entities.relooked(&entities),
+            Event::PlayerLook { model, skin } => {
+                self.own_look = model.map(|model| crate::render::Look { model, skin });
             }
 
             Event::Joined {
@@ -5937,6 +5961,13 @@ impl App {
             light: self.store.light_on_body(feet, HUMANOID_HEIGHT),
             tint: [1.0; 3],
         };
+        // In the mod's model the server said (Life ask 23), once the client
+        // has it; the engine's rig meanwhile and otherwise.
+        self.renderer.set_player_look(
+            self.own_look
+                .clone()
+                .filter(|look| self.renderer.has_model(&look.model)),
+        );
         self.renderer.set_player(Some(figure));
         self.place_blobs();
         self.place_hands();
@@ -6595,8 +6626,10 @@ impl App {
         // the engine's rig was skipped here, so a mod's cow was fetched,
         // parsed, scaled, put on the GPU and never placed. The renderer has
         // held the other half of this since the day models landed.
-        let mut by_model: std::collections::BTreeMap<String, Vec<crate::render::skinned::Figure>> =
-            std::collections::BTreeMap::new();
+        let mut by_model: std::collections::BTreeMap<
+            crate::render::Look,
+            Vec<crate::render::skinned::Figure>,
+        > = std::collections::BTreeMap::new();
         for (id, entity) in self.entities.iter() {
             // **A model the client actually has.** A server naming one it has
             // not pushed is naming nothing, and drawing a humanoid for it would
@@ -6659,7 +6692,13 @@ impl App {
                 tint: pose.tint,
             };
             if let Some(model) = mods.filter(|_| !own) {
-                by_model.entry(model.to_owned()).or_default().push(figure);
+                by_model
+                    .entry(crate::render::Look {
+                        model: model.to_owned(),
+                        skin: entity.skin,
+                    })
+                    .or_default()
+                    .push(figure);
             } else {
                 placed.push(figure);
             }
@@ -6682,7 +6721,10 @@ impl App {
     /// not arrived draws nothing").
     fn place_model_blocks(
         &self,
-        by_model: &mut std::collections::BTreeMap<String, Vec<crate::render::skinned::Figure>>,
+        by_model: &mut std::collections::BTreeMap<
+            crate::render::Look,
+            Vec<crate::render::skinned::Figure>,
+        >,
     ) {
         if self.block_models.model_of.is_empty() {
             return;
@@ -6748,7 +6790,10 @@ impl App {
             }
         }
         for (id, figure) in found {
-            by_model.entry(id).or_default().push(figure);
+            by_model
+                .entry(crate::render::Look::bare(&id))
+                .or_default()
+                .push(figure);
         }
     }
 

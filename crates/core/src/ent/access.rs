@@ -260,6 +260,27 @@ pub trait Access: Send + Sync {
         false
     }
 
+    /// Dresses a connected player in one of the bodies a mod registered with
+    /// `register_player_model` (Life ask 23); `None` is the first registered,
+    /// which is what everybody wears until a mod says otherwise. Changing
+    /// body takes the skin off: a skin is painted for one body.
+    ///
+    /// `Err` names an id nobody registered — a mod's typo, and so a Lua
+    /// error; `Ok(false)` is a player who is not here. Defaulted, because a
+    /// VM with no server behind it has no players.
+    fn set_player_model(&self, uuid: [u8; 32], id: Option<&str>) -> Result<bool, String> {
+        let _ = (uuid, id);
+        Ok(false)
+    }
+
+    /// Puts a skin on a player: a PNG the body they wear declared in `skins`,
+    /// or `None` for the model's own texture. `Err` names a file the body
+    /// did not declare.
+    fn set_player_skin(&self, uuid: [u8; 32], file: Option<&str>) -> Result<bool, String> {
+        let _ = (uuid, file);
+        Ok(false)
+    }
+
     /// Seats a connected player on an entity, so their keys drive it (Life
     /// ask 18).
     ///

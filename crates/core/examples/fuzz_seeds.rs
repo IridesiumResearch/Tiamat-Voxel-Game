@@ -1038,6 +1038,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 pitch: -32,
                 anim: 1,
                 model: Some("core_mimic:chest".to_owned()),
+                skin: None,
                 collider: Some([0.6, 1.8]),
                 nametag: Some("a mimic".to_owned()),
                 item: None,

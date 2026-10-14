@@ -2561,6 +2561,37 @@ function game.is_operator(player) end
 ---@return boolean told
 function game.set_player_abilities(player, abilities) end
 
+---Dresses a player in one of the bodies a mod registered with
+---`game.register_player_model` (Life ask 23); `nil` is the first registered,
+---which is what everybody wears until you say otherwise. Everybody sees it,
+---the player too in third person. Changing body takes the skin off: a skin
+---is painted for one body. Read the player's choice from your own
+---`[[setting]]` on join and say it here; nothing is persisted by the engine.
+---
+---An id nobody registered is an error, so a typo is not a body you think you
+---gave. Returns `false` for a player who is not here.
+---
+---```lua
+---game.register_on_player_join(function(event)
+---    game.set_player_model(event.player, game.setting(event.player, "body"))
+---end)
+---```
+---@param player string The player's UUID, in hex.
+---@param id string|nil The body's id, as registered.
+---@return boolean told
+function game.set_player_model(player, id) end
+
+---Puts a skin on a player's body: a PNG the body they wear declared in
+---`skins` on `game.register_player_model`, by that path, or `nil` for the
+---model's own texture (Life ask 23). Everybody who sees the player fetches it
+---by hash and draws it in place of the model's texture, with its UVs. A file
+---the body did not declare is an error. Returns `false` for a player who is
+---not here.
+---@param player string The player's UUID, in hex.
+---@param file string|nil A path from the body's `skins`, or `nil`.
+---@return boolean told
+function game.set_player_skin(player, file) end
+
 ---Sends one line of chat to one player. Returns whether it was delivered.
 ---
 ---A private message from your mod: nobody else sees it, and it arrives in the
@@ -2748,6 +2779,41 @@ function game.register_model(spec) end
 ---@field file string Required. A self-contained `.glb` inside your mod directory.
 ---@field scale number? Multiplies the model's size. Default 1, from 0.01 to 64.
 ---@field texture string? A PNG beside the model, drawn on it using the model's own UVs — `"models/cow.png"`. Without one a model is matte white, which is what every model was. Pushed to clients by hash like a block's texture, decoded through the same caps (charter rule 14), and a skin that will not decode leaves the model white with a warning rather than painting it magenta. Your `.glb` must NOT embed the image: the reader refuses embedded images, and this is the separate file it refuses them in favour of.
+
+---Offers players a body to be drawn as (Life ask 23). Registration window
+---only.
+---
+---**Until this existed every player was the engine's white humanoid.** Once a
+---mod registers any body, every player is drawn as one of them, by everybody
+---and by themselves in third person: the first registered until
+---`game.set_player_model` says otherwise. The collider, the eye height and
+---the first-person hand are the player's own whatever the body — this is the
+---look, not the body — so a model should be the collider's size, 5.4 cells
+---tall and 1.8 wide, feet at `y = 0`, `+Z` forward, with clips `idle`,
+---`walk`, `run`, `swing`, `swim`, `sneak` and `crawl` matched by name.
+---
+---```lua
+---game.register_model{ id = "male", file = "models/male.glb", texture = "models/male.png" }
+---game.register_player_model{ id = "male", model = "male", skins = { "skins/male_pale.png", "skins/male_dark.png" } }
+---```
+---
+---`model` is a model you registered with `game.register_model` (unqualified
+---means your own), checked once every mod has loaded: a body naming no model
+---is dropped with an error and players fall back to the humanoid. `skins`
+---are PNGs beside your mod that `game.set_player_skin` may put on the body,
+---using the model's own UVs, at most 32; one whose file is missing cannot be
+---worn. **A world's bodies all come from one mod**, the last in load order to
+---register any, as a theme. Two bodies spend two of the server's 64 models,
+---however many skins they carry.
+---
+---@param spec Tiamat.PlayerModelSpec
+function game.register_player_model(spec) end
+
+---Fields accepted by `game.register_player_model`.
+---@class Tiamat.PlayerModelSpec
+---@field id string Required. A short name you pick the body by in `set_player_model`: `"male"`.
+---@field model string Required. The id of a model you registered with `register_model`; unqualified is your own mod's.
+---@field skins string[]? PNGs inside your mod directory, each a skin `set_player_skin` may put on this body. Pushed to clients by hash like a texture, and decoded through the same caps.
 
 ---Declares this world's cloud deck. Registration window only.
 ---

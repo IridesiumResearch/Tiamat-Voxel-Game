@@ -65,6 +65,8 @@ pub struct Spawn {
     pub velocity: Velocity,
     /// What to draw, or `None` for something invisible.
     pub model: Option<String>,
+    /// The skin on it, by hash (Life ask 23); `None` is the model's own texture.
+    pub skin: Option<crate::proto::ContentHash>,
     /// How big it is, for the client's own culling.
     pub collider: Option<Collider>,
     /// The stack it looks like, for an item on the ground.
@@ -184,6 +186,9 @@ struct Sent {
     pitch: i8,
     anim: AnimTag,
     hands: crate::ent::Hands,
+    /// `Entity::look_serial` as last sent, so a changed model or skin is one
+    /// integer compare rather than a string one per entity per viewer.
+    look: u32,
     /// The colour shown this tick (Life ask 21): a flash fading on a
     /// creature standing still is a change, and is sent as one.
     tint: [u8; 3],
@@ -198,6 +203,7 @@ impl Sent {
             pitch: quantise_pitch(entity.transform.pitch),
             anim: entity.anim,
             hands: entity.hands.clone().clone(),
+            look: entity.look_serial,
             tint: entity.shown_tint(),
         }
     }
@@ -231,6 +237,20 @@ pub struct Update {
     /// position is corrected 50 ms later and a lost hand is not corrected at
     /// all until the holder next changes it.
     pub rearmed: Vec<Armed>,
+    /// Entities whose model or skin changed (Life ask 23): a player dressed
+    /// by a mod. Reliable, like a hand: a lost look is never corrected.
+    pub relooked: Vec<Look>,
+}
+
+/// A change of what an entity is drawn as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Look {
+    /// Which entity.
+    pub id: EntityId,
+    /// The model it is drawn as now, or `None` for nothing.
+    pub model: Option<String>,
+    /// The skin on it, or `None` for the model's own texture.
+    pub skin: Option<crate::proto::ContentHash>,
 }
 
 impl Update {
@@ -241,6 +261,7 @@ impl Update {
             && self.despawned.is_empty()
             && self.moved.is_empty()
             && self.rearmed.is_empty()
+            && self.relooked.is_empty()
     }
 }
 
@@ -332,6 +353,13 @@ impl Tracker {
                             hands: entity.hands.clone().clone(),
                         });
                     }
+                    if now.look != before.look {
+                        update.relooked.push(Look {
+                            id,
+                            model: entity.model.clone(),
+                            skin: entity.skin,
+                        });
+                    }
                 }
             }
             still_visible.insert(id, now);
@@ -359,6 +387,7 @@ fn spawn_of(id: EntityId, entity: &Entity) -> Spawn {
         transform: entity.transform,
         velocity: entity.velocity,
         model: entity.model.clone(),
+        skin: entity.skin,
         collider: entity.collider,
         item: entity.item.clone().clone(),
         hands: entity.hands.clone().clone(),

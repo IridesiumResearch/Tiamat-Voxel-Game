@@ -326,12 +326,47 @@ struct ModModels {
     /// **The player is the LAST of these**, appended by `set_player` — see
     /// there, and `skinned::Skinned::draw_first`.
     humanoid: Vec<skinned::Figure>,
-    /// One pass per model a mod pushed, by qualified id.
-    passes: std::collections::BTreeMap<String, skinned::Skinned>,
-    /// Where each of those models' entities are, camera-relative.
-    by_model: std::collections::BTreeMap<String, Vec<skinned::Figure>>,
-    /// Skins whose model has not arrived yet, by model id.
+    /// One pass per look: a model a mod pushed in its own texture, and one
+    /// more for each skin a figure has been seen wearing (Life ask 23), made
+    /// from the bare pass when both it and the image are here.
+    passes: std::collections::BTreeMap<Look, skinned::Skinned>,
+    /// Where each look's entities are, camera-relative.
+    by_model: std::collections::BTreeMap<Look, Vec<skinned::Figure>>,
+    /// Models' own textures that arrived before, or beside, their model, by
+    /// model id.
     skins: std::collections::BTreeMap<String, crate::texture::Image>,
+    /// Skins figures wear in place of a model's texture, by hash.
+    worn: std::collections::BTreeMap<tiamat_core::proto::ContentHash, crate::texture::Image>,
+    /// The look the player's own figure is drawn in, when it is a mod's
+    /// model rather than the engine's rig.
+    player: Option<Look>,
+    /// The player's own figure this frame, when it is drawn in a mod's model.
+    player_figure: Option<skinned::Figure>,
+    /// The pass that drew the player's figure LAST this frame, which the
+    /// world pass leaves out in first person — the mod-model mirror of the
+    /// humanoid list's rule.
+    player_pass: Option<Look>,
+}
+
+/// What a figure is drawn as: a registered model, and the skin on it if any
+/// (Life ask 23). The key a figure is routed by and a pass is kept under.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Look {
+    /// The model's qualified id.
+    pub model: String,
+    /// A skin's content hash, or `None` for the model's own texture.
+    pub skin: Option<tiamat_core::proto::ContentHash>,
+}
+
+impl Look {
+    /// A model in its own texture.
+    #[must_use]
+    pub fn bare(model: &str) -> Self {
+        Self {
+            model: model.to_owned(),
+            skin: None,
+        }
+    }
 }
 
 /// The default sky, as the shader wants it.
@@ -1630,8 +1665,35 @@ impl Renderer {
     /// has ever drawn.
     pub fn set_player(&mut self, figure: Option<skinned::Figure>) {
         self.figures.humanoid.truncate(self.entity_figures);
-        self.figures.humanoid.extend(figure);
-        self.player = figure.is_some();
+        // In a mod's model (Life ask 23) the figure rides that look's pass
+        // instead, placed last by `prepare_figures`; the rig draws nobody.
+        if self.figures.player.is_some() && figure.is_some() {
+            self.figures.player_figure = figure;
+            self.player = false;
+        } else {
+            self.figures.player_figure = None;
+            self.figures.humanoid.extend(figure);
+            self.player = figure.is_some();
+        }
+    }
+
+    /// Where a joint of a figure drawn in `look` is — the humanoid rig's for
+    /// `None` — for a prop to hang from. See [`Renderer::attachment`].
+    #[must_use]
+    pub fn attachment_on(
+        &self,
+        look: Option<&Look>,
+        figure: &skinned::Figure,
+        joint: &str,
+    ) -> Option<[f32; 16]> {
+        let Some(look) = look else {
+            return self.skinned.attachment(figure, joint);
+        };
+        self.figures
+            .passes
+            .get(look)
+            .or_else(|| self.figures.passes.get(&Look::bare(&look.model)))
+            .and_then(|pass| pass.attachment(figure, joint))
     }
 
     /// Where a named joint of `figure` is, in the figure's own space.
@@ -1677,7 +1739,12 @@ impl Renderer {
         if let Some(image) = self.figures.skins.get(id) {
             pass.set_texture(&self.gpu, image);
         }
-        self.figures.passes.insert(id.to_owned(), pass);
+        // New geometry: every skinned pass of this model is rebuilt from it
+        // the next time a figure wears the skin (Life ask 23).
+        self.figures
+            .passes
+            .retain(|look, _| look.model != id || look.skin.is_none());
+        self.figures.passes.insert(Look::bare(id), pass);
     }
 
     /// Dresses a mod's model in an image it pushed — Life ask 0, step 2.
@@ -1692,10 +1759,32 @@ impl Renderer {
     /// rest of the session (Life ask 16). The last skin per id is kept now,
     /// and [`Renderer::add_model`] puts it on whatever pass it builds.
     pub fn set_model_texture(&mut self, id: &str, image: &crate::texture::Image) {
-        if let Some(pass) = self.figures.passes.get_mut(id) {
+        if let Some(pass) = self.figures.passes.get_mut(&Look::bare(id)) {
             pass.set_texture(&self.gpu, image);
         }
         self.figures.skins.insert(id.to_owned(), image.clone());
+    }
+
+    /// Takes a skin figures wear in place of a model's texture (Life ask 23),
+    /// by the hash entities name it with. A pass wearing it is built the
+    /// first time a figure in it is drawn, once its model is here too.
+    pub fn set_skin(
+        &mut self,
+        hash: tiamat_core::proto::ContentHash,
+        image: &crate::texture::Image,
+    ) {
+        // A re-sent image: the passes wearing the old one are rebuilt.
+        self.figures
+            .passes
+            .retain(|look, _| look.skin != Some(hash));
+        self.figures.worn.insert(hash, image.clone());
+    }
+
+    /// The look the player's own figure is drawn in: a mod's model and skin,
+    /// or `None` for the engine's rig (Life ask 23). Set before
+    /// [`Renderer::set_player`] for the frame.
+    pub fn set_player_look(&mut self, look: Option<Look>) {
+        self.figures.player = look;
     }
 
     /// How many figures of a mod's models were placed this frame.
@@ -1712,7 +1801,7 @@ impl Renderer {
     /// Whether a model of this id has arrived and been uploaded.
     #[must_use]
     pub fn has_model(&self, id: &str) -> bool {
-        self.figures.passes.contains_key(id)
+        self.figures.passes.contains_key(&Look::bare(id))
     }
 
     /// Forgets every model a server pushed.
@@ -1723,12 +1812,16 @@ impl Renderer {
         self.figures.passes.clear();
         self.figures.by_model.clear();
         self.figures.skins.clear();
+        self.figures.worn.clear();
+        self.figures.player = None;
+        self.figures.player_figure = None;
+        self.figures.player_pass = None;
     }
 
-    /// Where each mod model's entities are this frame, camera-relative.
+    /// Where each look's entities are this frame, camera-relative.
     pub fn set_model_figures(
         &mut self,
-        figures: std::collections::BTreeMap<String, Vec<skinned::Figure>>,
+        figures: std::collections::BTreeMap<Look, Vec<skinned::Figure>>,
     ) {
         self.figures.by_model = figures;
     }
@@ -2188,19 +2281,68 @@ impl Renderer {
         self.skinned.prepare(&self.gpu, &shown);
         self.figures.humanoid = figures;
 
+        // **A look resolves to the pass that can draw it** (Life ask 23): a
+        // skin whose pass does not exist yet is built here from the bare pass
+        // and the image, once both are here; until then the figures wear the
+        // model's own texture rather than vanishing. The player's own figure
+        // goes LAST into its pass, whatever the frustum says, like the rig's.
         let posed = std::mem::take(&mut self.figures.by_model);
-        for (id, pass) in &mut self.figures.passes {
+        let mut drawn: std::collections::BTreeMap<Look, Vec<skinned::Figure>> =
+            std::collections::BTreeMap::new();
+        for (look, figures) in &posed {
+            let key = self.resolve_look(look);
+            drawn
+                .entry(key)
+                .or_default()
+                .extend(figures.iter().copied());
+        }
+        self.figures.player_pass = None;
+        if let (Some(look), Some(figure)) =
+            (self.figures.player.clone(), self.figures.player_figure)
+        {
+            let key = self.resolve_look(&look);
+            if self.figures.passes.contains_key(&key) {
+                drawn.entry(key.clone()).or_default().push(figure);
+                self.figures.player_pass = Some(key);
+            }
+        }
+        for (look, pass) in &mut self.figures.passes {
             let radius = pass.radius();
-            let shown: Vec<skinned::Figure> = posed
-                .get(id)
-                .map_or(&[][..], Vec::as_slice)
+            let figures = drawn.get(look).map_or(&[][..], Vec::as_slice);
+            let player_last = self.figures.player_pass.as_ref() == Some(look);
+            let others = if player_last {
+                figures.len().saturating_sub(1)
+            } else {
+                figures.len()
+            };
+            let mut shown: Vec<skinned::Figure> = figures
                 .iter()
+                .take(others)
                 .filter(|figure| culled.shows_figure(figure.offset, radius))
                 .copied()
                 .collect();
+            shown.extend(figures.iter().skip(others).copied());
             pass.prepare(&self.gpu, &shown);
         }
         self.figures.by_model = posed;
+    }
+
+    /// The pass a look is drawn by: its own, built now if its model and its
+    /// skin are both here, or else its model in its own texture.
+    fn resolve_look(&mut self, look: &Look) -> Look {
+        if self.figures.passes.contains_key(look) {
+            return look.clone();
+        }
+        let bare = Look::bare(&look.model);
+        if let Some(hash) = look.skin
+            && let Some(image) = self.figures.worn.get(&hash)
+            && let Some(base) = self.figures.passes.get(&bare)
+        {
+            let pass = base.reskinned(&self.gpu, image);
+            self.figures.passes.insert(look.clone(), pass);
+            return look.clone();
+        }
+        bare
     }
 
     /// Whether anything skinned is on screen at all.
@@ -2214,8 +2356,14 @@ impl Renderer {
     /// figure of the humanoid's list and `draw_first` is what leaves them out
     /// in first person, so nothing may be appended after it.
     fn draw_figures(&self, pass: &mut wgpu::RenderPass<'_>) {
-        for model in self.figures.passes.values() {
-            model.draw(pass);
+        for (look, model) in &self.figures.passes {
+            // The player's own figure is the last of its pass (Life ask 23),
+            // left out in first person as the rig's is.
+            if self.figures.player_pass.as_ref() == Some(look) && !self.body_visible {
+                model.draw_first(pass, model.drawn().saturating_sub(1));
+            } else {
+                model.draw(pass);
+            }
         }
         self.skinned
             .draw_first(pass, self.visible_figures(self.skinned.drawn()));

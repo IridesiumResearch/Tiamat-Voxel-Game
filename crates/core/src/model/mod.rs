@@ -246,6 +246,33 @@ pub struct ModelFile {
 /// whole world — and far short of what would make a join a download.
 pub const MAX_MODELS: usize = 64;
 
+/// A body a mod offers players, as it registered it (Life ask 23).
+///
+/// `model` names a registered model (`"my_mod:male"`); `skins` are PNGs in
+/// the mod's directory that `game.set_player_skin` may put on a player
+/// wearing this body. Once any are registered every player is drawn as one
+/// of them, the first until a mod says otherwise; none registered is the
+/// engine's humanoid, as before. The collider, the eye and the first-person
+/// hand are the player's own whatever the body: this is the look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerModelFile {
+    /// The id a mod picks a body by, unqualified: `"male"`.
+    pub id: String,
+    /// The mod that registered it, whose directory the skins are in.
+    pub mod_id: String,
+    /// The qualified id of the registered model drawn for it.
+    pub model: String,
+    /// The skins a mod may put on it, as paths inside its directory.
+    pub skins: Vec<String>,
+}
+
+/// The most skins one player model may declare.
+///
+/// A bound rather than a taste: every one is an image a client fetches and
+/// keeps, and a mod wanting more than this many looks on one body is a mod
+/// that should be registering bodies.
+pub const MAX_SKINS_PER_MODEL: usize = 32;
+
 /// The largest a model may be scaled, and the smallest.
 ///
 /// Generous both ways: a scale is a mod correcting its export's unit, and

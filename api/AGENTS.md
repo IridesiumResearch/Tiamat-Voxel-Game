@@ -54,6 +54,16 @@ is a mechanism a mod may now use; none of them changes a mod that ignores it.
 Everything listed is in API 1.0; from 1.1 on, an entry names the minor it
 arrived in, and a deprecation is an entry here too.
 
+- **Players wear a mod's models, and its skins** (2026-10-14, Life ask 23
+  part 1; protocol 92). `game.register_player_model{ id, model, skins }`,
+  registration only, offers a body: once any are registered every player is
+  drawn as one of them — by everybody, and by themselves in third person —
+  the first until `game.set_player_model(uuid, id)` says otherwise, and
+  `game.set_player_skin(uuid, file)` puts one of that body's declared PNGs
+  on them in place of the model's texture. A world's bodies all come from
+  one mod, the last in load order to register any. The collider, the eye
+  and the first-person hand are the player's own: this is the look. A world
+  that registers none is exactly the world it was.
 - **A swimming player, and a crawling one** (2026-10-14, Life ask 23 parts
   2 and 3; protocol 91). A player off the bottom in a fluid is tagged `SWIM`
   (4) on everybody's figure, so a model's `swim` clip plays where it used to
@@ -308,6 +318,8 @@ exists and one that is not does not.
 - `game.move_player(player, position)` — Puts a connected player somewhere else.
 - `game.push_player(player, impulse)` — Adds to a connected player's velocity, in cells per tick.
 - `game.set_player_abilities(player, abilities)` — Sets what one player may do: fly, how fast they move, whether they may sprint, and how heavy gravity is for them.
+- `game.set_player_model(player, id)` — Dresses a player in one of the bodies a mod registered with `game.register_player_model` (Life ask 23); `nil` is the first registered, which is what everybody wears until you say otherwise.
+- `game.set_player_skin(player, file)` — Puts a skin on a player's body: a PNG the body they wear declared in `skins` on `game.register_player_model`, by that path, or `nil` for the model's own texture (Life ask 23).
 - `game.is_operator(player)` — Whether the server already trusts this player with operator powers.
 - `game.looking_at(player)` — What a connected player's crosshair is on, within their reach.
 - `game.look_direction(player)` — Which way a player is looking, as a unit vector, and from which domain.
@@ -358,6 +370,7 @@ exists and one that is not does not.
 ### Entities and riding
 
 - `game.register_model(spec)` — Registers a model entities can be drawn as.
+- `game.register_player_model(spec)` — Offers players a body to be drawn as (Life ask 23).
 - `game.spawn_entity(spec)` — Puts an entity in the world.
 - `game.despawn_entity(id)` — Removes an entity.
 - `game.entity(id)` — Everything the engine knows about an entity, or nil if the id is stale.

@@ -102,7 +102,7 @@ part of 0.5.0 without them.
 |---|---|---|
 | L23.2 A swimming player is tagged `SWIM` (Life 23, part 2) — **landed 2026-10-14** (`anim_from_motion` reads the submersion the step measured; the client's own figure the same way) | engine | tiny |
 | L23.3 A crawl: `crawl` on `set_player_abilities`, `AnimTag::CRAWL`, the low box, predicted (Life 23, part 3) — **landed 2026-10-14** (`phys::crawl::posture`, Sub-Node Contract §2 "A body may crawl", protocol 91) | engine | medium |
-| L23.1 The mod's player models with skins (`register_player_model`, `set_player_model`, `set_player_skin`), drawn by everyone and in third person | engine | medium |
+| L23.1 The mod's player models with skins (`register_player_model`, `set_player_model`, `set_player_skin`), drawn by everyone and in third person — **landed 2026-10-14** (protocol 92: `EntityDef.skin`, `EntityLooked`, `PlayerLook`; the client keeps a pass per look) | engine | medium |
 | L23.1b A player's own skin, offered by the client at join and passed on by a host who allows it (`allow_custom_skins`, off by default) | engine | medium |
 
 ## Out of scope

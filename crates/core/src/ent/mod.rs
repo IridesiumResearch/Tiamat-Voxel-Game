@@ -194,6 +194,17 @@ pub struct Entity {
     /// a player's mirror, and not persisted for the reason `anim` is not.
     #[serde(skip)]
     pub crawling: bool,
+    /// The image drawn on the model in place of its own texture, by hash
+    /// (Life ask 23): a player's mirror wearing one of the mod's skins, or
+    /// their own. Not persisted: a mirror is rebuilt every tick, and a mod
+    /// that skins a mob keeps the hash and sets it again.
+    #[serde(skip)]
+    pub skin: Option<crate::proto::ContentHash>,
+    /// Counts the changes of `model` and `skin` since the entity spawned, so
+    /// a viewer's tracker can tell a look changed without comparing strings
+    /// for every entity it sees every tick. Not persisted.
+    #[serde(skip)]
+    pub look_serial: u32,
     /// The colour the figure is drawn in, a multiplier on its skin: white
     /// unless a mod set one (Life ask 21) — a frozen creature blue, a ghost's
     /// pallor. Presentation only, and NOT persisted: a mod that keeps a state
@@ -284,6 +295,8 @@ impl Entity {
             hands: Hands::default(),
             anim: AnimTag::default(),
             crawling: false,
+            skin: None,
+            look_serial: 0,
             tint: white(),
             flash: None,
             health: None,

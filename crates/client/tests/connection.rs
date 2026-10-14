@@ -309,6 +309,10 @@ impl Seen {
             }
             Event::EntityDespawn(ids) => self.entities.despawned(&ids),
             Event::EntityArmed(entities) => self.entities.rearmed(&entities),
+            Event::EntityLooked(entities) => self.entities.relooked(&entities),
+            // A skin, and this player's own look: the renderer's, not this
+            // record's (Life ask 23).
+            Event::Skin { .. } | Event::PlayerLook { .. } => {}
             Event::EntityState { tick, entities } => {
                 self.entities
                     .moved(tick, &entities, std::time::Duration::ZERO);

@@ -5332,7 +5332,7 @@ fn a_mods_model_wears_the_skin_it_was_pushed() {
     let ahead = camera.forward();
     let mut posed = std::collections::BTreeMap::new();
     posed.insert(
-        "zoo:cow".to_owned(),
+        client::render::Look::bare("zoo:cow"),
         vec![client::render::skinned::Figure {
             offset: [ahead.x * 2.0, ahead.y * 2.0 - 1.0, ahead.z * 2.0],
             yaw: 0.0,
@@ -5434,7 +5434,7 @@ fn a_mods_model_casts_a_shadow_like_the_engines_own_rig() {
     renderer.add_model("zoo:cow", tiamat_core::model::humanoid(), 1.0);
     let mut posed = std::collections::BTreeMap::new();
     posed.insert(
-        "zoo:cow".to_owned(),
+        client::render::Look::bare("zoo:cow"),
         vec![client::render::skinned::Figure {
             offset: [0.0, -10.0, 6.0],
             yaw: 0.0,
@@ -11058,7 +11058,7 @@ fn brazier_frame(gpu: Gpu, centre: BlockValue, model: bool) -> Image {
             })
             .collect();
         assert_eq!(figures.len(), 1, "one model block, one instance");
-        renderer.set_model_figures([("core:brazier".to_owned(), figures)].into());
+        renderer.set_model_figures([(client::render::Look::bare("core:brazier"), figures)].into());
     }
     let target = Offscreen::new(renderer.gpu(), WIDTH, HEIGHT);
     target.capture(&mut renderer, &camera).expect("capture")
@@ -11164,7 +11164,8 @@ fn a_mods_model_is_turned_by_its_pitch_about_the_middle_of_its_collider() {
             light: client::render::skinned::OPEN_SKY,
             tint: [1.0; 3],
         };
-        renderer.set_model_figures([("zoo:climber".to_owned(), vec![figure])].into());
+        renderer
+            .set_model_figures([(client::render::Look::bare("zoo:climber"), vec![figure])].into());
         let image = target.capture(&mut renderer, &camera).expect("capture");
         let found = changed_bounds(&image, &background).expect("the figure is in frame");
         (image, found)

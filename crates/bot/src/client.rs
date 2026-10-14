@@ -1707,6 +1707,14 @@ impl Bot {
                         }
                     }
                 }
+                ServerMessage::EntityLooked { entities } => {
+                    for look in entities {
+                        if let Some(known) = live.get_mut(&look.id) {
+                            known.model = look.model.clone();
+                            known.skin = look.skin;
+                        }
+                    }
+                }
                 _ => {}
             }
         }

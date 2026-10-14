@@ -157,6 +157,9 @@ pub struct Shared {
     pub picture_table: Vec<tiamat_core::proto::PictureDef>,
     /// Every model the loaded mods push. See [`tiamat_core::proto::ModelDef`].
     pub model_table: Vec<tiamat_core::proto::ModelDef>,
+    /// The bodies a mod offers players (Life ask 23), resolved, in
+    /// registration order; empty is a world of humanoids.
+    pub player_models: Vec<PlayerModelDef>,
     /// How the loaded mods want the engine's own screens to look, or `None`.
     pub theme: Option<tiamat_core::proto::ThemeDef>,
     /// The cloud deck a mod registered, or `None` for a world with none.
@@ -679,6 +682,19 @@ pub struct PlayerSim {
     /// (`PlayerSim::shape`), the eye it looked from, and the state the client
     /// is told so its replay starts as the same box. `false` while riding.
     pub crawling: bool,
+    /// Which of the mod's bodies this player wears (Life ask 23), by the id
+    /// it was registered under; `None` is the first registered, which is
+    /// everybody's until a mod says otherwise. Resolved against
+    /// `Shared::player_models` when the mirror is synced, so a body a mod
+    /// never registered falls back rather than failing.
+    pub model: Option<String>,
+    /// The skin on that body, by hash: one the body declared, put on with
+    /// `game.set_player_skin`. Taken off when the body changes.
+    pub skin: Option<tiamat_core::proto::ContentHash>,
+    /// Whether the client has been told what its own body is drawn as
+    /// (`ServerMessage::PlayerLook`) since it last changed. Like
+    /// `abilities_sent`: cleared by the setters, sent after the mods run.
+    pub look_sent: bool,
 }
 
 impl PlayerSim {
@@ -754,7 +770,41 @@ impl PlayerSim {
             look_tick: 0,
             riding: None,
             crawling: false,
+            model: None,
+            skin: None,
+            look_sent: false,
         }
+    }
+}
+
+/// A body a mod offers players, resolved: the model it names exists, and
+/// each skin is hashed (Life ask 23). Built beside the model table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerModelDef {
+    /// The id a mod picks it by.
+    pub id: String,
+    /// The qualified model id the client draws.
+    pub model: String,
+    /// Each declared skin: its path inside the mod, and its content hash.
+    /// A skin whose file is missing is dropped at build time, with a warning.
+    pub skins: Vec<(String, tiamat_core::proto::ContentHash)>,
+}
+
+impl Shared {
+    /// What a player's mirror is drawn as: the registered model of the body
+    /// they wear (the first registered when they have not been dressed), or
+    /// `None` for the engine's humanoid when no mod registered any — and the
+    /// skin on it.
+    #[must_use]
+    pub fn look_of(
+        &self,
+        player: &PlayerSim,
+    ) -> (Option<String>, Option<tiamat_core::proto::ContentHash>) {
+        let body = match &player.model {
+            Some(id) => self.player_models.iter().find(|body| body.id == *id),
+            None => self.player_models.first(),
+        };
+        (body.map(|body| body.model.clone()), body.and(player.skin))
     }
 }
 
@@ -4673,6 +4723,7 @@ mod tests {
             font_table: Vec::new(),
             picture_table: Vec::new(),
             model_table: Vec::new(),
+            player_models: Vec::new(),
             theme: None,
             cloud_layer: None,
             hud_scripts: Vec::new(),

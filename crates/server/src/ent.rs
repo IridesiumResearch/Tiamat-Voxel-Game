@@ -248,11 +248,15 @@ impl Population {
         anim: tiamat_core::ent::AnimTag,
         hands: tiamat_core::ent::Hands,
         crawling: bool,
+        model: Option<String>,
+        skin: Option<tiamat_core::proto::ContentHash>,
     ) -> EntityId {
         // The player's own box, so a client culls the drawn body against the
         // same shape the server collided it with (charter rule 2) — the low
         // one while they crawl (Life ask 23).
         let collider = phys::Shape::of_player(crawling);
+        // The body they wear (Life ask 23): a mod's, or the engine's rig.
+        let model = Some(model.unwrap_or_else(|| tiamat_core::ent::HUMANOID_MODEL.to_owned()));
         if let Some(&id) = self.players.get(&uuid)
             && let Some(entity) = self.entities.get_mut(id)
         {
@@ -265,6 +269,13 @@ impl Population {
             entity.hands = hands;
             entity.crawling = crawling;
             entity.collider = Some(collider);
+            if entity.model != model || entity.skin != skin {
+                // A dressed player: every viewer's tracker sees the serial
+                // change and sends the new look, reliably.
+                entity.model = model;
+                entity.skin = skin;
+                entity.look_serial = entity.look_serial.wrapping_add(1);
+            }
             return id;
         }
 
@@ -278,7 +289,8 @@ impl Population {
         entity.anim = anim;
         entity.hands = hands;
         entity.crawling = crawling;
-        entity.model = Some(tiamat_core::ent::HUMANOID_MODEL.to_owned());
+        entity.model = model;
+        entity.skin = skin;
         entity.collider = Some(collider);
         entity.owner = Some(tiamat_core::ent::Owner(uuid));
         // The UUID and not the name (charter rule 13): the current display name
@@ -888,6 +900,8 @@ pub struct Shared {
     /// next state the client is sent says so — but telling the mods would
     /// re-enter the VM mid-script. The tick delivers these with its own.
     dismounts: std::sync::Mutex<Vec<tiamat_core::script::DismountEvent>>,
+    /// The bodies a mod offers players (Life ask 23), as `transport::Shared` resolved them, so `set_player_model` and `set_player_skin` can check an id and a file before writing them.
+    pub player_models: Vec<crate::transport::PlayerModelDef>,
 }
 
 impl Shared {
@@ -897,6 +911,7 @@ impl Shared {
         population: std::sync::Arc<std::sync::RwLock<Population>>,
         bodies: std::sync::Arc<crate::transport::PlayerBodies>,
         domains: std::sync::Arc<std::sync::RwLock<tiamat_core::domain::Registry>>,
+        player_models: Vec<crate::transport::PlayerModelDef>,
     ) -> Self {
         Self {
             population,
@@ -905,6 +920,7 @@ impl Shared {
             bodies,
             selections: std::sync::Mutex::new(Vec::new()),
             dismounts: std::sync::Mutex::new(Vec::new()),
+            player_models,
         }
     }
 
@@ -1171,6 +1187,75 @@ impl tiamat_core::ent::Access for Shared {
         true
     }
 
+    fn set_player_model(&self, uuid: [u8; 32], id: Option<&str>) -> Result<bool, String> {
+        if let Some(id) = id
+            && !self.player_models.iter().any(|body| body.id == id)
+        {
+            return Err(format!(
+                "`{id}` is not a body any mod registered with `register_player_model`; the \
+                 bodies are {:?}",
+                self.player_models
+                    .iter()
+                    .map(|body| body.id.as_str())
+                    .collect::<Vec<_>>()
+            ));
+        }
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return Ok(false);
+        };
+        let Some(player) = bodies.get_mut(&uuid) else {
+            return Ok(false);
+        };
+        let model = id.map(str::to_owned);
+        if player.model != model {
+            player.model = model;
+            // A skin is painted for one body.
+            player.skin = None;
+            player.look_sent = false;
+        }
+        Ok(true)
+    }
+
+    fn set_player_skin(&self, uuid: [u8; 32], file: Option<&str>) -> Result<bool, String> {
+        let uuid = tiamat_core::PlayerUuid::from_bytes(uuid);
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return Ok(false);
+        };
+        let Some(player) = bodies.get_mut(&uuid) else {
+            return Ok(false);
+        };
+        let body = match &player.model {
+            Some(id) => self.player_models.iter().find(|body| body.id == *id),
+            None => self.player_models.first(),
+        };
+        let skin = match file {
+            None => None,
+            Some(file) => {
+                let Some(body) = body else {
+                    return Err(
+                        "no mod registered a body with `register_player_model`, so there \
+                                is nothing to skin"
+                            .to_owned(),
+                    );
+                };
+                let Some((_, hash)) = body.skins.iter().find(|(path, _)| path == file) else {
+                    return Err(format!(
+                        "`{file}` is not a skin the body `{}` declared; its skins are {:?}",
+                        body.id,
+                        body.skins.iter().map(|(path, _)| path).collect::<Vec<_>>()
+                    ));
+                };
+                Some(*hash)
+            }
+        };
+        if player.skin != skin {
+            player.skin = skin;
+            player.look_sent = false;
+        }
+        Ok(true)
+    }
+
     fn mount(
         &self,
         uuid: [u8; 32],
@@ -1271,6 +1356,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
 
         let crowd: Vec<EntityId> = population.crowd().map(|(id, _)| id).collect();
@@ -1523,6 +1610,7 @@ mod tests {
             std::sync::Arc::clone(population),
             std::sync::Arc::new(crate::transport::PlayerBodies::default()),
             std::sync::Arc::new(std::sync::RwLock::new(registry)),
+            Vec::new(),
         )
     }
 
@@ -1806,6 +1894,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         // A real mob in the same chunk, so the chunk genuinely needs saving and
         // the test is about what goes IN the row rather than whether one exists.
@@ -1839,6 +1929,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         assert!(
             population.take_dirty().is_empty(),
@@ -1857,6 +1949,8 @@ mod tests {
                 tiamat_core::ent::AnimTag::WALK,
                 tiamat_core::ent::Hands::default(),
                 false,
+                None,
+                None,
             );
         }
         assert!(
@@ -1883,6 +1977,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         let again = population.sync_player(
             uuid,
@@ -1895,6 +1991,8 @@ mod tests {
             tiamat_core::ent::AnimTag::WALK,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         assert_eq!(first, again);
         assert_eq!(population.len(), 1);
@@ -1924,6 +2022,8 @@ mod tests {
                 tiamat_core::ent::AnimTag::IDLE,
                 tiamat_core::ent::Hands::default(),
                 false,
+                None,
+                None,
             );
         }
         assert_eq!(population.len(), 2);
@@ -1962,6 +2062,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         let before = population.get(id).expect("mirror").transform;
 
@@ -1992,6 +2094,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         population.spawn(Entity::at(somewhere(home), "test:mob"));
 

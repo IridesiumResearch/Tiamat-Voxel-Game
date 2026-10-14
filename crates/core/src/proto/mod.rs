@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 91;
+pub const PROTOCOL_VERSION: u32 = 92;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -98,6 +98,16 @@ pub const PROTOCOL_VERSION: u32 = 91;
 // (`game.set_slot_grain`); and `DialogEvent::Dropped { click }`, appended — a
 // click outside every open screen while the cursor held a stack, which the
 // server takes off the cursor and reports to the screen's owner.
+// v92 (Life 23, players wear a mod's models and skins): `EntityDef` carries
+// `skin`, appended — the content hash of an image drawn on the model in place
+// of its own texture, or `None` — and two messages are appended.
+// `ServerMessage::EntityLooked { entities }`: entities in view whose model or
+// skin changed, reliable like `EntityArmed` (a player a mod dressed; refused
+// on decode past `MAX_ENTITIES_PER_MESSAGE`, or with a model id longer than
+// an id may be). `ServerMessage::PlayerLook { model, skin }`: what this
+// player's own body is drawn as, for third person — their mirror is never
+// streamed to them — sent at join and whenever it changes. A skin's bytes
+// travel by hash through the content pipeline like every picture.
 // v91 (Life 23, a swimming player and a crawling one): `AbilitiesDef` carries
 // `crawl`, appended — whether this player lies down to go under something too
 // low to stand in — and `ServerMessage::PlayerState` carries `crawling`,
@@ -2608,6 +2618,38 @@ pub enum ServerMessage {
         /// World material id, and the line to draw under that material's name.
         lines: Vec<(u16, String)>,
     },
+
+    /// Entities in view whose model or skin changed (protocol v92, Life ask
+    /// 23): a player a mod dressed, or who put on a skin.
+    ///
+    /// **Appended at the end.** Reliable, like [`Self::EntityArmed`]: a lost
+    /// look is never corrected by the stream.
+    EntityLooked {
+        /// Each changed entity, and what it is drawn as now.
+        entities: Vec<EntityLook>,
+    },
+
+    /// What this player's own body is drawn as (protocol v92, Life ask 23),
+    /// for third person: their mirror is never streamed to them.
+    ///
+    /// **Appended at the end.** Sent at join and whenever it changes.
+    PlayerLook {
+        /// The registered model, or `None` for the engine's humanoid.
+        model: Option<String>,
+        /// The skin on it, or `None` for the model's own texture.
+        skin: Option<ContentHash>,
+    },
+}
+
+/// An entity's look, as [`ServerMessage::EntityLooked`] carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityLook {
+    /// Which entity.
+    pub id: u64,
+    /// The model it is drawn as now, or `None` for nothing.
+    pub model: Option<String>,
+    /// The skin on it, or `None` for the model's own texture.
+    pub skin: Option<ContentHash>,
 }
 
 /// [`phys::Abilities`](crate::phys::Abilities) as it travels.
@@ -2745,6 +2787,12 @@ pub struct EntityDef {
     pub pitch: i8,
     /// Which clip to play.
     pub anim: u8,
+    /// The image drawn on the model in place of its own texture (protocol
+    /// v92, Life ask 23), by content hash like every pushed picture — a
+    /// player wearing one of a mod's skins — or `None` for the model's own.
+    /// Decoded through the picture caps; one that will not decode leaves the
+    /// model in its own texture.
+    pub skin: Option<ContentHash>,
     /// The model's canonical string id, or `None` for something invisible.
     ///
     /// **A name, not a number.** Models are content-addressed assets a mod
@@ -3786,6 +3834,19 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         ServerMessage::EntitySpawn { entities } => check_entity_spawns(entities)?,
         ServerMessage::EntityDespawn { entities } => {
             check_len("entity_despawn", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
+        }
+        ServerMessage::EntityLooked { entities } => {
+            check_len("entity_looked", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
+            for look in entities {
+                if let Some(model) = &look.model {
+                    check_len("entity_model", model.len(), MAX_ID_BYTES)?;
+                }
+            }
+        }
+        ServerMessage::PlayerLook { model, .. } => {
+            if let Some(model) = model {
+                check_len("player_look_model", model.len(), MAX_ID_BYTES)?;
+            }
         }
         // **A server's own list, and a server is not trusted** (charter rule
         // 14). Every string here is drawn on a screen and kept for the session.
@@ -5554,6 +5615,7 @@ mod tests {
                 pitch: 0,
                 anim: 0,
                 model: None,
+                skin: None,
                 collider: None,
                 nametag: None,
                 item: None,
@@ -5576,6 +5638,7 @@ mod tests {
                 pitch: 0,
                 anim: 0,
                 model: None,
+                skin: None,
                 collider: Some([f32::NAN, 1.0]),
                 nametag: None,
                 item: None,

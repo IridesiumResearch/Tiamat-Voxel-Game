@@ -68,6 +68,7 @@ fn def(local: [f32; 3]) -> EntityDef {
         pitch: 0,
         anim: 0,
         model: Some("engine:humanoid".to_owned()),
+        skin: None,
         collider: Some([1.8, 5.4]),
         nametag: None,
         item: None,

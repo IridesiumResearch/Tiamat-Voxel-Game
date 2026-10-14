@@ -285,6 +285,16 @@ impl Skinned {
         self.texture_bind = texture_bind(gpu, &self.texture_layout, &view, &self.sampler);
     }
 
+    /// This model again, wearing `image` (Life ask 23): a pass of its own,
+    /// because the skin is a bind group and a draw takes one, so a figure in
+    /// one of a mod's skins is drawn by the pass that wears it.
+    #[must_use]
+    pub fn reskinned(&self, gpu: &Gpu, image: &crate::texture::Image) -> Self {
+        let mut pass = Self::new(gpu, self.model.clone());
+        pass.set_texture(gpu, image);
+        pass
+    }
+
     /// The bind group layout the pipelines need for the skin.
     #[must_use]
     pub const fn texture_layout(&self) -> &wgpu::BindGroupLayout {

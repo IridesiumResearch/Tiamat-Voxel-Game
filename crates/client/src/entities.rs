@@ -65,6 +65,9 @@ const HISTORY: usize = 4;
 pub struct Entity {
     /// What to draw, or `None` for something invisible.
     pub model: Option<String>,
+    /// The skin on it, by hash, or `None` for the model's own texture (Life
+    /// ask 23).
+    pub skin: Option<tiamat_core::proto::ContentHash>,
     /// Footprint and height, in cells.
     pub collider: Option<[f32; 2]>,
     /// The label above it, already the current display name.
@@ -119,6 +122,7 @@ impl Entity {
     fn from_def(def: &EntityDef, at: Duration) -> Self {
         Self {
             model: def.model.clone(),
+            skin: def.skin,
             item: def.item.clone().clone(),
             hands: def.hands.clone().clone(),
             collider: def.collider,
@@ -349,6 +353,17 @@ impl Entities {
         }
     }
 
+    /// Records what entities are drawn as now (Life ask 23). Unknown ids are
+    /// dropped, for the reason a hand update's are.
+    pub fn relooked(&mut self, looks: &[tiamat_core::proto::EntityLook]) {
+        for look in looks {
+            if let Some(entity) = self.held.get_mut(&look.id) {
+                entity.model = look.model.clone();
+                entity.skin = look.skin;
+            }
+        }
+    }
+
     /// Records a despawn. Unknown ids are ignored.
     pub fn despawned(&mut self, ids: &[u64]) {
         for id in ids {
@@ -405,6 +420,7 @@ mod tests {
             pitch: 0,
             anim: 0,
             model: Some("engine:humanoid".into()),
+            skin: None,
             collider: Some([1.8, 5.4]),
             item: None,
             nametag: None,

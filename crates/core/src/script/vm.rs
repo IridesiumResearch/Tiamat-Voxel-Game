@@ -2068,6 +2068,14 @@ pub trait ScriptVm: Sized {
         Vec::new()
     }
 
+    /// The bodies a mod offers players (Life ask 23), in registration order.
+    ///
+    /// All from one mod — the last in load order to register any, as a
+    /// theme — and empty is a world whose players are the engine's humanoid.
+    fn registered_player_models(&self) -> Vec<crate::model::PlayerModelFile> {
+        Vec::new()
+    }
+
     /// The cloud deck a mod registered, if any.
     ///
     /// `None` is a world with no clouds, which is most of them. The same

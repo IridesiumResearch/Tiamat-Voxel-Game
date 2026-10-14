@@ -4530,6 +4530,35 @@ impl ScriptVm for MluaVm {
             .collect()
     }
 
+    fn registered_player_models(&self) -> Vec<crate::model::PlayerModelFile> {
+        let Ok(registry) = self
+            .lua
+            .named_registry_value::<Table>("tiamat.player_models")
+        else {
+            return Vec::new();
+        };
+        let all: Vec<crate::model::PlayerModelFile> = registry
+            .sequence_values::<Table>()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                Some(crate::model::PlayerModelFile {
+                    id: entry.get("id").ok()?,
+                    mod_id: entry.get("mod_id").ok()?,
+                    model: entry.get("model").ok()?,
+                    skins: entry.get("skins").ok().unwrap_or_default(),
+                })
+            })
+            .collect();
+        // **One mod's, the last to register any**: a world's bodies are a
+        // theme, and two mods' halves of one would be neither's.
+        let Some(theme) = all.last().map(|body| body.mod_id.clone()) else {
+            return Vec::new();
+        };
+        all.into_iter()
+            .filter(|body| body.mod_id == theme)
+            .collect()
+    }
+
     /// The cloud deck a mod registered, if one did.
     ///
     /// Lowest mod id wins where several register one, the rule
@@ -5302,6 +5331,44 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_player_abilities", set)
+            .map_err(|err| self.vm_error(&err))?;
+
+        // Life ask 23: which of the registered bodies a player wears, and
+        // which of its skins. An id or a file nobody declared is a typo and
+        // an error; a player who is not here is `false`.
+        let slot = std::sync::Arc::clone(&self.entities);
+        let set_model = self
+            .lua
+            .create_function(move |_, (uuid, id): (String, Option<String>)| {
+                let player = player_of(&uuid, "set_player_model")?;
+                slot.lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .map(|store| store.set_player_model(player, id.as_deref()))
+                    })
+                    .unwrap_or(Ok(false))
+                    .map_err(|why| mlua::Error::external(format!("set_player_model: {why}")))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_player_model", set_model)
+            .map_err(|err| self.vm_error(&err))?;
+        let slot = std::sync::Arc::clone(&self.entities);
+        let set_skin = self
+            .lua
+            .create_function(move |_, (uuid, file): (String, Option<String>)| {
+                let player = player_of(&uuid, "set_player_skin")?;
+                slot.lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .map(|store| store.set_player_skin(player, file.as_deref()))
+                    })
+                    .unwrap_or(Ok(false))
+                    .map_err(|why| mlua::Error::external(format!("set_player_skin: {why}")))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("set_player_skin", set_skin)
             .map_err(|err| self.vm_error(&err))
     }
 
@@ -5991,6 +6058,96 @@ impl MluaVm {
         Ok(())
     }
 
+    /// `game.register_player_model` — a body players are drawn as (Life ask
+    /// 23).
+    ///
+    /// Registration window only. The bodies of a world all come from one mod,
+    /// the last in load order to register any, as a theme: `registered_player_models`
+    /// reads back only that mod's. Each names a registered model (checked
+    /// where the model table is built, since the model may be registered
+    /// after the body) and up to `MAX_SKINS_PER_MODEL` PNGs beside it.
+    fn install_player_models(&self, mod_id: &str, game: &Table) -> Result<(), ScriptError> {
+        let owner = mod_id.to_owned();
+        let register = self
+            .lua
+            .create_function(move |lua, spec: Table| {
+                let frozen: bool = lua.named_registry_value("tiamat.frozen").unwrap_or(false);
+                if frozen {
+                    return Err(mlua::Error::external(format!(
+                        "mod `{owner}`: registration is closed"
+                    )));
+                }
+                for pair in spec.clone().pairs::<Value, Value>() {
+                    let (key, _) = pair?;
+                    if let Value::String(name) = key {
+                        let name = name.to_string_lossy();
+                        if !PLAYER_MODEL_FIELDS.contains(&name.as_ref()) {
+                            return Err(mlua::Error::external(format!(
+                                "register_player_model: unknown field `{name}`. The fields are \
+                                 {PLAYER_MODEL_FIELDS:?}."
+                            )));
+                        }
+                    }
+                }
+                let id: String = spec.get::<Option<String>>("id")?.ok_or_else(|| {
+                    mlua::Error::external("register_player_model: `id` is required")
+                })?;
+                if id.is_empty() || id.contains(':') || id.len() > crate::proto::MAX_ID_BYTES {
+                    return Err(mlua::Error::external(format!(
+                        "register_player_model: `id` is a short name a mod picks a body by, \
+                         got `{id}`"
+                    )));
+                }
+                let model: String = spec.get::<Option<String>>("model")?.ok_or_else(|| {
+                    mlua::Error::external(
+                        "register_player_model: `model` is required: the id of a model you \
+                         registered with `register_model`",
+                    )
+                })?;
+                let model = qualify_id(&owner, &model).map_err(mlua::Error::external)?;
+                let skins: Vec<String> = spec
+                    .get::<Option<Vec<String>>>("skins")?
+                    .unwrap_or_default();
+                if skins.len() > crate::model::MAX_SKINS_PER_MODEL {
+                    return Err(mlua::Error::external(format!(
+                        "register_player_model: a body may declare at most {} skins",
+                        crate::model::MAX_SKINS_PER_MODEL
+                    )));
+                }
+                for path in &skins {
+                    validate_mod_path("register_player_model", path)
+                        .map_err(mlua::Error::external)?;
+                    if !crate::content::is_distributable(std::path::Path::new(path)) {
+                        return Err(mlua::Error::external(format!(
+                            "register_player_model: a skin is an image file beside your mod, \
+                             got `{path}`. The client decodes PNG."
+                        )));
+                    }
+                }
+                let registry: Table = lua.named_registry_value("tiamat.player_models")?;
+                // Re-registering an id replaces it, the rule a model follows.
+                for existing in registry.clone().sequence_values::<Table>().flatten() {
+                    if existing.get::<String>("id").ok().as_deref() == Some(id.as_str())
+                        && existing.get::<String>("mod_id").ok().as_deref() == Some(owner.as_str())
+                    {
+                        existing.set("model", model)?;
+                        existing.set("skins", skins)?;
+                        return Ok(());
+                    }
+                }
+                let entry = lua.create_table()?;
+                entry.set("id", id)?;
+                entry.set("mod_id", owner.clone())?;
+                entry.set("model", model)?;
+                entry.set("skins", skins)?;
+                registry.push(entry)?;
+                Ok(())
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("register_player_model", register)
+            .map_err(|err| self.vm_error(&err))
+    }
+
     /// `game.register_sky` and `game.register_clouds` — what is overhead.
     ///
     /// The two together for the reason `install_hud_script` is its own method:
@@ -6300,6 +6457,7 @@ impl MluaVm {
             "tiamat.skies",
             "tiamat.clouds",
             "tiamat.models",
+            "tiamat.player_models",
         ] {
             let table = self.lua.create_table().map_err(|err| self.vm_error(&err))?;
             self.lua
@@ -6625,6 +6783,7 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
 
         self.install_sky(mod_id, game)?;
+        self.install_player_models(mod_id, game)?;
         self.install_model(mod_id, game)?;
 
         let owner = mod_id.to_owned();
@@ -11690,6 +11849,9 @@ const ABILITY_FIELDS: [&str; 7] = [
     "gravity",
     "crawl",
 ];
+
+/// Fields `game.register_player_model` accepts, checked for the same reason.
+const PLAYER_MODEL_FIELDS: [&str; 3] = ["id", "model", "skins"];
 
 /// Options `game.mount` accepts, checked for the same reason.
 const MOUNT_FIELDS: [&str; 2] = ["seat", "sneak_dismounts"];

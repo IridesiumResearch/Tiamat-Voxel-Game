@@ -668,6 +668,8 @@ mod tests {
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
             false,
+            None,
+            None,
         );
         assert_eq!(
             board(&mobs, &mut bodies, &uuid, body, SEAT),
@@ -904,6 +906,7 @@ mod tests {
             std::sync::Arc::clone(&population),
             std::sync::Arc::clone(&bodies),
             std::sync::Arc::new(std::sync::RwLock::new(tiamat_core::domain::Registry::new())),
+            Vec::new(),
         );
         let (uuid, player) = rider();
         bodies.lock().expect("bodies").insert(uuid, player);

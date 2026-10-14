@@ -170,6 +170,8 @@ AREAS = [
             "game.move_player",
             "game.push_player",
             "game.set_player_abilities",
+            "game.set_player_model",
+            "game.set_player_skin",
             "game.is_operator",
             "game.looking_at",
             "game.look_direction",
@@ -228,6 +230,7 @@ AREAS = [
         "Entities and riding",
         [
             "game.register_model",
+            "game.register_player_model",
             "game.spawn_entity",
             "game.despawn_entity",
             "game.entity",

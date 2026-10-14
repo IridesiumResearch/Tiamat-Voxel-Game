@@ -230,6 +230,14 @@ pub enum Event {
         /// The decoded image.
         image: crate::texture::Image,
     },
+    /// A skin arrived: an image an entity names by hash in place of its
+    /// model's own texture (Life ask 23), decoded and ready to wear.
+    Skin {
+        /// The content hash entities name it by.
+        hash: tiamat_core::proto::ContentHash,
+        /// The decoded image.
+        image: crate::texture::Image,
+    },
 
     /// A model a mod pushed, parsed and ready to upload.
     ///
@@ -484,6 +492,16 @@ pub enum Event {
     /// corrected 50 ms later and a lost hand is not corrected at all until its
     /// holder next changes it.
     EntityArmed(Vec<tiamat_core::proto::EntityHands>),
+    /// Entities whose model or skin changed (Life ask 23).
+    EntityLooked(Vec<tiamat_core::proto::EntityLook>),
+    /// What this player's own body is drawn as, for third person (Life ask
+    /// 23): a registered model and a skin, or the engine's humanoid.
+    PlayerLook {
+        /// The model, or `None` for the humanoid.
+        model: Option<String>,
+        /// The skin on it, or `None` for the model's own texture.
+        skin: Option<tiamat_core::proto::ContentHash>,
+    },
 
     /// Where the entities in view are now.
     ///
@@ -1070,6 +1088,9 @@ async fn session(
     // Fonts a server registered, waiting for their files.
     let mut awaited_fonts: Vec<tiamat_core::proto::FontDef> = Vec::new();
     let mut awaited_models: Vec<tiamat_core::proto::ModelDef> = Vec::new();
+    // Skins entities have named (Life ask 23), fetched by hash as they are
+    // first seen: a spawn, a look change, or this player's own.
+    let mut awaited_skins: Vec<tiamat_core::proto::ContentHash> = Vec::new();
     send.impair(impairment);
 
     let _ = events.send(Event::Connected {
@@ -1381,6 +1402,10 @@ async fn session(
                             offer_picture(hash, &cache, &events);
                         }
 
+                        if awaited_skins.contains(&hash) {
+                            offer_skin(hash, &cache, &events);
+                        }
+
                         // And a font, `filter` for the third time and the third
                         // reason to spell it out: two mods shipping the same
                         // typeface share one hash, and `find` would install it
@@ -1521,7 +1546,47 @@ async fn session(
             }
 
             ServerMessage::EntitySpawn { entities } => {
+                let wanted: Vec<tiamat_core::proto::ContentHash> =
+                    entities.iter().filter_map(|entity| entity.skin).collect();
+                want_skins(
+                    &wanted,
+                    &mut awaited_skins,
+                    &cache,
+                    &events,
+                    &mut send,
+                    &say,
+                )
+                .await;
                 let _ = events.send(Event::EntitySpawn(entities));
+            }
+
+            ServerMessage::EntityLooked { entities } => {
+                let wanted: Vec<tiamat_core::proto::ContentHash> =
+                    entities.iter().filter_map(|look| look.skin).collect();
+                want_skins(
+                    &wanted,
+                    &mut awaited_skins,
+                    &cache,
+                    &events,
+                    &mut send,
+                    &say,
+                )
+                .await;
+                let _ = events.send(Event::EntityLooked(entities));
+            }
+
+            ServerMessage::PlayerLook { model, skin } => {
+                let wanted: Vec<tiamat_core::proto::ContentHash> = skin.into_iter().collect();
+                want_skins(
+                    &wanted,
+                    &mut awaited_skins,
+                    &cache,
+                    &events,
+                    &mut send,
+                    &say,
+                )
+                .await;
+                let _ = events.send(Event::PlayerLook { model, skin });
             }
 
             ServerMessage::EntityDespawn { entities } => {
@@ -2117,6 +2182,61 @@ fn offer_picture(
 /// with no skin is matte white, which is the documented state of every model
 /// that never named one — so a cow whose skin will not decode looks like a cow
 /// nobody painted rather than like a bug in the world.
+/// Asks the server for the skins among `wanted` that the cache lacks, and
+/// decodes the ones it holds, the first time each is named (Life ask 23).
+async fn want_skins(
+    wanted: &[tiamat_core::proto::ContentHash],
+    awaited: &mut Vec<tiamat_core::proto::ContentHash>,
+    cache: &ContentCache,
+    events: &mpsc::UnboundedSender<Event>,
+    send: &mut tiamat_server::transport::Link,
+    say: &impl Fn(String),
+) {
+    let fresh: Vec<tiamat_core::proto::ContentHash> = wanted
+        .iter()
+        .copied()
+        .filter(|hash| !awaited.contains(hash))
+        .collect();
+    if fresh.is_empty() {
+        return;
+    }
+    for hash in &fresh {
+        awaited.push(*hash);
+        offer_skin(*hash, cache, events);
+    }
+    let missing = cache.missing(&fresh);
+    if !missing.is_empty()
+        && let Err(err) = send
+            .write(&ClientMessage::ContentRequest { hashes: missing })
+            .await
+    {
+        say(format!("could not ask for a skin: {err}"));
+    }
+}
+
+/// Decodes a skin the cache holds and hands it to the app (Life ask 23).
+fn offer_skin(
+    hash: tiamat_core::proto::ContentHash,
+    cache: &ContentCache,
+    events: &mpsc::UnboundedSender<Event>,
+) {
+    let Some(bytes) = cache.get(&hash) else {
+        return;
+    };
+    let events = events.clone();
+    tokio::task::spawn_blocking(move || {
+        let (image, failure) = decode_or_missing(&bytes);
+        if let Some(err) = failure {
+            let _ = events.send(Event::Warning(format!(
+                "a player's skin could not be decoded; the model's own texture is drawn \
+                 instead: {err}"
+            )));
+            return;
+        }
+        let _ = events.send(Event::Skin { hash, image });
+    });
+}
+
 fn offer_model_texture(
     model: &tiamat_core::proto::ModelDef,
     cache: &ContentCache,
