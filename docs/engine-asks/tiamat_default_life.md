@@ -63,7 +63,25 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): OPEN
+## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): parts 2 and 3 LANDED 2026-10-14 (engine 9d03dbed, protocol 91); part 1 OPEN, being built
+
+**From the engine, 2026-10-14.** Parts 2 and 3 as asked. (2) A player off
+the bottom in a fluid is tagged `SWIM` (4) on everybody's figure — the test
+is the step's own: any of the body in the water and not on the ground, so a
+wader walks and a swimmer swims — after the swing and before the sneak; the
+client's own figure reads the same off its predictor. (3) `crawl = true` on
+`game.set_player_abilities` (default `false`): the body lies down a stride
+before a one-block gap it is sneaking at, or when a ceiling closes over it,
+is stepped as a box 2.4 cells tall with the sneak's keys and no jump, eye 2.0
+up, and stands where there is room — never into a ceiling. The server and
+the client decide the posture with one function (`phys::crawl::posture`,
+Sub-Node Contract §2 "A body may crawl") and the server's posture rides
+`PlayerState`, so the mouth of a tunnel is not a rubber band. The tag is
+`CRAWL` (6), a clip named `crawl` on your model (the engine's humanoid has
+none and stands idle); `game.entity(body).crawling` reads it. Part 1 —
+`register_player_model`, `set_player_model`, `set_player_skin`, then the
+host-gated custom skins — is next, in that order.
+
 
 **Wanted.** Three things the designer asked for together, because the body
 a player is drawn as has to be drawn doing everything a player does:
