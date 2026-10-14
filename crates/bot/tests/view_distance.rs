@@ -54,6 +54,7 @@ fn start(name: &str) -> ServerHandle {
         world_path: scratch(name),
         identity_path: None,
         max_players: 4,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::DEFAULT,

@@ -360,6 +360,13 @@ pub struct Config {
     #[serde(default = "Config::default_menu")]
     pub menu: bool,
 
+    /// A PNG of the player's own, painted on the template of the body the
+    /// server's mods give them, offered to a host who allows custom skins
+    /// (Life ask 23) and worn by everybody's copy of this player. A path;
+    /// empty is none. Read at every connection, at most a megabyte.
+    #[serde(default)]
+    pub skin: String,
+
     /// Which server to play on when [`Config::menu`] is off.
     #[serde(default)]
     pub server: ServerChoice,
@@ -732,6 +739,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             volumes: crate::audio::Volumes::default(),
+            skin: String::new(),
             menu: Self::default_menu(),
             server: ServerChoice::default(),
             display_name: Self::default_display_name(),
@@ -933,6 +941,40 @@ pub fn adopt_former_data_dir(data: &Path) -> Option<PathBuf> {
             tracing::warn!(from = %was.display(), to = %data.display(), %err,
                            "could not carry the old data directory across");
             None
+        }
+    }
+}
+
+/// The most a skin may weigh, in bytes: the server's own cap, which it would
+/// refuse past anyway.
+pub const MAX_SKIN_BYTES: usize = tiamat_core::proto::MAX_SKIN_BYTES;
+
+impl Config {
+    /// The bytes of the skin [`Config::skin`] names, or `None` with a word
+    /// in the log when it is unset, unreadable, or over the cap. Not checked
+    /// further here: the server reads the header, and every client that
+    /// draws it decodes it under the picture caps.
+    #[must_use]
+    pub fn skin_bytes(&self) -> Option<Vec<u8>> {
+        let path = self.skin.trim();
+        if path.is_empty() {
+            return None;
+        }
+        match std::fs::read(path) {
+            Ok(bytes) if bytes.len() <= MAX_SKIN_BYTES => Some(bytes),
+            Ok(bytes) => {
+                tracing::warn!(
+                    path,
+                    bytes = bytes.len(),
+                    limit = MAX_SKIN_BYTES,
+                    "the skin is over the size a server takes; not offered"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::warn!(path, "the skin could not be read; not offered: {err}");
+                None
+            }
         }
     }
 }

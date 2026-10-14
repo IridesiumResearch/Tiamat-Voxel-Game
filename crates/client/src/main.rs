@@ -320,6 +320,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 client::net::Pinning::Remembered(&hosts)
             },
         )?;
+        // A skin of the player's own, read now so a bad path is a line in
+        // the log at the start rather than nothing at the join (Life ask 23).
+        if let Some(bytes) = config.skin_bytes() {
+            connection.send(client::net::Command::OfferSkin(bytes));
+        }
         (Some(connection), embedded)
     };
 
@@ -587,6 +592,7 @@ fn start_local_world(
             // One is right for a world nobody else can reach, and would be a
             // baffling refusal for one they can.
             max_players: if lan { 8 } else { 1 },
+            allow_custom_skins: true,
             allowlist: tiamat_core::identity::Allowlist::open(),
             // **Your own world, your own powers.** A player hosting a world for
             // themselves is its operator, which is what makes flight available
@@ -1565,6 +1571,11 @@ impl Client {
             }
             err.to_string()
         })?;
+        // A skin of the player's own, offered to a host who takes one (Life
+        // ask 23).
+        if let Some(bytes) = self.config.skin_bytes() {
+            connection.send(client::net::Command::OfferSkin(bytes));
+        }
 
         self.playing = Some(entry.name.clone());
         let mut app = self.start_app(connection);

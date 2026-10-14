@@ -52,6 +52,7 @@ fn start_in(world: &Path) -> ServerHandle {
         world_path: world.to_path_buf(),
         identity_path: None,
         max_players: 8,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

@@ -48,6 +48,7 @@ fn settings(dir: &std::path::Path, allowlist: Allowlist) -> Settings {
         world_path: dir.to_path_buf(),
         identity_path: None,
         max_players: 8,
+        allow_custom_skins: false,
         allowlist,
         operators: Vec::new(),
         rcon: None,

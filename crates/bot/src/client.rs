@@ -528,10 +528,33 @@ impl Bot {
     ///
     /// [`BotError::Refused`] if the server disconnected at any point.
     pub async fn join(&mut self, display_name: &str) -> Result<(), BotError> {
+        self.join_with_skins(display_name, &[]).await
+    }
+
+    /// Joins as [`Self::join`] does, offering skins of the player's own on
+    /// the way in — before `JoinWorld`, as the client does, so the join hook
+    /// sees them (Life ask 23). Each is `(body, bytes)`: the body it is
+    /// painted for, or `None` for any.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError`] as [`Self::join`].
+    pub async fn join_with_skins(
+        &mut self,
+        display_name: &str,
+        skins: &[(Option<String>, Vec<u8>)],
+    ) -> Result<(), BotError> {
         let nonce = self.hello(display_name).await?;
         self.authenticate(&nonce).await?;
         self.recv_until(|m| matches!(m, ServerMessage::ModManifest { .. }))
             .await?;
+        for (body, bytes) in skins {
+            self.send(&ClientMessage::Skin {
+                body: body.clone(),
+                bytes: bytes.clone(),
+            })
+            .await?;
+        }
         self.send(&ClientMessage::JoinWorld).await?;
         let joined = self
             .recv_until(|m| matches!(m, ServerMessage::JoinWorld { .. }))
@@ -549,6 +572,29 @@ impl Bot {
     #[must_use]
     pub const fn seed(&self) -> Option<u64> {
         self.seed
+    }
+
+    /// Offers a skin of the player's own once in the world (Life ask 23).
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Frame`] if the write fails.
+    pub async fn offer_skin(
+        &mut self,
+        body: Option<String>,
+        bytes: Vec<u8>,
+    ) -> Result<(), BotError> {
+        self.send(&ClientMessage::Skin { body, bytes }).await
+    }
+
+    /// Whether the server said it takes a player's own skin, from its
+    /// `HelloAck`; `None` before one arrived.
+    #[must_use]
+    pub fn custom_skins(&self) -> Option<bool> {
+        self.received().iter().find_map(|message| match message {
+            ServerMessage::HelloAck { custom_skins, .. } => Some(*custom_skins),
+            _ => None,
+        })
     }
 
     /// Sends a retired `BlockDelta`, which the server now refuses.

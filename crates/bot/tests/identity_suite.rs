@@ -37,6 +37,7 @@ fn settings(dir: &std::path::Path) -> Settings {
         world_path: dir.to_path_buf(),
         identity_path: None,
         max_players: 8,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

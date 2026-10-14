@@ -78,6 +78,7 @@ fn embedded(name: &str) -> ServerHandle {
         world_path: scratch(&format!("{name}-world")),
         identity_path: None,
         max_players: 1,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

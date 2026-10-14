@@ -665,11 +665,13 @@ mod tests {
             other,
             Transform::at(ChunkPos::new(0, 0, 0), [20.0, 3.0, 20.0]),
             crate::ent::Motion::default(),
-            tiamat_core::ent::AnimTag::IDLE,
-            tiamat_core::ent::Hands::default(),
-            false,
-            None,
-            None,
+            crate::ent::Seen {
+                anim: tiamat_core::ent::AnimTag::IDLE,
+                hands: tiamat_core::ent::Hands::default(),
+                crawling: false,
+                model: None,
+                skin: None,
+            },
         );
         assert_eq!(
             board(&mobs, &mut bodies, &uuid, body, SEAT),
@@ -907,6 +909,7 @@ mod tests {
             std::sync::Arc::clone(&bodies),
             std::sync::Arc::new(std::sync::RwLock::new(tiamat_core::domain::Registry::new())),
             Vec::new(),
+            false,
         );
         let (uuid, player) = rider();
         bodies.lock().expect("bodies").insert(uuid, player);

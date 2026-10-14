@@ -125,6 +125,7 @@ fn start_operated(name: &str, operators: Vec<String>) -> ServerHandle {
         world_path: scratch(&format!("{name}-world")),
         identity_path: None,
         max_players: 2,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators,
         view_distance: ViewDistance::MINIMUM,

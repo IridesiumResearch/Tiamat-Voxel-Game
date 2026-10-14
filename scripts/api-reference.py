@@ -172,6 +172,7 @@ AREAS = [
             "game.set_player_abilities",
             "game.set_player_model",
             "game.set_player_skin",
+            "game.custom_skins_allowed",
             "game.is_operator",
             "game.looking_at",
             "game.look_direction",

@@ -273,6 +273,15 @@ impl Default for Camera {
 const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
 
 impl Camera {
+    /// The default camera with this vertical field of view, in radians.
+    #[must_use]
+    pub fn with_fov_y(fov_y: f32) -> Self {
+        Self {
+            fov_y,
+            ..Self::default()
+        }
+    }
+
     /// The direction the camera is looking.
     #[expect(
         clippy::disallowed_methods,

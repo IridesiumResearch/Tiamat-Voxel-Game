@@ -615,6 +615,10 @@ pub enum Event {
 /// Something the render loop wants to say.
 #[derive(Debug, Clone)]
 pub enum Command {
+    /// A skin of the player's own to offer the server (Life ask 23): kept
+    /// until the server's `HelloAck` says the host takes one, and sent before
+    /// `JoinWorld` so the join hook sees it.
+    OfferSkin(Vec<u8>),
     /// Say something.
     Chat(String),
     /// Report this frame's movement intent.
@@ -1091,6 +1095,10 @@ async fn session(
     // Skins entities have named (Life ask 23), fetched by hash as they are
     // first seen: a spawn, a look change, or this player's own.
     let mut awaited_skins: Vec<tiamat_core::proto::ContentHash> = Vec::new();
+    // Whether this host takes a skin of the player's own, from its
+    // `HelloAck`, and the one the player chose, if any (Life ask 23).
+    let mut custom_skins = false;
+    let mut skin_offer: Option<Vec<u8>> = None;
     send.impair(impairment);
 
     let _ = events.send(Event::Connected {
@@ -1208,6 +1216,23 @@ async fn session(
                         send.impair(impairment);
                         None
                     }
+                    Some(Command::OfferSkin(bytes)) => {
+                        // Before the join it waits for the join; after it, a
+                        // host that takes one gets it now.
+                        if pending.joined
+                            && custom_skins
+                            && let Err(err) = send
+                                .write(&ClientMessage::Skin {
+                                    body: None,
+                                    bytes: bytes.clone(),
+                                })
+                                .await
+                        {
+                            say(format!("could not offer your skin: {err}"));
+                        }
+                        skin_offer = Some(bytes);
+                        None
+                    }
                     Some(command) => {
                         if let Err(err) = send.write(&to_wire(command)).await {
                             finish(format!("could not send to the server: {err}"));
@@ -1238,6 +1263,13 @@ async fn session(
             // materials complete.
             if !pending.joined && !pending.table.is_empty() && pending.outstanding == 0 {
                 emit_materials(&mut pending, &events);
+                // The skin first, so the join hook sees it (Life ask 23).
+                if custom_skins
+                    && let Some(bytes) = skin_offer.clone()
+                    && let Err(err) = send.write(&ClientMessage::Skin { body: None, bytes }).await
+                {
+                    say(format!("could not offer your skin: {err}"));
+                }
                 if let Err(err) = send.write(&ClientMessage::JoinWorld).await {
                     finish(format!("could not ask to join: {err}"));
                     break;
@@ -1327,6 +1359,14 @@ async fn session(
 
                 if missing.is_empty() {
                     emit_materials(&mut pending, &events);
+                    // The skin first, so the join hook sees it (Life ask 23).
+                    if custom_skins
+                        && let Some(bytes) = skin_offer.clone()
+                        && let Err(err) =
+                            send.write(&ClientMessage::Skin { body: None, bytes }).await
+                    {
+                        say(format!("could not offer your skin: {err}"));
+                    }
                     if let Err(err) = send.write(&ClientMessage::JoinWorld).await {
                         finish(format!("could not ask to join: {err}"));
                         break;
@@ -1437,6 +1477,14 @@ async fn session(
 
                 if !pending.joined && pending.outstanding == 0 && !pending.table.is_empty() {
                     emit_materials(&mut pending, &events);
+                    // The skin first, so the join hook sees it (Life ask 23).
+                    if custom_skins
+                        && let Some(bytes) = skin_offer.clone()
+                        && let Err(err) =
+                            send.write(&ClientMessage::Skin { body: None, bytes }).await
+                    {
+                        say(format!("could not offer your skin: {err}"));
+                    }
                     if let Err(err) = send.write(&ClientMessage::JoinWorld).await {
                         finish(format!("could not ask to join: {err}"));
                         break;
@@ -1927,9 +1975,13 @@ async fn session(
                 });
             }
 
-            ServerMessage::HelloAck { .. }
-            | ServerMessage::ModManifest { .. }
-            | ServerMessage::EntityStateDelta { .. } => {}
+            ServerMessage::HelloAck {
+                custom_skins: taken,
+                ..
+            } => {
+                custom_skins = taken;
+            }
+            ServerMessage::ModManifest { .. } | ServerMessage::EntityStateDelta { .. } => {}
         }
     }
 
@@ -2382,6 +2434,9 @@ fn to_wire(command: Command) -> ClientMessage {
         // panic rather than a placeholder message, because sending SOMETHING
         // for it would be a silent protocol violation.
         Command::Impair(_) => unreachable!("Command::Impair is applied, never sent"),
+        Command::OfferSkin(_) => {
+            unreachable!("Command::OfferSkin is kept, then sent before the join")
+        }
     }
 }
 

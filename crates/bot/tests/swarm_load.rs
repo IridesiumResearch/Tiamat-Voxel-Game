@@ -88,6 +88,7 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
         world_path: dir,
         identity_path: None,
         max_players: 64,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

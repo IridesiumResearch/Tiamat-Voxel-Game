@@ -1487,10 +1487,7 @@ impl App {
         mut renderer: Renderer,
         bindings: crate::input::Bindings,
     ) -> Self {
-        let camera = Camera {
-            fov_y: config.fov_degrees.to_radians(),
-            ..Camera::default()
-        };
+        let camera = Camera::with_fov_y(config.fov_degrees.to_radians());
         // **Every renderer setting the config holds, pushed once, here.**
         // Reported from the window: shadows turned off on the front screen
         // were still on after joining. The renderer is built with its own
@@ -4939,8 +4936,9 @@ impl App {
             Event::EntityDespawn(ids) => self.entities.despawned(&ids),
             Event::EntityState { tick, entities } => self.entities.moved(tick, &entities, at),
             Event::EntityArmed(entities) => self.entities.rearmed(&entities),
+            Event::EntityLooked(entities) => self.entities.relooked(&entities),
             // Every other event is handled where it arrives; this method exists
-            // for the three that share a clock.
+            // for the ones that share a clock, and the looks beside them.
             _ => {}
         }
     }
@@ -4995,18 +4993,9 @@ impl App {
             | Event::Skin { .. } => {
                 self.adopt_asset(event);
             }
-            Event::EntityLooked(entities) => self.entities.relooked(&entities),
-            Event::PlayerLook { model, skin } => {
-                self.own_look = model.map(|model| crate::render::Look { model, skin });
-            }
+            Event::PlayerLook { model, skin } => self.adopt_own_look(model, skin),
 
-            Event::Joined {
-                spawn,
-                tick,
-                may_fly,
-                seed,
-                ..
-            } => self.joined_world(spawn, tick, may_fly, seed),
+            Event::Joined { .. } => self.adopt_joined(&event),
 
             Event::Chunk(chunk, tint, fog) => self.adopt_chunk(*chunk, tint, fog),
 
@@ -5017,6 +5006,7 @@ impl App {
             event @ (Event::EntitySpawn(_)
             | Event::EntityDespawn(_)
             | Event::EntityArmed(_)
+            | Event::EntityLooked(_)
             | Event::EntityState { .. }) => self.entity_event(event),
 
             Event::ChunkFluid(pos, layer) => self.store.set_fluid(pos, *layer),
@@ -6444,6 +6434,31 @@ impl App {
             // back to the correction.
             self.flying = false;
         }
+    }
+
+    /// The join, taken off its event: its own method because `adopt` sits on
+    /// clippy's line ceiling.
+    fn adopt_joined(&mut self, event: &Event) {
+        if let Event::Joined {
+            spawn,
+            tick,
+            may_fly,
+            seed,
+            ..
+        } = event
+        {
+            self.joined_world(*spawn, *tick, *may_fly, *seed);
+        }
+    }
+
+    /// What the server says this player's own body is drawn as (Life ask
+    /// 23): a mod's model and skin, or the engine's rig for `None`.
+    fn adopt_own_look(
+        &mut self,
+        model: Option<String>,
+        skin: Option<tiamat_core::proto::ContentHash>,
+    ) {
+        self.own_look = model.map(|model| crate::render::Look { model, skin });
     }
 
     /// The abilities the predictor steps with.

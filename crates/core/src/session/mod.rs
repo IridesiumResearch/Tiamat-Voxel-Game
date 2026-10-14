@@ -287,6 +287,9 @@ pub struct JoinContext<'a> {
     /// Bound into the challenge signature, so a signature made for one server
     /// cannot be relayed to another.
     pub cert_fingerprint: &'a [u8; 32],
+    /// Whether the host takes a player's own skin (Life ask 23), told in the
+    /// `HelloAck` so a client knows whether to offer one before it joins.
+    pub custom_skins: bool,
     /// The resolved mod set, from Task 05.
     pub mods: &'a [ModEntry],
     /// The mod set's fingerprint.
@@ -535,6 +538,12 @@ impl Session {
                 // place.
                 Response::none()
             }
+            (Phase::Authenticated | Phase::InWorld, ClientMessage::Skin { .. }) => {
+                // A player's own skin (Life ask 23), taken by the transport
+                // layer, which holds the uploads; accepted here for the same
+                // reason. Before the join it waits for the body.
+                Response::none()
+            }
             (Phase::InWorld, ClientMessage::ViewDistance { .. }) => {
                 // Served by the transport layer, which owns the streamer, and
                 // accepted here for the same reason content requests are: the
@@ -702,6 +711,7 @@ impl Session {
                 ServerMessage::HelloAck {
                     protocol_version: PROTOCOL_VERSION,
                     cert_fingerprint: *context.cert_fingerprint,
+                    custom_skins: context.custom_skins,
                 },
                 ServerMessage::AuthChallenge { nonce },
             ],
@@ -967,6 +977,7 @@ impl Session {
             ClientMessage::ViewDistance { .. } => "ViewDistance",
             ClientMessage::Punch { .. } => "Punch",
             ClientMessage::SwapOffhand { .. } => "SwapOffhand",
+            ClientMessage::Skin { .. } => "Skin",
         };
         self.close_with(DisconnectReason::ProtocolError {
             detail: format!("{what} is not valid in phase {:?}", self.phase),
@@ -1106,6 +1117,7 @@ mod tests {
     fn context<'a>(allowlist: &'a Allowlist, mods: &'a [ModEntry]) -> JoinContext<'a> {
         JoinContext {
             cert_fingerprint: &FINGERPRINT,
+            custom_skins: false,
             theme: None,
             cloud_layer: None,
             models: &[],

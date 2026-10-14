@@ -126,6 +126,14 @@ pub struct Config {
     #[serde(default = "Config::default_view_distance")]
     pub view_distance: u8,
 
+    /// Whether players may wear a skin of their own: a PNG the client offers
+    /// at join, painted on the template of the body the mod gives them, and
+    /// shown to everyone who sees that player. Off by default, because a
+    /// host who allows it is showing every player a picture another player
+    /// drew. `allow_custom_skins = true` to allow.
+    #[serde(default)]
+    pub allow_custom_skins: bool,
+
     /// How far players can see vertically, in chunks.
     #[serde(default = "Config::default_vertical_view_distance")]
     pub vertical_view_distance: u8,
@@ -256,6 +264,7 @@ impl Default for Config {
             mods_path: None,
             enabled_mods: None,
             view_distance: Self::default_view_distance(),
+            allow_custom_skins: false,
             vertical_view_distance: Self::default_vertical_view_distance(),
             rcon: None,
         }

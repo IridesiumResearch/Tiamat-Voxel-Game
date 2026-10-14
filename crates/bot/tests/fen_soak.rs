@@ -314,6 +314,7 @@ fn fly_over_the_fen() {
         world_path: world,
         identity_path: None,
         max_players: 1,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: vec![operator],
         view_distance: ViewDistance::DEFAULT,

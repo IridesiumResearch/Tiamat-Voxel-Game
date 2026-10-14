@@ -1113,6 +1113,10 @@ pub struct JoinEvent {
     pub player: [u8; 32],
     /// What they are currently called on this server.
     pub name: String,
+    /// The skin of their own they arrived wearing, by content hash, if the
+    /// host takes one and it fits the body they wear (Life ask 23); a mod
+    /// may still overrule it with `set_player_skin`.
+    pub skin: Option<[u8; 32]>,
 }
 
 /// A player's feet crossed into another block (Progress ask 3).

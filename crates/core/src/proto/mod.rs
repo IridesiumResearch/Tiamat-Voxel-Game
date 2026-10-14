@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 92;
+pub const PROTOCOL_VERSION: u32 = 93;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -98,6 +98,17 @@ pub const PROTOCOL_VERSION: u32 = 92;
 // (`game.set_slot_grain`); and `DialogEvent::Dropped { click }`, appended — a
 // click outside every open screen while the cursor held a stack, which the
 // server takes off the cursor and reports to the screen's owner.
+// v93 (Life 23, a player's own skin): `ServerMessage::HelloAck` carries
+// `custom_skins`, appended — whether this host takes a skin from a client —
+// and `ClientMessage::Skin { body, bytes }` is appended: a PNG the player
+// chose, for one of the mod's bodies or for any (`None`), at most
+// `MAX_SKIN_BYTES`, sent before `JoinWorld` so the join hook sees it. The
+// server never decodes it: it reads the header for the size and forwards
+// the bytes by hash through the content pipeline, and every client decodes
+// them under the picture caps. Refused on decode when the bytes are over
+// the cap or the body id longer than an id may be. **A field on an existing
+// shape**, so the version check is what keeps a v92 peer from reading the
+// flag as the start of the challenge.
 // v92 (Life 23, players wear a mod's models and skins): `EntityDef` carries
 // `skin`, appended — the content hash of an image drawn on the model in place
 // of its own texture, or `None` — and two messages are appended.
@@ -1498,7 +1509,35 @@ pub enum ClientMessage {
         /// crosshair was on nothing in reach.
         target: Option<SubNodePos>,
     },
+
+    /// A skin the player chose for their own body (protocol v93, Life ask
+    /// 23): a PNG painted on a body's template.
+    ///
+    /// **Appended at the end.** Sent once authenticated and before
+    /// `JoinWorld`, so the join hook sees it, or later to change it; several
+    /// may be sent, one per body. A host whose `custom_skins` (in
+    /// [`ServerMessage::HelloAck`]) is off drops it with a word. The server
+    /// reads only the header, for the size the body's template has, and
+    /// forwards the bytes by hash; nobody decodes them but the clients that
+    /// draw them, under the picture caps (charter rule 14).
+    Skin {
+        /// The body it is painted for, by the id the mod registered, or
+        /// `None` for whichever body the player wears.
+        body: Option<String>,
+        /// The PNG, at most [`MAX_SKIN_BYTES`].
+        bytes: Vec<u8>,
+    },
 }
+
+/// The most a player's own skin may weigh, in bytes (protocol v93).
+///
+/// A bound for a server that keeps one in memory per player and serves it to
+/// everybody who sees them: a skin on a 256-square template is a few tens of
+/// kilobytes, and a megabyte is room for any template a mod would ship.
+pub const MAX_SKIN_BYTES: usize = 1024 * 1024;
+
+/// The most skins one player may offer in a session, one per body.
+pub const MAX_SKINS_PER_PLAYER: usize = 8;
 
 /// What a player did inside a dialog.
 ///
@@ -1706,6 +1745,11 @@ pub enum ServerMessage {
         /// Surfaced to the user for trust-on-first-use, and bound into the
         /// challenge signature so a relay cannot forward a handshake.
         cert_fingerprint: [u8; 32],
+        /// Whether this host takes a skin a player chose for their own body
+        /// (protocol v93, Life ask 23: `allow_custom_skins` in server.toml,
+        /// off by default). A client that has one sends it before
+        /// `JoinWorld` when this is `true`, and keeps it to itself otherwise.
+        custom_skins: bool,
     },
     /// Challenges the client to prove it holds the claimed key.
     AuthChallenge {
@@ -3143,6 +3187,12 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
             // for the same reason: it is stored and echoed.
             check_len("tool", tool.len(), MAX_NAME_BYTES)?;
         }
+        ClientMessage::Skin { body, bytes } => {
+            check_len("skin", bytes.len(), MAX_SKIN_BYTES)?;
+            if let Some(body) = body {
+                check_len("skin_body", body.len(), MAX_ID_BYTES)?;
+            }
+        }
         ClientMessage::Hello { display_name, .. } => {
             check_len("display_name", display_name.len(), MAX_NAME_BYTES)?;
             if display_name.is_empty() {
@@ -3832,22 +3882,9 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
         // — the same hazard `PlayerState` has, from a different message.
         // Charter rule 14: a server is not trusted merely for being the server.
         ServerMessage::EntitySpawn { entities } => check_entity_spawns(entities)?,
-        ServerMessage::EntityDespawn { entities } => {
-            check_len("entity_despawn", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
-        }
-        ServerMessage::EntityLooked { entities } => {
-            check_len("entity_looked", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
-            for look in entities {
-                if let Some(model) = &look.model {
-                    check_len("entity_model", model.len(), MAX_ID_BYTES)?;
-                }
-            }
-        }
-        ServerMessage::PlayerLook { model, .. } => {
-            if let Some(model) = model {
-                check_len("player_look_model", model.len(), MAX_ID_BYTES)?;
-            }
-        }
+        ServerMessage::EntityDespawn { entities } => check_despawns(entities)?,
+        ServerMessage::EntityLooked { entities } => check_entity_looks(entities)?,
+        ServerMessage::PlayerLook { model, .. } => check_model_id("player_look", model.as_deref())?,
         // **A server's own list, and a server is not trusted** (charter rule
         // 14). Every string here is drawn on a screen and kept for the session.
         ServerMessage::ModSettings { settings } => check_mod_settings(settings)?,
@@ -3980,6 +4017,28 @@ pub fn validate_server_message(message: &ServerMessage) -> Result<(), ProtocolEr
 ///
 /// Lifted out of `validate_server_message` because that function is at clippy's
 /// line ceiling and this is the longest arm in it.
+/// A model id a server named, bounded like every id (protocol v92).
+fn check_model_id(field: &'static str, model: Option<&str>) -> Result<(), ProtocolError> {
+    match model {
+        Some(model) => check_len(field, model.len(), MAX_ID_BYTES),
+        None => Ok(()),
+    }
+}
+
+/// Despawns: bounded in number, like every entity list.
+fn check_despawns(ids: &[u64]) -> Result<(), ProtocolError> {
+    check_len("entity_despawn", ids.len(), MAX_ENTITIES_PER_MESSAGE)
+}
+
+/// Looks that changed: bounded in number, each model id in length.
+fn check_entity_looks(entities: &[EntityLook]) -> Result<(), ProtocolError> {
+    check_len("entity_looked", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
+    for look in entities {
+        check_model_id("entity_model", look.model.as_deref())?;
+    }
+    Ok(())
+}
+
 fn check_entity_spawns(entities: &[EntityDef]) -> Result<(), ProtocolError> {
     check_len("entity_spawn", entities.len(), MAX_ENTITIES_PER_MESSAGE)?;
     for entity in entities {
@@ -4161,6 +4220,7 @@ mod tests {
             ServerMessage::HelloAck {
                 protocol_version: PROTOCOL_VERSION,
                 cert_fingerprint: [2u8; 32],
+                custom_skins: true,
             },
             ServerMessage::AuthChallenge { nonce: [3u8; 32] },
             ServerMessage::ModManifest {
@@ -4746,12 +4806,17 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of every variant and its ordinal; splitting it would hide the order"
+    )]
     fn server_variant_ordinals_are_pinned() {
         let server: [(ServerMessage, u8); 14] = [
             (
                 ServerMessage::HelloAck {
                     protocol_version: 0,
                     cert_fingerprint: [0u8; 32],
+                    custom_skins: false,
                 },
                 0,
             ),

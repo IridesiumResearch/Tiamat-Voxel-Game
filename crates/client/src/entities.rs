@@ -358,7 +358,7 @@ impl Entities {
     pub fn relooked(&mut self, looks: &[tiamat_core::proto::EntityLook]) {
         for look in looks {
             if let Some(entity) = self.held.get_mut(&look.id) {
-                entity.model = look.model.clone();
+                entity.model.clone_from(&look.model);
                 entity.skin = look.skin;
             }
         }

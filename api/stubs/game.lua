@@ -1559,7 +1559,7 @@ function game.line_of_sight(from, to) end
 ---    end
 ---end)
 ---```
----@param callback fun(event: { player: string, name: string })
+---@param callback fun(event: { player: string, name: string, skin: string|nil })
 function game.register_on_player_join(callback) end
 
 ---Called when a player's feet cross into another block.
@@ -2591,6 +2591,17 @@ function game.set_player_model(player, id) end
 ---@param file string|nil A path from the body's `skins`, or `nil`.
 ---@return boolean told
 function game.set_player_skin(player, file) end
+
+---Whether this host takes a skin a player chose for their own body (Life
+---ask 23): `allow_custom_skins` in the server's `server.toml`, off by
+---default. On, a client that has one offers it at join, the engine checks it
+---is a PNG the size of the template of the body they wear, and everybody who
+---sees the player wears it in their place — until you say otherwise with
+---`game.set_player_skin`. The join event's `skin` carries its hash, or nil.
+---Off, nothing is taken from any client and every player wears what you give
+---them. For saying so to a player, or offering a skin of yours instead.
+---@return boolean allowed
+function game.custom_skins_allowed() end
 
 ---Sends one line of chat to one player. Returns whether it was delivered.
 ---

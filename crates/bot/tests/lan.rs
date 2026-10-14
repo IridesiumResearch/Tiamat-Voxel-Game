@@ -53,6 +53,7 @@ fn start(name: &str, bind: &str, max_players: u32) -> ServerHandle {
         bind_addr: bind.parse().expect("an address"),
         world_path: scratch(name),
         identity_path: None,
+        allow_custom_skins: false,
         max_players,
         allowlist: Allowlist::open(),
         operators: Vec::new(),

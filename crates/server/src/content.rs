@@ -108,10 +108,17 @@ impl Transfers {
     ///
     /// A hash already queued or sent is ignored, so a client repeating its
     /// request cannot make the server send the same file twice.
-    pub fn request(&mut self, hashes: &[ContentHash], index: &ContentIndex) -> usize {
+    pub fn request(
+        &mut self,
+        hashes: &[ContentHash],
+        index: &ContentIndex,
+        uploads: &ContentIndex,
+    ) -> usize {
         let mut accepted = 0;
         for hash in hashes {
-            if self.seen.contains(hash) || index.get(hash).is_none() {
+            if self.seen.contains(hash)
+                || (index.get(hash).is_none() && uploads.get(hash).is_none())
+            {
                 continue;
             }
             self.seen.insert(*hash);
@@ -125,7 +132,11 @@ impl Transfers {
     ///
     /// Returns an empty vector when there is nothing queued or the quota is
     /// spent.
-    pub fn next_slices(&mut self, index: &ContentIndex) -> Vec<ServerMessage> {
+    pub fn next_slices(
+        &mut self,
+        index: &ContentIndex,
+        uploads: &ContentIndex,
+    ) -> Vec<ServerMessage> {
         let mut out = Vec::new();
 
         while out.len() < SLICES_PER_PASS {
@@ -139,7 +150,7 @@ impl Transfers {
             let Some(hash) = self.queue.first().copied() else {
                 break;
             };
-            let Some(item) = index.get(&hash) else {
+            let Some(item) = index.get(&hash).or_else(|| uploads.get(&hash)) else {
                 // Vanished between request and send. Cannot happen with a
                 // frozen index, but dropping the entry is the right response if
                 // the index ever becomes reloadable.
@@ -230,7 +241,7 @@ mod tests {
     fn drain(transfers: &mut Transfers, index: &ContentIndex) -> Vec<(ContentHash, Vec<u8>)> {
         let mut assembled: Vec<(ContentHash, Vec<u8>)> = Vec::new();
         loop {
-            let slices = transfers.next_slices(index);
+            let slices = transfers.next_slices(index, &ContentIndex::new());
             if slices.is_empty() {
                 return assembled;
             }
@@ -269,7 +280,7 @@ mod tests {
     fn a_small_file_transfers_in_one_slice_and_round_trips() {
         let (index, hash, bytes) = index_with("small", 1024);
         let mut transfers = Transfers::new();
-        assert_eq!(transfers.request(&[hash], &index), 1);
+        assert_eq!(transfers.request(&[hash], &index, &ContentIndex::new()), 1);
 
         let assembled = drain(&mut transfers, &index);
         assert_eq!(assembled.len(), 1);
@@ -288,7 +299,7 @@ mod tests {
         // producing a corrupt file on the client.
         let (index, hash, bytes) = index_with("large", SLICE_BYTES * 3 + 12_345);
         let mut transfers = Transfers::new();
-        transfers.request(&[hash], &index);
+        transfers.request(&[hash], &index, &ContentIndex::new());
 
         let assembled = drain(&mut transfers, &index);
         assert_eq!(assembled.len(), 1);
@@ -303,12 +314,16 @@ mod tests {
         // leaves the queue.
         let (index, hash, _) = index_with("empty", 0);
         let mut transfers = Transfers::new();
-        transfers.request(&[hash], &index);
+        transfers.request(&[hash], &index, &ContentIndex::new());
 
-        let first = transfers.next_slices(&index);
+        let first = transfers.next_slices(&index, &ContentIndex::new());
         assert_eq!(first.len(), 1, "an empty file still sends one slice");
         assert_eq!(transfers.queued(), 0, "and then finishes");
-        assert!(transfers.next_slices(&index).is_empty());
+        assert!(
+            transfers
+                .next_slices(&index, &ContentIndex::new())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -318,10 +333,15 @@ mod tests {
         let (index, _, _) = index_with("unknown", 64);
         let mut transfers = Transfers::new();
 
-        assert_eq!(transfers.request(&[[0xAB; 32]], &index), 0);
+        assert_eq!(
+            transfers.request(&[[0xAB; 32]], &index, &ContentIndex::new()),
+            0
+        );
         assert_eq!(transfers.queued(), 0);
         assert!(
-            transfers.next_slices(&index).is_empty(),
+            transfers
+                .next_slices(&index, &ContentIndex::new())
+                .is_empty(),
             "an unknown hash must produce no message at all"
         );
     }
@@ -333,9 +353,9 @@ mod tests {
         let (index, hash, _) = index_with("repeat", 4096);
         let mut transfers = Transfers::new();
 
-        assert_eq!(transfers.request(&[hash], &index), 1);
+        assert_eq!(transfers.request(&[hash], &index, &ContentIndex::new()), 1);
         assert_eq!(
-            transfers.request(&[hash, hash, hash], &index),
+            transfers.request(&[hash, hash, hash], &index, &ContentIndex::new()),
             0,
             "a hash already queued must be ignored"
         );
@@ -344,8 +364,12 @@ mod tests {
         assert_eq!(assembled.len(), 1);
 
         // And after it has been sent, asking again still does nothing.
-        assert_eq!(transfers.request(&[hash], &index), 0);
-        assert!(transfers.next_slices(&index).is_empty());
+        assert_eq!(transfers.request(&[hash], &index, &ContentIndex::new()), 0);
+        assert!(
+            transfers
+                .next_slices(&index, &ContentIndex::new())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -354,9 +378,9 @@ mod tests {
         // transfer is slow rather than a stall for everyone else.
         let (index, hash, _) = index_with("budget", SLICE_BYTES * 10);
         let mut transfers = Transfers::new();
-        transfers.request(&[hash], &index);
+        transfers.request(&[hash], &index, &ContentIndex::new());
 
-        let slices = transfers.next_slices(&index);
+        let slices = transfers.next_slices(&index, &ContentIndex::new());
         assert_eq!(slices.len(), SLICES_PER_PASS);
         assert!(transfers.queued() > 0, "the transfer should still be going");
     }
@@ -385,10 +409,10 @@ mod tests {
         let hash = hash_bytes(&bytes);
 
         let mut transfers = Transfers::new();
-        transfers.request(&[hash], &index);
+        transfers.request(&[hash], &index, &ContentIndex::new());
 
         loop {
-            let slices = transfers.next_slices(&index);
+            let slices = transfers.next_slices(&index, &ContentIndex::new());
             if slices.is_empty() {
                 break;
             }
@@ -421,7 +445,7 @@ mod tests {
             hash_bytes(b"beta"),
         ];
         let mut transfers = Transfers::new();
-        assert_eq!(transfers.request(&order, &index), 3);
+        assert_eq!(transfers.request(&order, &index, &ContentIndex::new()), 3);
 
         let assembled = drain(&mut transfers, &index);
         let hashes: Vec<ContentHash> = assembled.iter().map(|(hash, _)| *hash).collect();
@@ -432,7 +456,7 @@ mod tests {
     fn the_quota_stops_a_client_pulling_without_bound() {
         let (index, hash, _) = index_with("quota", 4096);
         let mut transfers = Transfers::new();
-        transfers.request(&[hash], &index);
+        transfers.request(&[hash], &index, &ContentIndex::new());
 
         assert!(!transfers.over_quota());
         drain(&mut transfers, &index);
@@ -441,10 +465,12 @@ mod tests {
         // Force the quota to its limit and confirm sending stops.
         transfers.sent_bytes = QUOTA_BYTES;
         transfers.seen.clear();
-        transfers.request(&[hash], &index);
+        transfers.request(&[hash], &index, &ContentIndex::new());
         assert!(transfers.over_quota());
         assert!(
-            transfers.next_slices(&index).is_empty(),
+            transfers
+                .next_slices(&index, &ContentIndex::new())
+                .is_empty(),
             "a client over quota must not be served more"
         );
     }
@@ -453,7 +479,11 @@ mod tests {
     fn a_fresh_transfer_has_nothing_to_send() {
         let (index, _, _) = index_with("fresh", 16);
         let mut transfers = Transfers::new();
-        assert!(transfers.next_slices(&index).is_empty());
+        assert!(
+            transfers
+                .next_slices(&index, &ContentIndex::new())
+                .is_empty()
+        );
         assert_eq!(transfers.sent_bytes(), 0);
     }
 }

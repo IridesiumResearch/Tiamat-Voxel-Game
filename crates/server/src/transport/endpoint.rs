@@ -160,6 +160,12 @@ pub struct Shared {
     /// The bodies a mod offers players (Life ask 23), resolved, in
     /// registration order; empty is a world of humanoids.
     pub player_models: Vec<PlayerModelDef>,
+    /// Whether this host takes a player's own skin (Life ask 23).
+    pub allow_custom_skins: bool,
+    /// Bytes that came over the wire rather than from a mod's directory — the
+    /// skins players chose — served by hash like any content, and forgotten
+    /// when the last player wearing one leaves.
+    pub uploads: std::sync::RwLock<tiamat_core::content::ContentIndex>,
     /// How the loaded mods want the engine's own screens to look, or `None`.
     pub theme: Option<tiamat_core::proto::ThemeDef>,
     /// The cloud deck a mod registered, or `None` for a world with none.
@@ -688,9 +694,14 @@ pub struct PlayerSim {
     /// `Shared::player_models` when the mirror is synced, so a body a mod
     /// never registered falls back rather than failing.
     pub model: Option<String>,
-    /// The skin on that body, by hash: one the body declared, put on with
-    /// `game.set_player_skin`. Taken off when the body changes.
-    pub skin: Option<tiamat_core::proto::ContentHash>,
+    /// What a mod said about the skin on that body with
+    /// `game.set_player_skin`; unsaid again when the body changes.
+    pub skin: SkinSay,
+    /// Skins the player chose for their own body, offered by their client
+    /// (Life ask 23), at most `MAX_SKINS_PER_PLAYER`; the one painted for the
+    /// body they wear — or for any — shows while a mod has said nothing and
+    /// its size is the body's template's.
+    pub own_skins: Vec<OwnSkin>,
     /// Whether the client has been told what its own body is drawn as
     /// (`ServerMessage::PlayerLook`) since it last changed. Like
     /// `abilities_sent`: cleared by the setters, sent after the mods run.
@@ -771,7 +782,8 @@ impl PlayerSim {
             riding: None,
             crawling: false,
             model: None,
-            skin: None,
+            skin: SkinSay::Unsaid,
+            own_skins: Vec::new(),
             look_sent: false,
         }
     }
@@ -788,6 +800,35 @@ pub struct PlayerModelDef {
     /// Each declared skin: its path inside the mod, and its content hash.
     /// A skin whose file is missing is dropped at build time, with a warning.
     pub skins: Vec<(String, tiamat_core::proto::ContentHash)>,
+    /// The size of the model's own texture, which a player's own skin must
+    /// match to be worn on this body (Life ask 23); `None` for a model with
+    /// no texture, which any skin fits.
+    pub template: Option<(u32, u32)>,
+}
+
+/// A skin a player chose for their own body, as the server keeps it: the
+/// body it is painted for (`None` for any), its hash in `Shared::uploads`,
+/// and its size, checked against a body's template when worn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnSkin {
+    /// The body's id, or `None` for whichever body the player wears.
+    pub body: Option<String>,
+    /// The bytes, by hash.
+    pub hash: tiamat_core::proto::ContentHash,
+    /// Width and height from the PNG header.
+    pub size: (u32, u32),
+}
+
+/// What a mod has said about a player's skin (Life ask 23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkinSay {
+    /// Nothing: the player's own skin shows, if they offered one that fits.
+    #[default]
+    Unsaid,
+    /// The model's own texture, over any skin of the player's own.
+    Bare,
+    /// One of the body's declared skins.
+    Mods(tiamat_core::proto::ContentHash),
 }
 
 impl Shared {
@@ -804,8 +845,142 @@ impl Shared {
             Some(id) => self.player_models.iter().find(|body| body.id == *id),
             None => self.player_models.first(),
         };
-        (body.map(|body| body.model.clone()), body.and(player.skin))
+        let skin = body.and_then(|body| match player.skin {
+            SkinSay::Mods(hash) => Some(hash),
+            SkinSay::Bare => None,
+            SkinSay::Unsaid => own_skin_for(body, &player.own_skins),
+        });
+        (body.map(|body| body.model.clone()), skin)
     }
+
+    /// Takes a skin a player chose for their own body (Life ask 23): refused
+    /// with a word to the player when the host does not allow one, it is not
+    /// a PNG, it names a body nobody registered, or the player has offered
+    /// as many as they may; kept, by hash, otherwise — and a word still if it
+    /// does not fit the body they wear now, since it may fit another.
+    pub fn offer_skin(&self, uuid: &PlayerUuid, body: Option<String>, bytes: Vec<u8>) -> bool {
+        if !self.allow_custom_skins {
+            self.tell(uuid, "this host does not allow custom skins".to_owned());
+            return false;
+        }
+        let Some(size) = tiamat_core::content::png_dimensions(&bytes) else {
+            self.tell(uuid, "your skin is not a PNG, and was not taken".to_owned());
+            return false;
+        };
+        if let Some(id) = &body
+            && !self.player_models.iter().any(|known| known.id == *id)
+        {
+            self.tell(
+                uuid,
+                format!("your skin is for a body `{id}` this world does not have"),
+            );
+            return false;
+        }
+        let hash = match self.uploads.write() {
+            Ok(mut uploads) => uploads.add_bytes(
+                "player",
+                &format!("{}/{}", uuid.to_hex(), body.as_deref().unwrap_or("any")),
+                bytes,
+            ),
+            Err(_) => return false,
+        };
+        let Ok(mut bodies) = self.bodies.lock() else {
+            return false;
+        };
+        let Some(player) = bodies.get_mut(uuid) else {
+            return false;
+        };
+        let replaced = player.own_skins.iter().position(|own| own.body == body);
+        if replaced.is_none() && player.own_skins.len() >= tiamat_core::proto::MAX_SKINS_PER_PLAYER
+        {
+            drop(bodies);
+            self.tell(
+                uuid,
+                format!(
+                    "you may offer at most {} skins",
+                    tiamat_core::proto::MAX_SKINS_PER_PLAYER
+                ),
+            );
+            return false;
+        }
+        let own = OwnSkin { body, hash, size };
+        match replaced {
+            Some(at) => player.own_skins[at] = own,
+            None => player.own_skins.push(own),
+        }
+        player.look_sent = false;
+        let worn = match &player.model {
+            Some(id) => self.player_models.iter().find(|known| known.id == *id),
+            None => self.player_models.first(),
+        };
+        let word = match worn {
+            None => {
+                Some("this world has no bodies to paint, so your skin is kept for one".to_owned())
+            }
+            Some(worn) if !fits(worn.template, size) => Some(format!(
+                "your skin is {} by {}; the body `{}` is painted {} by {}",
+                size.0,
+                size.1,
+                worn.id,
+                worn.template.map_or(0, |t| t.0),
+                worn.template.map_or(0, |t| t.1)
+            )),
+            Some(_) => None,
+        };
+        drop(bodies);
+        if let Some(word) = word {
+            self.tell(uuid, word);
+        }
+        true
+    }
+
+    /// Forgets the skins a departed player uploaded, unless another player
+    /// still here wears the same bytes.
+    pub fn forget_own_skins(&self, departed: &[OwnSkin]) {
+        let Ok(bodies) = self.bodies.lock() else {
+            return;
+        };
+        let still_worn = |hash: &tiamat_core::proto::ContentHash| {
+            bodies
+                .values()
+                .any(|player| player.own_skins.iter().any(|own| own.hash == *hash))
+        };
+        if let Ok(mut uploads) = self.uploads.write() {
+            for own in departed {
+                if !still_worn(&own.hash) {
+                    uploads.remove_bytes(&own.hash);
+                }
+            }
+        }
+    }
+
+    /// The skin of their own a player is wearing right now, if any — what the
+    /// join hook is told (Life ask 23).
+    #[must_use]
+    pub fn own_skin_worn(&self, uuid: &PlayerUuid) -> Option<tiamat_core::proto::ContentHash> {
+        let bodies = self.bodies.lock().ok()?;
+        let player = bodies.get(uuid)?;
+        if player.skin != SkinSay::Unsaid {
+            return None;
+        }
+        self.look_of(player).1
+    }
+}
+
+/// Whether a skin of `size` fits a body painted on `template`: a body with
+/// no texture takes any.
+fn fits(template: Option<(u32, u32)>, size: (u32, u32)) -> bool {
+    template.is_none_or(|template| template == size)
+}
+
+/// The skin a player chose for this body — painted for it by id, or for any
+/// body — if it is the size of the body's template.
+fn own_skin_for(body: &PlayerModelDef, own: &[OwnSkin]) -> Option<tiamat_core::proto::ContentHash> {
+    own.iter()
+        .find(|skin| skin.body.as_deref() == Some(body.id.as_str()))
+        .or_else(|| own.iter().find(|skin| skin.body.is_none()))
+        .filter(|skin| fits(body.template, skin.size))
+        .map(|skin| skin.hash)
 }
 
 /// Accumulates a body's descent, and settles up on the tick it lands.
@@ -1719,9 +1894,16 @@ impl Shared {
 
     /// Stops simulating a player.
     pub fn remove_player(&self, uuid: &PlayerUuid) {
-        if let Ok(mut bodies) = self.bodies.lock() {
-            bodies.remove(uuid);
-        }
+        let own_skins = self
+            .bodies
+            .lock()
+            .ok()
+            .and_then(|mut bodies| bodies.remove(uuid))
+            .map(|player| player.own_skins)
+            .unwrap_or_default();
+        // Their uploaded skins go with them, unless somebody still here
+        // wears the same bytes (Life ask 23).
+        self.forget_own_skins(&own_skins);
         // **And what their HUD was being told**, or a server nobody restarts
         // accumulates a set of values per player who has ever joined. A mod
         // sets them again when they come back, because it is the mod that
@@ -3663,6 +3845,8 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
     let mut beat = tokio::time::interval(tiamat_core::tick::TICK_DURATION);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut transfers = crate::content::Transfers::new();
+    // Skins offered before the join, applied the moment the body exists.
+    let mut offered: Vec<(Option<String>, Vec<u8>)> = Vec::new();
     // Chunk deliveries the simulation has answered, waiting to be written.
     let mut pending: Vec<Awaiting> = Vec::new();
 
@@ -3681,7 +3865,16 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 // Content before terrain: a client still waiting on textures
                 // cannot render the chunks it is about to receive, so sending
                 // terrain ahead of the assets for it just fills a buffer.
-                for message in transfers.next_slices(&shared.content) {
+                // The uploads' lock is held for the slicing only, never
+                // across a write: a std guard cannot cross an await.
+                let slices = {
+                    let uploads = shared
+                        .uploads
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    transfers.next_slices(&shared.content, &uploads)
+                };
+                for message in slices {
                     frame::write(&mut send, &message).await?;
                 }
                 if let Some(uuid) = session.uuid()
@@ -3934,6 +4127,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let context = JoinContext {
                 cert_fingerprint: &shared.cert_fingerprint,
+                custom_skins: shared.allow_custom_skins,
                 seed: shared.seed.load(std::sync::atomic::Ordering::Relaxed),
                 mods: &shared.mods,
                 mod_set_fingerprint: shared.mod_set_fingerprint,
@@ -3985,6 +4179,11 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     session.display_name().unwrap_or("<unnamed>").to_owned(),
                 )
             });
+            if let Some(uuid) = session.uuid() {
+                for (body, bytes) in offered.drain(..) {
+                    shared.offer_skin(&uuid, body, bytes);
+                }
+            }
             // Interest starts at spawn. Task 09's physics will call
             // `recentre` as the player moves; see `stream.rs` on why the
             // client is not asked where it is.
@@ -4102,8 +4301,37 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 tiamat_core::session::Phase::Authenticated | tiamat_core::session::Phase::InWorld
             )
         {
-            let accepted = transfers.request(hashes, &shared.content);
+            let accepted = {
+                let uploads = shared
+                    .uploads
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                transfers.request(hashes, &shared.content, &uploads)
+            };
             debug!(asked = hashes.len(), accepted, "content requested");
+        }
+
+        // **A skin the player chose for their own body** (Life ask 23). In
+        // the world, it goes on at once; before the join — the client sends
+        // it ahead of `JoinWorld` so the join hook sees it — it waits here
+        // for the body to exist. The session accepted the phase; the bytes
+        // were bounded on decode; the server reads only the header.
+        if let ClientMessage::Skin { body, bytes } = &message
+            && matches!(
+                session.phase(),
+                tiamat_core::session::Phase::Authenticated | tiamat_core::session::Phase::InWorld
+            )
+        {
+            match session.uuid() {
+                Some(uuid) if session.phase() == tiamat_core::session::Phase::InWorld => {
+                    shared.offer_skin(&uuid, body.clone(), bytes.clone());
+                }
+                _ => {
+                    if offered.len() < tiamat_core::proto::MAX_SKINS_PER_PLAYER {
+                        offered.push((body.clone(), bytes.clone()));
+                    }
+                }
+            }
         }
 
         // The session decided this was allowed; carrying it out is this
@@ -4724,6 +4952,8 @@ mod tests {
             picture_table: Vec::new(),
             model_table: Vec::new(),
             player_models: Vec::new(),
+            allow_custom_skins: false,
+            uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
             theme: None,
             cloud_layer: None,
             hud_scripts: Vec::new(),

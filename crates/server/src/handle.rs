@@ -1534,6 +1534,12 @@ pub struct Settings {
     /// to agree with terrain generated before. A world made with none gets
     /// every option's declared default. See `modload::WorldOption`.
     pub world_options: Vec<(String, String)>,
+    /// Whether this host takes a skin a player chose for their own body
+    /// (Life ask 23; `allow_custom_skins` in server.toml). Off by default: a
+    /// host who allows it is showing every player a picture another player
+    /// drew, which is the host's call. The embedded server of a client says
+    /// yes, since that host is the player.
+    pub allow_custom_skins: bool,
 
     /// Extra material ids to register, on top of whatever mods register.
     ///
@@ -1995,10 +2001,19 @@ impl ServerHandle {
                         hash.map(|hash| (path.clone(), hash))
                     })
                     .collect();
+                // The size a player's own skin must be, from the model's own
+                // texture's header: the server never decodes a picture.
+                let template = model_table
+                    .iter()
+                    .find(|entry| entry.id == body.model)
+                    .and_then(|entry| entry.texture)
+                    .and_then(|hash| content_index.get(&hash))
+                    .and_then(|item| tiamat_core::content::png_dimensions(&item.bytes));
                 Some(crate::transport::PlayerModelDef {
                     id: body.id,
                     model: body.model,
                     skins,
+                    template,
                 })
             })
             .collect();
@@ -2658,6 +2673,8 @@ impl ServerHandle {
             picture_table,
             model_table,
             player_models,
+            allow_custom_skins: settings.allow_custom_skins,
+            uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
             theme,
             cloud_layer,
             sound_bindings,
@@ -3098,6 +3115,7 @@ impl ServerHandle {
                                 std::sync::Arc::clone(&shared.bodies),
                                 std::sync::Arc::clone(&domains),
                                 shared.player_models.clone(),
+                                shared.allow_custom_skins,
                             ));
                             entity_access = Some(std::sync::Arc::clone(&access));
                             host.vm_mut().set_entity_access(access);
@@ -3912,14 +3930,16 @@ impl ServerHandle {
                                             submerged: player.submerged,
                                             fell: player.fell,
                                         },
-                                        player.anim,
-                                        // Read fresh, like the position above:
-                                        // a hand is a view of a live inventory
-                                        // and is never persisted with the body.
-                                        shared.hands_of(uuid),
-                                        player.crawling,
-                                        model,
-                                        skin,
+                                        crate::ent::Seen {
+                                            anim: player.anim,
+                                            // Read fresh, like the position above:
+                                            // a hand is a view of a live inventory
+                                            // and is never persisted with the body.
+                                            hands: shared.hands_of(uuid),
+                                            crawling: player.crawling,
+                                            model,
+                                            skin,
+                                        },
                                     );
                                 }
                                 // **Leaving dismounts** (Life ask 18). The
@@ -3982,6 +4002,7 @@ impl ServerHandle {
                                     joined.push(tiamat_core::script::JoinEvent {
                                         player: *uuid.as_bytes(),
                                         name,
+                                        skin: shared.own_skin_worn(uuid),
                                     });
                                     // **The ground under a new player, this
                                     // tick.** Their connection asks for it too,
@@ -6845,6 +6866,7 @@ impl ServerHandle {
             rcon: None,
             materials: Vec::new(),
             world_options: Vec::new(),
+            allow_custom_skins: false,
         })
     }
 

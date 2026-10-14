@@ -505,6 +505,7 @@ fn server_messages() -> Vec<Vec<u8>> {
         ServerMessage::HelloAck {
             protocol_version: PROTOCOL_VERSION,
             cert_fingerprint: [0xBB; 32],
+            custom_skins: true,
         },
         ServerMessage::AuthChallenge { nonce: [0xCC; 32] },
         ServerMessage::ModManifest {

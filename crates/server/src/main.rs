@@ -165,6 +165,7 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
         // travelling with the world is right — see `Settings::identity_path`.
         identity_path: None,
         max_players: config.max_players,
+        allow_custom_skins: config.allow_custom_skins,
         allowlist: Allowlist::open(),
         operators: config.operators.clone(),
         seed: config.seed,

@@ -119,6 +119,7 @@ fn water_running_into_a_plant_sweeps_it_away_and_leaves_its_neighbour() {
         world_path: scratch("world"),
         identity_path: None,
         max_players: 1,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

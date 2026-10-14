@@ -265,20 +265,34 @@ pub trait Access: Send + Sync {
     /// which is what everybody wears until a mod says otherwise. Changing
     /// body takes the skin off: a skin is painted for one body.
     ///
-    /// `Err` names an id nobody registered — a mod's typo, and so a Lua
-    /// error; `Ok(false)` is a player who is not here. Defaulted, because a
-    /// VM with no server behind it has no players.
+    /// `Ok(false)` is a player who is not here. Defaulted, because a VM with
+    /// no server behind it has no players.
+    ///
+    /// # Errors
+    ///
+    /// An id nobody registered — a mod's typo, and so a Lua error.
     fn set_player_model(&self, uuid: [u8; 32], id: Option<&str>) -> Result<bool, String> {
         let _ = (uuid, id);
         Ok(false)
     }
 
     /// Puts a skin on a player: a PNG the body they wear declared in `skins`,
-    /// or `None` for the model's own texture. `Err` names a file the body
-    /// did not declare.
+    /// or `None` for the model's own texture — over a skin of the player's
+    /// own, which shows while a mod has said nothing.
+    ///
+    /// # Errors
+    ///
+    /// A file the body did not declare.
     fn set_player_skin(&self, uuid: [u8; 32], file: Option<&str>) -> Result<bool, String> {
         let _ = (uuid, file);
         Ok(false)
+    }
+
+    /// Whether this host takes a skin a player chose for their own body
+    /// (`allow_custom_skins` in server.toml, Life ask 23). Defaulted to
+    /// `false`: a VM with no server behind it has no host.
+    fn custom_skins_allowed(&self) -> bool {
+        false
     }
 
     /// Seats a connected player on an entity, so their keys drive it (Life

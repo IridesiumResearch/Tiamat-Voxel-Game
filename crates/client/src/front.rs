@@ -975,6 +975,12 @@ impl Front {
                 // derived from it (charter rule 13); nothing keys on this.
                 changed |= ui.text_edit_singleline(&mut config.display_name).changed();
             });
+            ui.horizontal(|ui| {
+                ui.label("Skin (PNG)");
+                // A path to a picture painted on the body's template, offered
+                // to a host who allows it (Life ask 23); empty is none.
+                changed |= ui.text_edit_singleline(&mut config.skin).changed();
+            });
             ui.separator();
 
             changed |= graphics_settings(ui, config);

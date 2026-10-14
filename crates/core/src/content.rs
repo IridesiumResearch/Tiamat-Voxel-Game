@@ -158,6 +158,36 @@ impl ContentIndex {
         self.add_mod_with(mod_id, dir, &[])
     }
 
+    /// Takes bytes that came from nowhere on disk — a player's own skin,
+    /// uploaded over the wire (Life ask 23) — and serves them by hash like
+    /// any file. `relative_path` is for diagnostics; `mod_id` names the
+    /// source (`"player"`). Returns the hash.
+    pub fn add_bytes(&mut self, mod_id: &str, relative_path: &str, bytes: Vec<u8>) -> ContentHash {
+        let hash = hash_bytes(&bytes);
+        self.paths
+            .insert((mod_id.to_owned(), relative_path.to_owned()), hash);
+        self.items.entry(hash).or_insert(ContentItem {
+            hash,
+            relative_path: relative_path.to_owned(),
+            mod_id: mod_id.to_owned(),
+            bytes,
+        });
+        hash
+    }
+
+    /// Forgets bytes added with [`Self::add_bytes`]. A hash that is not
+    /// there, or that came from a mod's file, is left alone.
+    pub fn remove_bytes(&mut self, hash: &ContentHash) {
+        let Some(item) = self.items.get(hash) else {
+            return;
+        };
+        let key = (item.mod_id.clone(), item.relative_path.clone());
+        if self.paths.get(&key) == Some(hash) {
+            self.paths.remove(&key);
+        }
+        self.items.remove(hash);
+    }
+
     /// Indexes one mod's directory, plus files it explicitly asked to publish.
     ///
     /// # Why an opt-in list exists at all
@@ -322,6 +352,55 @@ impl ContentIndex {
     }
 }
 
+/// The eight bytes every PNG starts with.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// The width and height a PNG declares, read from its header without
+/// decoding it: the signature, then the `IHDR` chunk, which the format puts
+/// first. `None` for anything else.
+///
+/// **For a server that forwards an image it never decodes** (Life ask 23, a
+/// player's own skin): the server's only questions are "is this a PNG" and
+/// "is it the size the body's template is", and both are answered by
+/// twenty-four bytes it reads in a fixed order. The decode, under the picture
+/// caps, happens on the clients that draw it (charter rule 14). A dimension
+/// of zero is refused, as the format itself refuses it.
+#[must_use]
+pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let header = bytes.get(..24)?;
+    if header[..8] != PNG_SIGNATURE || &header[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes([header[16], header[17], header[18], header[19]]);
+    let height = u32::from_be_bytes([header[20], header[21], header[22], header[23]]);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Writes the twenty-four bytes [`png_dimensions`] reads, for a fixture that
+/// needs a PNG header and nothing behind it: the signature and an `IHDR`
+/// chunk of `width` by `height`, 8-bit RGBA. Not a decodable image.
+#[must_use]
+pub fn png_header(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = PNG_SIGNATURE.to_vec();
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes
+}
+
+/// A content hash as the sixty-four hex digits a mod sees it as.
+#[must_use]
+pub fn hash_hex(hash: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+    hash.iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
 /// `BLAKE3` of some bytes, domain-separated for content addressing.
 #[must_use]
 pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
@@ -394,6 +473,45 @@ fn resolve_inside(dir: &Path, named: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_png_header_gives_its_size_and_anything_else_gives_nothing() {
+        use super::{png_dimensions, png_header};
+        assert_eq!(png_dimensions(&png_header(64, 32)), Some((64, 32)));
+        assert_eq!(png_dimensions(&png_header(1, 1)), Some((1, 1)));
+        // The header with the image behind it is the same header.
+        let mut with_body = png_header(128, 64);
+        with_body.extend_from_slice(&[0; 300]);
+        assert_eq!(png_dimensions(&with_body), Some((128, 64)));
+        // Short, not a PNG, a PNG without IHDR first, a zero dimension.
+        assert_eq!(png_dimensions(&png_header(64, 32)[..23]), None);
+        assert_eq!(png_dimensions(b"glTF binary, not a picture at all"), None);
+        let mut wrong_chunk = png_header(64, 32);
+        wrong_chunk[12..16].copy_from_slice(b"IDAT");
+        assert_eq!(png_dimensions(&wrong_chunk), None);
+        assert_eq!(png_dimensions(&png_header(0, 32)), None);
+        assert_eq!(png_dimensions(&[]), None);
+    }
+
+    #[test]
+    fn bytes_added_by_hand_are_served_by_hash_and_forgotten_on_request() {
+        let mut index = ContentIndex::new();
+        let hash = index.add_bytes("player", "skin", b"PNG of a sort".to_vec());
+        assert_eq!(hash, hash_bytes(b"PNG of a sort"));
+        assert_eq!(
+            index.get(&hash).map(|item| item.bytes.as_slice()),
+            Some(&b"PNG of a sort"[..])
+        );
+        assert_eq!(index.hash_of("player", "skin"), Some(hash));
+        // The same bytes twice are one item.
+        assert_eq!(
+            index.add_bytes("player", "again", b"PNG of a sort".to_vec()),
+            hash
+        );
+        index.remove_bytes(&hash);
+        assert!(index.get(&hash).is_none());
+        index.remove_bytes(&hash);
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

@@ -43,6 +43,12 @@ doc = false
 bench = false
 
 [[bin]]
+name = "png_header"
+path = "fuzz_targets/png_header.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
 name = "font_ingest"
 path = "fuzz_targets/font_ingest.rs"
 test = false

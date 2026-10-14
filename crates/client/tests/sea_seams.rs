@@ -233,6 +233,7 @@ impl Diver {
             world_path: world.clone(),
             identity_path: None,
             max_players: 2,
+            allow_custom_skins: false,
             allowlist: Allowlist::open(),
             operators: Vec::new(),
             view_distance: view,

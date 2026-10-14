@@ -3917,6 +3917,10 @@ impl ScriptVm for MluaVm {
     fn player_join(&mut self, event: &crate::script::JoinEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.player).and_then(|table| {
             table.set("name", event.name.as_str())?;
+            // Life ask 23: the skin of their own they arrived in, as hex, or
+            // nil — the same spelling a content hash has everywhere a mod
+            // sees one.
+            table.set("skin", event.skin.map(crate::content::hash_hex))?;
             Ok(table)
         }) else {
             return HookOutcome::allow();
@@ -5332,7 +5336,14 @@ impl MluaVm {
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_player_abilities", set)
             .map_err(|err| self.vm_error(&err))?;
+        self.install_looks(game)
+    }
 
+    /// `game.set_player_model`, `game.set_player_skin` and
+    /// `game.custom_skins_allowed` — what a player is drawn as (Life ask
+    /// 23). Its own method because `install_abilities` sits on clippy's
+    /// line ceiling.
+    fn install_looks(&self, game: &Table) -> Result<(), ScriptError> {
         // Life ask 23: which of the registered bodies a player wears, and
         // which of its skins. An id or a file nobody declared is a typo and
         // an error; a player who is not here is `false`.
@@ -5369,6 +5380,19 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("set_player_skin", set_skin)
+            .map_err(|err| self.vm_error(&err))?;
+        let slot = std::sync::Arc::clone(&self.entities);
+        let allowed = self
+            .lua
+            .create_function(move |_, ()| {
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|store| store.custom_skins_allowed()))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("custom_skins_allowed", allowed)
             .map_err(|err| self.vm_error(&err))
     }
 
@@ -17867,6 +17891,7 @@ mod tests {
         let outcome = vm.player_join(&crate::script::JoinEvent {
             player: [0x33; 32],
             name: "Ada".to_owned(),
+            skin: None,
         });
         assert!(outcome.faults.is_empty(), "the hook raised: {outcome:?}");
         vm.eval_in(
@@ -18073,6 +18098,7 @@ mod tests {
         let outcome = vm.player_join(&crate::script::JoinEvent {
             player: [0x44; 32],
             name: "Nobody".to_owned(),
+            skin: None,
         });
         assert!(outcome.faults.is_empty());
     }

@@ -48,6 +48,7 @@ fn start(name: &str, view: ViewDistance) -> ServerHandle {
         world_path: world_dir(name),
         identity_path: None,
         max_players: 8,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: view,

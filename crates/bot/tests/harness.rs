@@ -70,6 +70,7 @@ fn start(name: &str) -> ServerHandle {
         world_path: scratch(&format!("{name}-world")),
         identity_path: None,
         max_players: 32,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

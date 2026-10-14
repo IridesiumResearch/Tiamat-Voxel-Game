@@ -90,6 +90,7 @@ fn twenty_bots_churning_lamps_keep_the_tick_inside_its_budget() {
         world_path: dir,
         identity_path: None,
         max_players: 64,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

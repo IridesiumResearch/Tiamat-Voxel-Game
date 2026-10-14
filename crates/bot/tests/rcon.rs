@@ -30,6 +30,7 @@ fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
         world_path: dir,
         identity_path: None,
         max_players: 8,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: Some((rcon_addr, TOKEN.to_owned())),

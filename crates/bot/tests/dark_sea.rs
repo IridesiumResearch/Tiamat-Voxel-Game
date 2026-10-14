@@ -91,6 +91,7 @@ fn sunlight_dims_with_depth_through_a_fluid_that_asked_it_to() {
         world_path: scratch("world"),
         identity_path: None,
         max_players: 1,
+        allow_custom_skins: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,
