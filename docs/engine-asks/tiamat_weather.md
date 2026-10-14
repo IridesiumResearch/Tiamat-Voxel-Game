@@ -12,8 +12,10 @@ file stays as the history. Each entry says what was seen, why the mod cannot
 fix it, and the smallest engine change that would. Newest first. Items are
 removed when they land.
 
-Open: none. W37 filed and landed 2026-10-13 (engine b37bfa5e), awaiting the eye; W34 and W35 filed 2026-10-12 landed 2026-10-13 (engine ae2dbece and 75a0132e), W34 awaiting the eye. W36 filed 2026-10-12 landed the same day (engine 3394bdb3), awaiting the eye. W33 landed 2026-10-07 awaiting the eye. W32 landed 2026-10-05 awaiting the eye. W31 landed 2026-10-01 awaiting the eye. W30 landed 2026-09-30 awaiting the eye. W29 landed 2026-09-28 awaiting the eye, W27's first step the same day with the gate not yet met (see it),
-W26 and W25 landed 2026-09-28 awaiting the eye, W28 the same day it was filed,
+Open: none. **The eye, 2026-10-14:** the designer passed every gate
+awaiting it — W37, W36, W34, W33, W32, W31, W29, W26 and W25 — except
+W30's: the rainbow is still awaiting the eye. W37 filed and landed 2026-10-13 (engine b37bfa5e); W34 and W35 filed 2026-10-12 landed 2026-10-13 (engine ae2dbece and 75a0132e). W36 filed 2026-10-12 landed the same day (engine 3394bdb3). W33 landed 2026-10-07. W32 landed 2026-10-05. W31 landed 2026-10-01. W30 landed 2026-09-30, awaiting the eye. W29 landed 2026-09-28, W27's first step the same day with the gate not yet met (see it),
+W26 and W25 landed 2026-09-28, W28 the same day it was filed,
 W24 2026-09-26, W19 to W23 2026-09-24, W17 and W18 the day before, below.
 
 **From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
@@ -37,7 +39,7 @@ nightly CI now runs the fen soak over the pinned mods and keeps its tick
 table as an artefact, so a cost that grows with the world is seen the night
 it lands.
 
-## W37. The sun is a dark disc (2026-10-13): LANDED 2026-10-13 (engine b37bfa5e), awaiting the eye
+## W37. The sun is a dark disc (2026-10-13): LANDED 2026-10-13 (engine b37bfa5e); the eye passed 2026-10-14
 
 **Seen.** The designer, playing 0.4.0: "the sun seems to be a dark circle
 rather than a white (or orange at sunset) one." Which lighting mode, and
@@ -185,7 +187,7 @@ a player was just loading showed gaps to them. Fixed in the streaming
 (engine 6ead3ea8): an edit to a chunk in flight now waits and is written
 right behind the chunk.
 
-## W34. Clouds in Simple are white whatever the sky (2026-10-12): LANDED 2026-10-13 (engine ae2dbece), awaiting the eye
+## W34. Clouds in Simple are white whatever the sky (2026-10-12): LANDED 2026-10-13 (engine ae2dbece); the eye passed 2026-10-14
 
 **Seen.** The designer: "the clouds in Simple lighting mode are bright white
 and should be a faded darker colour to match the sky." In `clouds.wgsl` mode
@@ -222,7 +224,7 @@ the other two as well. Nothing changes on the mod's side.
 at noon the deck is the white it was; at midnight a dim blue-grey near the
 night sky; at dusk it takes the dusk's tint. Classic and Beautiful look as
 they did.
-## W33. Rain vanishes in front of the sky (2026-10-05): LANDED 2026-10-07 (engine 9d248a3a), awaiting the eye
+## W33. Rain vanishes in front of the sky (2026-10-05): LANDED 2026-10-07 (engine 9d248a3a); the eye passed 2026-10-14
 
 **Seen.** The designer: "rain renders on top of the clouds but does not
 render on top of the sky. It vanishes as it passes over the sky." A drop is
@@ -277,7 +279,7 @@ an opaque drop hides the star behind it.
 same drops in all three lighting modes; snow the same; a lightning bolt over
 open sky shows in Beautiful; the stars and the rainbow still sit behind the
 rain.
-## W32. A light floor on the sky modifier, for night-sight (2026-10-05): LANDED 2026-10-05 (engine daf73304), awaiting the eye
+## W32. A light floor on the sky modifier, for night-sight (2026-10-05): LANDED 2026-10-05 (engine daf73304); the eye passed 2026-10-14
 
 **Seen.** Magic's Wx-M1 asked Weather for a layered sky overlay so its
 night-sight elixir and Luna talisman can brighten the night; until then
@@ -327,7 +329,7 @@ For the eye ([H]): at midnight with 0.5, the field and a cave about half of
 noon, the colours still the night's; at noon nothing changes; `nil` restores
 the night.
 
-## W31. No stars in Beautiful (2026-10-01): LANDED 2026-10-01 (engine 1235f34), awaiting the eye
+## W31. No stars in Beautiful (2026-10-01): LANDED 2026-10-01 (engine 1235f34); the eye passed 2026-10-14
 
 **Seen.** The designer, playing 0.3.0: "I am not seeing any stars in
 Beautiful lighting mode." A clear night, with the sky owner's keyframes
@@ -439,7 +441,7 @@ degrees up, facing away from it (one rain in `RAINBOW_ODDS` leaves one;
 and colours, the secondary, and that hills and cloud stand in front.
 Then watch it fade as the sun climbs.
 
-## W29. A cave's fog is the sky's colour (2026-09-28): LANDED 2026-09-28 (engine 0fdbca8), awaiting the eye
+## W29. A cave's fog is the sky's colour (2026-09-28): LANDED 2026-09-28 (engine 0fdbca8); the eye passed 2026-10-14
 
 **Seen.** The designer: "be sure that the day night cycle does not affect
 the colour of cave fog underground". Fog is drawn in `moment.sky`
@@ -612,7 +614,7 @@ probe's numbers on a real card, where the ratio is expected to be better
 than a software rasteriser's, whose fixed per-pass cost is what keeps the
 level view at 0.87.
 
-## W26. A lightning bolt that is drawn (2026-09-25): LANDED 2026-09-28 (engine 1eccb62), awaiting the eye
+## W26. A lightning bolt that is drawn (2026-09-25): LANDED 2026-09-28 (engine 1eccb62); the eye passed 2026-10-14
 
 **Seen.** A strike is a flash on the sky (`game.flash`, W3), sparks where it
 lands and thunder after its distance. Nothing is drawn between the cloud and
@@ -735,7 +737,7 @@ retire that.
 in 32, not 8; 4 cells in a storm, not 6), and the ground sampler clears any
 rainwater it finds near a player once the rain has been gone half a minute.
 
-## W25. Clouds at sunset: a brown sunward face (2026-09-25): LANDED 2026-09-28 (engine 7020552), awaiting the eye
+## W25. Clouds at sunset: a brown sunward face (2026-09-25): LANDED 2026-09-28 (engine 7020552); the eye passed 2026-10-14
 
 **Seen.** Towards sunset, under a storm deck, the faces of the clouds that
 face the sun are a flat brown-orange slab against violet-grey sides
