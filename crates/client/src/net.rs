@@ -1589,6 +1589,7 @@ async fn session(
                 on_ground,
                 jump_cooldown,
                 riding,
+                crawling,
             } => {
                 // **The body this player drives**: their own, or while riding
                 // the mount's (Life ask 18) — which is the one the server
@@ -1600,6 +1601,7 @@ async fn session(
                         on_ground,
                         jump_cooldown,
                         riding,
+                        crawling,
                     ),
                 ));
             }

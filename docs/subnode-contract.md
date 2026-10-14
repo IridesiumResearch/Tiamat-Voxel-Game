@@ -165,6 +165,24 @@ enterable; the shape you see is the shape you collide with.
   **Walls have no grip to scale.** Movement already slides along a wall rather
   than sticking to it (below), so "a slick wall" needs nothing; only the floor
   is read.
+- **A body may crawl.** *(Added 2026-10-14, Life ask 23.)* A player's box is
+  1.8 cells wide and 5.4 tall standing, and 2.4 tall lying down — under a
+  block, so a one-block gap is enterable. The posture is decided before the
+  step, from the body, its inputs and the cells around it, by one function
+  (`phys::crawl::posture`) that the server and the predicting client both run,
+  so the box stepped is the same on both sides and nobody rubber-bands at the
+  mouth of a tunnel. A standing body lies down when the standing box is
+  blocked where it is and the low one is not (a ceiling closed over it), or
+  when it is sneaking toward a gap the standing box cannot enter — nor step up
+  into, so a one-cell lip is still a step — and the low one can; it lies down
+  one stride before the opening. A crawling body stands when the standing box
+  is clear where it is, unless it is still sneaking into that gap. **Never
+  into a ceiling.** A crawling body is stepped with the sneak's keys and
+  cannot jump; a flying one never lies down. Nothing crawls unless a mod
+  grants it (`crawl` on `set_player_abilities`): a world whose mods never ask
+  steps exactly as it did. The eye is 2.0 cells up lying down (4.86 standing);
+  the mirror entity's collider is the low box; the dig ray, the reach check
+  and the placement check all read the posture's box.
 - Movement resolves one axis at a time (X, then Y, then Z), which is what makes
   a body slide along a wall rather than stick to it.
 - **Movement must never put a body inside geometry.** This is the invariant that

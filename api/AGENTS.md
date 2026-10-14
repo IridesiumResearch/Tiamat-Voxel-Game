@@ -54,6 +54,17 @@ is a mechanism a mod may now use; none of them changes a mod that ignores it.
 Everything listed is in API 1.0; from 1.1 on, an entry names the minor it
 arrived in, and a deprecation is an entry here too.
 
+- **A swimming player, and a crawling one** (2026-10-14, Life ask 23 parts
+  2 and 3; protocol 91). A player off the bottom in a fluid is tagged `SWIM`
+  (4) on everybody's figure, so a model's `swim` clip plays where it used to
+  walk. And `crawl = true` on `game.set_player_abilities` lets that player
+  lie down to go under a one-block gap — sneaking at it, or when a ceiling
+  closes over them — and stand where there is room, never into a ceiling:
+  the box is 2.4 cells tall while they crawl, the eye 2.0 up, the pace the
+  sneak's, no jump, and the client predicts the same posture. The tag is
+  `CRAWL` (6), matched to a clip named `crawl` (the engine's humanoid has
+  none and stands idle); `game.entity(body).crawling` says whether a player
+  is down. A world that never grants it is exactly the world it was.
 - **A schematic stamped at run time** (2026-10-13, weather ask W35).
   `game.stamp_schematic(schematic, pos, { turn, domain })` writes a
   `game.schematic` (or `game.schematic_shapes`) into the running world as

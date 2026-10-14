@@ -5799,7 +5799,7 @@ impl App {
     /// plus a player's eye height above its feet — where the camera is, and
     /// where the server casts a rider's reach from.
     fn eye_of(&self, predictor: &crate::predict::Predictor) -> [f32; 3] {
-        let [x, y, z] = predictor.body().eye();
+        let [x, y, z] = predictor.eye();
         let [sx, sy, sz] = self.seat_offset(predictor);
         [x + sx, y + sy, z + sz]
     }
@@ -6349,6 +6349,11 @@ impl App {
             ],
             tick,
         ));
+        // A grant that arrived before the body did (the abilities message
+        // precedes the world) still reaches the predictor.
+        if let Some(predictor) = self.predictor.as_mut() {
+            predictor.set_crawl_allowed(self.abilities.crawl);
+        }
     }
 
     /// Records that this client is hosting its world for other machines.
@@ -6393,6 +6398,9 @@ impl App {
     fn adopt_abilities(&mut self, abilities: tiamat_core::phys::Abilities) {
         self.abilities = abilities;
         self.may_fly = abilities.fly;
+        if let Some(predictor) = self.predictor.as_mut() {
+            predictor.set_crawl_allowed(abilities.crawl);
+        }
         if !abilities.wind_sky {
             // A clock already scrubbed goes back to the server's hour, or a
             // player who wound to noon before the grant arrived would keep the
@@ -6550,7 +6558,17 @@ impl App {
         if predictor.mount().is_some() {
             return AnimTag::IDLE.0;
         }
-        let velocity = predictor.body().velocity;
+        // Life ask 23: the posture is the box, so it comes before the gait,
+        // and a body off the bottom in a fluid swims — the server's own order
+        // in `anim_from_motion`, for the figure everybody else sees.
+        if predictor.crawling() {
+            return AnimTag::CRAWL.0;
+        }
+        let body = predictor.body();
+        if !body.on_ground && predictor.submerged() > 0.0 {
+            return AnimTag::SWIM.0;
+        }
+        let velocity = body.velocity;
         // Horizontal only, and squared: falling is not walking, a player
         // stepping off a ledge should not break into a run on the way down, and
         // `hypot` is on the determinism ban list even here where it would be

@@ -41,6 +41,7 @@
 //! also makes step-up expressible as "retry the horizontal move one cell
 //! higher" rather than as a special case inside a 3D solver.
 
+pub mod crawl;
 pub mod crowd;
 pub mod input;
 pub mod ray;
@@ -51,6 +52,7 @@ pub mod voxels;
 use crate::detgen::floor_to_i32;
 use crate::fluid::Fluid;
 
+pub use crawl::{crawling_intent, posture};
 pub use crowd::{Occupant, separate};
 pub use input::InputQueue;
 pub use ray::{Hit, REACH};
@@ -66,6 +68,14 @@ pub const PLAYER_HEIGHT: f32 = 5.4;
 
 /// Eye height above the feet, in cells. 1.62 yards.
 pub const EYE_HEIGHT: f32 = 4.86;
+
+/// The box a crawling player lies in, in cells: under a block high, so it goes
+/// where a one-block gap is (Life ask 23, Sub-Node Contract §2 "A body may
+/// crawl"). The width is the standing box's.
+pub const CRAWL_HEIGHT: f32 = 2.4;
+
+/// Eye height of a crawling player, in cells: near the top of the low box.
+pub const CRAWL_EYE_HEIGHT: f32 = 2.0;
 
 /// How far a body is kept clear of the geometry it lands against, in cells.
 ///
@@ -167,6 +177,24 @@ impl Shape {
         width: PLAYER_WIDTH,
         height: PLAYER_HEIGHT,
     };
+
+    /// The player lying down (Life ask 23): the same footprint, under a block
+    /// high. See [`crawl::posture`] for when a body takes it.
+    pub const CRAWL: Self = Self {
+        width: PLAYER_WIDTH,
+        height: CRAWL_HEIGHT,
+    };
+
+    /// The box of a player in this posture: [`Self::CRAWL`] lying down,
+    /// [`Self::HUMANOID`] otherwise.
+    #[must_use]
+    pub const fn of_player(crawling: bool) -> Self {
+        if crawling {
+            Self::CRAWL
+        } else {
+            Self::HUMANOID
+        }
+    }
 
     /// The box this shape makes with its feet at `feet`.
     #[must_use]
@@ -356,7 +384,8 @@ pub struct Intent {
 #[expect(
     clippy::struct_excessive_bools,
     reason = "a grant is a set of yes-or-no answers a mod gives about one player, and \
-              `operator_fly` is the fourth (Life ask 22); a state machine here would be \
+              `operator_fly` is the fourth (Life ask 22) and `crawl` the fifth (Life ask \
+              23); a state machine here would be \
               one more thing for a mod to learn"
 )]
 pub struct Abilities {
@@ -414,6 +443,12 @@ pub struct Abilities {
     /// low gravity is. A body being ridden is stepped with the mount's tuning
     /// and this does not apply to the pair.
     pub gravity: f32,
+    /// Whether this player lies down to go under something too low to stand
+    /// in (Life ask 23) — see [`crawl::posture`].
+    ///
+    /// `false` by default, so a world whose mods never ask is exactly the
+    /// world it was: a one-block gap stops a body as it always did.
+    pub crawl: bool,
 }
 
 impl Abilities {
@@ -425,6 +460,7 @@ impl Abilities {
         sprint: true,
         wind_sky: true,
         gravity: 1.0,
+        crawl: false,
     };
 
     /// The most a mod may multiply a speed by.
@@ -557,12 +593,27 @@ impl Body {
         Aabb::player_at(self.position)
     }
 
-    /// Where the eyes are.
+    /// Where the eyes are, standing.
+    ///
+    /// A player's are [`Self::eye_when`] their posture; this is the standing
+    /// answer, which every body that cannot crawl has.
     #[must_use]
     pub fn eye(&self) -> [f32; 3] {
+        self.eye_when(false)
+    }
+
+    /// Where the eyes are: [`EYE_HEIGHT`] up standing, [`CRAWL_EYE_HEIGHT`]
+    /// lying down (Life ask 23).
+    #[must_use]
+    pub fn eye_when(&self, crawling: bool) -> [f32; 3] {
+        let height = if crawling {
+            CRAWL_EYE_HEIGHT
+        } else {
+            EYE_HEIGHT
+        };
         [
             self.position[0],
-            self.position[1] + EYE_HEIGHT,
+            self.position[1] + height,
             self.position[2],
         ]
     }

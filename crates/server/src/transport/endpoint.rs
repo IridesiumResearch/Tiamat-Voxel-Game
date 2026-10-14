@@ -674,9 +674,26 @@ pub struct PlayerSim {
     /// Forgotten when the player leaves, because `PlayerSim` is: leaving
     /// dismounts, and nothing about a ride is saved.
     pub riding: Option<crate::mount::Riding>,
+    /// Whether this body is lying down (Life ask 23): the posture the tick
+    /// decided by `phys::crawl::posture`, which is the box it stepped
+    /// (`PlayerSim::shape`), the eye it looked from, and the state the client
+    /// is told so its replay starts as the same box. `false` while riding.
+    pub crawling: bool,
 }
 
 impl PlayerSim {
+    /// The box this body is stepped as: lying down or standing.
+    #[must_use]
+    pub const fn shape(&self) -> tiamat_core::phys::Shape {
+        tiamat_core::phys::Shape::of_player(self.crawling)
+    }
+
+    /// Where this player's eyes are, in the posture they are in.
+    #[must_use]
+    pub fn eye(&self) -> [f32; 3] {
+        self.body.eye_when(self.crawling)
+    }
+
     /// What this player may actually do: the mod's grant, plus the server's.
     ///
     /// **OR-ed, not replaced.** An operator is allowed to fly whatever a mod
@@ -736,6 +753,7 @@ impl PlayerSim {
             look: [0.0; 2],
             look_tick: 0,
             riding: None,
+            crawling: false,
         }
     }
 }
@@ -793,7 +811,9 @@ pub fn measure_fall(player: &mut PlayerSim, before: &tiamat_core::phys::Body, fl
 /// they are moving, because a crouch is a posture rather than a gait. Below the
 /// idle threshold everything else is standing still — a body drifting to a stop
 /// under friction should not keep walking on the spot for the three ticks it
-/// takes.
+/// takes. `submerged` is the fraction of the body in a fluid where it ended up:
+/// off the bottom in any of it, the body is swimming (Life ask 23), which
+/// outranks the posture and the gait but not the swing.
 /// How long a punch keeps the arm moving, in ticks.
 ///
 /// Four, which is the length of the rig's swing clip at twenty ticks a second.
@@ -807,6 +827,7 @@ pub fn anim_from_motion(
     intent: tiamat_core::phys::Intent,
     body: &tiamat_core::phys::Body,
     digging: bool,
+    submerged: f32,
 ) -> tiamat_core::ent::AnimTag {
     use tiamat_core::ent::AnimTag;
     use tiamat_core::phys::Gait;
@@ -817,6 +838,15 @@ pub fn anim_from_motion(
     // and a body that mines without moving its arms reads as broken.
     if digging {
         return AnimTag::SWING;
+    }
+
+    // **Off the bottom, in a fluid: swimming** (Life ask 23). The same test
+    // the step makes — `wet > 0.0` takes the swim branch, and buoyancy is
+    // what lifts a body off the floor — so a player wading in a puddle walks,
+    // and one treading water is drawn treading it. Before the sneak: a
+    // swimmer holding the key is diving, and still swimming.
+    if !body.on_ground && submerged > 0.0 {
+        return AnimTag::SWIM;
     }
 
     if matches!(intent.gait, Gait::Sneak) {
@@ -1522,7 +1552,7 @@ impl Shared {
     pub fn player_eye(&self, uuid: &PlayerUuid) -> Option<(tiamat_core::ChunkPos, [f32; 3])> {
         let bodies = self.bodies.lock().ok()?;
         let player = bodies.get(uuid)?;
-        Some((player.origin, player.body.eye()))
+        Some((player.origin, player.eye()))
     }
 
     /// Where a player stands and looks from, for a ray cast on their behalf:
@@ -1533,7 +1563,7 @@ impl Shared {
         Some(Aim {
             origin: player.origin,
             feet: player.body.position,
-            eye: player.body.eye(),
+            eye: player.eye(),
             look: player.look,
         })
     }
@@ -1550,7 +1580,7 @@ impl Shared {
             .map(|bodies| {
                 bodies
                     .values()
-                    .map(|player| (player.origin, player.body.aabb()))
+                    .map(|player| (player.origin, player.shape().aabb(player.body.position)))
                     .collect()
             })
             .unwrap_or_default()
@@ -2111,6 +2141,7 @@ impl Shared {
             // pairing one tick's input with another tick's mount would be a
             // correction the client could never agree with.
             riding: player.riding.as_ref().map(crate::mount::Riding::to_wire),
+            crawling: player.crawling,
         })
     }
 
@@ -5089,6 +5120,82 @@ mod tests {
             told(&shared),
             Some(Some(bow(0.5))),
             "the same rainbow for a player who came back was swallowed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod anim_tests {
+    //! `anim_from_motion`: the tag a body is drawn with (Life ask 23 added
+    //! the swim).
+
+    use tiamat_core::ent::AnimTag;
+    use tiamat_core::phys::{Body, Gait, Intent, Tuning};
+
+    use super::anim_from_motion;
+
+    fn standing() -> Body {
+        Body {
+            on_ground: true,
+            ..Body::at([24.0, 0.0, 24.0])
+        }
+    }
+
+    fn walking() -> Intent {
+        Intent {
+            walk: [0.0, 1.0],
+            jump: false,
+            gait: Gait::Walk,
+            fly: false,
+        }
+    }
+
+    #[test]
+    fn a_body_off_the_bottom_in_a_fluid_swims() {
+        let afloat = Body {
+            on_ground: false,
+            velocity: [0.0, 0.05, 0.3],
+            ..standing()
+        };
+        assert_eq!(
+            anim_from_motion(walking(), &afloat, false, 0.8),
+            AnimTag::SWIM
+        );
+        // Holding sneak dives, and is still swimming.
+        let diving = Intent {
+            gait: Gait::Sneak,
+            ..walking()
+        };
+        assert_eq!(anim_from_motion(diving, &afloat, false, 0.8), AnimTag::SWIM);
+        // Any of the body in the water, off the bottom: treading water counts.
+        assert_eq!(
+            anim_from_motion(walking(), &afloat, false, 0.05),
+            AnimTag::SWIM
+        );
+    }
+
+    #[test]
+    fn wading_on_the_bottom_is_walking_and_the_swing_beats_the_swim() {
+        let wading = Body {
+            velocity: [0.0, 0.0, Tuning::DEFAULT.walk_speed * 0.5],
+            ..standing()
+        };
+        assert_eq!(
+            anim_from_motion(walking(), &wading, false, 0.6),
+            AnimTag::WALK
+        );
+        let afloat = Body {
+            on_ground: false,
+            ..standing()
+        };
+        assert_eq!(
+            anim_from_motion(walking(), &afloat, true, 0.8),
+            AnimTag::SWING
+        );
+        // Dry and airborne is not swimming: a jump is drawn by its gait.
+        assert_eq!(
+            anim_from_motion(walking(), &afloat, false, 0.0),
+            AnimTag::IDLE
         );
     }
 }

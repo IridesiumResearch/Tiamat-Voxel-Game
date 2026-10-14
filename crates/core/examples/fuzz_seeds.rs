@@ -865,6 +865,7 @@ fn server_messages() -> Vec<Vec<u8>> {
             on_ground: true,
             jump_cooldown: 7,
             riding: None,
+            crawling: false,
         },
         ServerMessage::PlayerState {
             last_processed_input: u64::MAX,
@@ -874,6 +875,7 @@ fn server_messages() -> Vec<Vec<u8>> {
             on_ground: false,
             jump_cooldown: 7,
             riding: None,
+            crawling: false,
         },
         // Protocol v80 (Life 18): a rider's state, carrying the mount the
         // client predicts — an ordinary ride, and one whose every number is
@@ -896,6 +898,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 speed: 1.5,
                 seat: [0.0, 4.8, -0.9],
             }),
+            crawling: false,
         },
         ServerMessage::PlayerState {
             last_processed_input: 0,
@@ -915,6 +918,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 speed: f32::NAN,
                 seat: [f32::NEG_INFINITY, 1e9, 0.0],
             }),
+            crawling: false,
         },
         ServerMessage::DigProgress {
             target: SubNodePos::new(9, 9, 9),
@@ -1212,6 +1216,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 sprint: true,
                 wind_sky: true,
                 gravity: 0.17,
+                crawl: false,
             },
         },
         ServerMessage::Abilities {
@@ -1221,6 +1226,7 @@ fn server_messages() -> Vec<Vec<u8>> {
                 sprint: false,
                 wind_sky: false,
                 gravity: f32::INFINITY,
+                crawl: false,
             },
         },
     ];

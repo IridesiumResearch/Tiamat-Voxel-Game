@@ -188,6 +188,12 @@ pub struct Entity {
     /// Deliberately NOT persisted — see [`AnimTag`].
     #[serde(skip)]
     pub anim: AnimTag,
+    /// Whether a player's body is lying down this tick (Life ask 23): the
+    /// mirror of `phys::crawl::posture`, so a mod may read it
+    /// (`game.entity(body).crawling`). Always `false` on anything that is not
+    /// a player's mirror, and not persisted for the reason `anim` is not.
+    #[serde(skip)]
+    pub crawling: bool,
     /// The colour the figure is drawn in, a multiplier on its skin: white
     /// unless a mod set one (Life ask 21) — a frozen creature blue, a ghost's
     /// pallor. Presentation only, and NOT persisted: a mod that keeps a state
@@ -277,6 +283,7 @@ impl Entity {
             item: None,
             hands: Hands::default(),
             anim: AnimTag::default(),
+            crawling: false,
             tint: white(),
             flash: None,
             health: None,

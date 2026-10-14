@@ -2525,6 +2525,15 @@ function game.is_operator(player) end
 ---  While the player rides a mount the MOUNT's physics govern and this does not
 ---  apply to the pair. Mobs and other entities are untouched; it is yours to
 ---  say per player (gravity plating, cavorite soles, a low-gravity body).
+---- `crawl` (default `false`) — Life ask 23: this player lies down to go
+---  under something too low to stand in. Sneaking at a one-block gap, or a
+---  ceiling closing over them, takes the low box (2.4 cells tall, the eye 2.0
+---  up, the sneak's pace, no jump); they stand where there is room, and never
+---  into a ceiling. The client predicts the same posture, so nobody
+---  rubber-bands at the mouth of a tunnel. The figure is tagged `CRAWL` (6),
+---  a clip named `crawl` on a model (the engine's humanoid has none and stands
+---  idle); `game.entity(body).crawling` reads it. Off, a one-block gap stops
+---  a body as it always did.
 ---
 ---The client is told and predicts with the same numbers, so a slowed or light
 ---player does not rubber-band. An unknown field is an error, so a typo is not a
@@ -2548,7 +2557,7 @@ function game.is_operator(player) end
 ---})
 ---```
 ---@param player string The player's UUID, in hex.
----@param abilities { fly: boolean?, operator_fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean?, gravity: number? }|nil
+---@param abilities { fly: boolean?, operator_fly: boolean?, speed: number?, sprint: boolean?, wind_sky: boolean?, gravity: number?, crawl: boolean? }|nil
 ---@return boolean told
 function game.set_player_abilities(player, abilities) end
 
@@ -2717,7 +2726,7 @@ function game.register_hud_script(file) end
 ---a texture, so a client that already has it downloads nothing.
 ---
 ---**Clips are matched to the engine's animation tags by NAME**: `idle`,
----`walk`, `run`, `swing`, `swim`, `sneak`. A tag with no clip falls back to
+---`walk`, `run`, `swing`, `swim`, `sneak`, `crawl`. A tag with no clip falls back to
 ---`idle`; a model with no clips at all is drawn rigid, which is right for a
 ---crate. `scale` multiplies the model's own size, for art exported at one
 ---unit to the yard rather than to the engine's cell.
@@ -4586,7 +4595,7 @@ function game.transfer_entity(id, domain, position) end
 ---a fall of four hundred land at exactly the same number, and a body dropping
 ---through water is slowed by the water before it touches down. Walking down a
 ---step raises nothing: a body that never left the ground never fell.
----@return { pos: { x: number, y: number, z: number }, yaw: number, pitch: number, facing: { x: number, y: number, z: number }, velocity: { x: number, y: number, z: number }, on_ground: boolean, submerged: number, fell: number, source: string, model: string|nil, item: table|nil, anim: integer, health: integer|nil, max_health: integer|nil, owner: string|nil, nametag: string|nil, nametag_player: string|nil, tint: { r: number, g: number, b: number } }|nil
+---@return { pos: { x: number, y: number, z: number }, yaw: number, pitch: number, facing: { x: number, y: number, z: number }, velocity: { x: number, y: number, z: number }, on_ground: boolean, crawling: boolean, submerged: number, fell: number, source: string, model: string|nil, item: table|nil, anim: integer, health: integer|nil, max_health: integer|nil, owner: string|nil, nametag: string|nil, nametag_player: string|nil, tint: { r: number, g: number, b: number } }|nil
 function game.entity(id) end
 
 ---Changes an entity. Returns whether anything changed.

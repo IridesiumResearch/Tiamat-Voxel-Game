@@ -412,7 +412,7 @@ impl sight::Access for Shared {
                 player.domain.clone(),
                 player.origin,
                 player.body.position,
-                player.body.eye(),
+                player.eye(),
                 player.look,
             )
         };

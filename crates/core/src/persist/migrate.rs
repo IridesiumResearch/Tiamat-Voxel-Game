@@ -201,6 +201,7 @@ fn v1_to_v2(v1: EntityV1) -> crate::ent::Entity {
         // entity has none until its owner's next tick fills it in.
         hands: crate::ent::Hands::default(),
         anim: crate::ent::AnimTag::default(),
+        crawling: false,
         health: v1.health,
         nametag: v1.nametag,
         owner: v1.owner,
@@ -237,6 +238,7 @@ fn v3_to_v4(v3: EntityV3) -> crate::ent::Entity {
         }),
         hands: crate::ent::Hands::default(),
         anim: crate::ent::AnimTag::default(),
+        crawling: false,
         health: v3.health,
         nametag: v3.nametag,
         owner: v3.owner,

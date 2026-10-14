@@ -116,6 +116,9 @@ pub struct Authoritative {
     pub jump_cooldown: u8,
     /// The mount this body is, while the player rides one; `None` on foot.
     pub mount: Option<Mount>,
+    /// Whether the server has this body lying down (Life ask 23); `false`
+    /// while riding.
+    pub crawling: bool,
 }
 
 impl Authoritative {
@@ -131,6 +134,7 @@ impl Authoritative {
         on_ground: bool,
         jump_cooldown: u8,
         riding: Option<tiamat_core::proto::Riding>,
+        crawling: bool,
     ) -> Self {
         let (chunk, local, velocity) = own;
         match riding {
@@ -142,6 +146,7 @@ impl Authoritative {
                 on_ground,
                 jump_cooldown,
                 mount: None,
+                crawling,
             },
             Some(ride) => Self {
                 last_processed_input,
@@ -159,6 +164,8 @@ impl Authoritative {
                     speed: ride.speed,
                     seat: ride.seat,
                 }),
+                // A rider sits.
+                crawling: false,
             },
         }
     }
@@ -296,6 +303,17 @@ pub struct Predictor {
     remembered: VecDeque<Remembered>,
     /// The last disagreement found, for the HUD and the trace.
     divergence: Option<Divergence>,
+    /// Whether the body is lying down (Life ask 23): decided before every
+    /// step by `phys::crawl::posture`, the same function the server decides
+    /// it with, and restored from the server's state on reconcile so the
+    /// replay starts as the box the server stepped.
+    crawling: bool,
+    /// Whether a mod has granted the crawl (`crawl` on the abilities the
+    /// server sent). Without it the posture is never taken, as on the server.
+    crawl_allowed: bool,
+    /// How much of the body ended the last step in a fluid, for the figure's
+    /// own swim tag — the server's `submerged`, measured the same way.
+    submerged: f32,
     /// The mount this body is, while the player rides one (Life ask 18).
     ///
     /// **Which body is predicted is the server's word**, taken on reconcile:
@@ -356,9 +374,38 @@ impl Predictor {
             step_rate: 0.0,
             remembered: VecDeque::new(),
             divergence: None,
+            crawling: false,
+            crawl_allowed: false,
+            submerged: 0.0,
             mount: None,
             tick,
         }
+    }
+
+    /// Whether a mod lets this body crawl — `crawl` on the abilities the
+    /// server sent (Life ask 23). Taken away, the body stands at the next
+    /// step, as the server's does.
+    pub const fn set_crawl_allowed(&mut self, allowed: bool) {
+        self.crawl_allowed = allowed;
+    }
+
+    /// Whether the body is lying down.
+    #[must_use]
+    pub const fn crawling(&self) -> bool {
+        self.crawling
+    }
+
+    /// How much of the body is in a fluid, `0..=1`, after the last step.
+    #[must_use]
+    pub const fn submerged(&self) -> f32 {
+        self.submerged
+    }
+
+    /// Where the body's own eyes are: the standing height, or the low box's
+    /// while crawling. A rider's are the seat's, which the caller adds.
+    #[must_use]
+    pub fn eye(&self) -> [f32; 3] {
+        self.body.eye_when(self.crawling && self.mount.is_none())
     }
 
     /// The simulated body. Where the player *is*, not where they are drawn.
@@ -383,7 +430,8 @@ impl Predictor {
     /// on foot.
     #[must_use]
     pub fn shape(&self) -> Shape {
-        self.mount.map_or(Shape::HUMANOID, |mount| mount.shape)
+        self.mount
+            .map_or(Shape::of_player(self.crawling), |mount| mount.shape)
     }
 
     /// Forgets the world this body was standing in.
@@ -637,6 +685,9 @@ impl Predictor {
             on_ground: state.on_ground,
             jump_cooldown: state.jump_cooldown,
         };
+        // The box the server stepped, so the replay below starts as it: the
+        // posture is re-decided at every replayed step from here.
+        self.crawling = state.crawling && self.mount.is_none();
 
         // Replay: the inputs the server had not applied when it spoke. Skipping
         // this is the mistake that makes a client rubber-band under any latency
@@ -835,7 +886,28 @@ impl Predictor {
         // (Life ask 18) — the same `step_shaped` the server's entity step
         // takes, so a horse is predicted as the horse the server steps. On foot
         // this is exactly `phys::step`, which is `step_shaped` with a humanoid.
+        //
+        // **The posture first, from the same function the server uses** (Life
+        // ask 23): lying down to go under what the standing box cannot, with
+        // the sneak's keys, so the box stepped here is the box the server
+        // steps and nobody rubber-bands at the mouth of a tunnel. A rider
+        // sits, whatever they were doing on the ground.
+        let intent = if self.mount.is_some() {
+            self.crawling = false;
+            intent
+        } else {
+            self.crawling =
+                phys::posture(solid, &self.body, intent, self.crawling, self.crawl_allowed);
+            if self.crawling {
+                phys::crawling_intent(intent)
+            } else {
+                intent
+            }
+        };
         self.body = phys::step_shaped(solid, self.body, intent, tuning, self.shape());
+        // Measured where the body ended up, as the server measures it: this
+        // is what says the figure swims.
+        self.submerged = phys::submersion(solid, &self.shape().aabb(self.body.position)).fraction;
         self.last_step = [
             self.body.position[0] - before[0],
             self.body.position[1] - before[1],
@@ -1110,6 +1182,7 @@ mod tests {
             on_ground: true,
             jump_cooldown: 0,
             mount: None,
+            crawling: false,
         };
         let view = store_view(&predictor);
         predictor.reconcile(&view, &state, &Tuning::DEFAULT);
@@ -1258,6 +1331,7 @@ mod tests {
             on_ground: client.body().on_ground,
             jump_cooldown: 0,
             mount: None,
+            crawling: false,
         };
 
         // Then step up. These ticks are unconfirmed, so every reconcile until
@@ -1505,6 +1579,132 @@ mod tests {
         )
     }
 
+    impl Ground {
+        /// A slab three cells thick whose underside is three cells up — a
+        /// one-block gap — over `z` in `from_z..to_z`, every `x`.
+        fn with_ceiling(mut self, from_z: i32, to_z: i32) -> Self {
+            for x in -64..64 {
+                for y in 3..6 {
+                    for z in from_z..to_z {
+                        self.0.insert((x, y, z));
+                    }
+                }
+            }
+            self
+        }
+    }
+
+    fn sneaking_north() -> Intent {
+        Intent {
+            walk: [0.0, 1.0],
+            jump: false,
+            gait: Gait::Sneak,
+            fly: false,
+        }
+    }
+
+    #[test]
+    fn a_granted_body_sneaks_into_a_one_block_gap_as_the_low_box_and_stands_beyond_it() {
+        // Life ask 23. The slab from z = 28 to 40; the body starts at 24.
+        let tunnel = Ground::flat().with_ceiling(28, 40);
+
+        // The sneak covers 0.195 cells a tick, so a hundred ticks is twenty
+        // cells: from 24 to past the slab's far end at 40. World cells,
+        // because the body renormalises its origin at the chunk plane.
+        let z_of = |client: &Predictor| {
+            client.origin.z as f32 * tiamat_core::CHUNK_SUBNODES as f32 + client.body().position[2]
+        };
+
+        // Without the grant the slab is a wall, as it always was.
+        let mut client = predictor();
+        for tick in 1..=100 {
+            client.predict(&tunnel, tick, sneaking_north(), &Tuning::DEFAULT);
+        }
+        assert!(!client.crawling());
+        assert_eq!(client.shape(), Shape::HUMANOID);
+        assert!(
+            z_of(&client) < 28.0,
+            "an ungranted body went under the slab: z = {}",
+            z_of(&client)
+        );
+
+        // Granted, it lies down a stride before the mouth and goes in.
+        let mut client = predictor();
+        client.set_crawl_allowed(true);
+        let mut lay_down_at = None;
+        for tick in 1..=40 {
+            client.predict(&tunnel, tick, sneaking_north(), &Tuning::DEFAULT);
+            if client.crawling() && lay_down_at.is_none() {
+                lay_down_at = Some(z_of(&client));
+            }
+        }
+        let lay_down_at = lay_down_at.expect("the body never lay down");
+        assert!(
+            lay_down_at < 28.0 && lay_down_at > 25.0,
+            "lay down at z = {lay_down_at}, not a stride before the mouth"
+        );
+        assert!(client.crawling());
+        assert_eq!(client.shape(), Shape::CRAWL);
+        assert!(
+            z_of(&client) > 30.0,
+            "a granted body did not get under the slab: z = {}",
+            z_of(&client)
+        );
+        assert!(client.eye()[1] < tiamat_core::phys::EYE_HEIGHT);
+        assert!(client.body().on_ground, "a crawling body is on its floor");
+
+        // Out the far side it stands, still sneaking.
+        for tick in 41..=100 {
+            client.predict(&tunnel, tick, sneaking_north(), &Tuning::DEFAULT);
+        }
+        assert!(
+            z_of(&client) > 41.0,
+            "the body never came out: z = {}",
+            z_of(&client)
+        );
+        assert!(!client.crawling());
+        assert_eq!(client.shape(), Shape::HUMANOID);
+        assert_eq!(
+            client.eye()[1].to_bits(),
+            tiamat_core::phys::EYE_HEIGHT.to_bits()
+        );
+    }
+
+    #[test]
+    fn the_servers_posture_is_what_a_reconcile_starts_from() {
+        let tunnel = Ground::flat().with_ceiling(28, 40);
+        let mut client = predictor();
+        client.set_crawl_allowed(true);
+        let state = |z: f32, crawling: bool| Authoritative {
+            last_processed_input: 0,
+            chunk: ChunkPos::new(0, 0, 0),
+            local: [24.0, 0.0, z],
+            velocity: [0.0; 3],
+            on_ground: true,
+            jump_cooldown: 0,
+            mount: None,
+            crawling,
+        };
+        // Under the slab, lying down, as the server says.
+        client.reconcile(&tunnel, &state(32.0, true), &Tuning::DEFAULT);
+        assert!(client.crawling());
+        assert_eq!(client.shape(), Shape::CRAWL);
+        // Standing in the open, as the server says.
+        client.reconcile(&tunnel, &state(10.0, false), &Tuning::DEFAULT);
+        assert!(!client.crawling());
+        assert_eq!(client.shape(), Shape::HUMANOID);
+        // The grant withdrawn under the slab: the body stays down where it
+        // cannot stand — never into a ceiling — and the next step, with no
+        // grant, is stepped as the server would step it.
+        client.reconcile(&tunnel, &state(32.0, true), &Tuning::DEFAULT);
+        client.set_crawl_allowed(false);
+        client.predict(&tunnel, 1, sneaking_north(), &Tuning::DEFAULT);
+        assert!(
+            !client.crawling(),
+            "the server never crawls an ungranted body"
+        );
+    }
+
     fn riding_state(tick: u64, body: &Body, mount: Mount) -> Authoritative {
         Authoritative {
             last_processed_input: tick,
@@ -1514,6 +1714,7 @@ mod tests {
             on_ground: body.on_ground,
             jump_cooldown: body.jump_cooldown,
             mount: Some(mount),
+            crawling: false,
         }
     }
 
@@ -1686,6 +1887,7 @@ mod tests {
                 on_ground: true,
                 jump_cooldown: 0,
                 mount: None,
+                crawling: false,
             },
             &Tuning::DEFAULT,
         );
@@ -1712,7 +1914,7 @@ mod tests {
             seat: [0.0, 4.8, 0.0],
         };
         let own = (ChunkPos::new(1, 0, -1), [3.0, 8.8, 5.0], [0.1, 0.0, 0.0]);
-        let riding = Authoritative::from_wire(12, own, true, 0, Some(ride));
+        let riding = Authoritative::from_wire(12, own, true, 0, Some(ride), false);
         assert_eq!(
             riding.local.map(f32::to_bits),
             ride.local.map(f32::to_bits),
@@ -1723,7 +1925,7 @@ mod tests {
             "the mount's cooldown is the ride's"
         );
         assert_eq!(riding.mount.map(|mount| mount.entity), Some(9));
-        let afoot = Authoritative::from_wire(12, own, true, 0, None);
+        let afoot = Authoritative::from_wire(12, own, true, 0, None, false);
         assert_eq!(afoot.local.map(f32::to_bits), own.1.map(f32::to_bits));
         assert_eq!(afoot.mount, None);
     }
@@ -1752,6 +1954,7 @@ mod tests {
                 on_ground: server.body().on_ground,
                 jump_cooldown: 0,
                 mount: None,
+                crawling: false,
             },
             &Tuning::DEFAULT,
         );
@@ -1794,6 +1997,7 @@ mod tests {
                 on_ground: server.body().on_ground,
                 jump_cooldown: 0,
                 mount: None,
+                crawling: false,
             },
             &Tuning::DEFAULT,
         );
@@ -1827,6 +2031,7 @@ mod tests {
                 on_ground: true,
                 jump_cooldown: 0,
                 mount: None,
+                crawling: false,
             },
             &Tuning::DEFAULT,
         );
@@ -1872,6 +2077,7 @@ mod tests {
                 on_ground: true,
                 jump_cooldown: 0,
                 mount: None,
+                crawling: false,
             },
             &Tuning::DEFAULT,
         );
@@ -1919,6 +2125,7 @@ mod tests {
                 on_ground: server.body().on_ground,
                 jump_cooldown: 0,
                 mount: None,
+                crawling: false,
             },
             &Tuning::DEFAULT,
         );

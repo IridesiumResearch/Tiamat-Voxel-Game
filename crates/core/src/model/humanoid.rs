@@ -61,6 +61,10 @@ pub fn clip_for(tag: AnimTag) -> &'static str {
         AnimTag::SWING => "swing",
         AnimTag::SWIM => "swim",
         AnimTag::SNEAK => "sneak",
+        // The engine's rig has no crawl clip: a mod's player model brings
+        // one (Life ask 23), and this rig falls back to `idle` as any tag
+        // without a clip does.
+        AnimTag::CRAWL => "crawl",
         _ => "idle",
     }
 }

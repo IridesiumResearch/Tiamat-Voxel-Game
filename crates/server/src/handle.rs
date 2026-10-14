@@ -3611,12 +3611,36 @@ impl ServerHandle {
                                 )
                                 .passing(&passable)
                                 .gripping(&friction);
+                                // **The posture, decided here and predicted
+                                // from the same function on the client** (Life
+                                // ask 23): a body lies down to go under what
+                                // it cannot stand in, and is stepped as the
+                                // low box with the sneak's keys. A rider sits,
+                                // whatever they were doing on the ground.
+                                let intent = if carried {
+                                    player.crawling = false;
+                                    intent
+                                } else {
+                                    player.crawling = tiamat_core::phys::posture(
+                                        &voxels,
+                                        &player.body,
+                                        intent,
+                                        player.crawling,
+                                        abilities.crawl,
+                                    );
+                                    if player.crawling {
+                                        tiamat_core::phys::crawling_intent(intent)
+                                    } else {
+                                        intent
+                                    }
+                                };
                                 if !carried {
-                                    player.body = tiamat_core::phys::step(
+                                    player.body = tiamat_core::phys::step_shaped(
                                         &voxels,
                                         player.body,
                                         intent,
                                         &tuning,
+                                        player.shape(),
                                     );
                                 }
                                 // Carried is not falling, whatever the mount
@@ -3635,8 +3659,7 @@ impl ServerHandle {
                                 // block lookups, a dozen of them.
                                 player.submerged = tiamat_core::phys::submersion(
                                     &voxels,
-                                    &tiamat_core::phys::Shape::HUMANOID
-                                        .aabb(player.body.position),
+                                    &player.shape().aabb(player.body.position),
                                 )
                                 .fraction;
                                 // What a client draws this body doing, decided
@@ -3648,11 +3671,17 @@ impl ServerHandle {
                                 player.anim = if carried {
                                     // Sitting: the mount's gait is not theirs.
                                     crate::mount::seated_anim(swinging)
+                                } else if player.crawling {
+                                    // Lying down is what the box is, so it
+                                    // outranks the swing: the standing clip
+                                    // would put the figure through the ceiling.
+                                    tiamat_core::ent::AnimTag::CRAWL
                                 } else {
                                     crate::transport::anim_from_motion(
                                         intent,
                                         &player.body,
                                         swinging,
+                                        player.submerged,
                                     )
                                 };
                                 // **The server's half of the picture.** A client
@@ -3825,6 +3854,7 @@ impl ServerHandle {
                                         // a hand is a view of a live inventory
                                         // and is never persisted with the body.
                                         shared.hands_of(uuid),
+                                        player.crawling,
                                     );
                                 }
                                 // **Leaving dismounts** (Life ask 18). The

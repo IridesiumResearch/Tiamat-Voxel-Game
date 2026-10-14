@@ -667,6 +667,7 @@ mod tests {
             crate::ent::Motion::default(),
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         assert_eq!(
             board(&mobs, &mut bodies, &uuid, body, SEAT),

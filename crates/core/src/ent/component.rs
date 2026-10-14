@@ -237,6 +237,12 @@ impl AnimTag {
     pub const SWIM: Self = Self(4);
     /// Crouched.
     pub const SNEAK: Self = Self(5);
+    /// Lying down, moving under something too low to stand in (Life ask 23).
+    ///
+    /// A posture rather than a gesture, like [`Self::SNEAK`]: it is what the
+    /// body's box is, so it outranks a swing — the standing clip would put the
+    /// figure through the ceiling it is crawling under.
+    pub const CRAWL: Self = Self(6);
 }
 
 impl Default for AnimTag {

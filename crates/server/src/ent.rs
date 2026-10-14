@@ -247,7 +247,12 @@ impl Population {
         motion: Motion,
         anim: tiamat_core::ent::AnimTag,
         hands: tiamat_core::ent::Hands,
+        crawling: bool,
     ) -> EntityId {
+        // The player's own box, so a client culls the drawn body against the
+        // same shape the server collided it with (charter rule 2) — the low
+        // one while they crawl (Life ask 23).
+        let collider = phys::Shape::of_player(crawling);
         if let Some(&id) = self.players.get(&uuid)
             && let Some(entity) = self.entities.get_mut(id)
         {
@@ -258,6 +263,8 @@ impl Population {
             entity.fell = motion.fell;
             entity.anim = anim;
             entity.hands = hands;
+            entity.crawling = crawling;
+            entity.collider = Some(collider);
             return id;
         }
 
@@ -270,10 +277,9 @@ impl Population {
         entity.fell = motion.fell;
         entity.anim = anim;
         entity.hands = hands;
+        entity.crawling = crawling;
         entity.model = Some(tiamat_core::ent::HUMANOID_MODEL.to_owned());
-        // The player's own box, so a client culls the drawn body against the
-        // same shape the server collided it with (charter rule 2).
-        entity.collider = Some(phys::Shape::HUMANOID);
+        entity.collider = Some(collider);
         entity.owner = Some(tiamat_core::ent::Owner(uuid));
         // The UUID and not the name (charter rule 13): the current display name
         // is resolved when the spawn is sent, so a rebinding follows.
@@ -1264,6 +1270,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
 
         let crowd: Vec<EntityId> = population.crowd().map(|(id, _)| id).collect();
@@ -1798,6 +1805,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         // A real mob in the same chunk, so the chunk genuinely needs saving and
         // the test is about what goes IN the row rather than whether one exists.
@@ -1830,6 +1838,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         assert!(
             population.take_dirty().is_empty(),
@@ -1847,6 +1856,7 @@ mod tests {
                 },
                 tiamat_core::ent::AnimTag::WALK,
                 tiamat_core::ent::Hands::default(),
+                false,
             );
         }
         assert!(
@@ -1872,6 +1882,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         let again = population.sync_player(
             uuid,
@@ -1883,6 +1894,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::WALK,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         assert_eq!(first, again);
         assert_eq!(population.len(), 1);
@@ -1911,6 +1923,7 @@ mod tests {
                 },
                 tiamat_core::ent::AnimTag::IDLE,
                 tiamat_core::ent::Hands::default(),
+                false,
             );
         }
         assert_eq!(population.len(), 2);
@@ -1948,6 +1961,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         let before = population.get(id).expect("mirror").transform;
 
@@ -1977,6 +1991,7 @@ mod tests {
             },
             tiamat_core::ent::AnimTag::IDLE,
             tiamat_core::ent::Hands::default(),
+            false,
         );
         population.spawn(Entity::at(somewhere(home), "test:mob"));
 

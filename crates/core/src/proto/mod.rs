@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 90;
+pub const PROTOCOL_VERSION: u32 = 91;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -98,6 +98,17 @@ pub const PROTOCOL_VERSION: u32 = 90;
 // (`game.set_slot_grain`); and `DialogEvent::Dropped { click }`, appended — a
 // click outside every open screen while the cursor held a stack, which the
 // server takes off the cursor and reports to the screen's owner.
+// v91 (Life 23, a swimming player and a crawling one): `AbilitiesDef` carries
+// `crawl`, appended — whether this player lies down to go under something too
+// low to stand in — and `ServerMessage::PlayerState` carries `crawling`,
+// appended after `riding`: whether the server has the body lying down this
+// tick, restored on reconcile so a client replays its inputs as the box the
+// server stepped. Both sides decide the posture from the same function
+// (`phys::crawl::posture`); the state is what the replay starts from. A new
+// animation tag, `AnimTag::CRAWL` (6), rides the existing `anim` byte, and
+// `AnimTag::SWIM` (4) is now sent for a player off the bottom in a fluid.
+// **Fields on existing shapes**, so the version check is what keeps a v90
+// peer from reading a flag as the start of the next message.
 // v88 (Life 21, a tint on an entity): `EntityDef` and `EntityDelta` carry
 // `tint`, the colour the figure is drawn in this tick — a mod's hit flash,
 // a frozen creature's blue. Appended to each.
@@ -1888,6 +1899,12 @@ pub enum ServerMessage {
         /// the mount from the player's inputs, so `last_processed_input`
         /// speaks for this body and not for the one above. See [`Riding`].
         riding: Option<Riding>,
+        /// Whether the server has this body lying down (protocol v91, Life
+        /// ask 23) — the box it stepped, `phys::Shape::CRAWL`, which the
+        /// client restores on reconcile and replays its inputs as. Both
+        /// sides decide the posture by `phys::crawl::posture`; this is what
+        /// the replay starts from. `false` while riding: a rider sits.
+        crawling: bool,
     },
 
     /// How far along the player's current dig is.
@@ -2600,6 +2617,11 @@ pub enum ServerMessage {
 /// to a client, and a protocol whose shape is whatever a struct happens to hold
 /// is a protocol nobody can version.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the wire form of `phys::Abilities`, a set of yes-or-no answers about one \
+              player; `crawl` is the fourth (Life ask 23)"
+)]
 pub struct AbilitiesDef {
     /// Whether this player may fly. Already OR-ed with the operator list.
     pub fly: bool,
@@ -2611,6 +2633,10 @@ pub struct AbilitiesDef {
     pub wind_sky: bool,
     /// Multiplier on the gravity acting on this player's body.
     pub gravity: f32,
+    /// Whether this player lies down to go under something too low to stand
+    /// in (protocol v91, Life ask 23). The client predicts the posture, so it
+    /// must know the grant.
+    pub crawl: bool,
 }
 
 impl From<crate::phys::Abilities> for AbilitiesDef {
@@ -2621,6 +2647,7 @@ impl From<crate::phys::Abilities> for AbilitiesDef {
             sprint: abilities.sprint,
             wind_sky: abilities.wind_sky,
             gravity: abilities.gravity,
+            crawl: abilities.crawl,
         }
     }
 }
@@ -2639,6 +2666,7 @@ impl From<AbilitiesDef> for crate::phys::Abilities {
             sprint: def.sprint,
             wind_sky: def.wind_sky,
             gravity: def.gravity,
+            crawl: def.crawl,
         }
         .sanitised()
     }
@@ -3398,6 +3426,7 @@ fn check_player_floats(message: &ServerMessage) -> Result<(), ProtocolError> {
             local,
             velocity,
             riding,
+            crawling: false,
             ..
         } => {
             if local.iter().chain(velocity.iter()).any(|v| !v.is_finite()) {
@@ -4247,6 +4276,7 @@ mod tests {
                     on_ground: true,
                     jump_cooldown: 0,
                     riding: None,
+                    crawling: false,
                 },
                 ServerMessage::PlayerState {
                     last_processed_input: 1,
@@ -4256,6 +4286,7 @@ mod tests {
                     on_ground: true,
                     jump_cooldown: 0,
                     riding: None,
+                    crawling: false,
                 },
             ] {
                 assert!(
@@ -4273,6 +4304,7 @@ mod tests {
             on_ground: true,
             jump_cooldown: 0,
             riding: None,
+            crawling: false,
         };
         assert!(validate_server_message(&good).is_ok());
     }
@@ -4304,6 +4336,7 @@ mod tests {
             on_ground: false,
             jump_cooldown: 0,
             riding,
+            crawling: false,
         };
         for message in [state(None), state(Some(a_ride()))] {
             assert!(validate_server_message(&message).is_ok(), "{message:?}");
@@ -4331,6 +4364,7 @@ mod tests {
             on_ground: true,
             jump_cooldown: 0,
             riding: Some(riding),
+            crawling: false,
         };
         let poisons = [
             Riding {
@@ -4823,6 +4857,7 @@ mod tests {
             on_ground: false,
             jump_cooldown: 0,
             riding: None,
+            crawling: false,
         })
         .expect("encode");
         assert_eq!(state[0], 13);
@@ -5743,6 +5778,7 @@ mod tests {
                 sprint: true,
                 wind_sky: true,
                 gravity: 1.0,
+                crawl: false,
             },
         };
         assert!(validate_server_message(&poison).is_err());
@@ -5753,6 +5789,7 @@ mod tests {
                 sprint: true,
                 wind_sky: true,
                 gravity: f32::NAN,
+                crawl: false,
             },
         };
         assert!(validate_server_message(&poison_gravity).is_err());
@@ -5767,6 +5804,7 @@ mod tests {
             sprint: false,
             wind_sky: false,
             gravity: 1.0e30,
+            crawl: false,
         };
         let adopted = crate::phys::Abilities::from(wild);
         assert!(adopted.fly && !adopted.sprint && !adopted.wind_sky);
