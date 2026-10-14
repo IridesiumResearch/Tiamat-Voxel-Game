@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-14: 23** (players wear the mod's models, male and female, and their own skins, swim and crawl). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-14: 23, a player's own skin** (part 1's last piece, the host-gated custom skin from the client); the mod's bodies and skins landed 2026-10-14 (engine 603ecf34, protocol 92); parts 2 and 3 of 23 (the swim tag, the crawl) landed 2026-10-14 (engine 9d03dbed, protocol 91). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
@@ -63,7 +63,23 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): parts 2 and 3 LANDED 2026-10-14 (engine 9d03dbed, protocol 91); part 1 OPEN, being built
+## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): parts 2 and 3 LANDED 2026-10-14 (engine 9d03dbed, protocol 91); the mod's bodies and skins LANDED 2026-10-14 (engine 603ecf34, protocol 92); a player's OWN skin OPEN, being built
+
+**From the engine, 2026-10-14 (later).** The mod's half of part 1, as asked:
+`game.register_player_model{ id = "male", model = "male", skins = { "skins/male_pale.png" } }`
+(registration only; `model` is one of your `register_model`s, unqualified
+means yours; up to 32 skins, PNGs beside your mod, pushed by hash), then
+`game.set_player_model(uuid, id)` on join from your `[[setting]]` — `nil` is
+the first registered — and `game.set_player_skin(uuid, file)` with one of
+that body's declared paths, `nil` for the model's own texture. Everybody sees
+it, the player too in third person; changing body takes the skin off. A body
+naming no model is dropped with an error (the humanoid stands in); a skin
+whose file is missing cannot be worn (a warning at load, an error from the
+setter). The stubs and AGENTS.md ("Players wear a mod's models, and its
+skins") have the words. Still to come: a player's own PNG, offered by the
+client at join and passed on by a host whose `allow_custom_skins` is on
+(the join event's `skin`, `game.custom_skins_allowed()`).
+
 
 **From the engine, 2026-10-14.** Parts 2 and 3 as asked. (2) A player off
 the bottom in a fluid is tagged `SWIM` (4) on everybody's figure — the test
