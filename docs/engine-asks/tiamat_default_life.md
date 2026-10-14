@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-14: 23** (players wear a mod's model and their own skins, swim and crawl). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-14: 23** (players wear the mod's models, male and female, and their own skins, swim and crawl). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
@@ -63,14 +63,15 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 23. Players wear a mod's model and their own skins, swim and crawl (2026-10-14, revised the same day): OPEN
+## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): OPEN
 
 **Wanted.** Three things the designer asked for together, because the body
 a player is drawn as has to be drawn doing everything a player does:
 
-1. **One player model, the mod's, with skins.** Every player is drawn as
-   the same model, Life's, not the engine's humanoid. What varies is the
-   SKIN: the mod's default, one of the mod's own, or **a skin the player
+1. **Two player models, the mod's, with skins.** Every player is drawn as
+   one of the mod's player models, a male and a female, not the engine's
+   humanoid; each player picks theirs before the game. What varies beyond
+   that is the SKIN: the mod's default, one of the mod's own, or **a skin the player
    made**, chosen before the game, **if the server's host allows custom
    skins**. A host who does not sees everyone in the mod's skins.
 2. **A swimming animation** that plays when a player swims.
@@ -103,26 +104,34 @@ a player is drawn as has to be drawn doing everything a player does:
 **Smallest change.** In three parts, each useful alone.
 
 1. **The model, the skin, and the host's say.**
-   - `game.register_player_model{ model = "my_mod:person" }`, registration
-     only, one per world (the last mod in load order, as a theme): every
-     player is drawn as that registered model, by everyone, the player too in
-     third person, its clips matched to the tags by name as a creature's
-     are. The collider, the eye height and the first-person hand are
-     unchanged: this is the look, not the body, so the model must be the
-     collider's size (5.4 cells by 1.8). None registered: the humanoid, as
-     now.
+   - `game.register_player_model{ id = "male", model = "my_mod:male", ... }`,
+     registration only, called once per body (Life: `male` and `female`; a
+     world's player models all come from one mod, the last in load order
+     to register any, as a theme): every player is drawn as one of them, by
+     everyone, the player too in third person, its clips matched to the tags
+     by name as a creature's are. The collider, the eye height and the
+     first-person hand are unchanged: this is the look, not the body, so
+     each model must be the collider's size (5.4 cells by 1.8). None
+     registered: the humanoid, as now.
+   - `game.set_player_model(uuid, id)` picks a player's body among those;
+     the first registered is everyone's until a mod says otherwise. The
+     choice itself can be the mod's own `[[setting]]` ("Body: male /
+     female") on the Mods tab, read on join; nothing new is needed there.
    - `game.set_player_skin(uuid, file | nil)`: a PNG in the mod's directory,
-     declared at load (a `skins` list on `register_player_model`, pushed by
-     hash like the model's own skin), drawn on that player's model with the
-     model's UVs; `nil` is the model's own `texture`. One model, many skins,
-     one of the server's 64 models.
+     declared at load (a `skins` list on that body's
+     `register_player_model`, pushed by hash like the model's own skin),
+     drawn on that player's model with its UVs; `nil` is the model's own
+     `texture`. Two models, any number of skins, two of the server's 64
+     models.
    - **A player's own skin**, from the client: a "Skin" picker in the
      client's own settings (the start screen's, since no Lua runs there)
      keeps a PNG the player chose. On join the client offers its hash; a
      server that allows custom skins fetches the bytes once, decodes them
-     through the picture caps (charter rule 14) and the model's skin size
-     (a skin drawn for another layout is refused, with a word to the
-     player), and pushes them by hash to everyone who sees that player.
+     through the picture caps (charter rule 14) and the size of the skin of
+     the body that player wears (a skin painted for the other body, or any
+     other layout, is refused, with a word to the player), and pushes them
+     by hash to everyone who sees that player. A player may keep one skin
+     per body, so changing body does not mean repainting.
      The join event carries `skin` (the hash, or nil), and a mod may still
      overrule it with `set_player_skin`.
    - **The host's switch**: `allow_custom_skins` in `server.toml`, off by
@@ -150,9 +159,10 @@ a player is drawn as has to be drawn doing everything a player does:
    `game.entity(body).crawling` would let a mod read it (no sprinting while
    crawling, say).
 
-Life would then ship ONE player model with a default skin and a few of
-its own, register it as the player model, and publish its skin template
-(the UV layout as a PNG) so a player can paint their own. The model spec
+Life would then ship TWO player models, male and female, each with a
+default skin and a few of its own, a `[[setting]]` to pick the body, and
+each body's skin template (its UV layout as a PNG) so a player can paint
+their own. The model spec
 for an artist is the creature one: feet at y = 0, +Z forward, 5.4 cells
 tall and 1.8 wide to match the collider, clips `idle`, `walk`, `run`,
 `swing`, `swim`, `sneak` and now `crawl`.
