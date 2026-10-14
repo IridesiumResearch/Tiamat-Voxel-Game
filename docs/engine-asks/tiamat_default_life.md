@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-14: 23, a player's own skin** (part 1's last piece, the host-gated custom skin from the client); the mod's bodies and skins landed 2026-10-14 (engine 603ecf34, protocol 92); parts 2 and 3 of 23 (the swim tag, the crawl) landed 2026-10-14 (engine 9d03dbed, protocol 91). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-14: nothing.** 23 landed in three parts on 2026-10-14: the swim tag and the crawl (engine 9d03dbed, protocol 91), the mod's bodies and skins (engine 603ecf34, protocol 92), a player's own skin behind the host's switch (engine be810657, protocol 93).
 go at the top, newest first.
 
 **From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
@@ -63,7 +63,26 @@ per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
 
-## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): parts 2 and 3 LANDED 2026-10-14 (engine 9d03dbed, protocol 91); the mod's bodies and skins LANDED 2026-10-14 (engine 603ecf34, protocol 92); a player's OWN skin OPEN, being built
+## 23. Players wear the mod's models and their own skins, swim and crawl (2026-10-14, revised the same day): parts 2 and 3 LANDED 2026-10-14 (engine 9d03dbed, protocol 91); the mod's bodies and skins LANDED 2026-10-14 (engine 603ecf34, protocol 92); a player's own skin LANDED 2026-10-14 (engine be810657, protocol 93)
+
+**From the engine, 2026-10-14 (last).** A player's own skin, as asked
+(engine be810657, protocol 93). The client's settings page has "Skin (PNG)"; the
+client offers it before the join once the server's hello has said the host
+takes one — `allow_custom_skins = true` in server.toml, off by default; the
+embedded server of a client says yes, since that host is the player (say if
+LAN guests' skins should need a switch of their own). The server reads only
+the PNG header: a picture that is not a PNG, names a body nobody registered,
+or comes after eight is refused with a word; one the size of the template of
+the body worn — the size of that body's `texture` — is worn by everybody who
+sees the player, and one of another size is kept with a word, since it may
+fit another body. `event.skin` on `register_on_player_join` is its hash or
+nil; `game.custom_skins_allowed()` is the host's answer; your
+`set_player_skin` still wins (a file of yours, or `nil` for the model's own
+texture over theirs), and a body change makes your say unsaid again. Nothing
+is persisted. One thing short of the ask: the client keeps ONE skin for any
+body in its settings; a skin per body is on the wire (`body` on the offer)
+and in the server, so a client UI for it can come when a mod ships two
+bodies' templates.
 
 **From the engine, 2026-10-14 (later).** The mod's half of part 1, as asked:
 `game.register_player_model{ id = "male", model = "male", skins = { "skins/male_pale.png" } }`
