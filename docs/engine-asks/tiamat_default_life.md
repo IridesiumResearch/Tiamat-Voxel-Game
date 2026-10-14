@@ -9,7 +9,7 @@ everything that landed is recorded there, and only the open asks are here.
 Each entry says what was seen, why the mod cannot fix it, and the smallest
 engine change that would. Newest first. Items are removed when they land.
 
-**Open as of 2026-10-13: none.** 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
+**Open as of 2026-10-14: 23** (a player wears a mod's character, swims and crawls). 22 (an operator's flight a mod may withhold) landed 2026-10-13 (engine 3e5a019d); 21 (a tint) landed 2026-10-09; 20 landed 2026-10-05; 16 to 19 landed; 18 and 19 await the eye. New ones
 go at the top, newest first.
 
 **From the engine, 2026-10-13 (milestone 0.5.0: the mod API is 1.0).** Three
@@ -62,6 +62,71 @@ camera-facing row centred over an entity's head that FOLLOWS it, latest-state
 per entity, expiring on the client. Health bars, an "!" over a startled
 animal and a quest marker are all the second one. Both are documented in
 `api/stubs/game.lua` and `api/AGENTS.md`.
+
+## 23. A player wears a mod's character, swims and crawls (2026-10-14): OPEN
+
+**Wanted.** Three things the designer asked for together, because a
+character a player picks has to be drawn doing everything a player does:
+
+1. **Custom characters with their own skins**, picked before the game on
+   the start screen's Mods tab (a `[[setting]]` dropdown in `mod.toml`,
+   one option per character), and worn by that player for everyone to see.
+2. **A swimming animation** that plays when a player swims.
+3. **Crawling**: a player can get into a passage one block high, lying
+   down, with a crawling animation, and stands back up where there is room.
+
+**Why the mod can't.**
+
+- *The model.* A player is always drawn as `engine:humanoid`, untextured
+  (`core/src/model/humanoid.rs`: "Skins are a later phase and deliberately
+  not started here"; `client/src/render/mod.rs`, `ModModels`, keeps the
+  player as the last of the humanoid's figures). `set_entity` has no
+  `model`, a player's body is stepped from its own inputs, and nothing in
+  `stubs/game.lua` names a player's look.
+- *Swimming.* `anim_from_motion` (`server/src/transport/endpoint.rs`)
+  returns SWING, SNEAK, IDLE, RUN or WALK and never `AnimTag::SWIM`, so a
+  swimming player is drawn walking, though the humanoid has a `swim` clip
+  and a mod's model may carry one.
+- *Crawling.* The body is `Shape::HUMANOID`, 5.4 cells tall, at all times
+  (sneak changes the pace and the edge guard, not the height), so a gap of
+  one block (three cells) cannot be entered at all, and there is no tag
+  for a crawl to be drawn by.
+
+**Smallest change.** In three parts, each useful alone.
+
+1. `game.set_player_model(uuid, model, { texture })`: the player's body is
+   drawn as a registered model (`"my_mod:knight"`) by everyone, the player
+   too in third person; `nil` gives the humanoid back. Its clips are matched
+   to the tags by name as a creature's are. The collider, the eye height and
+   the first-person hand are unchanged: this is the look, not the body.
+   `texture` names a PNG the mod declared at load (for example a `skins`
+   list on `register_model`, pushed by hash like the model's own), so many
+   skins share ONE model: each skin as its own `register_model` would spend
+   the server's 64 models, and Life and its siblings use about 50 already.
+   Not persisted; a mod sets it again on join, which is where it reads the
+   player's `[[setting]]` anyway.
+2. `anim_from_motion` answers `AnimTag::SWIM` for a player who is swimming
+   (submerged above the feet and not standing on the bottom, by whatever
+   test the swim physics already makes), after the swing and before the
+   gait. Nothing else changes: a model with no `swim` clip falls back to
+   `idle` as now.
+3. A crawl: a new tag, `AnimTag::CRAWL` (6), matched to a clip named
+   `crawl`, and a low shape for the body, under a block high (2.4 cells, say,
+   with the eye near the top of it), that a player takes when the space
+   ahead or overhead is too low to stand in: sneaking into a one-block gap,
+   or a ceiling closing over them. They stand when there is room again,
+   never into a ceiling; the pace is the sneak's. The client predicts the
+   same shape, so nobody rubber-bands at the mouth of a tunnel. Opt in with
+   `crawl = true` on `set_player_abilities`, so a world whose mods never
+   ask is exactly the world it was; Life would send it everywhere.
+   `game.entity(body).crawling` would let a mod read it (no sprinting while
+   crawling, say).
+
+Life would then ship characters as a `.glb` with its skins beside it, a
+`[[setting]]` listing them, and a `set_player_model` on join. The model
+spec for an artist is the creature one: feet at y = 0, +Z forward, 5.4
+cells tall and 1.8 wide to match the collider, clips `idle`, `walk`,
+`run`, `swing`, `swim`, `sneak` and now `crawl`.
 
 ## 22. An operator flies whatever the mod says (2026-10-12): LANDED 2026-10-13 (engine)
 
