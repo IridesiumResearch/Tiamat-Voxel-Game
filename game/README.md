@@ -31,6 +31,20 @@ how it gets caught.
 A real default game is a later phase, built as mods on top of a finished engine.
 It is not part of the 18-task build plan in [`../voxel-prompts/`](../voxel-prompts/).
 
+## A mod developed beside the engine
+
+A mod of its own repository appears here as a **link** named for its id, and
+is loaded, checked (`--check-mods game`) and bundled from wherever the link
+points. A symlink works on the machine that made it; a tree shared between
+two operating systems needs a **link file** instead — a plain text file of
+that name holding candidate paths to the mod's directory, one per line,
+relative to `game/` or absolute, `#` comments ignored, the first that holds a
+`mod.toml` being the one (so the same file can name a sibling directory for
+one machine and a mount for the other). The engine's scanner follows both
+(`modload::manifest::follow_link_file`), and so do the scripts
+(`scripts/lib/modlink.sh`). `scripts/conform.sh` writes a link file. A link
+whose candidates all miss is skipped like any other non-mod entry.
+
 ## `reference = true`
 
 Every manifest in this directory carries it, and it is what makes "not the

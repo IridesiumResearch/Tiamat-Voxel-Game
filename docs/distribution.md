@@ -245,7 +245,10 @@ the server they join.
 The mods **in** this repository carry the repository's licence and its SPDX
 headers, and need nothing else. A mod from **outside** it — the default world,
 life, weather and UI mods live in their own repositories, and appear here as
-symlinks for development — is bundled **at the commit `bundle.toml` pins**,
+links for development, a symlink or a link file (`scripts/lib/modlink.sh`:
+a text file of candidate paths, which a tree shared between two operating
+systems needs, since a symlink made on either is a reparse point the other
+cannot follow) — is bundled **at the commit `bundle.toml` pins**,
 never from a working tree. `scripts/bundle-lock.sh` writes that file from the
 repositories beside the checkout (refusing a commit nobody has pushed), it is
 committed with the version bump before a release is tagged, and the packager
@@ -259,7 +262,7 @@ that makes the game a game is worse than no archive. `--allow-missing-mods`,
 for a bare test build, leaves such a mod out rather than shipping it without
 its notice: the mod goes, not the rule. The same helper serves a checkout
 with no repositories beside it: `scripts/fetch-mods.sh` puts every pinned mod
-into `game/` at its commit, leaving any symlink alone, which is how the
+into `game/` at its commit, leaving any link alone, which is how the
 nightly soak flies over the mods a release would ship.
 
 ## 7. Licences, and why this section is not optional

@@ -4,7 +4,7 @@
 #
 # Writes `bundle.toml`: the default mods a release bundles, pinned by commit.
 #
-# The mods live in repositories of their own and appear here as symlinks under
+# The mods live in repositories of their own and appear here as links under
 # `game/`. A release must record exactly which version of each it carries —
 # the corresponding source for a binary is the engine at its commit AND every
 # mod at its commit — and CI, which has no symlinks, packages from this file.
@@ -49,8 +49,10 @@ is_excluded() {
     return 1
 }
 
+# shellcheck source=scripts/lib/modlink.sh
+source scripts/lib/modlink.sh
 for id in "${excluded[@]+"${excluded[@]}"}"; do
-    if [ ! -L "game/$id" ]; then
+    if ! modlink_is "game/$id"; then
         echo "error: --exclude $id: no mod of that id is linked under game/" >&2
         exit 2
     fi
@@ -59,13 +61,13 @@ done
 entries=()
 failed=0
 for link in game/*; do
-    [ -L "$link" ] || continue
+    modlink_is "$link" || continue
     id="$(basename "$link")"
     if is_excluded "$id"; then
         echo "note: $id is left out of this release (--exclude)" >&2
         continue
     fi
-    dir="$(readlink -f "$link" 2>/dev/null || true)"
+    dir="$(modlink_target "$link")"
     if [ -z "$dir" ] || [ ! -f "$dir/mod.toml" ]; then
         echo "error: $link points nowhere readable; mount the drive it lives on" >&2
         failed=1
@@ -94,7 +96,7 @@ if [ "$failed" -ne 0 ]; then
     exit 1
 fi
 if [ "${#entries[@]}" -eq 0 ]; then
-    echo "error: no mod symlinks under game/; nothing to pin" >&2
+    echo "error: no mod links under game/; nothing to pin" >&2
     exit 1
 fi
 

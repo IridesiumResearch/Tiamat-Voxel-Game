@@ -891,6 +891,14 @@ pub fn scan_directory(root: &Path) -> Result<Vec<DiscoveredMod>, ManifestError> 
             source,
         })?;
         let dir = entry.path();
+        // **A link file stands in for a symlink.** A developer's mod lives in
+        // a checkout beside the engine and appears under the mods directory
+        // as a link; on a working tree shared between two operating systems
+        // a Linux symlink is a reparse point Windows cannot follow, and a
+        // Windows one the other way. So a plain text file holding the mod
+        // directory's path is a link both sides read — see
+        // [`follow_link_file`] for its shape.
+        let dir = follow_link_file(&dir).unwrap_or(dir);
         if !dir.is_dir() || !dir.join(MANIFEST_FILE).is_file() {
             // A directory without a manifest is not a mod — documentation,
             // assets, a stray checkout. Not an error.
@@ -906,9 +914,88 @@ pub fn scan_directory(root: &Path) -> Result<Vec<DiscoveredMod>, ManifestError> 
     Ok(found)
 }
 
+/// The most a link file may hold, in bytes: a few paths, never a mod.
+const LINK_FILE_LIMIT: u64 = 4096;
+
+/// Follows a link file to the mod directory it names, or answers `None` for
+/// anything that is not one.
+///
+/// A link file is a plain text file under the mods directory, named for the
+/// mod, holding one or more candidate paths, one per line: each relative to
+/// the mods directory or absolute, blank lines and `#` comments ignored. The
+/// first candidate that is a directory with a manifest in it is the mod.
+/// Several candidates, because one working tree is read from two machines
+/// whose paths to the same checkout differ — a sibling directory on one, a
+/// mount on the other — and the file is the same file on both.
+///
+/// A directory, a symlink (which `is_file` already follows), an empty file,
+/// a file over [`LINK_FILE_LIMIT`] or one whose candidates all miss is
+/// `None`: it is not a link, or it is a link to nothing, and either way the
+/// scan treats it as it treats any other non-mod entry.
+#[must_use]
+pub fn follow_link_file(path: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > LINK_FILE_LIMIT {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let base = path.parent()?;
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let candidate = Path::new(line);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base.join(candidate)
+            }
+        })
+        .find(|candidate| candidate.is_dir() && candidate.join(MANIFEST_FILE).is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_file_stands_in_for_a_symlink_and_the_first_candidate_that_exists_wins() {
+        let root = std::env::temp_dir().join(format!("tiamat-link-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let elsewhere = root.join("elsewhere").join("mods").join("linked");
+        std::fs::create_dir_all(&elsewhere).expect("mod dir");
+        std::fs::write(
+            elsewhere.join(MANIFEST_FILE),
+            "id = \"linked\"\nname = \"Linked\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(elsewhere.join("init.lua"), "").expect("entry");
+        let mods = root.join("game");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        // A missing candidate first, a comment, then a relative one that is
+        // there; the absolute form of the same directory would do as well.
+        std::fs::write(
+            mods.join("linked"),
+            "# a developer's link\n/nowhere/at/all/linked\n../elsewhere/mods/linked\n",
+        )
+        .expect("link file");
+        // Not links: an empty file, a note, and a directory with no manifest.
+        std::fs::write(mods.join("empty"), "").expect("empty");
+        std::fs::write(mods.join("notes.txt"), "remember to feed the cow\n").expect("note");
+        std::fs::create_dir_all(mods.join("assets")).expect("assets");
+
+        let found = scan_directory(&mods).expect("scan");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].manifest.id, "linked");
+        assert_eq!(
+            found[0].dir.canonicalize().expect("dir"),
+            elsewhere.canonicalize().expect("target")
+        );
+        assert_eq!(follow_link_file(&mods.join("empty")), None);
+        assert_eq!(follow_link_file(&mods.join("notes.txt")), None);
+        assert_eq!(follow_link_file(&mods.join("assets")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn id_rules_are_strict() {

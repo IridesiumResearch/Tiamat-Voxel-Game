@@ -35,15 +35,19 @@ id="$(sed -n 's/^id = "\([^"]*\)".*/\1/p' "$mod/mod.toml" | head -1)"
 
 echo "==> the default mods beside $id"
 bash scripts/fetch-mods.sh
-if [ -L "game/$id" ]; then
-    if [ "$(readlink -f "game/$id")" != "$mod" ]; then
-        echo "note: game/$id pointed at $(readlink "game/$id"); it now points at $mod"
+# shellcheck source=scripts/lib/modlink.sh
+source scripts/lib/modlink.sh
+if modlink_is "game/$id"; then
+    if [ "$(modlink_target "game/$id")" != "$mod" ]; then
+        echo "note: game/$id pointed at $(modlink_target "game/$id"); it now points at $mod"
     fi
     rm "game/$id"
 elif [ -e "game/$id" ]; then
     rm -rf "game/$id"
 fi
-ln -s "$mod" "game/$id"
+# A link file rather than a symlink, so a tree shared with another operating
+# system still reads it (scripts/lib/modlink.sh).
+modlink_write "game/$id" "$mod"
 echo "game/$id -> $mod"
 
 echo "==> building the server and the bot"
