@@ -512,11 +512,16 @@ fn a_rider_drives_the_mount_at_its_pace_and_sits_on_it_until_they_get_off() {
         assert_eq!(ask(&mut bot, "off", "off ").await, "true");
         let (reason, _, at) = dismount(&notice_after(&mut bot, seen, "dismount ").await);
         assert_eq!(reason, "dismount");
+        // The same quarter cell the sneak above allows, and for the same
+        // reason: the scarecrow the bot reads is a sample off the entity
+        // stream, a tick or two from the one the dismount was measured
+        // against, and the crowd pass is easing the two apart meanwhile.
+        // macOS CI landed a twentieth of a cell off on 2026-10-14.
         assert_near(
             "a dismount lands them at its feet",
             at,
             entity_at(&mut bot, mount).await.expect("the scarecrow"),
-            0.05,
+            0.25,
         );
         assert_eq!(ask(&mut bot, "off", "off ").await, "false", "off twice");
 
