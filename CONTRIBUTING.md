@@ -59,6 +59,15 @@ git config core.hooksPath .githooks
 CI rejects any commit in a pull request without a valid, author-matching
 sign-off.
 
+**One exception, recorded here once.** Three documentation-only commits on
+`main` carry no sign-off: `be39490e` (2026-10-01), `5787eb7d` and `14810aa9`
+(both 2026-10-12), each an edit to an engine-ask sheet under
+`docs/engine-asks/`, made from a default-mod repository's working copy. Their
+author is Iridesium, the copyright holder, who affirms the certificate below
+for them by this paragraph (2026-10-15) rather than rewriting history that
+every clone already holds. It is the only exception: CI checks every push,
+and a commit without the trailer is fixed before it is pushed, not after.
+
 ## Before you open a pull request
 
 On Linux, install the client's system dependencies first — see

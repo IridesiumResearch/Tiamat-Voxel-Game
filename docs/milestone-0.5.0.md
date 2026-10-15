@@ -46,9 +46,9 @@ is the mod agents in their own repositories.
 |---|---|---|
 | T1 The badge queue is published once per tick, so a network pass never reads it mid-tick (`show_over` has flaked four times on macOS; the race is real) — **landed 2a7c1db7** | engine | small |
 | T2 `placement::chiselled_spares` is understood and fixed, not retried (flaked on Windows twice) — not reproduced on one starved core (10 of 10 passed); the stall now reports every notice and the last messages, so the next CI failure names its cause | engine | small |
-| T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts — **landed 2026-10-13** (`.github/workflows/nightly.yml`: the fen soak over the mods at `bundle.toml`'s commits via `scripts/fetch-mods.sh`, the swarm at twenty bots and at E1's fifty for five minutes, every table an artefact); the first nightly after it is the proof | engine | small |
+| T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts — **landed 2026-10-13** (`.github/workflows/nightly.yml`: the fen soak over the mods at `bundle.toml`'s commits via `scripts/fetch-mods.sh`, the swarm at twenty bots and at E1's fifty for five minutes, every table an artefact); the first nightly after it is the proof — **run 77, 2026-10-15:** the fifty-bot soak passed on a shared runner, the fen soak flew but wrote its table under `crates/bot/target` (a relative `FEN_OUT`; fixed de64985b), and the 200-mob entity swarm failed its zero-tolerance gate once while passing locally at head and at bf00d4ac with the same numbers — a runner stall, watched on run 78 | engine | small |
 | T4 The plan-stamp stall: a plan holding a partial cell of a `whole` material must not wait for ever (`plans.rs`, found landing W35) — **landed fa5ddd51** | engine | small |
-| T5 The two unsigned mod-side commits on main are the designer's call: rewrite with sign-off or document the exception once | designer | tiny |
+| T5 The unsigned mod-side commits on main (three by 2026-10-12: be39490e, 5787eb7d, 14810aa9) are the designer's call: rewrite with sign-off or document the exception once — **documented 2026-10-15**, the designer's call (`CONTRIBUTING.md`, "One exception, recorded here once") | designer | tiny |
 | T6 Invisible walls: act on the first `client.log` that shows one; the reload, the held edits and both logs landed in 0.4.1 | engine, as reports come | unknown |
 
 ### 2. Signed releases — in scope by the designer's decision
@@ -89,7 +89,7 @@ on hills and caves.
 | item | who | size |
 |---|---|---|
 | V1 One structured pass over every "awaiting the eye" gate, on all three machines, with the sheets marked | designer | days |
-| V2 Every LAN pairing, both directions, default names | designer | half a day |
+| V2 Every LAN pairing, both directions, default names — **read by the designer 2026-10-15: fully working on 0.4.2** (E7) | designer | half a day |
 | V3 The update chain from an installed 0.4.x | designer | an hour |
 
 ### 6. Asks filed after the plan
