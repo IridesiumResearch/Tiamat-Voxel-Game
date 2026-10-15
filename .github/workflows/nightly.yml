@@ -59,8 +59,11 @@ jobs:
       # rather than the engine. `--ignored` because the test opts out of the
       # fast loop a developer runs twenty times an hour.
       - name: Twenty bots for sixty seconds
+        # Absolute on purpose: cargo runs a test binary from its package
+        # directory, so a relative `target/swarm` lands in `crates/bot/target/`
+        # and the upload below finds nothing (nightly 77 kept no swarm tables).
         env:
-          SWARM_OUT: target/swarm
+          SWARM_OUT: ${{ github.workspace }}/target/swarm
         run: cargo test -p bot --test swarm_load --release -- --ignored --nocapture
 
       # The tick table, kept whether or not the gate passed: a red run is
@@ -95,10 +98,13 @@ jobs:
       # digging — for five minutes. The gates are the test's: a tenth of the
       # ticks over budget, one stall at most, and bounded memory.
       - name: Fifty bots for five minutes
+        # Absolute on purpose: cargo runs a test binary from its package
+        # directory, so a relative `target/swarm` lands in `crates/bot/target/`
+        # and the upload below finds nothing (nightly 77 kept no swarm tables).
         env:
           SWARM_BOTS: 50
           SWARM_SECONDS: 300
-          SWARM_OUT: target/swarm
+          SWARM_OUT: ${{ github.workspace }}/target/swarm
         run: cargo test -p bot --test swarm_load --release -- --ignored --nocapture
 
       - name: Keep the tick table
@@ -129,8 +135,11 @@ jobs:
       # relighting before the light thread. Nothing is asserted; the table is
       # the verdict, and it is kept below for a person to read.
       - name: Fly over the fen
+        # Absolute on purpose: cargo runs a test binary from its package
+        # directory, so a relative `target/fen` lands in `crates/bot/target/`
+        # and "The soak flew" reads an empty place (nightly 77, the first run).
         env:
-          FEN_OUT: target/fen
+          FEN_OUT: ${{ github.workspace }}/target/fen
         run: cargo test -p bot --test fen_soak --release -- --ignored --nocapture
 
       # The soak passes quietly when a mod it needs is not in game/, which on
