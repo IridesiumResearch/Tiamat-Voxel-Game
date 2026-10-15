@@ -166,6 +166,7 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
         identity_path: None,
         max_players: config.max_players,
         allow_custom_skins: config.allow_custom_skins,
+        sticky_names: config.sticky_names,
         allowlist: Allowlist::open(),
         operators: config.operators.clone(),
         seed: config.seed,

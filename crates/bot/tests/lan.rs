@@ -54,6 +54,7 @@ fn start(name: &str, bind: &str, max_players: u32) -> ServerHandle {
         world_path: scratch(name),
         identity_path: None,
         allow_custom_skins: false,
+        sticky_names: false,
         max_players,
         allowlist: Allowlist::open(),
         operators: Vec::new(),

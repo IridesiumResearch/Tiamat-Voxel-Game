@@ -162,6 +162,9 @@ pub struct Shared {
     pub player_models: Vec<PlayerModelDef>,
     /// Whether this host takes a player's own skin (Life ask 23).
     pub allow_custom_skins: bool,
+    /// Whether a name sticks to the identity that first joined with it
+    /// (`sticky_names` in server.toml); see `session::JoinContext`.
+    pub sticky_names: bool,
     /// Bytes that came over the wire rather than from a mod's directory — the
     /// skins players chose — served by hash like any content, and forgotten
     /// when the last player wearing one leaves.
@@ -4128,6 +4131,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
             let context = JoinContext {
                 cert_fingerprint: &shared.cert_fingerprint,
                 custom_skins: shared.allow_custom_skins,
+                sticky_names: shared.sticky_names,
                 seed: shared.seed.load(std::sync::atomic::Ordering::Relaxed),
                 mods: &shared.mods,
                 mod_set_fingerprint: shared.mod_set_fingerprint,
@@ -4953,6 +4957,7 @@ mod tests {
             model_table: Vec::new(),
             player_models: Vec::new(),
             allow_custom_skins: false,
+            sticky_names: false,
             uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
             theme: None,
             cloud_layer: None,

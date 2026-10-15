@@ -104,6 +104,7 @@ part of 0.5.0 without them.
 | L23.3 A crawl: `crawl` on `set_player_abilities`, `AnimTag::CRAWL`, the low box, predicted (Life 23, part 3) — **landed 2026-10-14** (`phys::crawl::posture`, Sub-Node Contract §2 "A body may crawl", protocol 91) | engine | medium |
 | L23.1 The mod's player models with skins (`register_player_model`, `set_player_model`, `set_player_skin`), drawn by everyone and in third person — **landed 2026-10-14** (protocol 92: `EntityDef.skin`, `EntityLooked`, `PlayerLook`; the client keeps a pass per look) | engine | medium |
 | L23.1b A player's own skin, offered by the client at join and passed on by a host who allows it (`allow_custom_skins`, off by default) — **landed 2026-10-14** (protocol 93: `HelloAck.custom_skins`, `ClientMessage::Skin`; the server reads the PNG header and never decodes, `event.skin` on join, `game.custom_skins_allowed()`) | engine | medium |
+| N1 Names that stick: `sticky_names` in server.toml — a player wears the first name they joined this server with whatever their client asks for, is told so on joining, and only RCON `rename` changes it (the designer, 2026-10-14: players should stop changing names; the smaller of two answers, the other being a name registry at tiamatengine.com behind `AuthProvider`, held for the milestone after 0.5.0 and to be raised again before 1.0.0) — **landed 2026-10-15** (`session::JoinContext::sticky_names`; off by default, and off on a client's embedded host, which has no admin port to rename from; no protocol change) | engine | small |
 
 ## Out of scope
 
@@ -123,6 +124,20 @@ compatibility window (the exact-version handshake stays).
 5. V1–V3, then the tag.
 
 This file is updated as items land, with the commit beside each.
+
+## Where it stands, 2026-10-15 (morning)
+
+The first nightly on the T3 workflow ran: the fifty-bot soak passed, the fen
+soak's table was lost to a relative path (fixed de64985b), and the entity
+swarm failed its zero-tolerance gate once without reproducing locally at
+either end of the diff (row T3). T5 is documented (5049d115). The designer
+read every LAN pairing as fully working on 0.4.2 (V2, and E7 with it). N1,
+names that stick, landed. Decided by the designer the same morning: the name
+registry is the theme of the milestone after 0.5.0, and is raised again
+before 1.0.0. What is left is unchanged otherwise: S1, S2, E2, V1 and V3 are
+the designer's; E8 has Craft and UI running the conformance workflow,
+Progress's adoption committed but not pushed, and five mods to go; P3, P5,
+T6 and S5 are the engine's if and when their conditions arrive.
 
 ## Where it stands, 2026-10-13 (evening)
 

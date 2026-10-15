@@ -119,6 +119,7 @@ fn start(name: &str, mods: PathBuf) -> ServerHandle {
         identity_path: None,
         max_players: 4,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         // The default rather than the minimum: the mobs have to be inside a

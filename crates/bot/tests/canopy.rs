@@ -100,6 +100,7 @@ fn a_canopy_that_dims_shades_the_floor_and_one_that_does_not_lights_it() {
         identity_path: None,
         max_players: 1,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

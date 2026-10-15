@@ -1540,6 +1540,13 @@ pub struct Settings {
     /// drew, which is the host's call. The embedded server of a client says
     /// yes, since that host is the player.
     pub allow_custom_skins: bool,
+    /// Whether a name sticks to the identity that first joined with it
+    /// (`sticky_names` in server.toml). On, a player who joins under another
+    /// name wears the one they have here, is told so, and only RCON `rename`
+    /// changes it. Off by default: a name is a claim a player may change by
+    /// joining under another, which releases the old one. A client's
+    /// embedded host says no — it has no admin port to rename anyone from.
+    pub sticky_names: bool,
 
     /// Extra material ids to register, on top of whatever mods register.
     ///
@@ -2674,6 +2681,7 @@ impl ServerHandle {
             model_table,
             player_models,
             allow_custom_skins: settings.allow_custom_skins,
+            sticky_names: settings.sticky_names,
             uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
             theme,
             cloud_layer,
@@ -6867,6 +6875,7 @@ impl ServerHandle {
             materials: Vec::new(),
             world_options: Vec::new(),
             allow_custom_skins: false,
+            sticky_names: false,
         })
     }
 

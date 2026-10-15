@@ -126,6 +126,7 @@ fn start_operated(name: &str, operators: Vec<String>) -> ServerHandle {
         identity_path: None,
         max_players: 2,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators,
         view_distance: ViewDistance::MINIMUM,

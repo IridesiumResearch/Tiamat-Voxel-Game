@@ -20,6 +20,17 @@ world_path = "world"
 # Maximum simultaneously connected players. Must be at least 1.
 max_players = 16
 
+# Whether a name sticks to the player who first joined with it.
+#
+# A player is their key (charter rule 13); the name is a claim on this server.
+# Off (or absent), a player who joins under a new name takes it and releases
+# the old one, so somebody can be somebody new every join. On, a player wears
+# the first name they joined here with whatever their client asks for, is told
+# so on joining, and only an operator can change it: `rename <name> <new>` on
+# the admin port below. The same first-come rule either way: a name somebody
+# else holds gets a numbered variant, `player 2`.
+#sticky_names = true
+
 # Directory to load mods from, relative to the server's working directory.
 #
 # **On by default here, because a server with no mods has no blocks.** Absent is

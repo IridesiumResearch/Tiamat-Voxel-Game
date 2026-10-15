@@ -290,6 +290,12 @@ pub struct JoinContext<'a> {
     /// Whether the host takes a player's own skin (Life ask 23), told in the
     /// `HelloAck` so a client knows whether to offer one before it joins.
     pub custom_skins: bool,
+    /// Whether a name sticks to the identity that first joined with it
+    /// (`sticky_names` in server.toml). On, a player who joins under another
+    /// name wears the one they have here and is told so; only an operator's
+    /// RCON `rename` changes it. Off, the default, a new name on a join
+    /// rebinds the identity and releases the old one.
+    pub sticky_names: bool,
     /// The resolved mod set, from Task 05.
     pub mods: &'a [ModEntry],
     /// The mod set's fingerprint.
@@ -406,10 +412,20 @@ pub struct Session {
     nonce: Option<[u8; NONCE_BYTES]>,
     claimed_key: Option<ed25519_dalek::VerifyingKey>,
     claimed_name: Option<String>,
-    /// The name the client asked for, when it was bound to a variant of it
-    /// instead — told to the player on joining, then forgotten.
-    renamed_from: Option<String>,
+    /// The name the client asked for, when it wears another one — told to
+    /// the player on joining, with the reason, then forgotten.
+    renamed_from: Option<(String, WhyRenamed)>,
     uuid: Option<PlayerUuid>,
+}
+
+/// Why the name a client asked for is not the one it wears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhyRenamed {
+    /// Somebody else holds it here, so a numbered variant was bound.
+    Taken,
+    /// This server keeps the first name an identity joined with
+    /// (`sticky_names`), and this identity already has one.
+    Kept,
 }
 
 impl Default for Session {
@@ -793,20 +809,39 @@ impl Session {
         // `player`, and a LAN of two must not be a host and a guest who
         // cannot join. The player is told which name they got, below.
         let name = self.claimed_name.clone().unwrap_or_default();
-        match registry.bind_name_or_next(&name, uuid, NAME_VARIANTS) {
-            Ok(bound) => {
-                if bound != name {
-                    self.renamed_from = Some(name);
+        // **A name that sticks** (`sticky_names`, asked by the designer on
+        // 2026-10-14 for players who are somebody new every join): an
+        // identity that already holds a name here wears it whatever it asked
+        // for this time, and only an operator's `rename` moves it. A
+        // numbered variant of its own name is left to the path below, which
+        // keeps it anyway and whose notice names the taker, not the switch.
+        let kept = if context.sticky_names {
+            registry
+                .name_of(&uuid)
+                .filter(|own| *own != name && !registry::is_variant_of(own, &name))
+                .map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        if let Some(own) = kept {
+            self.renamed_from = Some((name, WhyRenamed::Kept));
+            self.claimed_name = Some(own);
+        } else {
+            match registry.bind_name_or_next(&name, uuid, NAME_VARIANTS) {
+                Ok(bound) => {
+                    if bound != name {
+                        self.renamed_from = Some((name, WhyRenamed::Taken));
+                    }
+                    self.claimed_name = Some(bound);
                 }
-                self.claimed_name = Some(bound);
-            }
-            Err(RegistryError::NameTaken { .. }) => {
-                return self.close_with(DisconnectReason::NameTaken { name });
-            }
-            Err(err) => {
-                return self.close_with(DisconnectReason::AuthFailed {
-                    detail: err.to_string(),
-                });
+                Err(RegistryError::NameTaken { .. }) => {
+                    return self.close_with(DisconnectReason::NameTaken { name });
+                }
+                Err(err) => {
+                    return self.close_with(DisconnectReason::AuthFailed {
+                        detail: err.to_string(),
+                    });
+                }
             }
         }
 
@@ -838,13 +873,19 @@ impl Session {
         // **Told, once in the world, which name they wear here.** A notice
         // from nobody, like a server's, so a guest called `player 2` is not
         // left wondering why the chat does not say `player`.
-        if let (Some(asked), Some(bound)) = (self.renamed_from.take(), self.claimed_name.as_ref()) {
-            response.send.push(ServerMessage::Chat {
-                from: None,
-                text: format!(
+        if let (Some((asked, why)), Some(bound)) =
+            (self.renamed_from.take(), self.claimed_name.as_ref())
+        {
+            let text = match why {
+                WhyRenamed::Taken => format!(
                     "`{asked}` is already somebody else's name on this server; you are `{bound}` here"
                 ),
-            });
+                WhyRenamed::Kept => format!(
+                    "this server keeps the name you first joined with: you are `{bound}` here, \
+                     not `{asked}`; an operator can change it"
+                ),
+            };
+            response.send.push(ServerMessage::Chat { from: None, text });
         }
         response
     }
@@ -1118,6 +1159,7 @@ mod tests {
         JoinContext {
             cert_fingerprint: &FINGERPRINT,
             custom_skins: false,
+            sticky_names: false,
             theme: None,
             cloud_layer: None,
             models: &[],
@@ -1152,8 +1194,20 @@ mod tests {
         registry: &mut IdentityRegistry,
         allowlist: &Allowlist,
     ) -> (Session, Vec<ServerMessage>) {
+        join_in(identity, name, registry, allowlist, false)
+    }
+
+    /// [`join`], on a server that keeps names or not.
+    fn join_in(
+        identity: &Identity,
+        name: &str,
+        registry: &mut IdentityRegistry,
+        allowlist: &Allowlist,
+        sticky_names: bool,
+    ) -> (Session, Vec<ServerMessage>) {
         let mods = Vec::new();
-        let context = context(allowlist, &mods);
+        let mut context = context(allowlist, &mods);
+        context.sticky_names = sticky_names;
         let auth = SelfSovereign;
         let mut session = Session::new();
         let mut sent = Vec::new();
@@ -1619,6 +1673,83 @@ mod tests {
                 ServerMessage::Chat { from: None, text } if text.contains("`Alice 2`")
             )),
             "Bob should be told the name he wears, got {sent:?}"
+        );
+    }
+
+    #[test]
+    fn with_sticky_names_an_identity_wears_the_name_it_first_joined_with() {
+        // Alice joins as `Alice`, then comes back asking to be `Alicia`. On a
+        // server that keeps names she is still `Alice`, is told so, and
+        // `Alicia` is bound to nobody — only an operator's rename moves her.
+        let alice = Identity::generate().expect("generate");
+        let mut registry = registry_with(&alice);
+        let allowlist = Allowlist::open();
+
+        let (first, _) = join_in(&alice, "Alice", &mut registry, &allowlist, true);
+        assert_eq!(first.display_name(), Some("Alice"));
+
+        let (second, sent) = join_in(&alice, "Alicia", &mut registry, &allowlist, true);
+        assert_eq!(second.phase(), Phase::InWorld);
+        assert_eq!(second.display_name(), Some("Alice"));
+        assert_eq!(registry.name_holder("Alice"), Some(alice.uuid_as_root()));
+        assert_eq!(registry.name_holder("Alicia"), None);
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ServerMessage::Chat { from: None, text }
+                    if text.contains("`Alice`") && text.contains("`Alicia`")
+            )),
+            "Alice should be told the name she keeps, got {sent:?}"
+        );
+
+        // Back under her own name there is nothing to tell.
+        let (third, sent) = join_in(&alice, "Alice", &mut registry, &allowlist, true);
+        assert_eq!(third.display_name(), Some("Alice"));
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, ServerMessage::Chat { from: None, .. })),
+            "nothing to tell, got {sent:?}"
+        );
+    }
+
+    #[test]
+    fn without_sticky_names_a_new_name_on_a_rejoin_rebinds() {
+        // The default: a name is a claim the player changes by joining under
+        // another, which releases the old one (no hoarding).
+        let alice = Identity::generate().expect("generate");
+        let mut registry = registry_with(&alice);
+        let allowlist = Allowlist::open();
+
+        join_in(&alice, "Alice", &mut registry, &allowlist, false);
+        let (second, _) = join_in(&alice, "Alicia", &mut registry, &allowlist, false);
+        assert_eq!(second.display_name(), Some("Alicia"));
+        assert_eq!(registry.name_holder("Alice"), None);
+        assert_eq!(registry.name_holder("Alicia"), Some(alice.uuid_as_root()));
+    }
+
+    #[test]
+    fn sticky_names_leave_a_numbered_variant_to_the_variant_path() {
+        // A guest who was `player 2` asks for `player` again: still `player 2`,
+        // as without the switch, and the notice names the taker.
+        let host = Identity::generate().expect("generate");
+        let guest = Identity::generate().expect("generate");
+        let mut registry = IdentityRegistry::default();
+        registry.insert(KeySet::new(host.public_key(), None, 0));
+        registry.insert(KeySet::new(guest.public_key(), None, 0));
+        let allowlist = Allowlist::open();
+
+        join_in(&host, "player", &mut registry, &allowlist, true);
+        let (first, _) = join_in(&guest, "player", &mut registry, &allowlist, true);
+        assert_eq!(first.display_name(), Some("player 2"));
+        let (again, sent) = join_in(&guest, "player", &mut registry, &allowlist, true);
+        assert_eq!(again.display_name(), Some("player 2"));
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ServerMessage::Chat { from: None, text } if text.contains("somebody else's")
+            )),
+            "the variant's own notice, got {sent:?}"
         );
     }
 

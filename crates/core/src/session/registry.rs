@@ -377,7 +377,7 @@ impl KeyLookup for IdentityRegistry {
 
 /// Whether `candidate` is `name` followed by a space and a number — the
 /// shape [`IdentityRegistry::bind_name_or_next`] hands out.
-fn is_variant_of(candidate: &str, name: &str) -> bool {
+pub(super) fn is_variant_of(candidate: &str, name: &str) -> bool {
     candidate
         .strip_prefix(name)
         .and_then(|rest| rest.strip_prefix(' '))

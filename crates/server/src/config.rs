@@ -134,6 +134,14 @@ pub struct Config {
     #[serde(default)]
     pub allow_custom_skins: bool,
 
+    /// Whether a name sticks to the identity that first joined with it.
+    /// On, a player who joins under another name wears the one they have
+    /// here and is told so; only RCON `rename` changes it. Off by default:
+    /// a name is a claim a player may change by joining under another.
+    /// `sticky_names = true` to keep names.
+    #[serde(default)]
+    pub sticky_names: bool,
+
     /// How far players can see vertically, in chunks.
     #[serde(default = "Config::default_vertical_view_distance")]
     pub vertical_view_distance: u8,
@@ -265,6 +273,7 @@ impl Default for Config {
             enabled_mods: None,
             view_distance: Self::default_view_distance(),
             allow_custom_skins: false,
+            sticky_names: false,
             vertical_view_distance: Self::default_vertical_view_distance(),
             rcon: None,
         }

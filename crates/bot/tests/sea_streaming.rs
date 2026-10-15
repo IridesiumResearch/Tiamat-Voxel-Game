@@ -65,6 +65,7 @@ fn every_chunk_of_a_sea_arrives_after_its_own_water() {
         identity_path: None,
         max_players: 2,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance {
@@ -158,6 +159,7 @@ fn the_sea_is_drawn_at_the_horizon_and_not_as_a_hole_the_shape_of_it() {
         identity_path: None,
         max_players: 2,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

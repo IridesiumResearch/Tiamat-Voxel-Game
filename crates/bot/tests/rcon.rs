@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bot::Bot;
 use tiamat_core::identity::{Allowlist, Identity};
+use tiamat_core::proto::ServerMessage;
 use tiamat_server::{ServerHandle, Settings};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
@@ -14,6 +15,11 @@ use tokio::net::TcpStream;
 const TOKEN: &str = "a-sufficiently-long-test-token";
 
 fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
+    start_with(name, false)
+}
+
+/// [`start`], on a server that keeps names or not.
+fn start_with(name: &str, sticky_names: bool) -> (ServerHandle, std::net::SocketAddr) {
     let dir = std::env::temp_dir().join("tiamat-rcon-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -31,6 +37,7 @@ fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
         identity_path: None,
         max_players: 8,
         allow_custom_skins: false,
+        sticky_names,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: Some((rcon_addr, TOKEN.to_owned())),
@@ -307,6 +314,87 @@ fn rename_moves_a_name_and_frees_the_old_one() {
         bob.join("Alice")
             .await
             .expect("the released name should be free");
+
+        alice.disconnect().await;
+        bob.disconnect().await;
+    });
+
+    server.stop();
+}
+
+#[test]
+fn with_sticky_names_only_a_rename_changes_what_a_player_is_called() {
+    // `sticky_names = true`: a player who joins under a new name keeps the
+    // old one; an operator's rename is what moves it, and the name moved
+    // from is free for somebody else.
+    let (server, rcon_addr) = start_with("sticky-rename", true);
+    let addr = server.local_addr();
+    let fingerprint = server.cert_fingerprint();
+
+    block_on(async {
+        let mut admin = Admin::connect(rcon_addr).await;
+        admin.authenticate().await;
+
+        let identity = Identity::generate().expect("identity");
+        let seed = identity.seed();
+        let mut alice = Bot::connect(addr, identity, fingerprint)
+            .await
+            .expect("connect");
+        alice.join("Alice").await.expect("join");
+        alice.disconnect().await;
+
+        // Asking to be `Alicia` changes nothing.
+        let mut alice = Bot::connect(addr, Identity::from_seed(&seed), fingerprint)
+            .await
+            .expect("connect");
+        alice.join("Alicia").await.expect("rejoin");
+        let told = alice
+            .recv_until(|m| matches!(m, ServerMessage::Chat { from: None, .. }))
+            .await
+            .expect("told the name");
+        assert!(
+            matches!(&told, ServerMessage::Chat { text, .. } if text.contains("you are `Alice` here")),
+            "got {told:?}"
+        );
+
+        // An operator can.
+        let mut reply = String::new();
+        for _ in 0..100 {
+            reply = admin.send("rename Alice Alicia").await;
+            if !reply.contains("no player named") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(reply, "ok: Alice is now Alicia", "got `{reply}`");
+        alice.disconnect().await;
+
+        // Back asking for `Alice`: she is `Alicia` now, and `Alice` is Bob's
+        // for the taking.
+        let mut alice = Bot::connect(addr, Identity::from_seed(&seed), fingerprint)
+            .await
+            .expect("connect");
+        alice.join("Alice").await.expect("rejoin");
+        let told = alice
+            .recv_until(|m| matches!(m, ServerMessage::Chat { from: None, .. }))
+            .await
+            .expect("told the name");
+        assert!(
+            matches!(&told, ServerMessage::Chat { text, .. } if text.contains("you are `Alicia` here")),
+            "got {told:?}"
+        );
+        let bob_identity = Identity::generate().expect("identity");
+        let bob_uuid = bob_identity.uuid_as_root();
+        let mut bob = Bot::connect(addr, bob_identity, fingerprint)
+            .await
+            .expect("connect");
+        bob.join("Alice")
+            .await
+            .expect("the moved-from name is free");
+        {
+            let identities = server.shared().identities.lock().await;
+            assert_eq!(identities.name_holder("Alice"), Some(bob_uuid));
+        }
 
         alice.disconnect().await;
         bob.disconnect().await;

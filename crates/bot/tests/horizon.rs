@@ -49,6 +49,7 @@ fn start(name: &str, view: ViewDistance) -> ServerHandle {
         identity_path: None,
         max_players: 8,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: view,

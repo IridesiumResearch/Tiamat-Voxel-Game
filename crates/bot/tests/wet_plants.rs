@@ -94,6 +94,7 @@ fn a_plant_under_water_does_not_stand_in_a_bubble_of_air() {
         identity_path: None,
         max_players: 1,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

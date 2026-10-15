@@ -93,6 +93,7 @@ fn start_at(world: PathBuf, mods: PathBuf) -> ServerHandle {
         identity_path: None,
         max_players: 4,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

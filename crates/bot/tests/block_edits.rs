@@ -35,6 +35,7 @@ fn settings(dir: &std::path::Path) -> Settings {
         identity_path: None,
         max_players: 8,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: None,
@@ -61,6 +62,7 @@ fn reference_mods() -> PathBuf {
 fn settings_with_mods(dir: &std::path::Path) -> Settings {
     Settings {
         allow_custom_skins: false,
+        sticky_names: false,
         world_options: Vec::new(),
         mods_path: Some(reference_mods()),
         enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())

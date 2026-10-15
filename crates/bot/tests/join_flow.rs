@@ -49,6 +49,7 @@ fn settings(dir: &std::path::Path, allowlist: Allowlist) -> Settings {
         identity_path: None,
         max_players: 8,
         allow_custom_skins: false,
+        sticky_names: false,
         allowlist,
         operators: Vec::new(),
         rcon: None,
@@ -64,6 +65,15 @@ fn settings(dir: &std::path::Path, allowlist: Allowlist) -> Settings {
 fn start(name: &str) -> (ServerHandle, PathBuf) {
     let dir = world_dir(name);
     let handle = ServerHandle::start(&settings(&dir, Allowlist::open())).expect("start server");
+    (handle, dir)
+}
+
+/// A server that keeps names (`sticky_names = true`).
+fn start_sticky(name: &str) -> (ServerHandle, PathBuf) {
+    let dir = world_dir(name);
+    let mut settings = settings(&dir, Allowlist::open());
+    settings.sticky_names = true;
+    let handle = ServerHandle::start(&settings).expect("start server");
     (handle, dir)
 }
 
@@ -203,6 +213,43 @@ fn a_first_join_registers_a_new_identity() {
             "the identity should be registered"
         );
         assert_eq!(identities.name_holder("Newcomer"), Some(uuid));
+    });
+
+    server.stop();
+}
+
+#[test]
+fn with_sticky_names_a_rejoin_under_another_name_keeps_the_first() {
+    // `sticky_names = true`, asked by the designer for players who are
+    // somebody new every join: Alice joined as `Alice`, and coming back as
+    // `Alicia` she is still `Alice`, is told so, and `Alicia` is nobody's.
+    let (server, _dir) = start_sticky("name-sticky");
+
+    block_on(async {
+        let identity = Identity::generate().expect("identity");
+        let uuid = identity.uuid_as_root();
+        let seed = identity.seed();
+        let mut first = connect(&server, identity).await;
+        first.join("Alice").await.expect("the first join");
+        first.disconnect().await;
+
+        let mut again = connect(&server, Identity::from_seed(&seed)).await;
+        again.join("Alicia").await.expect("the rejoin");
+        let told = again
+            .recv_until(|m| matches!(m, ServerMessage::Chat { from: None, .. }))
+            .await
+            .expect("told the name");
+        assert!(
+            matches!(&told, ServerMessage::Chat { text, .. }
+                if text.contains("`Alice`") && text.contains("`Alicia`")),
+            "Alice should be told the name she keeps, got {told:?}"
+        );
+        {
+            let identities = server.shared().identities.lock().await;
+            assert_eq!(identities.name_holder("Alice"), Some(uuid));
+            assert_eq!(identities.name_holder("Alicia"), None);
+        }
+        again.disconnect().await;
     });
 
     server.stop();

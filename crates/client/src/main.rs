@@ -593,6 +593,10 @@ fn start_local_world(
             // baffling refusal for one they can.
             max_players: if lan { 8 } else { 1 },
             allow_custom_skins: true,
+            // A LAN guest may well pick a better name than `player 2` on
+            // their second visit, and this host has no admin port to rename
+            // anyone from, so names do not stick here.
+            sticky_names: false,
             allowlist: tiamat_core::identity::Allowlist::open(),
             // **Your own world, your own powers.** A player hosting a world for
             // themselves is its operator, which is what makes flight available
