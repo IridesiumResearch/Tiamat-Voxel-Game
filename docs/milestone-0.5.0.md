@@ -46,7 +46,7 @@ is the mod agents in their own repositories.
 |---|---|---|
 | T1 The badge queue is published once per tick, so a network pass never reads it mid-tick (`show_over` has flaked four times on macOS; the race is real) — **landed 2a7c1db7** | engine | small |
 | T2 `placement::chiselled_spares` is understood and fixed, not retried (flaked on Windows twice) — not reproduced on one starved core (10 of 10 passed); the stall now reports every notice and the last messages, so the next CI failure names its cause | engine | small |
-| T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts — **landed 2026-10-13** (`.github/workflows/nightly.yml`: the fen soak over the mods at `bundle.toml`'s commits via `scripts/fetch-mods.sh`, the swarm at twenty bots and at E1's fifty for five minutes, every table an artefact); the first nightly after it is the proof — **run 77, 2026-10-15:** the fifty-bot soak passed on a shared runner, the fen soak flew but wrote its table under `crates/bot/target` (a relative `FEN_OUT`; fixed de64985b), and the 200-mob entity swarm failed its zero-tolerance gate once while passing locally at head and at bf00d4ac with the same numbers — a runner stall, watched on run 78 | engine | small |
+| T3 A nightly CI workflow runs the fen soak and the swarm load in release on a real runner and keeps the tick tables as artefacts — **landed 2026-10-13** (`.github/workflows/nightly.yml`: the fen soak over the mods at `bundle.toml`'s commits via `scripts/fetch-mods.sh`, the swarm at twenty bots and at E1's fifty for five minutes, every table an artefact); the first nightly after it is the proof — **run 77, 2026-10-15:** the fifty-bot soak passed on a shared runner, the fen soak flew but wrote its table under `crates/bot/target` (a relative `FEN_OUT`; fixed de64985b), and the 200-mob entity swarm failed its zero-tolerance gate once while passing locally at head and at bf00d4ac with the same numbers — a runner stall, and **run 78 (2026-10-16)** passed it, so a runner stall it was. Run 78 failed the fifty-bot soak instead, exit 101 with no table (the path fix was not yet pushed): reproduced here as the memory gate at 96% of its bound, and traced to the harness — a bot keeps every message it is sent, some 130 a second beside a swarm, so fifty bots for five minutes put a gigabyte into the test process while the server itself went from 18 to 50 MiB and flattened (two-process measurement). The test now runs the bots as a child `bot swarm` process and the gate measures the server; the first nightly after it is the proof | engine | small |
 | T4 The plan-stamp stall: a plan holding a partial cell of a `whole` material must not wait for ever (`plans.rs`, found landing W35) — **landed fa5ddd51** | engine | small |
 | T5 The unsigned mod-side commits on main (three by 2026-10-12: be39490e, 5787eb7d, 14810aa9) are the designer's call: rewrite with sign-off or document the exception once — **documented 2026-10-15**, the designer's call (`CONTRIBUTING.md`, "One exception, recorded here once") | designer | tiny |
 | T6 Invisible walls: act on the first `client.log` that shows one; the reload, the held edits and both logs landed in 0.4.1 | engine, as reports come | unknown |
@@ -124,6 +124,17 @@ compatibility window (the exact-version handshake stays).
 5. V1–V3, then the tag.
 
 This file is updated as items land, with the commit beside each.
+
+## Where it stands, 2026-10-16
+
+The three commits held for the push landed (N1, T5, the nightly paths), after
+the host's GitHub CLI token was given the `workflow` scope. Nightly run 78,
+still on the commit before them, passed the entity swarm — run 77's red was
+the runner — and failed the fifty-bot soak on its memory gate, which turned
+out to measure the bot harness rather than the server (row T3); the swarm
+test now keeps the bots in a child process. E8 moved: every default mod
+repository carries the conformance workflow, World's adoption commit still
+unpushed. The rest is as on the 15th.
 
 ## Where it stands, 2026-10-15 (morning)
 

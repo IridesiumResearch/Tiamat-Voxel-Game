@@ -8,6 +8,11 @@
 //! *stable*: no tick blowing the budget by an order of magnitude, no memory
 //! climbing without bound, and every bot finishing.
 //!
+//! The server runs in this process, where its tick samples and its resident
+//! size can be read; the bots run in a child process, `bot swarm`, so that
+//! what is measured is the server and not the harness (see the comment at
+//! the spawn for the night that taught this).
+//!
 //! # Why this is `#[ignore]` by default
 //!
 //! It takes a minute of wall clock, which does not belong in the `cargo test`
@@ -27,8 +32,10 @@
 //! it as an artefact.
 
 use std::fmt::Write as _;
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tiamat_core::identity::Allowlist;
 use tiamat_core::interest::ViewDistance;
@@ -114,42 +121,74 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     let addr = server.local_addr();
     let control = server.control().clone();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("runtime");
-
     // Let startup settle, then take the baseline. Measuring from process start
     // would count the world opening and the first chunk generation as "growth".
     std::thread::sleep(Duration::from_secs(3));
     let _ = control.take_tick_samples();
     let rss_after_warmup = rss_kib();
 
-    let results = runtime.block_on(async {
-        let mut handles = Vec::new();
-        for index in 0..bots {
-            handles.push(tokio::spawn(bot::wander(
-                addr,
-                format!("load{index}"),
-                index,
-                Duration::from_secs(seconds),
-                u64::from(index).wrapping_mul(0x9E37_79B9) | 1,
-            )));
-        }
-        let mut healthy = 0;
-        let mut failures = Vec::new();
-        for handle in handles {
-            match handle.await {
-                Ok(Ok(_)) => healthy += 1,
-                Ok(Err(err)) => failures.push(err.to_string()),
-                Err(err) => failures.push(format!("task panicked: {err}")),
+    // **The bots run in a child process, so that this process is the server.**
+    //
+    // They ran here, as tasks on a runtime, and the memory gate below measured
+    // them along with the server. A bot keeps every message it is sent —
+    // `Bot::received` is how a scenario asserts about the wire — and beside a
+    // swarm that is some 130 messages a second, so fifty bots for five minutes
+    // put a gigabyte into the process under test. Measured on 2026-10-16 with
+    // the two ends split: the server went from 18 to 50 MiB and flattened; the
+    // bots' process climbed in a straight line to 1.08 GiB. The bound below,
+    // written for twenty bots and a minute, failed nightly 78 on the runner
+    // and sat at 96% of itself here, both saying nothing about the server.
+    // Out of process, the gate measures what it claims to.
+    let swarm_dir = std::env::temp_dir().join("tiamat-swarm-load-bots");
+    let _ = std::fs::remove_dir_all(&swarm_dir);
+    std::fs::create_dir_all(&swarm_dir).expect("swarm scratch dir");
+    let stdout_path = swarm_dir.join("stdout.txt");
+    let stderr_path = swarm_dir.join("stderr.txt");
+    // Files rather than pipes: fifty bots' logging could fill a pipe nobody is
+    // draining and stall the child, and a swarm that hangs should be the
+    // deadline's finding, not a deadlock's.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bot"))
+        .arg("swarm")
+        .arg(bots.to_string())
+        .arg("--server")
+        .arg(addr.to_string())
+        .arg("--duration")
+        .arg(seconds.to_string())
+        .arg("--seed")
+        .arg("1")
+        .stdin(Stdio::null())
+        .stdout(File::create(&stdout_path).expect("swarm stdout"))
+        .stderr(File::create(&stderr_path).expect("swarm stderr"))
+        .spawn()
+        .expect("the bot binary, which cargo builds for this test");
+    let grace = 180;
+    let deadline = Instant::now() + Duration::from_secs(seconds + grace);
+    let status = loop {
+        match child.try_wait().expect("wait on the swarm") {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the swarm did not finish within {grace} s of its {seconds} s run");
             }
+            None => std::thread::sleep(Duration::from_millis(500)),
         }
-        (healthy, failures)
-    });
-
-    let (healthy, failures) = results;
+    };
+    let swarm_stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    let swarm_stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    // The swarm's own report: `bots healthy: N/M` on stdout, and one
+    // `bot I failed: …` line on stderr per bot that did not finish.
+    let healthy: u32 = swarm_stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("bots healthy: "))
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0);
+    let failures: Vec<String> = swarm_stderr
+        .lines()
+        .filter(|line| line.contains("failed"))
+        .map(|line| line.trim().to_owned())
+        .collect();
     let samples = control.take_tick_samples();
     let report = bot::bench::TickReport::from_samples(
         &samples,
@@ -176,6 +215,12 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
             "  RSS: {before} KiB after warmup, {after} KiB after load"
         );
     }
+    // The swarm's side of it, client-observed round trips included, so the
+    // artefact carries both ends.
+    let _ = writeln!(summary, "  the swarm exited with {status}:");
+    for line in swarm_stdout.lines() {
+        let _ = writeln!(summary, "    {}", line.trim_end());
+    }
     println!("{summary}");
     // Written before the assertions, so a failed gate still leaves the table
     // that says why.
@@ -185,6 +230,10 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
         std::fs::write(out.join("table.txt"), &summary).expect("table");
     }
 
+    assert!(
+        status.success(),
+        "the swarm exited with {status}; failures: {failures:?}"
+    );
     assert_eq!(
         healthy, bots,
         "every bot should finish; failures: {failures:?}"
@@ -241,9 +290,12 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     // uptime is one that dies overnight, and no throughput number matters then.
     match (rss_after_warmup, rss_after_load) {
         (Some(before), Some(after)) => {
-            // Generous: twenty bots' worth of chunk cache and connection state
-            // is real growth. What this catches is unbounded growth, not
-            // working set.
+            // Generous: fifty players' worth of chunks, sessions and dirty
+            // state is real growth. What this catches is unbounded growth, not
+            // working set. The bound predates the bots leaving this process;
+            // the server alone measured 18 → 50 MiB over fifty bots and five
+            // minutes (2026-10-16), so it can tighten once the nightly's
+            // tables have shown that number a few times.
             let limit = before.saturating_mul(3).max(before + 512 * 1024);
             assert!(
                 after <= limit,
