@@ -24,7 +24,7 @@ Every one is checked before the tag, and the release notes say which held.
 
 | # | criterion | proof |
 |---|---|---|
-| E1 | The swarm load with 50 moving players runs under the 50 ms tick on the reference machine, no tick dropped over a five-minute soak | `swarm_load` with movement, run in the nightly CI soak |
+| E1 | The swarm load with 50 moving players runs under the 50 ms tick on the reference machine, no tick dropped over a five-minute soak | `swarm_load` with movement, run in the nightly CI soak. **Reference machine (the 7800X3D, release, three five-minute runs of fifty):** 2026-10-16 with the bots in-process, 6,271 ticks, mean 2.0 ms (3.9%), p99 3.6 ms, max 16.3 ms, 0 over budget, 0 dropped; 2026-10-16 with the bots in a child process, 6,294 ticks, mean 2.6 ms, p99 25.1 ms, max 129 ms, 3 over budget, 0 dropped — the 129 ms was one SQLite summary save that crossed the WAL's auto-checkpoint on the tick thread, the first item of the optimisation survey; 2026-10-19 pinned to four cores after the harness fix, mean 1.5 ms, p99 3.8 ms, max 16.1 ms, 0 over, 0 dropped, 50/50 bots. No tick dropped in any run. The nightly's proof is the first green fifty-bot soak after ad981ac2 |
 | E2 | A flying session at full detail on the designer's card shows no frame over 33 ms once the world is streamed, and the `VRAM` line stays under the bound in `docs/performance-targets.md` | overlay readings, recorded on the sheet |
 | E3 | CI is green on all three platforms for ten consecutive runs of main without a re-run | the Actions history |
 | E4 | A fresh Windows machine and a fresh Mac run the downloaded archive with no SmartScreen warning and no quarantine step | installed from the public release by a human |

@@ -28,6 +28,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # The gate. `bot bench` exits non-zero if p99 is more than 2x the
       # committed baseline, and refuses outright if the workload does not match
@@ -54,6 +58,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # Release, because a debug build measures rustc's inlining decisions
       # rather than the engine. `--ignored` because the test opts out of the
@@ -92,6 +100,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # The performance target's player count (docs/performance-targets.md:
       # fifty players, a 50 ms tick) at the swarm's own workload — walking,
@@ -123,6 +135,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # The default mods are separate repositories, and a runner has none
       # beside this checkout. Each is taken at the commit bundle.toml pins —
@@ -163,6 +179,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # Task 10's stated load test. Release for the same reason the swarm is:
       # a debug build measures rustc's inlining decisions rather than the
@@ -177,6 +197,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # Task 12's stated load test. Two hundred scripted mobs in one area, each
       # running a Lua callback with its own instruction budget every tick, all
@@ -191,6 +215,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # A mod generating terrain from a sampled density field, which is several
       # times what the reference world's flat fill costs. The engine may not
@@ -208,6 +236,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Saved even when the soak fails: a red night that threw its cache
+          # away built cold the next night too (runs 79–81, ~7 min a night).
+          cache-on-failure: true
 
       # `cargo bench --workspace` builds the client, which links the audio
       # backend, which needs ALSA's headers on Linux. Nothing here plays a
