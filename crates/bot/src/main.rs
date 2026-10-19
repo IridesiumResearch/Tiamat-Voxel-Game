@@ -244,23 +244,37 @@ fn swarm_mode(
     let started = std::time::Instant::now();
 
     let results: Vec<Result<SwarmStats, String>> = runtime.block_on(async {
+        // **A bot that outlives its run is a failure, not a wait.** `wander`
+        // checks its deadline between rounds and each of a round's awaits is
+        // bounded, so a healthy bot overshoots by seconds — a round's worth of
+        // waits at the most. One that does not come back, whatever stopped it,
+        // used to hold the whole swarm open: nightlies 79–81 saw the soak's
+        // own deadline kill this process with nothing reported. Now it is one
+        // bot's failure, named, and the swarm still answers.
+        let grace = std::time::Duration::from_secs(90);
         let mut handles = Vec::new();
         for index in 0..count {
             let name = format!("swarm{index}");
-            handles.push(tokio::spawn(bot::wander(
-                server,
-                name,
-                index,
-                duration,
-                seed.wrapping_add(u64::from(index))
-                    .wrapping_mul(0x9E37_79B9),
+            handles.push(tokio::spawn(tokio::time::timeout(
+                duration + grace,
+                bot::wander(
+                    server,
+                    name,
+                    index,
+                    duration,
+                    seed.wrapping_add(u64::from(index))
+                        .wrapping_mul(0x9E37_79B9),
+                ),
             )));
         }
         let mut results = Vec::new();
         for handle in handles {
             results.push(match handle.await {
-                Ok(Ok(stats)) => Ok(stats),
-                Ok(Err(err)) => Err(err.to_string()),
+                Ok(Ok(Ok(stats))) => Ok(stats),
+                Ok(Ok(Err(err))) => Err(err.to_string()),
+                Ok(Err(_)) => Err(format!(
+                    "did not finish within {grace:?} of its {duration:?} run"
+                )),
                 Err(err) => Err(format!("bot task panicked: {err}")),
             });
         }

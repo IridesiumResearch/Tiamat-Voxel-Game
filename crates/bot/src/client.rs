@@ -359,6 +359,22 @@ impl Bot {
             .unwrap_or_default()
     }
 
+    /// The history, borrowed under its lock rather than copied.
+    ///
+    /// For the readers this type calls from its own wait loops: a dig polls
+    /// [`Self::cells_broken`] and [`Self::saw_partial`] every few tens of
+    /// milliseconds, and each used to clone the whole history to answer. Fifty
+    /// bots five minutes into a soak were copying tens of thousands of messages
+    /// apiece per poll, and a four-core runner starved on it (nightlies 79–81).
+    /// The guard lives for one expression or one loop, and nothing holding it
+    /// awaits or re-enters the bot, because the reader task takes the same lock
+    /// to append. [`Self::received`] stays the snapshot a scenario keeps.
+    fn history_lock(&self) -> std::sync::MutexGuard<'_, Vec<ServerMessage>> {
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Sends one message.
     ///
     /// Drains anything already waiting first. A bot that only ever wrote would
@@ -447,7 +463,7 @@ impl Bot {
             if left.is_zero() {
                 return Err(BotError::TimedOut {
                     waited: PATIENCE,
-                    received: self.received().len(),
+                    received: self.history_lock().len(),
                 });
             }
             let Ok(message) = tokio::time::timeout(left, self.recv()).await else {
@@ -591,10 +607,12 @@ impl Bot {
     /// `HelloAck`; `None` before one arrived.
     #[must_use]
     pub fn custom_skins(&self) -> Option<bool> {
-        self.received().iter().find_map(|message| match message {
-            ServerMessage::HelloAck { custom_skins, .. } => Some(*custom_skins),
-            _ => None,
-        })
+        self.history_lock()
+            .iter()
+            .find_map(|message| match message {
+                ServerMessage::HelloAck { custom_skins, .. } => Some(*custom_skins),
+                _ => None,
+            })
     }
 
     /// Sends a retired `BlockDelta`, which the server now refuses.
@@ -1324,7 +1342,7 @@ impl Bot {
     #[must_use]
     pub fn cells_broken(&self, pos: tiamat_core::BlockPos) -> usize {
         let mut gone = std::collections::BTreeSet::new();
-        for message in self.received() {
+        for message in self.history_lock().iter() {
             let ServerMessage::BlockDelta { edit, .. } = message else {
                 continue;
             };
@@ -1332,8 +1350,8 @@ impl Bot {
                 tiamat_core::proto::Edit::Block {
                     pos: got,
                     material: got_material,
-                } if got == pos => {
-                    if got_material == tiamat_core::MaterialId::AIR.0 {
+                } if *got == pos => {
+                    if *got_material == tiamat_core::MaterialId::AIR.0 {
                         return tiamat_core::block::SUBNODES_PER_BLOCK;
                     }
                     // Filled back in. Anything counted before it is stale.
@@ -1343,7 +1361,7 @@ impl Bot {
                     pos: got,
                     material: got_material,
                 } if got.block() == pos => {
-                    if got_material == tiamat_core::MaterialId::AIR.0 {
+                    if *got_material == tiamat_core::MaterialId::AIR.0 {
                         gone.insert((got.x, got.y, got.z));
                     } else {
                         gone.remove(&(got.x, got.y, got.z));
@@ -1696,7 +1714,7 @@ impl Bot {
         let chunk = pos.chunk();
         // The LAST one wins: light is re-sent whenever it changes, and an
         // earlier payload describes a world that has moved on.
-        self.received()
+        self.history_lock()
             .iter()
             .rev()
             .find_map(|message| match message {
@@ -1722,7 +1740,7 @@ impl Bot {
     pub fn entities(&self) -> std::collections::BTreeMap<u64, tiamat_core::proto::EntityDef> {
         let mut live: std::collections::BTreeMap<u64, tiamat_core::proto::EntityDef> =
             std::collections::BTreeMap::new();
-        for message in self.received().iter() {
+        for message in self.history_lock().iter() {
             match message {
                 ServerMessage::EntitySpawn { entities } => {
                     for entity in entities {
@@ -1818,7 +1836,7 @@ impl Bot {
         &self,
         pos: tiamat_core::ChunkPos,
     ) -> Option<tiamat_core::fluid::FluidLayer> {
-        self.received()
+        self.history_lock()
             .iter()
             .rev()
             .find_map(|message| match message {
@@ -1880,7 +1898,7 @@ impl Bot {
         // question cannot tell a placement from the terrain it was aimed at.
         // A test about a multi-cell placement reads the `Partial` itself —
         // `placing_a_cut_stack_puts_that_cut_in_the_world` is the example.
-        self.received().iter().any(|message| {
+        self.history_lock().iter().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
@@ -2174,10 +2192,10 @@ impl Bot {
     /// What the server last said is on this player's cursor.
     #[must_use]
     pub fn held(&self) -> Option<tiamat_core::proto::StackDef> {
-        self.received()
-            .into_iter()
+        self.history_lock()
+            .iter()
             .filter_map(|message| match message {
-                ServerMessage::ViewUpdate { held, .. } => Some(held),
+                ServerMessage::ViewUpdate { held, .. } => Some(held.clone()),
                 _ => None,
             })
             .next_back()
@@ -2535,7 +2553,7 @@ impl Bot {
     /// Unlike [`Bot::saw_partial`] this does not care how many cells were
     /// filled — for a caller that only needs to know the placement happened.
     fn saw_any_partial(&self, pos: tiamat_core::BlockPos, material: u16) -> bool {
-        self.received().iter().any(|message| {
+        self.history_lock().iter().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
@@ -2552,7 +2570,7 @@ impl Bot {
 
     /// Whether a matching partial placement has been seen.
     fn saw_partial(&self, pos: tiamat_core::BlockPos, material: u16, cells: u32) -> bool {
-        self.received().iter().rev().any(|message| {
+        self.history_lock().iter().rev().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
@@ -2577,7 +2595,7 @@ impl Bot {
     #[must_use]
     /// The last time of day the server sent, `0.0..1.0`, if any.
     pub fn time_of_day(&self) -> Option<f32> {
-        self.received()
+        self.history_lock()
             .iter()
             .rev()
             .find_map(|message| match message {
@@ -2587,7 +2605,7 @@ impl Bot {
     }
 
     pub fn notices(&self) -> Vec<String> {
-        self.received()
+        self.history_lock()
             .iter()
             .filter_map(|message| match message {
                 ServerMessage::Chat { from: None, text } => Some(text.clone()),
@@ -2664,7 +2682,7 @@ impl Bot {
         if material == tiamat_core::MaterialId::AIR.0 && self.block_is_empty(pos) {
             return true;
         }
-        self.received().iter().rev().any(|message| {
+        self.history_lock().iter().rev().any(|message| {
             matches!(
                 message,
                 ServerMessage::BlockDelta {
@@ -2682,7 +2700,7 @@ impl Bot {
     /// them into blocks and spare nodes.
     #[must_use]
     pub fn inventory(&self) -> Vec<tiamat_core::proto::StackDef> {
-        self.received()
+        self.history_lock()
             .iter()
             .rev()
             .find_map(|message| match message {

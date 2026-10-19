@@ -139,11 +139,14 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     // written for twenty bots and a minute, failed nightly 78 on the runner
     // and sat at 96% of itself here, both saying nothing about the server.
     // Out of process, the gate measures what it claims to.
-    let swarm_dir = std::env::temp_dir().join("tiamat-swarm-load-bots");
-    let _ = std::fs::remove_dir_all(&swarm_dir);
+    // The child's own output goes beside the table when a nightly keeps one,
+    // so a swarm that fails is read from the artefact rather than guessed at.
+    let swarm_dir = std::env::var_os("SWARM_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("tiamat-swarm-load-bots"));
     std::fs::create_dir_all(&swarm_dir).expect("swarm scratch dir");
-    let stdout_path = swarm_dir.join("stdout.txt");
-    let stderr_path = swarm_dir.join("stderr.txt");
+    let stdout_path = swarm_dir.join("swarm-stdout.txt");
+    let stderr_path = swarm_dir.join("swarm-stderr.txt");
     // Files rather than pipes: fifty bots' logging could fill a pipe nobody is
     // draining and stall the child, and a swarm that hangs should be the
     // deadline's finding, not a deadlock's.
@@ -169,6 +172,36 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                // What there is to say goes into the table first, so the
+                // artefact explains the red: the ticks so far, and the child's
+                // output as it stood. Nightlies 79–81 reached this arm and
+                // left nothing behind.
+                let samples = control.take_tick_samples();
+                let report = bot::bench::TickReport::from_samples(
+                    &samples,
+                    control.over_budget_ticks(),
+                    control.dropped(),
+                    bots,
+                    seconds,
+                );
+                let mut summary = report.to_table();
+                let _ = writeln!(
+                    summary,
+                    "  the swarm did not finish within {grace} s of its {seconds} s run and was killed"
+                );
+                let _ = writeln!(summary, "  its stdout so far:");
+                for line in std::fs::read_to_string(&stdout_path)
+                    .unwrap_or_default()
+                    .lines()
+                {
+                    let _ = writeln!(summary, "    {}", line.trim_end());
+                }
+                println!("{summary}");
+                if let Some(out) = std::env::var_os("SWARM_OUT") {
+                    let out = PathBuf::from(out);
+                    let _ = std::fs::create_dir_all(&out);
+                    let _ = std::fs::write(out.join("table.txt"), &summary);
+                }
                 panic!("the swarm did not finish within {grace} s of its {seconds} s run");
             }
             None => std::thread::sleep(Duration::from_millis(500)),
