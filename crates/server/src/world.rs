@@ -678,6 +678,9 @@ pub struct World {
     /// methods and the world is only ever on one thread at a time — it moves
     /// between the tick and a mod's lease, and is never shared.
     sql: std::cell::RefCell<crate::sqlclock::Log>,
+    /// The thread folding the write-ahead log back, off the tick; `None` for
+    /// an in-memory world. See `tiamat_core::persist::checkpoint`.
+    checkpointer: Option<tiamat_core::persist::checkpoint::Checkpointer>,
 }
 
 impl World {
@@ -685,7 +688,8 @@ impl World {
     ///
     /// # Errors
     ///
-    /// [`WorldError`] if the seed cannot be read or written.
+    /// [`WorldError`] if the seed cannot be read or written, or the checkpoint
+    /// thread cannot start.
     pub fn open(db: WorldDb, new_seed: u64) -> Result<Self, WorldError> {
         // Read first. A world's seed is fixed at creation: re-rolling it on a
         // later start would generate different terrain beyond what has already
@@ -697,6 +701,9 @@ impl World {
                 new_seed
             }
         };
+        // Started beside the world, stopped before it closes: the tick never
+        // checkpoints, and the one at close has the file to itself.
+        let checkpointer = db.checkpointer(tiamat_core::persist::checkpoint::INTERVAL)?;
         Ok(Self {
             db,
             seed,
@@ -706,6 +713,7 @@ impl World {
             served: 0,
             fluids: tiamat_core::fluid::Fluids::new(),
             sql: std::cell::RefCell::new(crate::sqlclock::Log::default()),
+            checkpointer,
         })
     }
 
@@ -1960,6 +1968,9 @@ impl World {
     /// [`WorldError`] if the final write fails.
     pub fn close(mut self) -> Result<(), WorldError> {
         self.save_dirty()?;
+        if let Some(checkpointer) = self.checkpointer.take() {
+            checkpointer.stop();
+        }
         self.db.close()
     }
 }

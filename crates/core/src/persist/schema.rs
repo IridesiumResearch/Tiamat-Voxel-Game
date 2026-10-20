@@ -277,17 +277,24 @@ CREATE INDEX IF NOT EXISTS player_keys_by_uuid
 ///
 /// # WAL checkpoint policy
 ///
-/// An explicit flush, [`WorldDb::flush`], runs a **passive** checkpoint.
-/// Passive never blocks readers and gives up rather than waiting, which is
-/// correct for a periodic flush — if it cannot checkpoint now it will succeed
-/// on the next one.
+/// **The automatic checkpoint is off** (`wal_autocheckpoint = 0`). Its default
+/// of 1,000 pages ran inside whichever commit crossed that line, on the thread
+/// that made the commit — for a world, the tick — and cost it 127–131 ms at a
+/// time (the reference machine on 2026-10-16, nightly run 82 on 2026-10-20),
+/// against ticks otherwise under 7 ms. [`super::checkpoint::Checkpointer`]
+/// folds the log back instead: a passive checkpoint every few seconds from a
+/// connection of its own, on a thread of its own, which the world's owner
+/// starts beside the world and stops before closing it.
 ///
-/// **Nothing flushes during play, though.** `flush` is reached only from
-/// [`WorldDb::close`], so mid-session the WAL is folded back by `SQLite`'s own
-/// automatic checkpoint: `wal_autocheckpoint` is not set here, so its default
-/// of 1,000 pages, run inside whichever commit crosses that line and on the
-/// thread that made the commit — for a world, the tick. The passive checkpoint
-/// at close is the only one the engine asks for.
+/// An explicit flush, [`WorldDb::flush`], runs a **passive** checkpoint too.
+/// Passive never blocks readers and gives up rather than waiting, which is
+/// correct for a flush — if it cannot checkpoint now it will succeed on the
+/// next one. `flush` is reached from [`WorldDb::close`], after the thread has
+/// been stopped, so the closing checkpoint is the only thing on the file.
+///
+/// `journal_size_limit` trims the log file back to 32 MiB whenever a
+/// checkpoint has emptied it, since without the automatic checkpoint the file
+/// is only ever reused, never shrunk, between passes.
 ///
 /// Task 16's `save-freeze` depends on this: it needs a moment where the WAL is
 /// known to be folded into the main database so the file can be copied. It gets
@@ -306,6 +313,9 @@ pub fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Off: the checkpoint thread folds the log back. See the policy above.
+    conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    conn.pragma_update(None, "journal_size_limit", 32 * 1024 * 1024)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }

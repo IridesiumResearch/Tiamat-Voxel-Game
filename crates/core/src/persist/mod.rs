@@ -18,6 +18,7 @@
 //! # Layout
 //!
 //! - [`schema`] — tables, pragmas, and the WAL checkpoint policy
+//! - [`checkpoint`] — the thread that folds the WAL back, off the tick
 //! - [`idmap`] — string ⇄ world numeric material ids, and mod-churn survival
 //! - [`codec`] — chunk blob encoding, `postcard` + `zstd` behind a version byte
 //! - [`migrate`] — the v→v+1 blob migration chain
@@ -30,6 +31,7 @@
 //! and every structural invariant is re-checked on load rather than assumed —
 //! see [`crate::chunk::CorruptChunk`].
 
+pub mod checkpoint;
 pub mod codec;
 pub mod containers;
 mod cutcells;
@@ -168,6 +170,10 @@ pub enum WorldError {
     /// A SQL or connection failure.
     #[error("world database error")]
     Sql(#[from] rusqlite::Error),
+
+    /// The checkpoint thread could not be started.
+    #[error("the checkpoint thread could not start")]
+    Thread(#[source] std::io::Error),
 
     /// A chunk blob could not be encoded or decoded.
     #[error("chunk at ({}, {}, {}) in domain `{domain}`", pos.x, pos.y, pos.z)]
@@ -2480,6 +2486,26 @@ impl WorldDb {
         let mut wal = self.path.clone().into_os_string();
         wal.push("-wal");
         std::fs::metadata(wal).ok().map(|meta| meta.len())
+    }
+
+    /// Starts the thread that folds this world's log back every `interval`.
+    ///
+    /// `None` for an in-memory world, which has no log to fold. The thread
+    /// has a connection of its own; stop it ([`checkpoint::Checkpointer::stop`])
+    /// before [`Self::close`], so the closing flush is the only thing on the
+    /// file. See [`checkpoint`] for the policy and the measurements behind it.
+    ///
+    /// # Errors
+    ///
+    /// As [`checkpoint::Checkpointer::spawn`].
+    pub fn checkpointer(
+        &self,
+        interval: std::time::Duration,
+    ) -> Result<Option<checkpoint::Checkpointer>, WorldError> {
+        if self.path.as_os_str() == ":memory:" {
+            return Ok(None);
+        }
+        checkpoint::Checkpointer::spawn(&self.path, interval).map(Some)
     }
 
     /// Flushes pending work and folds the WAL back into the database.
