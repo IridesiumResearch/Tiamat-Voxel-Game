@@ -160,3 +160,24 @@ beside it, which the client always tolerated. The determinism argument is
 in the module's documentation: the thread runs the same passes over the
 same blocks in the same order, and `a_snapshot_lights_a_chunk_exactly_as_the_world_does`
 holds it to that.
+
+## Addendum, 2026-10-20: the WAL checkpoint off the tick (milestone 0.5.0, E1)
+
+Fifty bots for five minutes, release, the reference machine, before and
+after `persist::checkpoint` (84e1a4be):
+
+| | ticks | mean | p99 | max | over budget | the worst tick was |
+|---|---|---|---|---|---|---|
+| before, 2026-10-16 | 6,294 | 2.6 ms | 25.1 ms | 129 ms | 3 | one SQLite summary save, WAL 4.1 MiB |
+| before, the runner (nightly 82) | 6,382 | 2.5 ms | 6.2 ms | 136 ms | 4 | one SQLite chunk-save batch, WAL 3.9 MiB |
+| after | 6372 | 1.6 ms | 3.2 ms | 6.4 ms | 0 | nothing named |
+
+Every tick over budget in those soaks was `SQLite`'s automatic checkpoint,
+which ran inside whichever commit crossed a thousand pages — on the tick.
+It is off now on every connection the world opens; a thread named
+`checkpoint`, on a connection of its own, folds the log back passively
+every five seconds, and the server's `World` starts it at open and stops
+it before the closing flush. The tick still records the WAL's size beside
+any slow call, so a regression here would name itself. The next named cost
+in the state above, the fluid hooks' registry walk, is the survey's second
+item.
