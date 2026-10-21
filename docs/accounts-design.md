@@ -3,15 +3,16 @@
 
 # Accounts — a name registry at tiamatengine.com
 
-*Draft 1, 2026-10-21. The design the designer asked for on 2026-10-21, to
-ship with 0.5.0 if it can. It is the second of the two answers laid out on
+*Draft 2, 2026-10-21: draft 1 with the designer's ten decisions folded in
+(§11, the same day). The design the designer asked for, to ship with 0.5.0
+if it can. It is the second of the two answers laid out on
 2026-10-14 to "players keep changing names"; the first, `sticky_names`,
 landed as N1 and stays. Everything here is checked against the engine as it
 stands: `crates/core/src/identity` (keys, key sets, `AuthProvider`),
 `crates/core/src/session` (how a join binds a name), the protocol's `Hello`,
 and `docs/distribution.md` §2 (how the update host's key is pinned and
 rotated). Where the text and the code disagree, the code wins and the
-disagreement is fixed here. §11 is what the designer decides.*
+disagreement is fixed here. §11 records what the designer decided.*
 
 ---
 
@@ -53,7 +54,8 @@ not a person *accountable*. Bans still key on UUID and IP.
 ```
 NameCertificate (postcard, then signed; ≤ 256 bytes on the wire)
   version        u8          1
-  name           String      ≤ 32 bytes, in canonical form (§3)
+  name           String      3–18 bytes, in canonical form (§3)
+  display        String      the same name in the holder's casing
   uuid           [u8; 32]    BLAKE3 of the root public key, as the engine's PlayerUuid
   issued         i64         Unix seconds
   expires        i64         Unix seconds; issued + LIFETIME
@@ -88,34 +90,41 @@ NameCertificate (postcard, then signed; ≤ 256 bytes on the wire)
 ## 3. Names
 
 - **Canonical form** is what is unique and what the certificate carries:
-  3–16 characters from `a–z`, `0–9` and `_`, starting with a letter. The
+  3–18 characters from `a–z`, `0–9` and `_`, starting with a letter. The
   player's **display casing** (`Iridesium`, `IRIDESIUM`) is theirs to pick at
-  claim time and is carried beside the canonical form; two players cannot
-  hold `alice` and `Alice`. This is the smallest rule that rules out every
-  confusable; a Unicode profile (PRECIS, with confusable folding) is the
-  documented way to widen it in a later version without breaking uniqueness,
-  since any wider name would fold to a canonical form this rule never issued.
+  claim time and travels in the certificate beside the canonical form; two
+  players cannot hold `alice` and `Alice`. This is the smallest rule that
+  rules out every confusable; a Unicode profile (PRECIS, with confusable
+  folding) is the documented way to widen it in a later version without
+  breaking uniqueness, since any wider name would fold to a canonical form
+  this rule never issued. Eighteen fits the protocol's 32-byte name limit
+  with room.
 - **Reserved**: `iridesium`, `tiamat`, `admin`, `server`, `system`, `console`,
-  every default mod's id, and a short list the operator keeps in the
-  registry's own table. Reserved names are refused with the reason.
-- **One name per identity** (§11). A rename is a release and a claim; the
-  released name is held for the same UUID for 30 days so a slip is undone.
+  `moderator`, `support`, every default mod's id, and a short list the
+  operator keeps in the registry's own table. Reserved names are refused
+  with the reason.
+- **One name per identity.** A rename is a release and a claim; the released
+  name is held for the same UUID for 30 days so a slip is undone. Renames are
+  limited to three in any 30 days per identity.
 - **No profanity filter at claim time.** Lists are porous and insulting in
   their misses; the remedy is a report and the operator's revocation (§4),
   with the audit log saying what was done and why.
 
 ## 4. The flows
 
-**Claim.** The client builds `{ name, display, uuid, timestamp }`, signs it
-with its current key, and POSTs it. The registry checks the signature against
-the key, that the key's UUID matches (a new identity's root key *is* its
-UUID; an added device's key proves itself by the key-set record the client
-sends alongside, exactly as a server verifies it), that the name is free and
-not reserved, and the rate limits; it writes the binding and answers with the
-certificate. The client stores it beside `identity.key`.
+**Claim.** The client builds `{ name, display, uuid, timestamp, work }`,
+signs it with its current key, and POSTs it. `work` is a small proof of
+work (§7), a second or so of the claimant's CPU, which makes a thousand
+names cost a thousand seconds and a single one cost nothing anyone notices.
+The registry checks the signature against the key, that the key's UUID
+matches (a new identity's root key *is* its UUID; an added device's key
+proves itself by the key-set record the client sends alongside, exactly as
+a server verifies it), the work, that the name is free and not reserved,
+and the limits; it writes the binding and answers with the certificate. The
+client stores it beside `identity.key`.
 
-**Renew.** The same request with the same name; answered with a fresh
-certificate while the binding stands.
+**Renew.** The same request with the same name, without the work; answered
+with a fresh certificate while the binding stands.
 
 **Release.** Signed like a claim; the binding is marked released with the
 30-day hold.
@@ -124,23 +133,39 @@ certificate while the binding stands.
 identity is the UUID the certificate names: the client renews on first
 contact and the name is there. Nothing to design.
 
-**Everything lost — no phrase, no device.** The name is lost with the key.
-This is the charter's own honest limit for the identity and the registry
-inherits it. An **optional email** bound at claim time would allow a
-re-binding to a new UUID after verification and a public two-week notice;
-it is the one feature that brings personal data, mail delivery and a
-privacy policy with it, so it is designed here and **not built for 0.5.0**
-(§11).
+**A recovery email, optional.** A player may bind one address to their
+identity: the client sends `{ uuid, address, timestamp }` signed by the key;
+the registry mails the address a link; the address is stored only once the
+link is followed, and until then nothing is kept but a hashed token that
+dies in a day. Changing or removing the address is the same signed request.
+Nothing else ever goes to that address: no news, no notices of joins.
+
+**Everything lost — no phrase, no device — with an email bound.** On a new
+identity the player asks to recover the name: the new key signs `{ name,
+new_uuid }`, the registry mails the bound address a confirmation link, and
+following it starts a **fourteen-day public notice**: the name's public page
+(§7, `GET /v1/name/`) says a recovery is pending, every renewal the current
+key makes in that time is answered with the same notice, and the current
+key can **cancel** it with one signed request, which is what stops a stolen
+mailbox from taking a name whose holder is still playing. When the notice
+ends uncancelled, the binding moves to the new UUID, the email binding with
+it, and every certificate issued to the old UUID is put on the revocation
+list by serial. A player without a bound email who loses both phrase and
+device has lost the name; the charter's honest limit for the identity
+stands and the registry inherits it.
 
 **Report and revocation.** A form on tiamatengine.com, read by the operator
 (Iridesium), who can **revoke** (the serial goes on the signed revocation
 list the registry publishes and clients fetch with renewals; servers that
 have internet may fetch it too, but need not), **reserve**, or **rename**
-through a local admin tool. Every action is a row in the audit table with
-the reason. Deliberately manual, as the charter's `rebind` is.
+through the admin subcommand (§7). Every action is a row in the audit table
+with the reason. Deliberately manual, as the charter's `rebind` is.
 
-**Expiry.** A name not renewed for 12 months (§11) is released
-automatically, with the 30-day hold.
+**Expiry.** A name whose certificate a client has renewed at least once is
+released after 12 months without a renewal; a name claimed and **never
+renewed** is released when its first certificate expires at 90 days. Both
+with the 30-day hold. The second rule is for the squatter who claims and
+walks away.
 
 ## 5. The server
 
@@ -179,12 +204,16 @@ name, and one rule:
 
 - **The identity screen** (where the recovery phrase lives) gains the
   account: the name held, its expiry, *Claim a name* / *Rename* / *Release*,
-  and a line saying what is sent (§8). Claiming is a form with the name
-  field and the registry's answer in words: taken, reserved, too short, too
-  many attempts, done.
+  the recovery email with *Bind* / *Change* / *Remove* and its state
+  (unverified, verified), *Recover a name* for a fresh identity, and a line
+  saying what is sent (§8). Claiming is a form with the name field and the
+  registry's answer in words: taken, reserved, too short, too many attempts,
+  done. The proof of work runs while the form is open, with a small progress
+  mark, so the claim itself is instant.
 - **Renewal is silent**, on launch and once a day while running, when online
   and under 30 days remain. A failure is a line in the log and a quiet mark
-  on the screen; never a dialog.
+  on the screen; never a dialog. A pending recovery against this identity's
+  name is the one thing renewal surfaces, as a notice with a *Cancel* button.
 - **The registry's URL and public key are pinned** in the client beside the
   update host's, with `--registry <url>` and a key override for tests
   against a local instance, as the updater has for its manifest.
@@ -192,63 +221,113 @@ name, and one rule:
   expired the join is uncertified and the server treats it as such.
 - **Privacy, said on the screen:** what leaves the machine is the name, the
   public key, a signature and the timestamp; the registry sees the IP address
-  for rate limiting and keeps it for seven days. No email, no telemetry.
+  for rate limiting and keeps it for seven days; an email is kept only if
+  the player binds one, only for recovery, and is removed on request. No
+  telemetry.
 
 ## 7. The service
 
 `crates/registry`: a headless binary like the server, GPL-3.0-only, no GUI,
-no engine simulation. It speaks plain HTTP on localhost behind Caddy, which
-terminates TLS with an automatic certificate; the binary therefore carries
-no TLS and no certificate handling. Storage is SQLite through `rusqlite`
-(already in the tree; the WAL policy of `persist::checkpoint` applies),
-signing is `ed25519-dalek` (in the tree), and the HTTP side is the smallest
-pure-Rust server in good standing (`tiny_http`, or `hyper` alone), chosen
-by `cargo deny` and dependency count rather than fashion.
+no engine simulation, with subcommands `serve` and `admin`. It speaks plain
+HTTP inside its container; TLS is Dokploy's Traefik, as it is for the update
+host. Storage is SQLite through `rusqlite` (already in the tree; the WAL
+policy of `persist::checkpoint` applies), signing is `ed25519-dalek` (in the
+tree), mail goes out over SMTP with `lettre` (MIT, rustls), and the HTTP
+side is the smallest pure-Rust server in good standing (`tiny_http`, or
+`hyper` alone), chosen by `cargo deny` and dependency count rather than
+fashion.
 
 | endpoint | does |
 |---|---|
 | `POST /v1/claim` | §4 claim or renew; answers the certificate |
 | `POST /v1/release` | §4 release |
-| `GET /v1/name/{canonical}` | whether a name is held, and by which UUID — public, so a server with internet may ask, and so a player can check before claiming |
+| `POST /v1/email` | bind, change or remove the recovery address; `GET /v1/email/verify?t=` is the link in the mail |
+| `POST /v1/recover` | start a recovery; `GET /v1/recover/confirm?t=` is the link; `POST /v1/recover/cancel` is the holder's veto |
+| `GET /v1/name/{canonical}` | whether a name is held, by which UUID, and whether a recovery is pending — public, so a server with internet may ask, and so a player can check before claiming |
 | `GET /v1/keys` | the current registry public key, the hash of its successor, and the signed rotation records |
 | `GET /v1/revocations` | the signed revocation list, small, cacheable |
 | `GET /healthz` | up, and the database answers |
 
 **Tables:** `names` (canonical, display, uuid, claimed, renewed, released,
-hold_until), `reserved`, `revocations` (serial, when, reason), `audit`
-(who, what, when, why), `limits` (ip or uuid, window, count; rows older than
-seven days are deleted by the service itself). The registry key lives in a
-file on the host readable by the service alone; the successor key is made
-offline and only its hash goes on the host, as the release key's does
-(`C:\tiamat-keys` is the precedent).
+hold_until, renewals), `emails` (uuid, address, verified_at), `tokens`
+(hash, purpose, uuid, expires), `recoveries` (canonical, from_uuid, to_uuid,
+confirmed_at, notice_until, state), `reserved`, `revocations` (serial, when,
+reason), `audit` (who, what, when, why), `limits` (ip, subnet or uuid,
+window, count; rows older than seven days are deleted by the service
+itself).
 
-**Limits:** a token bucket per IP (10 claims an hour) and per UUID (3 a day),
-a 32 KiB body cap, a 2 s request timeout, and refusal of any request whose
-timestamp is more than five minutes from the service's clock (replay).
+**Limits, set for the bulk squatter** (the designer, §11.8): two claims a
+day per IP address and six per `/24`; one claim and three renames per
+identity in any 30 days; a proof of work on every claim — BLAKE3 over the
+claim with a nonce, leading zero bits set by the service and raised while a
+subnet's claim rate is high, so a burst from one place pays more for each
+name; a 32 KiB body cap, a 2 s request timeout, and refusal of any request
+whose timestamp is more than five minutes from the service's clock
+(replay). Mail is limited to three messages an hour per address and ten per
+`/24`. Beside the limits, the operator's view: `admin claims --since 48h`
+groups young claims by subnet, and `admin revoke --subnet 203.0.113.0/24
+--since 48h --reason "…"` undoes a burst in one line, every name of it to
+the audit table.
 
-**Admin:** `registry-admin` on the host, over the same database: `revoke
-<serial|name> <reason>`, `reserve <name>`, `release <name>`, `rename <from>
-<to> <reason>`, `rotate-key`, `stats`. Local only; no admin HTTP.
+**Keys.** The registry key and its successor are generated **offline** with
+`registry admin key new`, on the designer's machine beside the release key
+(`C:\tiamat-keys` is the precedent). The host receives the current key as a
+Dokploy secret and the successor's BLAKE3 hash as a plain variable; the
+successor's private half never leaves the designer's machine until a
+rotation, when it is uploaded as the new current key, a new successor is
+made, and the service publishes the rotation record signed by the old key.
 
-**Operations:** one small VPS (any provider; a few euros a month), Caddy, a
-systemd unit, a nightly `VACUUM INTO` backup copied off the host, and a
-check from the engine's nightly workflow that `/healthz` answers. The whole
-of it is one page in `docs/registry-ops.md`, written with the service.
+**Deployment on Dokploy**, step by step in `docs/registry-ops.md`:
+
+1. The engine's release workflow builds a small two-stage image
+   (`crates/registry/Dockerfile`: the Rust build, then a minimal runtime
+   with the one binary) and pushes it to the GitHub container registry as
+   `ghcr.io/iridesiumresearch/tiamat-registry:<version>`, public. Dokploy
+   never compiles Rust.
+2. In Dokploy, a new Application with provider *Docker image*, that image;
+   a volume mounted at `/data` for the database, the daily backups and the
+   logs; the domain `registry.tiamatengine.com` with HTTPS, which Traefik
+   certifies; the health check `GET /healthz`; environment: `REGISTRY_DATA`,
+   `REGISTRY_KEY` (secret), `REGISTRY_NEXT_KEY_HASH`, `REGISTRY_SMTP_URL`
+   (secret, `smtps://user:pass@host`), `REGISTRY_MAIL_FROM`, `REGISTRY_BASE_URL`.
+3. DNS: an `A` record for `registry` to the Dokploy host.
+4. Updates are a new image tag in the application's settings and *Redeploy*;
+   the database migrates itself forward on start, never back.
+
+**Backups.** The service writes `VACUUM INTO /data/backups/registry-<date>.sqlite`
+once a day and keeps fourteen. Dokploy's volume backup to S3-compatible
+storage covers the volume where the installed version offers it; where it
+does not, a second tiny service in the same project runs `rclone` on a
+schedule against the same volume. Either way a restore is: new volume, copy
+the newest file to `/data/registry.sqlite`, start.
+
+**Mail.** Any SMTP provider the designer prefers, transactional, with the
+`From` address on tiamatengine.com and that domain's SPF and DKIM records
+set for it; the service sends plain text with one link and nothing else.
+
+**Operations, the rest:** the engine's nightly workflow asks `/healthz` and
+`/v1/keys` and fails its job if either is wrong; `admin stats` prints names
+held, claims and recoveries by day, and the limits tripped.
 
 **Legal, the designer's:** a terms page and a privacy page at
-tiamatengine.com (what §6 says, plus retention and the report address);
-deletion on request is a release.
+tiamatengine.com (§8 in plain words, plus retention and the report address);
+deletion on request is a release and the removal of the email.
 
 ## 8. What is sent, kept, and for how long
 
 | datum | sent to | kept | why |
 |---|---|---|---|
 | canonical and display name, UUID | the registry, then every server joined | while bound; released rows kept 30 days then deleted | the binding |
-| public key, signature, timestamp | the registry | not kept past verification | proof of possession |
-| IP address | the registry | seven days | rate limiting |
+| public key, signature, timestamp, the proof of work | the registry | not kept past verification | proof of possession |
+| IP address, and its `/24` | the registry | seven days | rate limiting |
+| recovery email address | the registry | while bound; removed on request or with the identity's last name | recovery only |
+| verification and recovery tokens | the registry | hashed; a day | the links in the mail |
+| recovery records | the registry | ninety days after they end | the operator's record of a disputed name |
 | audit rows | the registry | indefinitely | the operator's record of revocations and renames |
 
-Nothing else. The registry never learns which servers a player joins.
+Nothing else. The registry never learns which servers a player joins, and
+never writes to a bound address except to verify it or to confirm a recovery
+the player asked for.
 
 ## 9. Charter check
 
@@ -269,53 +348,63 @@ Nothing else. The registry never learns which servers a player joins.
 **Engine (the agent):** the certificate type, its codec, verification and
 fuzz target in `core::identity::registry`; the `Hello` field and protocol 94;
 the session rule and the new `WhyRenamed`; the `registry` server policy and
-the RCON refusal; the client's store, renewal, pinned key and screen; the
-API addition for mods; bot tests against a registry instance the test starts
-in-process (the service crate is a library with a binary, so a test calls
-`registry::serve` on a loopback port): claim and join as the certified name,
-an impostor renamed, a forged certificate refused, an expired one
-uncertified, a rotation accepted only against its commitment, `require`
-refusing the uncertified. About a week.
+the RCON refusal; the client's store, renewal, pinned key, the proof of
+work, and the screen with the email and recovery forms; the API addition
+for mods; bot tests against a registry instance the test starts in-process
+(the service crate is a library with a binary, so a test calls
+`registry::serve` on a loopback port with a mail sink in place of SMTP):
+claim and join as the certified name, an impostor renamed, a forged
+certificate refused, an expired one uncertified, a rotation accepted only
+against its commitment, `require` refusing the uncertified, a recovery
+confirmed by mail and cancelled by the holder, and one that completes and
+revokes the old serials. About eight working days.
 
-**Service (the agent):** `crates/registry` and `registry-admin`, the tables,
-the limits, the ops page. Three to four days, overlapping the above.
+**Service (the agent):** `crates/registry` with `serve` and `admin`, the
+tables and their forward migrations, the limits and the proof of work, the
+mail, the Dockerfile and the image job in the release workflow, the ops
+page. Four to five days, overlapping the above.
 
-**Operations and legal (the designer):** the DNS record for
-`registry.tiamatengine.com`, the VPS and Caddy, the registry key made and its
-successor's hash recorded, the terms and privacy pages, the report address.
-Days of elapsed time; an afternoon of work.
+**Operations and legal (the designer):** the DNS record, the Dokploy
+application from the published image with its volume, domain and
+variables, the registry key and its successor made offline and the hash
+recorded, an SMTP provider and the domain's SPF and DKIM for it, the terms
+and privacy pages, the report address. Days of elapsed time; an afternoon
+or two of work, in the order `docs/registry-ops.md` gives.
 
-**0.5.0, honestly.** The engine side and the service can be built and
-gated inside the 0.5.0 window as it stands, since the signing identities
-(S1, S2) have days of lead time of their own. The release can then ship in
-one of two states, and either is sound: the registry live, and *Claim a
-name* works on day one; or the registry not yet deployed, the client's
-pinned URL unset, and the screen saying the registry is not open yet — every
-server already honours certificates, so the day the service goes live
-nothing ships again. What must not happen is 0.5.0 waiting on a VPS.
+**0.5.0.** The engine side and the service can be built and gated inside
+the 0.5.0 window as it stands, since the signing identities (S1, S2) have
+days of lead time of their own. The release ships in one of two states, and
+the designer has accepted either: the registry live, and *Claim a name*
+works on day one; or the registry not yet deployed, the client's pinned URL
+unset, and the screen saying the registry is not open yet — every server
+already honours certificates, so the day the service goes live nothing
+ships again. What must not happen is 0.5.0 waiting on the host.
 
-**Proposed milestone rows** (added to `docs/milestone-0.5.0.md` once §11 is
-decided): N2 the certificate and its verification in core, with the fuzz
-target; N3 protocol 94, the session rule, the server policy; N4 the client's
-store, renewal and screen; N5 `crates/registry` with the admin tool and the
-ops page; N6 the bot tests against an in-process registry; N7 (designer) the
-host, the key, the pages; exit criterion **E10:** a player claims a name on
-one machine, restores the phrase on another, joins a `require` server there
-under that name, and an impostor on the same server is renamed and told why.
+**Milestone rows** (`docs/milestone-0.5.0.md`): N2 the certificate and its
+verification in core, with the fuzz target; N3 protocol 94, the session
+rule, the server policy, the RCON refusal; N4 the client's store, renewal,
+proof of work and screen, with the email and recovery forms; N5
+`crates/registry`, the admin subcommand, mail, the image and the ops page;
+N6 the bot tests against an in-process registry; N7 (designer) the host,
+the keys, the mail provider, the pages; exit criterion **E10:** a player
+claims a name on one machine, restores the phrase on another, joins a
+`require` server there under that name, and an impostor on the same server
+is renamed and told why; and on the test instance a recovery by mail
+completes against a silent holder and is cancelled by a present one.
 
-## 11. Decisions for the designer
+## 11. Decided, 2026-10-21
 
-1. **Names.** The canonical rule in §3 (`a–z 0–9 _`, 3–16, letter first)
-   with free display casing — yes, or wider from the start?
-2. **One name per identity**, rename = release and claim with a 30-day hold.
-3. **Lifetimes.** 90-day certificates renewed under 30; 12 months without
-   renewal frees the name.
-4. **Email recovery:** designed, not built for 0.5.0. Confirm.
-5. **Default server policy** `honour`; dedicated public servers opt into
-   `require`. Confirm, or make `require` the dedicated default.
-6. **Hosting:** a VPS with Caddy and SQLite as in §7, run by Iridesium.
-   Confirm, or name a provider you already use.
-7. **The domain:** `registry.tiamatengine.com`.
-8. **Fee:** none; squatting is answered by expiry and the operator.
-9. **Reserved names** beyond §3's list.
-10. **Ship state** for 0.5.0: both states in §10 are acceptable; confirm.
+1. **Names:** `a–z 0–9 _`, **3–18**, letter first, free display casing.
+2. **One name per identity;** rename is release and claim, 30-day hold.
+3. **Lifetimes:** 90-day certificates renewed under 30; 12 months without
+   renewal frees a renewed name, 90 days frees one never renewed.
+4. **Email recovery is built for 0.5.0** (§4, §6, §7, §8).
+5. **Default server policy `honour`;** public servers opt into `require`.
+6. **Hosting on Dokploy**, beside the update host: a published image, a
+   volume, Traefik's TLS (§7).
+7. **Domain** `registry.tiamatengine.com`.
+8. **No fee**, and **stricter on bulk squatters**: the per-IP and per-subnet
+   limits, the proof of work that rises with a subnet's rate, the 90-day
+   expiry of a name never renewed, and the operator's bulk revocation (§7).
+9. **Reserved names:** §3's list; nothing further known.
+10. **Ship state:** either of §10's two.

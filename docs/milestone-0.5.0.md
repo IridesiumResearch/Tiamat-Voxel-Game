@@ -33,6 +33,7 @@ Every one is checked before the tag, and the release notes say which held.
 | E7 | Every LAN pairing (Windows, macOS, Linux, both directions) joins with default names and plays five minutes | the designer's machines |
 | E8 | The `api/` stubs and `AGENTS.md` carry a version, a deprecation rule, and a reference section; every default mod's own CI runs `--check-mods` and the bot fixtures against the engine's main | the mod repositories' CI |
 | E9 | No invisible wall reported from a `client.log` that the logs cannot explain | the user's reports |
+| E10 | A player claims a name on one machine, restores the phrase on another, joins a `require` server there under that name, and an impostor on the same server is renamed and told why; on the test instance a recovery by mail completes against a silent holder and is cancelled by a present one (`docs/accounts-design.md`, decided 2026-10-21) | the bot tests against an in-process registry, then the designer on two machines |
 
 ## The work, in order
 
@@ -105,6 +106,12 @@ part of 0.5.0 without them.
 | L23.1 The mod's player models with skins (`register_player_model`, `set_player_model`, `set_player_skin`), drawn by everyone and in third person — **landed 2026-10-14** (protocol 92: `EntityDef.skin`, `EntityLooked`, `PlayerLook`; the client keeps a pass per look) | engine | medium |
 | L23.1b A player's own skin, offered by the client at join and passed on by a host who allows it (`allow_custom_skins`, off by default) — **landed 2026-10-14** (protocol 93: `HelloAck.custom_skins`, `ClientMessage::Skin`; the server reads the PNG header and never decodes, `event.skin` on join, `game.custom_skins_allowed()`) | engine | medium |
 | N1 Names that stick: `sticky_names` in server.toml — a player wears the first name they joined this server with whatever their client asks for, is told so on joining, and only RCON `rename` changes it (the designer, 2026-10-14: players should stop changing names; the smaller of two answers, the other being a name registry at tiamatengine.com behind `AuthProvider`, held for the milestone after 0.5.0 and to be raised again before 1.0.0) — **landed 2026-10-15** (`session::JoinContext::sticky_names`; off by default, and off on a client's embedded host, which has no admin port to rename from; no protocol change) | engine | small |
+| N2 The name certificate in core: the type, its codec, offline verification against the pinned registry key and its pre-committed successor, the revocation list, and a `cargo fuzz` target for the parser (`core::identity::registry`; `docs/accounts-design.md` §2) | engine | medium |
+| N3 Protocol 94: `Hello` carries the certificate; the session binds a certified name over an uncertified one with a new `WhyRenamed`; `registry = honour|require|off` in server.toml; RCON `rename` refused on a certified player; `event.certified` and `game.player_certified` for mods (design §5) | engine | medium |
+| N4 The client: the certificate stored beside the identity, silent renewal, the proof of work, the pinned URL and key with a test override, and the identity screen's claim, rename, release, recovery email and recover-a-name forms (design §6) | engine | medium |
+| N5 `crates/registry`: `serve` and `admin`, SQLite with forward migrations, the limits and the rising proof of work, mail over SMTP with a sink for tests, the Dockerfile and the image job in the release workflow, `docs/registry-ops.md` for Dokploy (design §7) | engine | large |
+| N6 Bot tests against an in-process registry: claim and join certified, impostor renamed, forged refused, expired uncertified, rotation only against its commitment, `require` refusing, a recovery confirmed and one cancelled (design §10) | engine | medium |
+| N7 The host: the DNS record, the Dokploy application from the published image with its volume, domain and variables, the registry key and its successor made offline and the hash recorded, an SMTP provider with SPF and DKIM, the terms and privacy pages, the report address — in the order `docs/registry-ops.md` gives | designer | an afternoon or two, days elapsed |
 
 ## Out of scope
 
@@ -124,6 +131,14 @@ compatibility window (the exact-version handshake stays).
 5. V1–V3, then the tag.
 
 This file is updated as items land, with the commit beside each.
+
+## Where it stands, 2026-10-21
+
+E1 closed with the WAL checkpoint off the tick (84e1a4be). The designer asked
+for the accounts system to ship with 0.5.0 and decided its ten questions the
+same day: `docs/accounts-design.md` draft 2 is the plan, rows N2–N7 and E10
+above are its work, and the two ship states in its §10 are both accepted.
+S1 and S2 are in the designer's hands; E3 is at seven greens.
 
 ## Where it stands, 2026-10-20
 
