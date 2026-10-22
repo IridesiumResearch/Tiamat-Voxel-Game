@@ -760,6 +760,69 @@ impl BufferHandle {
     ///
     /// Its own function for the reason its siblings are: `add_methods` sits at
     /// the line limit.
+    /// `buf:place(schematic, root, { turn })`: one schematic at a root the
+    /// generator chose, turned as `game.stamp_schematic` turns, clipped to the
+    /// chunk. Structures ask ST-E1; see [`ChunkBuffer::place`].
+    fn add_place_method<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut(
+            "place",
+            |lua, this, (schematic, root, options): (mlua::Value, mlua::Value, Option<Table>)| {
+                let what = |message: &str| mlua::Error::external(format!("place: {message}"));
+                let handle = match &schematic {
+                    mlua::Value::UserData(handle) => handle.borrow::<SchematicHandle>().ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    what("`schematic` is one built by game.schematic or game.schematic_shapes")
+                })?;
+                let mlua::Value::Table(root) = root else {
+                    return Err(what("`root` is a table of whole blocks, { x, y, z }"));
+                };
+                // Whole numbers only, as `stamp_schematic` insists: 0.5 is not
+                // a block, and truncating it would put a structure a block off
+                // on one side of zero and not the other.
+                let axis = |name: &str| {
+                    whole_number(lua, root.get(name)?)
+                        .and_then(|value| i32::try_from(value).ok())
+                        .ok_or_else(|| what(&format!("`root.{name}` is a whole block coordinate")))
+                };
+                let at = crate::BlockPos::new(axis("x")?, axis("y")?, axis("z")?);
+                let turn = match &options {
+                    None => 0,
+                    Some(options) => {
+                        let mut unknown = Vec::new();
+                        for pair in options.pairs::<mlua::Value, mlua::Value>() {
+                            let (key, _) = pair?;
+                            let name = match &key {
+                                mlua::Value::String(text) => text.to_str()?.to_owned(),
+                                other => format!("a {} key", other.type_name()),
+                            };
+                            if name != "turn" {
+                                unknown.push(name);
+                            }
+                        }
+                        unknown.sort();
+                        if let Some(name) = unknown.first() {
+                            return Err(what(&format!(
+                                "no option called `{name}`; the one option is `turn`"
+                            )));
+                        }
+                        match options.get::<mlua::Value>("turn")? {
+                            mlua::Value::Nil => 0,
+                            value => whole_number(lua, value)
+                                .and_then(|turn| u32::try_from(turn).ok())
+                                .filter(|turn| *turn < 4)
+                                .ok_or_else(|| {
+                                    what("`turn` is a whole number of quarter turns, 0 to 3")
+                                })?,
+                        }
+                    }
+                };
+                Ok(this.buffer.place(&handle.schematic, at, turn))
+            },
+        );
+    }
+
     fn add_scatter_method<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         // Structures on the surface at generation, across chunk edges — see
         // `ChunkBuffer::scatter`. The one call that writes a forest, where the
@@ -1066,6 +1129,7 @@ impl mlua::UserData for BufferHandle {
         Self::add_cover_method(methods);
         Self::add_palette_method(methods);
         Self::add_scatter_method(methods);
+        Self::add_place_method(methods);
 
         methods.add_method_mut(
             "set_block",
@@ -21446,6 +21510,81 @@ mod entity_tests {
     /// `+z` face of the block north of the root, and a whole block up and east.
     const SHIP: &str = "ship = game.schematic{ {0, 0, 1, 7, 1 << 21}, {1, 2, 0, 8, 0x7FFFFFF} }";
 
+    #[test]
+    fn a_generator_places_one_schematic_at_the_root_it_chose() {
+        // Structures ask ST-E1: a mod draws its own sites from the seed and
+        // writes each one where it drew it, turned as a run-time stamp turns,
+        // clipped to the chunk — and is told whether anything landed here.
+        let mut vm = vm();
+        load(
+            &mut vm,
+            "ruins",
+            &format!(
+                "{SHIP}\n\
+                 game.register_on_generate(function(buf, pos)\n\
+                 \x20   landed = buf:place(ship, {{ x = 5, y = 3, z = 5 }}, {{ turn = 1 }})\n\
+                 \x20   missed = buf:place(ship, {{ x = 500, y = 3, z = 5 }})\n\
+                 \x20   local ok, err = pcall(buf.place, buf, ship, {{ x = 0, y = 0, z = 0 }}, {{ turn = 4 }})\n\
+                 \x20   refused = (not ok) and tostring(err) or 'accepted'\n\
+                 \x20   local ok2, err2 = pcall(buf.place, buf, ship, {{ x = 0, y = 0, z = 0 }}, {{ sink = 1 }})\n\
+                 \x20   unknown = (not ok2) and tostring(err2) or 'accepted'\n\
+                 end)"
+            ),
+        )
+        .expect("load");
+        vm.freeze().expect("freeze");
+        let seed = 7;
+        vm.set_world_seed(seed);
+        let (chunk, _) = vm
+            .generate_chunk(
+                crate::domain::OVERWORLD,
+                seed,
+                crate::ChunkPos::new(0, 0, 0),
+                MaterialId::AIR,
+            )
+            .expect("generate");
+        let env = vm.environment("ruins").expect("env");
+        assert!(
+            env.get::<bool>("landed").expect("read"),
+            "the root is in the chunk"
+        );
+        assert!(
+            !env.get::<bool>("missed").expect("read"),
+            "a root far away lands nothing"
+        );
+        let refused: String = env.get("refused").expect("read");
+        assert!(
+            refused.contains("0 to 3"),
+            "a turn of 4 was not refused by name: {refused}"
+        );
+        let unknown: String = env.get("unknown").expect("read");
+        assert!(
+            unknown.contains("`sink`"),
+            "an unknown option was not named: {unknown}"
+        );
+        // The ship's whole block, {1, 2, 0}, turned one quarter lands where
+        // `StampBlock::turned` says, as `game.stamp_schematic` would put it.
+        let turned = StampBlock {
+            dx: 1,
+            dy: 2,
+            dz: 0,
+            material: MaterialId(8),
+            mask: crate::block::OCCUPANCY_FULL,
+        }
+        .turned(1);
+        let at = crate::BlockPos::new(5 + turned.dx, 3 + turned.dy, 5 + turned.dz);
+        assert_eq!(
+            chunk.block_cells(at.local())[0],
+            MaterialId(8),
+            "the turned block"
+        );
+        let untouched = crate::BlockPos::new(6, 5, 5);
+        assert_eq!(
+            chunk.block_cells(untouched.local())[0],
+            MaterialId::AIR,
+            "where the unturned block would have been"
+        );
+    }
     #[test]
     fn a_schematic_is_stamped_turned_at_run_time_into_the_space_asked_for() {
         // Weather ask W35: the structure `buf:scatter` stamps at generation,

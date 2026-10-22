@@ -54,6 +54,15 @@ is a mechanism a mod may now use; none of them changes a mod that ignores it.
 Everything listed is in API 1.0; from 1.1 on, an entry names the minor it
 arrived in, and a deprecation is an entry here too.
 
+- **One schematic at a root the generator chose** (2026-10-22, Structures
+  ask ST-E1). `buf:place(schematic, root, { turn })` stamps a `game.schematic`
+  at a world block position, turned as `game.stamp_schematic` turns, clipped
+  to the chunk as a merge write, and answers whether any block landed — for
+  the mod that draws its own sites from the seed and must know where they
+  stand, which `buf:scatter`'s count cannot tell it. And a sentence the stubs
+  lacked (Structures ask ST-E2): a `ChunkBuffer`, like every userdata, crosses
+  an export call as itself, writable, live for the generator call it was
+  handed to; see `game.exports`.
 - **A player's own skin, if the host allows it** (2026-10-14, Life ask 23,
   the last piece; protocol 93). A client offers the PNG its settings name
   before it joins; a host whose `server.toml` says `allow_custom_skins =
@@ -266,6 +275,7 @@ exists and one that is not does not.
 - `buf:fill_fluid_below(level, fluid)` — Fills every block below `level` with a fluid, around the terrain.
 - `buf:fill_fluid_terraced(spec)` — Fills a body of fluid whose level is its own in every column, and holds it there with lips: a river running downhill.
 - `buf:scatter(spec)` — Stamps structures on the surface, across chunk edges, at generation.
+- `buf:place(schematic, root, options)` — Stamps ONE schematic with its root at a world block position you chose, at generation.
 - `buf:set_block(x, y, z, material)` — Sets one whole block.
 - `buf:set_world(x, y, z, material)` — Writes one block by WORLD position, ignoring anything outside this chunk.
 - `buf:set_subnode(bx, by, bz, sx, sy, sz, material)` — Sets one sub-node cell.

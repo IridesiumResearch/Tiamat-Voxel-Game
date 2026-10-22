@@ -100,6 +100,7 @@ AREAS = [
             "ChunkBuffer:fill_fluid_below",
             "ChunkBuffer:fill_fluid_terraced",
             "ChunkBuffer:scatter",
+            "ChunkBuffer:place",
             "ChunkBuffer:set_block",
             "ChunkBuffer:set_world",
             "ChunkBuffer:set_subnode",

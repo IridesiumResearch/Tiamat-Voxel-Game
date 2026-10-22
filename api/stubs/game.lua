@@ -431,6 +431,38 @@ function ChunkBuffer:is_expanded() end
 ---@return integer placed
 function ChunkBuffer:scatter(spec) end
 
+---Stamps ONE schematic with its root at a world block position you chose,
+---at generation.
+---
+---**For the structure you placed yourself** (Structures ask ST-E1). `scatter`
+---decides where a structure stands from a hash of its own and answers only a
+---count, so a mod that must know where its sites are — to name one, to roll
+---its loot, to say a player found it — draws the sites itself, as a pure
+---function of the seed, and writes each one here: turned 0 to 3 quarter turns
+---exactly as `game.stamp_schematic` turns, clipped to this chunk, as a merge
+---write (whole blocks replace, partial ones fill their cells). A structure that
+---reaches into several chunks is written by every chunk it reaches, each call
+---keeping its own slice, so call it from each of them with the SAME root and
+---turn — which a root drawn from the seed gives you. The root may lie outside
+---this chunk.
+---
+---```lua
+---game.register_on_generate(function(buf, pos)
+---    for _, site in ipairs(sites_reaching(pos)) do   -- yours: a pure function of pos.seed
+---        buf:place(RUIN, site.root, { turn = site.turn })
+---    end
+---end)
+---```
+---
+---Returns whether any block of it landed in this chunk. A mistake is an error
+---naming the field: a `turn` that is not 0 to 3, a root that is not whole
+---blocks, a schematic that is not one.
+---@param schematic Tiamat.Schematic From `game.schematic` or `game.schematic_shapes`.
+---@param root { x: integer, y: integer, z: integer } Where the root block goes, in world blocks.
+---@param options { turn: integer? }?
+---@return boolean landed
+function ChunkBuffer:place(schematic, root, options) end
+
 ---A named random stream. Reproducible for the same world seed, chunk and name;
 ---uncorrelated with streams under other names.
 ---@class Tiamat.Stream
@@ -3321,6 +3353,16 @@ function game.export(exports) end
 ---    life.add_button("Wardrobe", function(player) open_wardrobe(player) end)
 ---end
 ---```
+---
+---**What crosses an export call.** Tables cross as read-only views and
+---functions as boundary calls (above). Everything else — a `ChunkBuffer`, a
+---density, a stream, a schematic — crosses **as itself**, so a generator may
+---hand its buffer to another mod's exported function and that mod may write
+---it, with every method the generator has (Structures ask ST-E2). A buffer is
+---live for the duration of the generator call it was handed to and no longer:
+---the engine copies the chunk out when the generators return, and a buffer
+---kept past that is written into nothing, without an error. So do the work
+---inside the call, and never keep a buffer in a table.
 ---@param mod_id string
 ---@return table|nil
 function game.exports(mod_id) end

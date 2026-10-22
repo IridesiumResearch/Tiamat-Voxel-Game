@@ -1759,37 +1759,83 @@ impl ChunkBuffer {
                         continue;
                     }
                     let base = surface + 1 - scatter.sink;
-                    let mut landed = false;
-                    for block in schematic.blocks() {
-                        let at = crate::BlockPos::new(x + block.dx, base + block.dy, z + block.dz);
-                        if at.chunk() != self.pos {
-                            continue;
-                        }
-                        let local = at.local();
-                        if block.mask & FULL_MASK == FULL_MASK {
-                            self.set_block(local, block.material);
-                        } else {
-                            for bit in 0..SUBNODES_PER_BLOCK as u32 {
-                                if block.mask & (1 << bit) != 0 {
-                                    self.set_subnode(
-                                        local,
-                                        bit % 3,
-                                        (bit / 3) % 3,
-                                        bit / 9,
-                                        block.material,
-                                    );
-                                }
-                            }
-                        }
-                        landed = true;
-                    }
-                    if landed {
+                    if self.stamp_blocks(schematic.blocks(), crate::BlockPos::new(x, base, z)) {
                         placed += 1;
                     }
                 }
             }
         }
         Ok(placed)
+    }
+
+    /// Writes a schematic's blocks with their root at `root`, clipped to this
+    /// chunk, as a merge write: whole blocks by [`Self::set_block`], partial
+    /// ones cell by cell. Answers whether any block landed here.
+    ///
+    /// The one write behind [`Self::scatter`] and [`Self::place`], so the two
+    /// cannot disagree about what a schematic puts in a chunk.
+    fn stamp_blocks(&mut self, blocks: &[StampBlock], root: crate::BlockPos) -> bool {
+        let mut landed = false;
+        for block in blocks {
+            // Saturating: a root a mod drew at the edge of the coordinates
+            // lands outside this chunk rather than wrapping into it.
+            let at = crate::BlockPos::new(
+                root.x.saturating_add(block.dx),
+                root.y.saturating_add(block.dy),
+                root.z.saturating_add(block.dz),
+            );
+            if at.chunk() != self.pos {
+                continue;
+            }
+            let local = at.local();
+            if block.mask & FULL_MASK == FULL_MASK {
+                self.set_block(local, block.material);
+            } else {
+                for bit in 0..SUBNODES_PER_BLOCK as u32 {
+                    if block.mask & (1 << bit) != 0 {
+                        self.set_subnode(local, bit % 3, (bit / 3) % 3, bit / 9, block.material);
+                    }
+                }
+            }
+            landed = true;
+        }
+        landed
+    }
+
+    /// Stamps one schematic with its root at a world block position the
+    /// generator chose, turned `quarters` quarter turns as
+    /// `game.stamp_schematic` turns, clipped to this chunk, as a merge write.
+    ///
+    /// **For the structure a generator placed itself** (Structures ask ST-E1):
+    /// [`Self::scatter`] decides where a structure stands from a hash of its
+    /// own and answers only a count, so a mod that must know where its sites
+    /// are — to name one, to roll its loot, to say a player found it — draws
+    /// the sites itself, as a pure function of the seed, and writes each one
+    /// here. A structure that reaches into several chunks is written by every
+    /// chunk it reaches, each call clipping to its own; the root may lie
+    /// outside this chunk. Answers whether any block landed in this chunk.
+    ///
+    /// Determinism is the caller's as it is for every fill: the same root and
+    /// turn from every chunk that asks, which a root drawn from the seed gives.
+    pub fn place(&mut self, schematic: &Schematic, root: crate::BlockPos, quarters: u32) -> bool {
+        // A turn swaps the two horizontal reaches, so the wider one bounds both.
+        let reach = schematic.reach_x.max(schematic.reach_z);
+        let side = CHUNK_BLOCKS as i32;
+        let (x0, y0, z0) = (self.pos.x * side, self.pos.y * side, self.pos.z * side);
+        if root.x + reach < x0
+            || root.x - reach >= x0 + side
+            || root.z + reach < z0
+            || root.z - reach >= z0 + side
+            || root.y + schematic.highest < y0
+            || root.y + schematic.lowest >= y0 + side
+        {
+            return false;
+        }
+        if quarters.is_multiple_of(4) {
+            self.stamp_blocks(schematic.blocks(), root)
+        } else {
+            self.stamp_blocks(&schematic.turned(quarters), root)
+        }
     }
 
     // -- sub-node operations (the opt-in path) -----------------------------
@@ -4342,5 +4388,141 @@ mod tests {
             );
         }
         assert_eq!(schematic.turned(0), schematic.blocks().to_vec());
+    }
+
+    #[test]
+    fn place_stamps_a_schematic_at_the_root_the_caller_chose() {
+        let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
+        let column = column();
+        let landed = buffer.place(&column, crate::BlockPos::new(5, 3, 9), 0);
+        assert!(landed, "the root is inside the chunk");
+        // The column's shape: three whole blocks up from the root and a half
+        // block on top, exactly as `scatter` stamps it.
+        for y in 3..6 {
+            assert_eq!(buffer.get_block(LocalBlock::new(5, y, 9)), STONE);
+        }
+        assert_eq!(buffer.get_subnode(LocalBlock::new(5, 6, 9), 1, 0, 1), STONE);
+        assert_eq!(
+            buffer.get_subnode(LocalBlock::new(5, 6, 9), 1, 2, 1),
+            MaterialId::AIR
+        );
+        assert_eq!(
+            buffer.get_block(LocalBlock::new(5, 2, 9)),
+            MaterialId::AIR,
+            "below the root"
+        );
+        assert_eq!(
+            buffer.get_block(LocalBlock::new(6, 3, 9)),
+            MaterialId::AIR,
+            "beside it"
+        );
+    }
+
+    #[test]
+    fn place_clips_to_the_chunk_and_says_whether_anything_landed() {
+        // An arm of four blocks pointing +x from the root, with the root in
+        // the chunk to the west: only the two blocks that cross into this
+        // chunk land, and a root with nothing reaching in lands nothing.
+        let arm = Schematic::new(
+            (0..4)
+                .map(|dx| StampBlock {
+                    dx,
+                    dy: 0,
+                    dz: 0,
+                    material: STONE,
+                    mask: FULL_MASK,
+                })
+                .collect(),
+        );
+        let mut buffer = ChunkBuffer::new(origin(), MaterialId::AIR);
+        assert!(buffer.place(&arm, crate::BlockPos::new(-2, 4, 4), 0));
+        assert_eq!(buffer.get_block(LocalBlock::new(0, 4, 4)), STONE);
+        assert_eq!(buffer.get_block(LocalBlock::new(1, 4, 4)), STONE);
+        assert_eq!(buffer.get_block(LocalBlock::new(2, 4, 4)), MaterialId::AIR);
+        let mut untouched = ChunkBuffer::new(origin(), MaterialId::AIR);
+        assert!(!untouched.place(&arm, crate::BlockPos::new(-9, 4, 4), 0));
+        assert!(
+            !untouched.place(&arm, crate::BlockPos::new(4, 40, 4), 0),
+            "above the chunk"
+        );
+        for x in 0..CHUNK_BLOCKS {
+            assert_eq!(
+                untouched.get_block(LocalBlock::new(x, 4, 4)),
+                MaterialId::AIR
+            );
+        }
+    }
+
+    #[test]
+    fn place_turns_as_a_stamp_block_turns() {
+        // One quarter turn takes +x to -z, as `StampBlock::turned` does and
+        // as `game.stamp_schematic` turns at run time.
+        let arm = Schematic::new(vec![StampBlock {
+            dx: 3,
+            dy: 0,
+            dz: 0,
+            material: STONE,
+            mask: FULL_MASK,
+        }]);
+        let root = crate::BlockPos::new(8, 8, 8);
+        let mut straight = ChunkBuffer::new(origin(), MaterialId::AIR);
+        assert!(straight.place(&arm, root, 0));
+        assert_eq!(straight.get_block(LocalBlock::new(11, 8, 8)), STONE);
+        let mut turned = ChunkBuffer::new(origin(), MaterialId::AIR);
+        assert!(turned.place(&arm, root, 1));
+        let expected = arm.blocks()[0].turned(1);
+        assert_eq!(
+            turned.get_block(LocalBlock::new(
+                (8 + expected.dx) as u32,
+                8,
+                (8 + expected.dz) as u32
+            )),
+            STONE
+        );
+        assert_eq!(turned.get_block(LocalBlock::new(11, 8, 8)), MaterialId::AIR);
+        // Four quarters is no turn.
+        let mut around = ChunkBuffer::new(origin(), MaterialId::AIR);
+        assert!(around.place(&arm, root, 4));
+        assert_eq!(around.get_block(LocalBlock::new(11, 8, 8)), STONE);
+    }
+
+    #[test]
+    fn place_and_scatter_write_a_structure_the_same_way() {
+        // The same column by both paths, at the same root, is the same chunk.
+        let mut by_scatter = ChunkBuffer::new(origin(), MaterialId::AIR);
+        by_scatter
+            .fill_density(&flat_ground(), 7, STONE)
+            .expect("fills");
+        let column = column();
+        let placed = by_scatter
+            .scatter(
+                7,
+                &Scatter {
+                    depth: &flat_ground(),
+                    stand: None,
+                    schematics: &[&column],
+                    cell: 16,
+                    chance: 1.0,
+                    salt: 1,
+                    sink: 0,
+                },
+            )
+            .expect("scatters");
+        assert_eq!(placed, 1);
+        let (mut rx, mut rz) = (None, None);
+        for x in 0..CHUNK_BLOCKS {
+            for z in 0..CHUNK_BLOCKS {
+                if by_scatter.get_block(LocalBlock::new(x, 8, z)) == STONE {
+                    (rx, rz) = (Some(x), Some(z));
+                }
+            }
+        }
+        let (rx, rz) = (rx.expect("a column"), rz.expect("a column"));
+        let mut by_place = ChunkBuffer::new(origin(), MaterialId::AIR);
+        by_place
+            .fill_density(&flat_ground(), 7, STONE)
+            .expect("fills");
+        assert!(by_place.place(&column, crate::BlockPos::new(rx as i32, 8, rz as i32), 0));
+        assert_eq!(by_scatter.to_chunk(), by_place.to_chunk());
     }
 }
