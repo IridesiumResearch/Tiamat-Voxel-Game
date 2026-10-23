@@ -40,6 +40,7 @@
 
 pub mod keyset;
 mod phrase;
+pub mod registry;
 
 pub use keyset::{AuthorisedKey, KeySet, KeySetError, RotationProof};
 pub use phrase::{PhraseError, RecoveryPhrase};

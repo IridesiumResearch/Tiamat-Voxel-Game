@@ -112,3 +112,10 @@ path = "fuzz_targets/manifest_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "name_certificate_decode"
+path = "fuzz_targets/name_certificate_decode.rs"
+test = false
+doc = false
+bench = false

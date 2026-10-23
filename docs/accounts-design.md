@@ -112,8 +112,10 @@ NameCertificate (postcard, then signed; ≤ 256 bytes on the wire)
 
 ## 4. The flows
 
-**Claim.** The client builds `{ name, display, uuid, timestamp, work }`,
-signs it with its current key, and POSTs it. `work` is a small proof of
+**Claim.** The client builds `{ name, display, uuid, public_key, timestamp, work }`,
+signs it with its current key, and POSTs it. The public key travels in the
+request, as `Hello` carries one, so the registry can check the signature and
+then ask whether that key belongs to the UUID. `work` is a small proof of
 work (§7), a second or so of the claimant's CPU, which makes a thousand
 names cost a thousand seconds and a single one cost nothing anyone notices.
 The registry checks the signature against the key, that the key's UUID
@@ -158,8 +160,11 @@ stands and the registry inherits it.
 (Iridesium), who can **revoke** (the serial goes on the signed revocation
 list the registry publishes and clients fetch with renewals; servers that
 have internet may fetch it too, but need not), **reserve**, or **rename**
-through the admin subcommand (§7). Every action is a row in the audit table
-with the reason. Deliberately manual, as the charter's `rebind` is.
+through the admin subcommand (§7). The list carries the registry key that
+signed it and, with each entry, the key that issued the revoked
+certificate, so a rotation does not make an old serial ambiguous with a
+new key's numbering. Every action is a row in the audit table with the
+reason. Deliberately manual, as the charter's `rebind` is.
 
 **Expiry.** A name whose certificate a client has renewed at least once is
 released after 12 months without a renewal; a name claimed and **never
