@@ -1,0 +1,41 @@
+[package]
+name = "registry"
+description = "The Tiamat name registry: certificates, names, and recovery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# No GUI, no rendering, no simulation. The registry answers HTTP, writes SQLite,
+# and signs with the registry key — that is its whole job (charter rule 2: no
+# network in the join path; this service is the one that is *not* called there).
+#
+# `tiamat-core` is taken with its default features because core's
+# `--no-default-features` build is currently broken (`fluid/mod.rs` reaches into
+# `crate::script` unconditionally), so the scripting VM is linked in and never
+# used here. That is core's bug to fix, tracked in the hand-back to N5, not a
+# reason to duplicate the certificate types.
+[dependencies]
+tiamat-core.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+postcard.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tiny_http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lib]
+name = "tiamat_registry"
+path = "src/lib.rs"
+
+[[bin]]
+name = "registry"
+path = "src/main.rs"

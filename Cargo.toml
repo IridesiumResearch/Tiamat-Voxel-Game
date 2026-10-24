@@ -5,6 +5,7 @@ members = [
     "crates/server",
     "crates/client",
     "crates/bot",
+    "crates/registry",
     "crates/relman",
     "crates/updater",
     "spikes/subnode",
@@ -20,6 +21,7 @@ default-members = [
     "crates/server",
     "crates/client",
     "crates/bot",
+    "crates/registry",
     "crates/relman",
     "crates/updater",
 ]
@@ -125,6 +127,25 @@ tokio = { version = "1.47", features = ["rt-multi-thread", "net", "sync", "time"
 clap = { version = "4.5", features = ["derive"] }
 toml = "0.9"
 ctrlc = { version = "3.4", features = ["termination"] }
+
+# --- the accounts registry (milestone 0.5.0, N5) --------------------------
+# The name registry's HTTP side. `tiny_http` is blocking and
+# thread-per-connection with NO TLS of its own (its default features are empty),
+# which is deliberate: TLS is the reverse proxy's job at Dokploy, and so is
+# timing out a slow client. Chosen over hyper for dependency count, which is the
+# design's stated criterion for this service — it answers a handful of requests
+# per player per ninety days, so async machinery would be cost without benefit.
+tiny_http = "0.12"
+# SMTP for the two mails the registry sends: an address to verify, and a
+# recovery to confirm. `default-features = false` is load-bearing — the default
+# is `native-tls`, which pulls `openssl-sys`, which deny.toml forbids. `rustls`
+# is already in the tree for QUIC and the update check.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "rustls-tls",
+    "builder",
+    "hostname",
+] }
 
 # --- test and benchmark (dev-dependencies only) ---------------------------
 # Charter rule 15: simulation invariants are property-tested, benchmarks use
