@@ -125,6 +125,16 @@ a server verifies it), the work, that the name is free and not reserved,
 and the limits; it writes the binding and answers with the certificate. The
 client stores it beside `identity.key`.
 
+**The key-set record is a chain from the root.** `KeySetProof` in
+`core::identity::registry`: the root public key, then one link per added key,
+each link carrying the `add-key` payload the client signed when that device was
+added — its key, the successor it committed to, the key that authorised it, and
+that key's signature. The last link's key is the one that signed the request.
+The registry verifies every link and re-derives the UUID from the root, so a
+proof cannot be moved to another identity, and a stolen device key alone still
+cannot claim. Claims and renewals carry one; the email and recovery requests do
+not yet, and so still want the root key (§7's limitation).
+
 **Renew.** The same request with the same name, without the work; answered
 with a fresh certificate while the binding stands.
 

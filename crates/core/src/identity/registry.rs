@@ -327,6 +327,36 @@ pub enum RegistryError {
     #[error("the public key presented is malformed")]
     BadPublicKey,
 
+    /// A claim signed by an added key, with no proof it belongs to the UUID.
+    #[error(
+        "this request must be signed by the identity's root key, or carry the key-set proof \
+         that reaches the signing key from it"
+    )]
+    RootKeyRequired,
+
+    /// A key-set proof whose root is not this identity's.
+    #[error("the key-set proof is for a different identity")]
+    ProofNotThisIdentity,
+
+    /// A key-set proof whose links do not join.
+    #[error("a key-set proof link is not authorised by the key before it")]
+    ProofBrokenChain,
+
+    /// A key-set proof that does not end at the signing key.
+    #[error("the key-set proof does not reach the key that signed this request")]
+    ProofNotForThisKey,
+
+    /// A key-set proof with no links.
+    #[error("a key-set proof must carry at least one link")]
+    ProofEmpty,
+
+    /// Too many links.
+    #[error("the key-set proof has {links} links, and {MAX_KEY_SET_LINKS} is the most allowed")]
+    ProofTooLong {
+        /// How many it had.
+        links: usize,
+    },
+
     /// More entries than [`MAX_REVOCATIONS`].
     #[error("the revocation list holds {found} entries, over the limit of {MAX_REVOCATIONS}")]
     TooManyRevocations {
@@ -1082,13 +1112,146 @@ pub struct VerifiedClaim {
     pub uuid: PlayerUuid,
     /// The key that signed the request.
     ///
-    /// Whether that key belongs to `uuid` is the **service's** question, not
-    /// this module's: a root key *is* the UUID, an added device proves itself
-    /// with the key-set record the client sends beside the request (§4), and
-    /// that lookup is database work.
+    /// **Already shown to be the identity's own**: it is either the root key,
+    /// whose hash is the UUID, or a key that a [`KeySetProof`] reaches from that
+    /// root. The service may therefore use it as the identity without keeping a
+    /// key store of its own.
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
+}
+
+/// Format version of a key-set proof.
+pub const KEY_SET_PROOF_VERSION: u8 = 1;
+
+/// The most links a key-set proof may carry.
+///
+/// Root, a phone, a laptop and one replacement is four; eight is far past any
+/// honest identity and bounds what a hostile chain can make a verifier do.
+pub const MAX_KEY_SET_LINKS: usize = 8;
+
+/// The largest key-set proof read at all, in bytes.
+///
+/// Eight links of `32 + 33 + 32 + 65` bytes, plus the version and the root, with
+/// room over; checked before the bytes are decoded.
+pub const MAX_KEY_SET_PROOF_BYTES: usize = 2_048;
+
+/// One link in a key-set proof: a key authorised by a key already in the set.
+///
+/// The signature is over [`super::keyset::add_key_payload`] — the same payload
+/// a client signed when the device was added — so a proof is a replay of
+/// authorisations the identity already made, not a new signature to collect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyAuthorisation {
+    /// The key being authorised, raw bytes.
+    pub key: [u8; 32],
+    /// The commitment that key made to its own successor, if any.
+    pub next_key_hash: Option<[u8; COMMITMENT_BYTES]>,
+    /// The key that authorised it: the root for the first link, then the
+    /// previous link's key.
+    pub added_by: [u8; 32],
+    /// `added_by`'s signature over the add-key payload.
+    pub signature: Signature64,
+}
+
+/// A chain of authorisations from an identity's root key to a signing key.
+///
+/// This is the registry's answer to "the player is on a second device": the
+/// UUID is `BLAKE3` of the **root** key (`PlayerUuid`), and a key added later is
+/// only that identity's if a chain of signatures reaches it from the root.
+/// Every link is one the client already made when it added the device, so the
+/// proof is a record rather than a fresh authorisation.
+///
+/// Verified by [`verify_key_set_proof`], which also re-derives the UUID from
+/// the root: a proof cannot be moved to another identity, because the payloads
+/// the links signed name the UUID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeySetProof {
+    /// [`KEY_SET_PROOF_VERSION`].
+    pub version: u8,
+    /// The identity's root public key, raw bytes. Its hash is the UUID.
+    pub root: [u8; 32],
+    /// The links, oldest first; the last one's key is the signing key.
+    pub chain: Vec<KeyAuthorisation>,
+}
+
+impl KeySetProof {
+    /// Reads a proof under its cap, checking its version and its length.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`],
+    /// [`RegistryError::ProofEmpty`] or [`RegistryError::ProofTooLong`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
+        let proof: Self = decode("key-set proof", bytes, MAX_KEY_SET_PROOF_BYTES)?;
+        proof.check()?;
+        Ok(proof)
+    }
+
+    /// Every rule the proof's shape must hold.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Version`], [`RegistryError::ProofEmpty`] or
+    /// [`RegistryError::ProofTooLong`].
+    pub fn check(&self) -> Result<(), RegistryError> {
+        if self.version != KEY_SET_PROOF_VERSION {
+            return Err(RegistryError::Version {
+                what: "key-set proof",
+                found: self.version,
+                expected: KEY_SET_PROOF_VERSION,
+            });
+        }
+        if self.chain.is_empty() {
+            return Err(RegistryError::ProofEmpty);
+        }
+        if self.chain.len() > MAX_KEY_SET_LINKS {
+            return Err(RegistryError::ProofTooLong {
+                links: self.chain.len(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Verifies that `signing_key` is `uuid`'s, through `proof`.
+///
+/// # Errors
+///
+/// [`RegistryError::ProofNotThisIdentity`] when the root does not hash to the
+/// UUID, [`RegistryError::ProofBrokenChain`] when a link is not authorised by
+/// the key before it, [`RegistryError::SignatureInvalid`] when a link's
+/// signature does not verify, [`RegistryError::BadPublicKey`] for a malformed
+/// key in the chain, and [`RegistryError::ProofNotForThisKey`] when the chain
+/// does not end at the key that signed the request.
+pub fn verify_key_set_proof(
+    proof: &KeySetProof,
+    uuid: &PlayerUuid,
+    signing_key: &VerifyingKey,
+) -> Result<(), RegistryError> {
+    proof.check()?;
+    let root = public_key_from_bytes(&proof.root).map_err(|_| RegistryError::BadPublicKey)?;
+    if PlayerUuid::from_root_key(&root) != *uuid {
+        return Err(RegistryError::ProofNotThisIdentity);
+    }
+    let mut parent = root;
+    for link in &proof.chain {
+        let key = public_key_from_bytes(&link.key).map_err(|_| RegistryError::BadPublicKey)?;
+        let added_by =
+            public_key_from_bytes(&link.added_by).map_err(|_| RegistryError::BadPublicKey)?;
+        if added_by != parent {
+            return Err(RegistryError::ProofBrokenChain);
+        }
+        let payload = super::keyset::add_key_payload(uuid, &key, link.next_key_hash.as_ref());
+        parent
+            .verify_strict(&payload, &Signature::from_bytes(&link.signature.0))
+            .map_err(|_| RegistryError::SignatureInvalid)?;
+        parent = key;
+    }
+    if parent != *signing_key {
+        return Err(RegistryError::ProofNotForThisKey);
+    }
+    Ok(())
 }
 
 /// A claim, or a renewal of one, signed by the player's own identity.
@@ -1097,6 +1260,10 @@ pub struct VerifiedClaim {
 /// nonce, a **renewal** is the same request with the same name and no work
 /// (§4 of the design). Two verify methods, so a caller cannot accidentally
 /// accept a claim without one.
+///
+/// `key_set` is what lets a **second device** renew: the signing key need not
+/// be the identity's root, provided the request carries the chain of
+/// authorisations that reaches it from the root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimRequest {
     /// [`CLAIM_VERSION`].
@@ -1115,6 +1282,15 @@ pub struct ClaimRequest {
     pub work: Option<u64>,
     /// The player key's signature over [`Self::signing_payload`].
     pub signature: Signature64,
+    /// A chain from the identity's root key to `public_key`, when that key was
+    /// added later (a second device). `None` means the key is the root.
+    ///
+    /// **Deliberately outside `signature`**: the proof is itself a chain of
+    /// root-anchored signatures, and keeping it out of the signed payload means
+    /// a device renews with the same proof it was added with. Appended after
+    /// `signature` because postcard's field order is fixed — no encoder in the
+    /// field predates this field.
+    pub key_set: Option<KeySetProof>,
 }
 
 impl ClaimRequest {
@@ -1138,6 +1314,7 @@ impl ClaimRequest {
             timestamp,
             work: None,
             signature: Signature64([0; 64]),
+            key_set: None,
         }
     }
 
@@ -1145,8 +1322,8 @@ impl ClaimRequest {
     ///
     /// # Errors
     ///
-    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
-    /// the name rules from [`Name::from_parts`].
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], the
+    /// name rules from [`Name::from_parts`], and the proof's own shape rules.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
         let request: Self = decode("claim request", bytes, MAX_REQUEST_BYTES)?;
         if request.version != CLAIM_VERSION {
@@ -1159,6 +1336,9 @@ impl ClaimRequest {
         // Form only: whether a name may be *claimed* — reserved and free — is
         // the registry's question, answered in `verify_claim`.
         Name::from_parts(&request.name, &request.display)?;
+        if let Some(proof) = &request.key_set {
+            proof.check()?;
+        }
         Ok(request)
     }
 
@@ -1287,11 +1467,18 @@ impl ClaimRequest {
         })
     }
 
-    /// The signing key, parsed, and the signature checked over the payload.
+    /// The signing key, parsed; the signature checked; and the key shown to be
+    /// the identity's own — the root, or a key a proof reaches from it.
     fn verified_key(&self) -> Result<VerifyingKey, RegistryError> {
         let key =
             public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
         verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        let uuid = PlayerUuid::from_bytes(self.uuid);
+        match &self.key_set {
+            Some(proof) => verify_key_set_proof(proof, &uuid, &key)?,
+            None if PlayerUuid::from_root_key(&key) == uuid => {}
+            None => return Err(RegistryError::RootKeyRequired),
+        }
         Ok(key)
     }
 
@@ -2477,5 +2664,140 @@ mod tests {
         let verified = parsed.verify(NOW).expect("verify");
         assert_eq!(verified.name, "alice");
         assert_eq!(verified.uuid, holder.uuid_as_root());
+    }
+
+    /// A proof that `root` added `devices`, in order.
+    fn proof_for(root: &Identity, devices: &[&Identity], uuid: &PlayerUuid) -> KeySetProof {
+        let mut chain = Vec::new();
+        let mut parent = root;
+        for device in devices {
+            let payload =
+                crate::identity::keyset::add_key_payload(uuid, &device.public_key(), None);
+            let signature = parent.sign(&payload);
+            chain.push(KeyAuthorisation {
+                key: device.public_key().to_bytes(),
+                next_key_hash: None,
+                added_by: parent.public_key().to_bytes(),
+                signature: Signature64(signature.to_bytes()),
+            });
+            parent = *device;
+        }
+        KeySetProof {
+            version: KEY_SET_PROOF_VERSION,
+            root: root.public_key().to_bytes(),
+            chain,
+        }
+    }
+
+    #[test]
+    fn a_key_set_proof_reaches_a_device_from_the_root() {
+        let root = player(1);
+        let device = player(2);
+        let uuid = root.uuid_as_root();
+        let proof = proof_for(&root, &[&device], &uuid);
+        verify_key_set_proof(&proof, &uuid, &device.public_key()).expect("an authorised device");
+
+        // The proof is a wire record; the wire form verifies the same.
+        let wire = postcard::to_allocvec(&proof).expect("encode");
+        let parsed = KeySetProof::from_bytes(&wire).expect("parse");
+        verify_key_set_proof(&parsed, &uuid, &device.public_key()).expect("parse and verify");
+
+        // A chain of two links also verifies.
+        let second = player(3);
+        let chained = proof_for(&root, &[&device, &second], &uuid);
+        verify_key_set_proof(&chained, &uuid, &second.public_key()).expect("a chain");
+    }
+
+    #[test]
+    fn a_proof_is_about_one_identity_one_chain_and_one_key() {
+        let root = player(1);
+        let device = player(2);
+        let uuid = root.uuid_as_root();
+        let proof = proof_for(&root, &[&device], &uuid);
+
+        // Another identity's UUID: refused, because the root is not its root.
+        assert_eq!(
+            verify_key_set_proof(&proof, &player(3).uuid_as_root(), &device.public_key()),
+            Err(RegistryError::ProofNotThisIdentity)
+        );
+
+        // A link whose authorising key is not the one before it.
+        let mut broken = proof.clone();
+        broken.chain[0].added_by = player(4).public_key().to_bytes();
+        assert_eq!(
+            verify_key_set_proof(&broken, &uuid, &device.public_key()),
+            Err(RegistryError::ProofBrokenChain)
+        );
+
+        // A chain that does not reach the signing key.
+        assert_eq!(
+            verify_key_set_proof(&proof, &uuid, &player(5).public_key()),
+            Err(RegistryError::ProofNotForThisKey)
+        );
+
+        // A tampered link signature.
+        let mut forged = proof.clone();
+        forged.chain[0].signature.0[0] ^= 0b0000_0001;
+        assert_eq!(
+            verify_key_set_proof(&forged, &uuid, &device.public_key()),
+            Err(RegistryError::SignatureInvalid)
+        );
+
+        // An empty chain and an absurdly long one.
+        let empty = KeySetProof {
+            version: KEY_SET_PROOF_VERSION,
+            root: root.public_key().to_bytes(),
+            chain: Vec::new(),
+        };
+        assert_eq!(
+            verify_key_set_proof(&empty, &uuid, &device.public_key()),
+            Err(RegistryError::ProofEmpty)
+        );
+        let long = KeySetProof {
+            version: KEY_SET_PROOF_VERSION,
+            root: root.public_key().to_bytes(),
+            chain: vec![proof.chain[0].clone(); MAX_KEY_SET_LINKS + 1],
+        };
+        assert_eq!(
+            verify_key_set_proof(&long, &uuid, &device.public_key()),
+            Err(RegistryError::ProofTooLong {
+                links: MAX_KEY_SET_LINKS + 1
+            })
+        );
+    }
+
+    #[test]
+    fn a_second_device_claims_and_renews_with_its_proof() {
+        let root = player(1);
+        let device = player(2);
+        let uuid = root.uuid_as_root();
+        let name = Name::from_parts("alice", "Alice").expect("name");
+
+        let mut claim = ClaimRequest::new(&device, &name, NOW);
+        // The UUID is the root's; the constructor fills in the device's own.
+        claim.uuid = *uuid.as_bytes();
+        claim.key_set = Some(proof_for(&root, &[&device], &uuid));
+        claim.work = Some(0);
+        claim.sign(&device);
+        let verified = claim
+            .verify_claim(NOW, 0)
+            .expect("a device with the chain from its root");
+        assert_eq!(verified.uuid, uuid);
+        assert_eq!(verified.public_key, device.public_key());
+
+        // The same request with the proof removed is refused.
+        let mut bare = claim.clone();
+        bare.key_set = None;
+        bare.sign(&device);
+        assert_eq!(
+            bare.verify_claim(NOW, 0),
+            Err(RegistryError::RootKeyRequired)
+        );
+
+        // A renewal (no work) from the device is accepted the same way.
+        let mut renewal = claim.clone();
+        renewal.work = None;
+        renewal.sign(&device);
+        assert!(renewal.verify_renewal(NOW).is_ok());
     }
 }

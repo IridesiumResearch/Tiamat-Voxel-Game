@@ -23,10 +23,10 @@
 //!   rule (§4).
 //! - **Reserved names cannot be claimed**, from core's constant list or the
 //!   operator's table.
-//! - **A claim needs a root key.** The UUID is `BLAKE3` of the root public key,
-//!   so a claim signed by an added device's key cannot prove membership here:
-//!   the registry never sees a player's key set. That is stated as a limitation
-//!   in the crate docs and reported to the engine as an ask.
+//! - **A claim names an identity, not just a key.** `verify_claim` has already
+//!   shown the signing key to be the identity's own — the root, or a device a
+//!   signed key-set chain reaches from it — so this layer takes the UUID as
+//!   given and keeps no key store.
 
 use std::net::IpAddr;
 
@@ -105,8 +105,6 @@ pub enum ClaimOutcome {
         /// Set when a recovery is in flight against the name.
         notice: Option<i64>,
     },
-    /// The signing key is not the UUID's root key.
-    NotRoot,
     /// The name is reserved.
     Reserved,
     /// Somebody else holds it.
@@ -160,12 +158,6 @@ pub fn claim(
     now: i64,
     client: IpAddr,
 ) -> rusqlite::Result<ClaimOutcome> {
-    // The UUID is BLAKE3 of a root public key. An added device's key does not
-    // derive it, and this service is never shown the key set that would prove
-    // the device (see the crate docs).
-    if PlayerUuid::from_root_key(&claimed.public_key) != claimed.uuid {
-        return Ok(ClaimOutcome::NotRoot);
-    }
     let canonical = claimed.name.canonical().to_owned();
     let uuid = claimed.uuid.to_hex();
     let transaction = connection.transaction()?;
@@ -756,32 +748,6 @@ mod tests {
             fixture.claim("admin", "Admin", 2, "203.0.113.2", NOW),
             ClaimOutcome::Reserved
         ));
-    }
-
-    #[test]
-    fn a_claim_needs_the_root_key() {
-        let fixture = Fixture::new();
-        let root = SigningKey::from_bytes(&[1; 32]);
-        let device = SigningKey::from_bytes(&[2; 32]);
-        let verified = VerifiedClaim {
-            name: Name::from_parts("alice", "Alice").expect("name"),
-            uuid: PlayerUuid::from_root_key(&root.verifying_key()),
-            public_key: device.verifying_key(),
-            timestamp: NOW,
-        };
-        let outcome = fixture
-            .db
-            .with(|connection| {
-                claim(
-                    connection,
-                    &fixture.keys,
-                    &verified,
-                    NOW,
-                    "203.0.113.1".parse().expect("ip"),
-                )
-            })
-            .expect("claim");
-        assert!(matches!(outcome, ClaimOutcome::NotRoot));
     }
 
     #[test]

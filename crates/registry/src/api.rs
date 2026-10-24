@@ -96,11 +96,6 @@ pub(crate) fn claim(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
                 certificate,
                 notice,
             }) => issued(certificate, notice),
-            Ok(ClaimOutcome::NotRoot) => Reply::error(
-                403,
-                "not_root",
-                "a name is claimed with the identity's root key; this key does not derive the UUID",
-            ),
             Ok(ClaimOutcome::Reserved) => Reply::error(403, "reserved", "that name is reserved"),
             Ok(ClaimOutcome::Taken) => {
                 Reply::error(409, "taken", "that name is registered to somebody else")
@@ -521,6 +516,17 @@ fn refused(error: &RegistryError) -> Reply {
             Reply::error(401, "signature", "the signature does not verify")
         }
         RegistryError::BadPublicKey => Reply::error(400, "key", "the public key is malformed"),
+        RegistryError::RootKeyRequired => Reply::error(
+            403,
+            "not_root",
+            "this must be signed by the identity's root key, or carry the key-set proof \
+             that reaches the signing key from it",
+        ),
+        RegistryError::ProofNotThisIdentity
+        | RegistryError::ProofBrokenChain
+        | RegistryError::ProofNotForThisKey
+        | RegistryError::ProofEmpty
+        | RegistryError::ProofTooLong { .. } => Reply::error(403, "proof", &error.to_string()),
         RegistryError::NameReserved { .. } => {
             Reply::error(403, "reserved", "that name is reserved")
         }

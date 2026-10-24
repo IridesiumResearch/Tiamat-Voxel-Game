@@ -157,13 +157,12 @@ is decided on and never moves.
 
 ## What this service does not do (yet)
 
-- **A claim must be signed by the identity's root key.** The registry is never
-  shown a player's key set, so a key added to an identity on a second device
-  cannot prove it belongs to the UUID here. Restoring the recovery phrase
-  restores the root key and works; a device added *without* the phrase can play
-  but cannot renew the name. Closing this needs a signed key-set proof in
-  `core::identity::registry` and a field in the claim request — an ask on the
-  engine, not a service change.
+- **Email and recovery need the identity's root key.** Claims and renewals do
+  not: a second device presents the signed chain of add-key authorisations from
+  the root (`KeySetProof` in `core::identity::registry`), which the service
+  verifies without keeping a key store of its own. Binding a recovery address
+  or starting a recovery from an added device is the part still to do; the
+  phrase, or the first device, works for both today.
 - **No fee, and no accountability.** Keys are free to mint, so names are free
   up to the limits and a UUID ban is trivially evaded. The registry makes a
   name unique, not a person accountable (charter rule 13's honest limit).

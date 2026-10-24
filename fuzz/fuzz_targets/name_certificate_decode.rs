@@ -24,9 +24,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use tiamat_core::identity::registry::{
-    ClaimRequest, MAX_CERTIFICATE_BYTES, MAX_CERTIFICATE_LIFETIME_SECONDS, MAX_NAME_CHARS,
-    MAX_REVOCATIONS, MIN_NAME_CHARS, Name, NameCertificate, ReleaseRequest, RevocationList,
-    RotationRecord,
+    ClaimRequest, KeySetProof, MAX_CERTIFICATE_BYTES, MAX_CERTIFICATE_LIFETIME_SECONDS,
+    MAX_KEY_SET_LINKS, MAX_KEY_SET_PROOF_BYTES, MAX_NAME_CHARS, MAX_REVOCATIONS, MIN_NAME_CHARS,
+    Name, NameCertificate, ReleaseRequest, RevocationList, RotationRecord,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -69,6 +69,21 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(record) = RotationRecord::from_bytes(data) {
         let _ = record.signing_payload();
+    }
+
+    if let Ok(proof) = KeySetProof::from_bytes(data) {
+        assert!(
+            !proof.chain.is_empty(),
+            "a key-set proof with no links parsed"
+        );
+        assert!(
+            proof.chain.len() <= MAX_KEY_SET_LINKS,
+            "a key-set proof over the link cap parsed"
+        );
+        assert!(
+            data.len() <= MAX_KEY_SET_PROOF_BYTES,
+            "a key-set proof over the size cap parsed"
+        );
     }
 
     if let Ok(claim) = ClaimRequest::from_bytes(data) {

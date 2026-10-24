@@ -15,8 +15,10 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use common::{KEY_SEED, NEXT_HASH, body_text, config, request, start_with};
 use tiamat_core::identity::Identity;
+use tiamat_core::identity::keyset::add_key_payload;
 use tiamat_core::identity::registry::{
-    ClaimRequest, Name, RegistryTrust, ReleaseRequest, verify_certificate,
+    ClaimRequest, KEY_SET_PROOF_VERSION, KeyAuthorisation, KeySetProof, Name, RegistryTrust,
+    ReleaseRequest, Signature64, verify_certificate,
 };
 use tiamat_registry::Clock;
 use tiamat_registry::wire::ClaimResponse;
@@ -320,5 +322,95 @@ fn a_malformed_body_is_refused_without_a_handler_running() {
     let (status, body) = request(handle.local_addr(), "POST", "/v1/claim", b"not a claim");
     assert_eq!(status, 400);
     assert!(body_text(&body).contains("malformed"), "{body:?}");
+    assert!(handle.stop());
+}
+
+/// The record a device was added with: the root's signature over the add-key
+/// payload, which is exactly what a client already stores in its key set.
+fn proof_for(root: &Identity, device: &Identity) -> KeySetProof {
+    let uuid = root.uuid_as_root();
+    let payload = add_key_payload(&uuid, &device.public_key(), None);
+    KeySetProof {
+        version: KEY_SET_PROOF_VERSION,
+        root: root.public_key().to_bytes(),
+        chain: vec![KeyAuthorisation {
+            key: device.public_key().to_bytes(),
+            next_key_hash: None,
+            added_by: root.public_key().to_bytes(),
+            signature: Signature64(root.sign(&payload).to_bytes()),
+        }],
+    }
+}
+
+/// A claim (or renewal) signed by a **device** key, carrying its proof.
+fn device_claim_body(
+    root: &Identity,
+    device: &Identity,
+    canonical: &str,
+    timestamp: i64,
+    mine: bool,
+) -> Vec<u8> {
+    let name = Name::from_parts(canonical, canonical).expect("name");
+    let mut claim = ClaimRequest::new(device, &name, timestamp);
+    // The UUID belongs to the root, not to the device that signs.
+    claim.uuid = *root.uuid_as_root().as_bytes();
+    claim.key_set = Some(proof_for(root, device));
+    if mine {
+        claim.solve_work(4).expect("a nonce");
+    }
+    claim.sign(device);
+    postcard::to_allocvec(&claim).expect("encode")
+}
+
+#[test]
+fn a_second_device_claims_and_renews_with_its_key_set_proof() {
+    let clock = Arc::new(TestClock::new(NOW));
+    let handle = start_with(config(None), clock);
+    let root = player(10);
+    let device = player(11);
+
+    let (status, body) = request(
+        handle.local_addr(),
+        "POST",
+        "/v1/claim",
+        &device_claim_body(&root, &device, "alice", NOW, true),
+    );
+    assert_eq!(status, 200, "{}", body_text(&body));
+    let claimed: ClaimResponse = postcard::from_bytes(&body).expect("postcard");
+    let name = verify_certificate(
+        &claimed.certificate.to_bytes().expect("bytes"),
+        &root.uuid_as_root(),
+        NOW,
+        &trust(),
+        None,
+    )
+    .expect("the certificate names the root's UUID");
+    assert_eq!(name.canonical(), "alice");
+
+    // The same device renews without the root key ever being present.
+    let (status, body) = request(
+        handle.local_addr(),
+        "POST",
+        "/v1/claim",
+        &device_claim_body(&root, &device, "alice", NOW + 60, false),
+    );
+    assert_eq!(status, 200, "{}", body_text(&body));
+    let renewed: ClaimResponse = postcard::from_bytes(&body).expect("postcard");
+    assert_eq!(renewed.certificate.serial, claimed.certificate.serial + 1);
+
+    // Without the proof, the device is just a stranger to the identity.
+    let name = Name::from_parts("bobby", "bobby").expect("name");
+    let mut bare = ClaimRequest::new(&device, &name, NOW);
+    bare.uuid = *root.uuid_as_root().as_bytes();
+    bare.solve_work(4).expect("work");
+    bare.sign(&device);
+    let (status, body) = request(
+        handle.local_addr(),
+        "POST",
+        "/v1/claim",
+        &postcard::to_allocvec(&bare).expect("encode"),
+    );
+    assert_eq!(status, 403, "{}", body_text(&body));
+    assert!(body_text(&body).contains("not_root"), "{body:?}");
     assert!(handle.stop());
 }
