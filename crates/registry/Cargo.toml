@@ -13,13 +13,14 @@ publish.workspace = true
 # and signs with the registry key — that is its whole job (charter rule 2: no
 # network in the join path; this service is the one that is *not* called there).
 #
-# `tiamat-core` is taken with its default features because core's
-# `--no-default-features` build is currently broken (`fluid/mod.rs` reaches into
-# `crate::script` unconditionally), so the scripting VM is linked in and never
-# used here. That is core's bug to fix, tracked in the hand-back to N5, not a
-# reason to duplicate the certificate types.
+# `default-features = false` keeps the scripting VM out of the image: this crate
+# uses `identity`, `keyset` and `release`, none of which need Lua, and the
+# service has no mods to run. Spelled as a path dependency rather than
+# `.workspace = true` because Cargo does not let a member override a workspace
+# dependency's default features; the workspace's other consumers keep the
+# defaults they already rely on.
 [dependencies]
-tiamat-core.workspace = true
+tiamat-core = { path = "../core", default-features = false }
 blake3.workspace = true
 clap.workspace = true
 ctrlc.workspace = true

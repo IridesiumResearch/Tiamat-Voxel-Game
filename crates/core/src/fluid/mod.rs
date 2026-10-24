@@ -60,6 +60,18 @@ pub use solver::{
 /// in the way. This is the ceiling for an empty one.
 pub const MAX_VOLUME: u32 = 27;
 
+/// How opaque a fluid is drawn when nothing said otherwise, `0.0..=1.0`.
+///
+/// **Here rather than in `script::vm::FluidRules`, because three paths that
+/// must build without the scripting feature need it** — a placeholder fluid, a
+/// stored fluid map, and a chunk summary all draw something and none of them
+/// has a mod to ask. `FluidRules::DEFAULT_OPACITY` re-points at this constant,
+/// so there is still exactly one value.
+///
+/// A shade under three quarters: enough to see the shape of a riverbed through
+/// a pond, not so much that a deep pool stops reading as deep.
+pub const DEFAULT_OPACITY: f32 = 0.72;
+
 /// How much fluid a block will take, in cells of 27.
 ///
 /// **Sub-Node Contract §4.** `occupancy` is how full of terrain the block is, in
@@ -485,7 +497,7 @@ impl Fluids {
             material: MaterialId::AIR,
             // Never drawn, so this is arbitrary too; the engine default is the
             // one that says nothing was chosen.
-            opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+            opacity: crate::fluid::DEFAULT_OPACITY,
             // A fluid nobody registered must not rearrange the light of a world
             // that merely had a mod disabled.
             light_falloff: 0,
@@ -642,7 +654,7 @@ mod tests {
                 tick_rate: 1,
                 washes: true,
                 material: MaterialId(4),
-                opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                opacity: crate::fluid::DEFAULT_OPACITY,
                 light_falloff: 0,
             })
             .expect("first registration");
@@ -663,7 +675,7 @@ mod tests {
             tick_rate: 1,
             washes: true,
             material: MaterialId(4),
-            opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+            opacity: crate::fluid::DEFAULT_OPACITY,
             light_falloff: 0,
         };
         fluids.register(entry()).expect("first");
@@ -686,7 +698,7 @@ mod tests {
                     tick_rate: 1,
                     washes: true,
                     material: MaterialId(1),
-                    opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                    opacity: crate::fluid::DEFAULT_OPACITY,
                     light_falloff: 0,
                 })
                 .expect("within the limit");
@@ -700,7 +712,7 @@ mod tests {
                 tick_rate: 1,
                 washes: true,
                 material: MaterialId(1),
-                opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                opacity: crate::fluid::DEFAULT_OPACITY,
                 light_falloff: 0,
             }),
             Err(RegisterError::Full { .. })

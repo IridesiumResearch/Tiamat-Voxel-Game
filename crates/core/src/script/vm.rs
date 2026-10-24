@@ -587,11 +587,10 @@ impl FluidRules {
 
     /// How opaque a fluid is if its mod said nothing.
     ///
-    /// A shade under three quarters, which was the engine-wide constant every
-    /// fluid was drawn with until a mod could say: enough to see the shape of a
-    /// riverbed through a pond, not so much that a deep pool stops reading as
-    /// deep.
-    pub const DEFAULT_OPACITY: f32 = 0.72;
+    /// The value lives in [`crate::fluid::DEFAULT_OPACITY`], where the paths
+    /// that build without the scripting feature can reach it; this is the name
+    /// a mod's rules use, so there is one number and not two.
+    pub const DEFAULT_OPACITY: f32 = crate::fluid::DEFAULT_OPACITY;
 
     /// What a fluid looks like from inside, if its mod said nothing.
     ///

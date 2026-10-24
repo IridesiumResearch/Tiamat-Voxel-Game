@@ -317,7 +317,7 @@ mod tests {
             evaporates: 0,
             color: [255, 255, 255],
             material: MaterialId(4),
-            opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+            opacity: crate::fluid::DEFAULT_OPACITY,
             light_falloff: 0,
         }
     }

@@ -1090,7 +1090,7 @@ mod tests {
                 evaporates: 0,
                 color: [0, 0, 255],
                 material,
-                opacity: crate::script::FluidRules::DEFAULT_OPACITY,
+                opacity: crate::fluid::DEFAULT_OPACITY,
                 light_falloff: 0,
             })
             .expect("register");
