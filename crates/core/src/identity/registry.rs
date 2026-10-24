@@ -789,6 +789,29 @@ impl RegistryTrust {
         }
     }
 
+    /// A trust from the two hex strings a `server.toml` carries (design §5).
+    ///
+    /// The engine ships the registry's current public key and the hash of its
+    /// committed successor; a server pins the same strings so a join can be
+    /// checked offline. The successor hash is only checked for shape — nothing
+    /// can prove it belongs to the current key until a rotation record arrives
+    /// — but a typo is refused here rather than silently trusting the wrong
+    /// chain.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::BadPublicKey`] for a current key that is not 64 hex
+    /// characters naming a valid point, or a successor hash that is not 64.
+    pub fn from_hex(current: &str, next_key_hash: Option<&str>) -> Result<Self, RegistryError> {
+        let key = decode_hex_32(current).ok_or(RegistryError::BadPublicKey)?;
+        let current = VerifyingKey::from_bytes(&key).map_err(|_| RegistryError::BadPublicKey)?;
+        let next = match next_key_hash.map(str::trim).filter(|hash| !hash.is_empty()) {
+            None => None,
+            Some(hash) => Some(decode_hex_32(hash).ok_or(RegistryError::BadPublicKey)?),
+        };
+        Ok(Self::new(current, next))
+    }
+
     /// The key the registry signs with now.
     #[must_use]
     pub fn current(&self) -> &VerifyingKey {
@@ -873,6 +896,19 @@ impl RegistryTrust {
             .find(|entry| entry.key == key && issued < entry.retired_at)
             .map(|entry| entry.key)
     }
+}
+
+/// Thirty-two bytes from 64 hex characters, or `None`.
+fn decode_hex_32(text: &str) -> Option<[u8; 32]> {
+    let text = text.trim();
+    if text.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Checks a certificate against the joining identity, the clock, the trust set
@@ -2790,5 +2826,25 @@ mod tests {
         renewal.work = None;
         renewal.sign(&device);
         assert!(renewal.verify_renewal(NOW).is_ok());
+    }
+
+    #[test]
+    fn a_trust_can_be_pinned_from_hex() {
+        let key = SigningKey::from_bytes(&[0x77; 32]);
+        let hex = key.verifying_key().to_bytes();
+        let mut text = String::with_capacity(64);
+        for byte in hex {
+            use std::fmt::Write as _;
+            let _ = write!(text, "{byte:02x}");
+        }
+        let trust = RegistryTrust::from_hex(&text, None).expect("a pinned key");
+        assert_eq!(trust.current(), &key.verifying_key());
+
+        assert!(RegistryTrust::from_hex("not hex", None).is_err());
+        assert!(RegistryTrust::from_hex(&text[..62], None).is_err());
+        assert!(RegistryTrust::from_hex(&text, Some("abc")).is_err());
+        let successor = text.clone();
+        let trust = RegistryTrust::from_hex(&text, Some(&successor)).expect("a successor hash");
+        assert_eq!(trust.current(), &key.verifying_key());
     }
 }
