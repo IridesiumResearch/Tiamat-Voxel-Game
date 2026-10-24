@@ -1547,6 +1547,13 @@ pub struct Settings {
     /// joining under another, which releases the old one. A client's
     /// embedded host says no — it has no admin port to rename anyone from.
     pub sticky_names: bool,
+    /// What this server does with name certificates (design §5): `honour` by
+    /// default, `require` for a public server, `off` for a LAN world or an
+    /// embedded host.
+    pub name_policy: tiamat_core::session::NamePolicy,
+    /// The registry keys this server pins, or `None` when it has none — in
+    /// which case no certificate can verify and every join is uncertified.
+    pub registry_trust: Option<tiamat_core::identity::registry::RegistryTrust>,
 
     /// Extra material ids to register, on top of whatever mods register.
     ///
@@ -2682,6 +2689,8 @@ impl ServerHandle {
             player_models,
             allow_custom_skins: settings.allow_custom_skins,
             sticky_names: settings.sticky_names,
+            name_policy: settings.name_policy,
+            registry_trust: settings.registry_trust.clone(),
             uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
             theme,
             cloud_layer,
@@ -6900,6 +6909,10 @@ impl ServerHandle {
             world_options: Vec::new(),
             allow_custom_skins: false,
             sticky_names: false,
+            // An embedded host has no registry to pin; a certificate would
+            // have nothing to verify against.
+            name_policy: tiamat_core::session::NamePolicy::Off,
+            registry_trust: None,
         })
     }
 

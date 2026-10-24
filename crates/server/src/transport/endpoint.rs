@@ -165,6 +165,11 @@ pub struct Shared {
     /// Whether a name sticks to the identity that first joined with it
     /// (`sticky_names` in server.toml); see `session::JoinContext`.
     pub sticky_names: bool,
+    /// What this server does with name certificates (`registry` in
+    /// server.toml, design §5).
+    pub name_policy: tiamat_core::session::NamePolicy,
+    /// The registry keys this server pins, or `None` when it has none.
+    pub registry_trust: Option<tiamat_core::identity::registry::RegistryTrust>,
     /// Bytes that came over the wire rather than from a mod's directory — the
     /// skins players chose — served by hash like any content, and forgotten
     /// when the last player wearing one leaves.
@@ -4132,6 +4137,8 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                 cert_fingerprint: &shared.cert_fingerprint,
                 custom_skins: shared.allow_custom_skins,
                 sticky_names: shared.sticky_names,
+                name_policy: shared.name_policy,
+                registry_trust: shared.registry_trust.as_ref(),
                 seed: shared.seed.load(std::sync::atomic::Ordering::Relaxed),
                 mods: &shared.mods,
                 mod_set_fingerprint: shared.mod_set_fingerprint,
@@ -4958,6 +4965,8 @@ mod tests {
             player_models: Vec::new(),
             allow_custom_skins: false,
             sticky_names: false,
+            name_policy: tiamat_core::session::NamePolicy::Off,
+            registry_trust: None,
             uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
             theme: None,
             cloud_layer: None,

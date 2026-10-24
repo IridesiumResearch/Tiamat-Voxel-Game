@@ -280,6 +280,27 @@ impl Response {
     }
 }
 
+/// What a server does with the name certificates its players carry.
+///
+/// `registry` in `server.toml` (design §5). The default is [`NamePolicy::Honour`],
+/// which costs nothing: a certificate that verifies wins its name, and one that
+/// does not is simply absent, exactly as before certificates existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NamePolicy {
+    /// Ignore certificates. A LAN world or an embedded host, where there is no
+    /// registry to pin and no reason to make a player carry one.
+    Off,
+    /// A valid certificate wins its name; no valid one is an ordinary join.
+    #[default]
+    Honour,
+    /// A public server: no valid certificate, no join.
+    ///
+    /// A server that sets this must pin a registry key, or no certificate can
+    /// ever verify and every join fails; the server's configuration refuses to
+    /// start in that state.
+    Require,
+}
+
 /// What the server needs to know to run a join flow.
 pub struct JoinContext<'a> {
     /// `BLAKE3` of the server's self-signed certificate.
@@ -295,7 +316,19 @@ pub struct JoinContext<'a> {
     /// name wears the one they have here and is told so; only an operator's
     /// RCON `rename` changes it. Off, the default, a new name on a join
     /// rebinds the identity and releases the old one.
+    ///
+    /// **Uncertified players only.** A certified player's name follows their
+    /// certificate, so a rename at the registry is seen at the next join.
     pub sticky_names: bool,
+    /// What this server does with name certificates (design §5).
+    pub name_policy: NamePolicy,
+    /// The registry keys this server pins, or `None` when it has none.
+    ///
+    /// `None` means no certificate can verify, which is the honest state of a
+    /// LAN world: the policy stays [`NamePolicy::Honour`] and every join is
+    /// uncertified. A server whose policy is [`NamePolicy::Require`] must pin
+    /// one, and its configuration refuses to start otherwise.
+    pub registry_trust: Option<&'a crate::identity::registry::RegistryTrust>,
     /// The resolved mod set, from Task 05.
     pub mods: &'a [ModEntry],
     /// The mod set's fingerprint.
@@ -415,6 +448,15 @@ pub struct Session {
     /// The name the client asked for, when it wears another one — told to
     /// the player on joining, with the reason, then forgotten.
     renamed_from: Option<(String, WhyRenamed)>,
+    /// The certificate carried by `Hello`, unverified until the challenge is
+    /// answered — see [`Self::certified_name`].
+    certificate: Option<Vec<u8>>,
+    /// Whether this session's name is the one a certificate issued.
+    certified: bool,
+    /// An identity a certified join renamed off its name, that name, and the
+    /// variant it now wears. The server tells them; see
+    /// [`certified_displacement_notice`].
+    displacement: Option<(PlayerUuid, String, String)>,
     uuid: Option<PlayerUuid>,
 }
 
@@ -426,6 +468,22 @@ enum WhyRenamed {
     /// This server keeps the first name an identity joined with
     /// (`sticky_names`), and this identity already has one.
     Kept,
+    /// The registry's certificate for this identity names it differently, and
+    /// the certificate is what wins.
+    Certified,
+}
+
+/// The line a player is sent when a certified holder takes the name they wore.
+///
+/// The displaced player keeps playing: a certified name is worth a rename, not
+/// a removal. Same shape as the notices above, from nobody, so it reads as the
+/// server's voice rather than another player's.
+#[must_use]
+pub fn certified_displacement_notice(name: &str, variant: &str) -> String {
+    format!(
+        "`{name}` is registered to another identity; you are `{variant}` here until \
+         an operator renames you"
+    )
 }
 
 impl Default for Session {
@@ -444,6 +502,9 @@ impl Session {
             claimed_key: None,
             claimed_name: None,
             renamed_from: None,
+            certificate: None,
+            certified: false,
+            displacement: None,
             uuid: None,
         }
     }
@@ -462,6 +523,44 @@ impl Session {
     #[must_use]
     pub const fn uuid(&self) -> Option<PlayerUuid> {
         self.uuid
+    }
+
+    /// Whether this session's name is the one a certificate issued.
+    #[must_use]
+    pub const fn is_certified(&self) -> bool {
+        self.certified
+    }
+
+    /// Takes the identity a certified join displaced off its name, with the
+    /// variant it now wears.
+    ///
+    /// Core decides the rename and composes the words
+    /// ([`certified_displacement_notice`]); the server owns delivery, because
+    /// the displaced player is on another connection.
+    #[must_use]
+    pub fn take_displacement(&mut self) -> Option<(PlayerUuid, String)> {
+        self.displacement
+            .take()
+            .map(|(uuid, name, variant)| (uuid, certified_displacement_notice(&name, &variant)))
+    }
+
+    /// The certificate carried in `Hello`, verified against this server's pin
+    /// and clock.
+    ///
+    /// `None` for `off`, for a join without one, for a server that pins no key,
+    /// and for any certificate that does not verify: under `honour` a bad
+    /// certificate is not a refusal, and under `require` its absence refuses.
+    fn certified_name(
+        &self,
+        context: &JoinContext<'_>,
+        uuid: &PlayerUuid,
+    ) -> Option<crate::identity::registry::Name> {
+        if context.name_policy == NamePolicy::Off {
+            return None;
+        }
+        let bytes = self.certificate.as_deref()?;
+        let trust = context.registry_trust?;
+        crate::identity::registry::verify_certificate(bytes, uuid, context.now, trust, None).ok()
     }
 
     /// The bound display name, once in world.
@@ -677,10 +776,15 @@ impl Session {
             protocol_version,
             public_key,
             display_name,
+            name_certificate,
         } = message
         else {
             return self.refuse_out_of_phase(message);
         };
+
+        // Kept until the challenge is answered: before that the UUID is only
+        // claimed, and a certificate is a statement about a **proven** identity.
+        self.certificate.clone_from(name_certificate);
 
         // Version first. Everything below assumes both ends agree on what the
         // bytes mean, and a mismatch should say so rather than surfacing as a
@@ -736,6 +840,11 @@ impl Session {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one step of the join state machine: authenticate, admit, then bind a name; \
+                  splitting it would hide the order the rules run in"
+    )]
     fn handle_auth(
         &mut self,
         signature: &crate::proto::WireSignature,
@@ -804,43 +913,85 @@ impl Session {
             registry.insert(KeySet::new(key, None, context.now));
         }
 
-        // Bind the name to the PROVEN identity — or the next free variant of
-        // it, when somebody else wears it here: every fresh install is
-        // `player`, and a LAN of two must not be a host and a guest who
-        // cannot join. The player is told which name they got, below.
-        let name = self.claimed_name.clone().unwrap_or_default();
-        // **A name that sticks** (`sticky_names`, asked by the designer on
-        // 2026-10-14 for players who are somebody new every join): an
-        // identity that already holds a name here wears it whatever it asked
-        // for this time, and only an operator's `rename` moves it. A
-        // numbered variant of its own name is left to the path below, which
-        // keeps it anyway and whose notice names the taker, not the switch.
-        let kept = if context.sticky_names {
-            registry
-                .name_of(&uuid)
-                .filter(|own| *own != name && !registry::is_variant_of(own, &name))
-                .map(ToOwned::to_owned)
-        } else {
-            None
-        };
-        if let Some(own) = kept {
-            self.renamed_from = Some((name, WhyRenamed::Kept));
-            self.claimed_name = Some(own);
-        } else {
-            match registry.bind_name_or_next(&name, uuid, NAME_VARIANTS) {
+        // **A certificate, now that there is a proven identity to check it
+        // against.** §5: `honour` takes a valid one and ignores a bad one,
+        // `require` refuses without one, `off` does not look.
+        let certified = self.certified_name(context, &uuid);
+        if context.name_policy == NamePolicy::Require && certified.is_none() {
+            return self.close_with(DisconnectReason::NameRequired);
+        }
+        if let Some(certified_name) = certified {
+            // The registry owns this name: an uncertified holder is moved to a
+            // variant and told, and the certificate's casing wins over what the
+            // client asked for.
+            match registry.bind_certified(
+                certified_name.display(),
+                certified_name.canonical(),
+                uuid,
+                NAME_VARIANTS,
+            ) {
                 Ok(bound) => {
-                    if bound != name {
-                        self.renamed_from = Some((name, WhyRenamed::Taken));
+                    let asked = self.claimed_name.clone().unwrap_or_default();
+                    if bound.name != asked {
+                        self.renamed_from = Some((asked, WhyRenamed::Certified));
                     }
-                    self.claimed_name = Some(bound);
+                    let certified_display = bound.name.clone();
+                    self.displacement = bound
+                        .displaced
+                        .map(|(uuid, variant)| (uuid, certified_display, variant));
+                    self.claimed_name = Some(bound.name);
+                    self.certified = true;
                 }
-                Err(RegistryError::NameTaken { .. }) => {
+                Err(RegistryError::NameTaken { name }) => {
                     return self.close_with(DisconnectReason::NameTaken { name });
                 }
                 Err(err) => {
                     return self.close_with(DisconnectReason::AuthFailed {
                         detail: err.to_string(),
                     });
+                }
+            }
+        } else {
+            // Bind the name to the PROVEN identity — or the next free variant of
+            // it, when somebody else wears it here: every fresh install is
+            // `player`, and a LAN of two must not be a host and a guest who
+            // cannot join. The player is told which name they got, below.
+            let name = self.claimed_name.clone().unwrap_or_default();
+            // **A name that sticks** (`sticky_names`, asked by the designer on
+            // 2026-10-14 for players who are somebody new every join): an
+            // identity that already holds a name here wears it whatever it asked
+            // for this time, and only an operator's `rename` moves it. A
+            // numbered variant of its own name is left to the path below, which
+            // keeps it anyway and whose notice names the taker, not the switch.
+            // Uncertified players only: a certificate's name follows the
+            // certificate.
+            let kept = if context.sticky_names {
+                registry
+                    .name_of(&uuid)
+                    .filter(|own| *own != name && !registry::is_variant_of(own, &name))
+                    .map(ToOwned::to_owned)
+            } else {
+                None
+            };
+            if let Some(own) = kept {
+                self.renamed_from = Some((name, WhyRenamed::Kept));
+                self.claimed_name = Some(own);
+            } else {
+                match registry.bind_name_or_next(&name, uuid, NAME_VARIANTS) {
+                    Ok(bound) => {
+                        if bound != name {
+                            self.renamed_from = Some((name, WhyRenamed::Taken));
+                        }
+                        self.claimed_name = Some(bound);
+                    }
+                    Err(RegistryError::NameTaken { .. }) => {
+                        return self.close_with(DisconnectReason::NameTaken { name });
+                    }
+                    Err(err) => {
+                        return self.close_with(DisconnectReason::AuthFailed {
+                            detail: err.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -883,6 +1034,9 @@ impl Session {
                 WhyRenamed::Kept => format!(
                     "this server keeps the name you first joined with: you are `{bound}` here, \
                      not `{asked}`; an operator can change it"
+                ),
+                WhyRenamed::Certified => format!(
+                    "the registry has `{bound}` for this identity, so that is your name here"
                 ),
             };
             response.send.push(ServerMessage::Chat { from: None, text });
@@ -1160,6 +1314,8 @@ mod tests {
             cert_fingerprint: &FINGERPRINT,
             custom_skins: false,
             sticky_names: false,
+            name_policy: NamePolicy::Off,
+            registry_trust: None,
             theme: None,
             cloud_layer: None,
             models: &[],
@@ -1216,6 +1372,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: *identity.public_key().as_bytes(),
             display_name: name.to_owned(),
+            name_certificate: None,
         };
         let response = session.handle(&hello, &context, &auth, registry);
         sent.extend(response.send.iter().cloned());
@@ -1478,6 +1635,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION + 1,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "Alice".to_owned(),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -1511,6 +1669,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "Alice".to_owned(),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -1549,6 +1708,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "Alice".to_owned(),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -1584,6 +1744,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "Alice".to_owned(),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -1617,6 +1778,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "Alice".to_owned(),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -1952,6 +2114,7 @@ mod tests {
                     protocol_version: PROTOCOL_VERSION,
                     public_key: *alice.public_key().as_bytes(),
                     display_name: "Alice".to_owned(),
+                    name_certificate: None,
                 },
                 &context,
                 &auth,
@@ -2078,6 +2241,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "Alice".to_owned(),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -2106,6 +2270,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 public_key: *alice.public_key().as_bytes(),
                 display_name: "x".repeat(1000),
+                name_certificate: None,
             },
             &context,
             &auth,
@@ -2134,5 +2299,226 @@ mod tests {
             &mut registry,
         );
         assert!(response.send.is_empty(), "a closed session must stay quiet");
+    }
+
+    /// [`join_in`], with a certificate and a policy.
+    fn join_certified(
+        identity: &Identity,
+        name: &str,
+        certificate: Option<Vec<u8>>,
+        trust: Option<&crate::identity::registry::RegistryTrust>,
+        policy: NamePolicy,
+        registry: &mut IdentityRegistry,
+        allowlist: &Allowlist,
+    ) -> (Session, Vec<ServerMessage>) {
+        let mods = Vec::new();
+        let mut context = context(allowlist, &mods);
+        context.name_policy = policy;
+        context.registry_trust = trust;
+        let auth = SelfSovereign;
+        let mut session = Session::new();
+        let mut sent = Vec::new();
+
+        let hello = ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            public_key: *identity.public_key().as_bytes(),
+            display_name: name.to_owned(),
+            name_certificate: certificate,
+        };
+        let response = session.handle(&hello, &context, &auth, registry);
+        sent.extend(response.send.iter().cloned());
+
+        let Some(ServerMessage::AuthChallenge { nonce }) = response
+            .send
+            .iter()
+            .find(|m| matches!(m, ServerMessage::AuthChallenge { .. }))
+            .cloned()
+        else {
+            return (session, sent);
+        };
+
+        let signature = identity.sign(&challenge_payload(&nonce, &FINGERPRINT, PROTOCOL_VERSION));
+        let auth_response = ClientMessage::AuthResponse {
+            signature: WireSignature(signature.to_bytes()),
+        };
+        let response = session.handle(&auth_response, &context, &auth, registry);
+        sent.extend(response.send.iter().cloned());
+
+        if session.phase() == Phase::Authenticated {
+            let response = session.handle(&ClientMessage::JoinWorld, &context, &auth, registry);
+            sent.extend(response.send);
+        }
+
+        (session, sent)
+    }
+
+    /// A certificate for `uuid`, signed by a registry key.
+    fn issue_certificate(
+        registry_key: &ed25519_dalek::SigningKey,
+        canonical: &str,
+        display: &str,
+        uuid: PlayerUuid,
+        issued: i64,
+    ) -> Vec<u8> {
+        let name = crate::identity::registry::Name::from_parts(canonical, display).expect("name");
+        crate::identity::registry::NameCertificate::issue(registry_key, &name, uuid, issued, 1)
+            .to_bytes()
+            .expect("bytes")
+    }
+
+    #[test]
+    fn a_valid_certificate_binds_its_own_name() {
+        let registry_key = ed25519_dalek::SigningKey::from_bytes(&[0x5A; 32]);
+        let trust =
+            crate::identity::registry::RegistryTrust::new(registry_key.verifying_key(), None);
+        let alice = Identity::generate().expect("identity");
+        let mut registry = IdentityRegistry::default();
+        let allowlist = Allowlist::default();
+        let certificate = issue_certificate(
+            &registry_key,
+            "alice",
+            "Alice",
+            alice.uuid_as_root(),
+            1_699_999_000,
+        );
+        let (session, sent) = join_certified(
+            &alice,
+            "Whatever",
+            Some(certificate),
+            Some(&trust),
+            NamePolicy::Honour,
+            &mut registry,
+            &allowlist,
+        );
+        assert!(session.is_certified(), "a valid certificate certifies");
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
+        assert!(
+            sent.iter().any(|message| matches!(
+                message,
+                ServerMessage::Chat { from: None, text } if text.contains("Alice")
+            )),
+            "the player is told which name the registry has"
+        );
+    }
+
+    #[test]
+    fn a_certified_name_displaces_an_uncertified_holder() {
+        let registry_key = ed25519_dalek::SigningKey::from_bytes(&[0x5B; 32]);
+        let trust =
+            crate::identity::registry::RegistryTrust::new(registry_key.verifying_key(), None);
+        let alice = Identity::generate().expect("identity");
+        let bob = Identity::generate().expect("bob");
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_name("Alice", bob.uuid_as_root())
+            .expect("bob was here first");
+        let allowlist = Allowlist::default();
+        let certificate = issue_certificate(
+            &registry_key,
+            "alice",
+            "Alice",
+            alice.uuid_as_root(),
+            1_699_999_000,
+        );
+        let (mut session, _) = join_certified(
+            &alice,
+            "Alice",
+            Some(certificate),
+            Some(&trust),
+            NamePolicy::Honour,
+            &mut registry,
+            &allowlist,
+        );
+        assert!(session.is_certified());
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
+        let displaced = session.take_displacement().expect("a displacement");
+        assert_eq!(displaced.0, bob.uuid_as_root());
+        assert!(displaced.1.contains("Alice 2"), "{displaced:?}");
+        assert_eq!(registry.name_of(&bob.uuid_as_root()), Some("Alice 2"));
+        assert!(certified_displacement_notice("Alice", "Alice 2").contains("registered"));
+    }
+
+    #[test]
+    fn require_refuses_a_join_without_a_certificate() {
+        let registry_key = ed25519_dalek::SigningKey::from_bytes(&[0x5C; 32]);
+        let trust =
+            crate::identity::registry::RegistryTrust::new(registry_key.verifying_key(), None);
+        let alice = Identity::generate().expect("identity");
+        let mut registry = IdentityRegistry::default();
+        let allowlist = Allowlist::default();
+        let (session, sent) = join_certified(
+            &alice,
+            "Alice",
+            None,
+            Some(&trust),
+            NamePolicy::Require,
+            &mut registry,
+            &allowlist,
+        );
+        assert_eq!(session.phase(), Phase::Closed);
+        assert!(
+            sent.iter().any(|message| matches!(
+                message,
+                ServerMessage::Disconnect {
+                    reason: DisconnectReason::NameRequired
+                }
+            )),
+            "the refusal says a name is required"
+        );
+    }
+
+    #[test]
+    fn off_and_expired_certificates_leave_a_join_uncertified() {
+        let registry_key = ed25519_dalek::SigningKey::from_bytes(&[0x5D; 32]);
+        let trust =
+            crate::identity::registry::RegistryTrust::new(registry_key.verifying_key(), None);
+        let alice = Identity::generate().expect("identity");
+        let allowlist = Allowlist::default();
+
+        // `off` does not look at it at all.
+        let mut registry = IdentityRegistry::default();
+        let certificate = issue_certificate(
+            &registry_key,
+            "alice",
+            "Alice",
+            alice.uuid_as_root(),
+            1_699_999_000,
+        );
+        let (session, _) = join_certified(
+            &alice,
+            "alice",
+            Some(certificate),
+            Some(&trust),
+            NamePolicy::Off,
+            &mut registry,
+            &allowlist,
+        );
+        assert!(!session.is_certified());
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("alice"));
+
+        // An expired one under `honour` is an ordinary join (the design's
+        // offline rule: the stored certificate may be stale).
+        let mut registry = IdentityRegistry::default();
+        let stale = issue_certificate(
+            &registry_key,
+            "alice",
+            "Alice",
+            alice.uuid_as_root(),
+            1_600_000_000,
+        );
+        let (session, _) = join_certified(
+            &alice,
+            "alice",
+            Some(stale),
+            Some(&trust),
+            NamePolicy::Honour,
+            &mut registry,
+            &allowlist,
+        );
+        assert!(
+            !session.is_certified(),
+            "an expired certificate is not a reason to refuse"
+        );
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("alice"));
     }
 }

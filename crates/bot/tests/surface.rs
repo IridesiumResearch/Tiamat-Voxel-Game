@@ -79,6 +79,8 @@ fn snow_lands_where_the_engine_says_the_surface_is() {
         max_players: 1,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

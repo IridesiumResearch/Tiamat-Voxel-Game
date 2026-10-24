@@ -66,6 +66,8 @@ fn every_chunk_of_a_sea_arrives_after_its_own_water() {
         max_players: 2,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance {
@@ -160,6 +162,8 @@ fn the_sea_is_drawn_at_the_horizon_and_not_as_a_hole_the_shape_of_it() {
         max_players: 2,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

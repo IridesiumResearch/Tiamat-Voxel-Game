@@ -597,6 +597,8 @@ fn start_local_world(
             // their second visit, and this host has no admin port to rename
             // anyone from, so names do not stick here.
             sticky_names: false,
+            name_policy: tiamat_core::session::NamePolicy::Off,
+            registry_trust: None,
             allowlist: tiamat_core::identity::Allowlist::open(),
             // **Your own world, your own powers.** A player hosting a world for
             // themselves is its operator, which is what makes flight available

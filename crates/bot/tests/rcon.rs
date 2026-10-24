@@ -38,6 +38,8 @@ fn start_with(name: &str, sticky_names: bool) -> (ServerHandle, std::net::Socket
         max_players: 8,
         allow_custom_skins: false,
         sticky_names,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: Some((rcon_addr, TOKEN.to_owned())),

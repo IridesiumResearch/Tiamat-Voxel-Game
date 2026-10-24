@@ -55,6 +55,8 @@ fn start(name: &str, bind: &str, max_players: u32) -> ServerHandle {
         identity_path: None,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         max_players,
         allowlist: Allowlist::open(),
         operators: Vec::new(),

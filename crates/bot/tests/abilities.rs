@@ -127,6 +127,8 @@ fn start_operated(name: &str, operators: Vec<String>) -> ServerHandle {
         max_players: 2,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators,
         view_distance: ViewDistance::MINIMUM,

@@ -36,6 +36,8 @@ fn settings(dir: &std::path::Path) -> Settings {
         max_players: 8,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: None,
@@ -63,6 +65,8 @@ fn settings_with_mods(dir: &std::path::Path) -> Settings {
     Settings {
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         world_options: Vec::new(),
         mods_path: Some(reference_mods()),
         enabled_mods: bot::fixture::enabled_mods_for(&reference_mods())

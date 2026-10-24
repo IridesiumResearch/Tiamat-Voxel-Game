@@ -489,6 +489,7 @@ impl Bot {
             protocol_version: PROTOCOL_VERSION,
             public_key: *self.identity.public_key().as_bytes(),
             display_name: display_name.to_owned(),
+            name_certificate: None,
         })
         .await?;
 

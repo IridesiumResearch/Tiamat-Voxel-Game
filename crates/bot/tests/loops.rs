@@ -84,6 +84,8 @@ fn a_loop_addressed_to_one_player_reaches_that_player_alone_with_its_fades() {
         max_players: 2,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

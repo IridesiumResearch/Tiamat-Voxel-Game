@@ -92,6 +92,8 @@ fn twenty_bots_churning_lamps_keep_the_tick_inside_its_budget() {
         max_players: 64,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

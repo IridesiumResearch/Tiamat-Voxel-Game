@@ -110,6 +110,8 @@ fn start(name: &str, mods: PathBuf, view: ViewDistance) -> ServerHandle {
         max_players: 4,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: view,

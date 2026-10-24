@@ -158,12 +158,14 @@ fn client_messages() -> Vec<Vec<u8>> {
             protocol_version: PROTOCOL_VERSION,
             public_key: [0x11; 32],
             display_name: "Alice".to_owned(),
+            name_certificate: None,
         },
         // A version mismatch, which is a path with its own handling.
         ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION.wrapping_add(1),
             public_key: [0xFF; 32],
             display_name: "x".repeat(32),
+            name_certificate: None,
         },
         ClientMessage::AuthResponse {
             signature: WireSignature([0x22; 64]),

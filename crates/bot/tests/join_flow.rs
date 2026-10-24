@@ -50,6 +50,8 @@ fn settings(dir: &std::path::Path, allowlist: Allowlist) -> Settings {
         max_players: 8,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist,
         operators: Vec::new(),
         rcon: None,
@@ -410,6 +412,7 @@ fn a_version_mismatch_is_refused_cleanly() {
             protocol_version: PROTOCOL_VERSION + 99,
             public_key: *identity.public_key().as_bytes(),
             display_name: "Alice".to_owned(),
+            name_certificate: None,
         })
         .await
         .expect("send");

@@ -90,6 +90,8 @@ fn ground_that_names_its_fluid_drinks_that_one_and_refuses_the_other() {
         max_players: 1,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

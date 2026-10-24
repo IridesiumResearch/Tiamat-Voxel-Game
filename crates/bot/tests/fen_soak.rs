@@ -316,6 +316,8 @@ fn fly_over_the_fen() {
         max_players: 1,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: vec![operator],
         view_distance: ViewDistance::DEFAULT,

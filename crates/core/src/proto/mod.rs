@@ -44,7 +44,7 @@ use crate::coords::{BlockPos, ChunkPos, SubNodePos};
 /// **Bump on any change to a message type.** Peers exchange this before
 /// anything else and refuse each other cleanly on mismatch — see
 /// [`ServerMessage::Disconnect`].
-pub const PROTOCOL_VERSION: u32 = 93;
+pub const PROTOCOL_VERSION: u32 = 94;
 // v2 (Task 07): appended `ServerMessage::InventoryUpdate`. Appended, never
 // inserted — see the module docs and CONTRIBUTING's protocol checklist.
 // v3 (Task 08): appended `ServerMessage::MaterialTable`.
@@ -98,6 +98,15 @@ pub const PROTOCOL_VERSION: u32 = 93;
 // (`game.set_slot_grain`); and `DialogEvent::Dropped { click }`, appended — a
 // click outside every open screen while the cursor held a stack, which the
 // server takes off the cursor and reports to the screen's owner.
+// v94 (accounts, a name the registry issued): `ClientMessage::Hello` carries
+// `name_certificate`, appended — the postcard certificate the registry issued
+// this identity, or `None` — at most `MAX_NAME_CERTIFICATE_BYTES`. It is
+// unverified when it arrives; the session checks it after the challenge, against
+// the server's pinned registry keys and its `registry` policy (design §5), and
+// a valid one binds the certified name (`NamePolicy`, `WhyRenamed`). Refused on
+// decode when the bytes are over the cap. **A field on an existing shape**, so
+// the version check is what keeps a v93 peer from reading it as the start of
+// the challenge.
 // v93 (Life 23, a player's own skin): `ServerMessage::HelloAck` carries
 // `custom_skins`, appended — whether this host takes a skin from a client —
 // and `ClientMessage::Skin { body, bytes }` is appended: a PNG the player
@@ -387,6 +396,15 @@ pub const MAX_CONTENT_CHUNK_BYTES: usize = 256 * 1024;
 /// Longest display name.
 pub const MAX_NAME_BYTES: usize = 32;
 
+/// Largest name certificate a `Hello` may carry.
+///
+/// A certificate is a version, two short strings, a timestamp, a serial, the
+/// registry key and a signature — 256 is the same bound
+/// `identity::registry::MAX_CERTIFICATE_BYTES` enforces when the certificate is
+/// parsed, and this copy is checked when the message is decoded so a peer cannot
+/// make a session hold more.
+pub const MAX_NAME_CERTIFICATE_BYTES: usize = 256;
+
 /// Longest chat message.
 pub const MAX_CHAT_BYTES: usize = 512;
 
@@ -548,6 +566,9 @@ pub enum DisconnectReason {
     },
     /// The server is enforcing an allowlist and this identity is not on it.
     NotAllowlisted,
+    /// The server requires a name certificate and this identity presented no
+    /// valid one (`registry = "require"`).
+    NameRequired,
     /// The server is full.
     ServerFull {
         /// Configured maximum.
@@ -1169,6 +1190,14 @@ pub enum ClientMessage {
         public_key: [u8; 32],
         /// The display name it wants.
         display_name: String,
+        /// The registry's certificate for this identity, in postcard form, or
+        /// `None`.
+        ///
+        /// **Optional and unverified here.** It is checked after the challenge,
+        /// when the UUID is proven: the server's `registry` policy and its
+        /// pinned keys decide what it is worth (design §5). Refused on decode
+        /// when it is over [`MAX_NAME_CERTIFICATE_BYTES`].
+        name_certificate: Option<Vec<u8>>,
     },
     /// Response to [`ServerMessage::AuthChallenge`].
     ///
@@ -3193,7 +3222,11 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
                 check_len("skin_body", body.len(), MAX_ID_BYTES)?;
             }
         }
-        ClientMessage::Hello { display_name, .. } => {
+        ClientMessage::Hello {
+            display_name,
+            name_certificate,
+            ..
+        } => {
             check_len("display_name", display_name.len(), MAX_NAME_BYTES)?;
             if display_name.is_empty() {
                 return Err(ProtocolError::FieldTooLarge {
@@ -3201,6 +3234,13 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
                     len: 0,
                     limit: MAX_NAME_BYTES,
                 });
+            }
+            if let Some(certificate) = name_certificate {
+                check_len(
+                    "name_certificate",
+                    certificate.len(),
+                    MAX_NAME_CERTIFICATE_BYTES,
+                )?;
             }
         }
         ClientMessage::Chat { text } => check_len("chat", text.len(), MAX_CHAT_BYTES)?,
@@ -4204,6 +4244,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [1u8; 32],
             display_name: "Bob".to_owned(),
+            name_certificate: None,
         }
     }
 
@@ -4333,6 +4374,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [0u8; 32],
             display_name: "x".repeat(MAX_NAME_BYTES + 1),
+            name_certificate: None,
         };
         assert!(matches!(
             validate_client_message(&message),
@@ -4349,6 +4391,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [0u8; 32],
             display_name: String::new(),
+            name_certificate: None,
         };
         assert!(validate_client_message(&message).is_err());
     }
@@ -4579,6 +4622,7 @@ mod tests {
                     protocol_version: 0,
                     public_key: [0u8; 32],
                     display_name: String::new(),
+                    name_certificate: None,
                 },
                 0,
             ),

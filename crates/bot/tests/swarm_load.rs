@@ -97,6 +97,8 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
         max_players: 64,
         allow_custom_skins: false,
         sticky_names: false,
+        name_policy: tiamat_core::session::NamePolicy::Off,
+        registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         view_distance: ViewDistance::MINIMUM,

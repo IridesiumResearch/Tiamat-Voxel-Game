@@ -29,6 +29,16 @@ pub struct NameBinding {
     pub uuid: PlayerUuid,
 }
 
+/// What [`IdentityRegistry::bind_certified`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedBinding {
+    /// The name bound — the certificate's display casing.
+    pub name: String,
+    /// The identity that wore the canonical name and was moved to a variant,
+    /// with the variant it now wears.
+    pub displaced: Option<(PlayerUuid, String)>,
+}
+
 /// Something went wrong updating the registry.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -262,6 +272,81 @@ impl IdentityRegistry {
             Err(RegistryError::NameTaken { .. }) => {}
             Err(err) => return Err(err),
         }
+        for n in 2..=most {
+            let variant = format!("{name} {n}");
+            if variant.len() > crate::proto::MAX_NAME_BYTES {
+                break;
+            }
+            match self.bind_name(&variant, uuid) {
+                Ok(()) => return Ok(variant),
+                Err(RegistryError::NameTaken { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(RegistryError::NameTaken {
+            name: name.to_owned(),
+        })
+    }
+
+    /// Binds a name the registry has certified to `uuid`, displacing an
+    /// uncertified holder first (design §5).
+    ///
+    /// The **canonical** form decides whose the name is; `display` — the
+    /// certificate's casing — is the string this server shows. A holder of the
+    /// canonical name with another UUID is moved to a numbered variant of what
+    /// they wore, and answered in [`CertifiedBinding::displaced`] so the caller
+    /// can tell them. The certified identity's previous name, if any, is
+    /// released: a certified player's name follows the certificate.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::NameTaken`] if every variant up to `most` is held and
+    /// the displaced holder could not be moved.
+    pub fn bind_certified(
+        &mut self,
+        display: &str,
+        canonical: &str,
+        uuid: PlayerUuid,
+        most: usize,
+    ) -> Result<CertifiedBinding, RegistryError> {
+        // Whose name is this, by the rule the registry uses? A server's own
+        // names have no canonical form, so the comparison is case-insensitive:
+        // an uncertified `alice` wears a certified `Alice`'s name.
+        let worn = self
+            .names
+            .iter()
+            .find(|(name, holder)| **holder != uuid && name.eq_ignore_ascii_case(canonical))
+            .map(|(name, holder)| (name.clone(), *holder));
+        if let Some((name, _)) = &worn {
+            self.release_name(name);
+        }
+        if let Some(previous) = self.name_of(&uuid).map(ToOwned::to_owned)
+            && previous != display
+        {
+            self.release_name(&previous);
+        }
+        self.bind_name(display, uuid)?;
+        let displaced = match worn {
+            Some((name, holder)) => Some((holder, self.bind_variant(&name, holder, most)?)),
+            None => None,
+        };
+        Ok(CertifiedBinding {
+            name: display.to_owned(),
+            displaced,
+        })
+    }
+
+    /// Binds `<name> 2`, `<name> 3`, … to `uuid`, answering which.
+    ///
+    /// **Variants only**, unlike [`Self::bind_name_or_next`], which tries the
+    /// name itself first: a displaced holder must not get the name back that a
+    /// certificate just took.
+    fn bind_variant(
+        &mut self,
+        name: &str,
+        uuid: PlayerUuid,
+        most: usize,
+    ) -> Result<String, RegistryError> {
         for n in 2..=most {
             let variant = format!("{name} {n}");
             if variant.len() > crate::proto::MAX_NAME_BYTES {
@@ -646,5 +731,55 @@ mod tests {
             None,
             "reinsert must drop the retired key from the index"
         );
+    }
+
+    #[test]
+    fn a_certified_name_binds_its_own_casing() {
+        let alice = identity();
+        let mut registry = IdentityRegistry::default();
+        let bound = registry
+            .bind_certified("Alice", "alice", alice.uuid_as_root(), 99)
+            .expect("bind");
+        assert_eq!(bound.name, "Alice");
+        assert_eq!(bound.displaced, None);
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
+    }
+
+    #[test]
+    fn a_certified_name_displaces_an_uncertified_holder() {
+        let alice = identity();
+        let bob = identity();
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_name("alice", bob.uuid_as_root())
+            .expect("bob was here first");
+
+        let bound = registry
+            .bind_certified("Alice", "alice", alice.uuid_as_root(), 99)
+            .expect("bind");
+        assert_eq!(bound.name, "Alice");
+        assert_eq!(
+            bound.displaced,
+            Some((bob.uuid_as_root(), "alice 2".to_owned()))
+        );
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
+        assert_eq!(registry.name_of(&bob.uuid_as_root()), Some("alice 2"));
+        assert_eq!(registry.name_holder("alice"), None);
+    }
+
+    #[test]
+    fn a_certified_name_releases_what_its_identity_wore_before() {
+        let alice = identity();
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_name("Alicia", alice.uuid_as_root())
+            .expect("earlier name");
+
+        let bound = registry
+            .bind_certified("Alice", "alice", alice.uuid_as_root(), 99)
+            .expect("bind");
+        assert_eq!(bound.name, "Alice");
+        assert_eq!(registry.name_holder("Alicia"), None);
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
     }
 }
