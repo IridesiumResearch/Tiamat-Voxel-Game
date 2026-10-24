@@ -71,6 +71,54 @@ fn a_body_over_the_cap_is_refused_before_it_is_read() {
 }
 
 #[test]
+fn the_revocation_list_is_signed_and_carries_what_was_revoked() {
+    let dir = test_dir("revocations");
+    // A rotation-free service, stopped, so a revocation can be planted the way
+    // `admin revoke` plants one — the endpoint reads the table, not a cache.
+    {
+        let handle = serve_with(
+            config(Some(dir.clone())),
+            Arc::new(SinkMailer::default()),
+            Arc::new(SystemClock),
+        )
+        .expect("start");
+        assert!(handle.stop());
+    }
+    let key = ed25519_dalek::SigningKey::from_bytes(&KEY_SEED)
+        .verifying_key()
+        .to_bytes();
+    {
+        let connection = rusqlite::Connection::open(dir.join("registry.sqlite")).expect("db");
+        connection
+            .execute(
+                "INSERT INTO revocations (registry_key, serial, when_at, reason)
+                 VALUES (?1, 5, 1, 'test')",
+                [key.as_slice()],
+            )
+            .expect("insert");
+    }
+
+    let handle = serve_with(
+        config(Some(dir)),
+        Arc::new(SinkMailer::default()),
+        Arc::new(SystemClock),
+    )
+    .expect("reopen");
+    let (status, body) = request(handle.local_addr(), "GET", "/v1/revocations", b"");
+    assert_eq!(status, 200);
+    let list = tiamat_core::identity::registry::RevocationList::from_bytes(&body)
+        .expect("a revocation list");
+    let trust = tiamat_core::identity::registry::RegistryTrust::new(
+        ed25519_dalek::SigningKey::from_bytes(&KEY_SEED).verifying_key(),
+        Some(NEXT_HASH),
+    );
+    list.verify(&trust).expect("signed by the pinned key");
+    assert!(list.is_revoked(&key, 5));
+    assert!(!list.is_revoked(&key, 6));
+    assert!(handle.stop());
+}
+
+#[test]
 fn a_file_backed_registry_keeps_its_database_across_a_restart() {
     let dir = test_dir("http-restart");
     {

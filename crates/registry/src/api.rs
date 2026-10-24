@@ -390,6 +390,45 @@ pub(crate) fn recover_cancel(service: &Service, body: &[u8]) -> Reply {
     }
 }
 
+/// `GET /v1/revocations` — the signed list of revoked certificate serials.
+///
+/// Servers that have internet may fetch it and hand it to their verifier;
+/// servers that do not rely on the certificate's ninety-day lifetime. The list
+/// is signed with the current key and carries, per entry, the key that issued
+/// the revoked certificate.
+pub(crate) fn revocations(service: &Service) -> Reply {
+    let now = service.now();
+    let entries = match service.db().with(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT registry_key, serial FROM revocations
+             ORDER BY when_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(
+            [tiamat_core::identity::registry::MAX_REVOCATIONS as i64],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (key, serial) = row?;
+            if let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) {
+                entries.push(tiamat_core::identity::registry::Revocation {
+                    registry_key: key,
+                    serial: u64::try_from(serial).unwrap_or(0),
+                });
+            }
+        }
+        Ok(entries)
+    }) {
+        Ok(entries) => entries,
+        Err(error) => return internal(error),
+    };
+    let list = service.keys().sign_revocations(now, entries);
+    match postcard::to_allocvec(&list) {
+        Ok(bytes) => Reply::octets(bytes),
+        Err(error) => internal(error),
+    }
+}
+
 /// The token from a link's query string, if it is the right shape.
 fn token_from_query(query: &str) -> Option<&str> {
     query

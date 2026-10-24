@@ -259,3 +259,40 @@ jobs:
           files=(dist/tiamat-*.tar.gz dist/tiamat-*.zip)
           echo "uploading: ${files[*]}"
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+  # The name registry's image (milestone 0.5.0, N5). Separate from the game's
+  # archives on purpose: a host pulls this image, a player never downloads it,
+  # and a broken image must not hold a game release hostage.
+  registry-image:
+    # A dispatch run has no tag, and an untagged image would be overwritten by
+    # the next one; the registry is deployed by version.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the registry image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/registry/Dockerfile
+          push: true
+          # The tag and `latest`: the tag is what a deployment pins, `latest`
+          # is what a person pulling by hand gets.
+          tags: |
+            ghcr.io/iridesiumresearch/tiamat-registry:${{ github.ref_name }}
+            ghcr.io/iridesiumresearch/tiamat-registry:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

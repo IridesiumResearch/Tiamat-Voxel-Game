@@ -220,6 +220,91 @@ impl RegistryKeys {
     ) -> NameCertificate {
         NameCertificate::issue(&self.signing, name, uuid, issued, serial)
     }
+
+    /// Signs a rotation record to `successor`, if the commitment already held
+    /// allows it.
+    ///
+    /// The secret never leaves this type: `admin rotate` asks for a record and
+    /// gets one, rather than holding the signing key and re-implementing the
+    /// commitment rule.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyError::NoCommittedSuccessor`] when the current key committed to
+    /// nothing, and [`KeyError::SuccessorMismatch`] when `successor` does not
+    /// hash to the commitment.
+    pub fn sign_rotation(
+        &self,
+        successor: &VerifyingKey,
+        next_key_hash: Option<[u8; 32]>,
+        at: i64,
+    ) -> Result<RotationRecord, KeyError> {
+        let Some(committed) = self.next else {
+            return Err(KeyError::NoCommittedSuccessor);
+        };
+        if commit_to(successor) != committed {
+            return Err(KeyError::SuccessorMismatch);
+        }
+        let mut record = RotationRecord {
+            version: tiamat_core::identity::registry::ROTATION_VERSION,
+            retired: self.public_key().to_bytes(),
+            successor: successor.to_bytes(),
+            next_key_hash,
+            rotated_at: at,
+            signature: tiamat_core::identity::registry::Signature64([0; 64]),
+        };
+        record.sign(&self.signing);
+        Ok(record)
+    }
+
+    /// Signs a revocation list with the current key.
+    #[must_use]
+    pub fn sign_revocations(
+        &self,
+        issued: i64,
+        entries: Vec<tiamat_core::identity::registry::Revocation>,
+    ) -> tiamat_core::identity::registry::RevocationList {
+        let mut list = tiamat_core::identity::registry::RevocationList {
+            version: tiamat_core::identity::registry::REVOCATION_VERSION,
+            registry_key: self.public_key().to_bytes(),
+            issued,
+            entries,
+            signature: tiamat_core::identity::registry::Signature64([0; 64]),
+        };
+        list.sign(&self.signing);
+        list
+    }
+}
+
+/// Loads the key chain from the database, replaying the published rotations.
+///
+/// Shared by the service and the operator commands so a rotation written by one
+/// is read by the other exactly the same way.
+///
+/// # Errors
+///
+/// [`KeyError::Database`] when the rows cannot be read, and every error
+/// [`RegistryKeys::open`] returns.
+pub fn from_database(
+    db: &crate::db::Db,
+    seed: [u8; 32],
+    next: Option<[u8; 32]>,
+) -> Result<RegistryKeys, KeyError> {
+    let stored: Vec<Vec<u8>> = db
+        .with(|connection| {
+            let mut statement = connection.prepare("SELECT record FROM rotations ORDER BY seq")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect()
+        })
+        .map_err(|error| KeyError::Database(error.to_string()))?;
+    let mut rotations = Vec::with_capacity(stored.len());
+    for (index, bytes) in stored.iter().enumerate() {
+        rotations.push(
+            RotationRecord::from_bytes(bytes)
+                .map_err(|source| KeyError::BadRotation { index, source })?,
+        );
+    }
+    RegistryKeys::open(seed, next, rotations)
 }
 
 impl std::fmt::Debug for RegistryKeys {
@@ -275,6 +360,21 @@ pub enum KeyError {
          set the newest commitment, not the one from before the rotation"
     )]
     NextMismatch,
+
+    /// The database could not be read.
+    #[error("the registry database could not be read: {0}")]
+    Database(String),
+
+    /// There is no successor to rotate to.
+    #[error(
+        "this registry key has no committed successor, so nothing can be rotated to; \
+         set REGISTRY_NEXT_KEY_HASH from `admin key next` first"
+    )]
+    NoCommittedSuccessor,
+
+    /// The proposed successor is not the committed one.
+    #[error("the proposed successor does not hash to REGISTRY_NEXT_KEY_HASH")]
+    SuccessorMismatch,
 }
 
 #[cfg(test)]

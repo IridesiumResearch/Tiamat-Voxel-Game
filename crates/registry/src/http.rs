@@ -179,6 +179,7 @@ fn dispatch(
     match (method, path) {
         ("GET", "/healthz") => api::health(service),
         ("GET", "/v1/keys") => api::keys(service),
+        ("GET", "/v1/revocations") => api::revocations(service),
         ("POST", "/v1/claim") => api::claim(service, body, client),
         ("POST", "/v1/release") => api::release(service, body),
         ("POST", "/v1/email") => api::email(service, body, client),
@@ -200,6 +201,7 @@ fn is_known(path: &str) -> bool {
         path,
         "/healthz"
             | "/v1/keys"
+            | "/v1/revocations"
             | "/v1/claim"
             | "/v1/release"
             | "/v1/email"

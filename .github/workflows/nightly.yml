@@ -270,3 +270,22 @@ jobs:
           name: criterion-${{ github.sha }}
           path: target/criterion-output.txt
           if-no-files-found: warn
+  # The deployed name registry (milestone 0.5.0, N5). Skipped until the
+  # repository variable REGISTRY_URL exists, so the workflow is green before the
+  # service is hosted and starts checking the day it is.
+  registry-health:
+    if: vars.REGISTRY_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: The registry is up and its keys answer
+        env:
+          REGISTRY_URL: ${{ vars.REGISTRY_URL }}
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 20 "$REGISTRY_URL/healthz"
+          echo
+          # The keys endpoint is the client's whole trust root: if it stops
+          # answering, renewals are one startup away from failing everywhere.
+          curl -fsS --max-time 20 "$REGISTRY_URL/v1/keys" -o /tmp/registry-keys.postcard
+          test -s /tmp/registry-keys.postcard
+          echo "keys endpoint: $(wc -c < /tmp/registry-keys.postcard) bytes"

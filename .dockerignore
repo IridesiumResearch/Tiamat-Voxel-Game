@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Iridesium
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Build context for the registry image. The Dockerfile copies only the
+# workspace manifests, `crates/` and `spikes/`, so this keeps the context small
+# and — more importantly — keeps a developer's target directory, a stale
+# worktree or a local database out of the image.
+
+target/
+.git/
+.github/
+.claude/
+dist/
+docs/
+game/
+api/
+fuzz/
+benches/
+*.md

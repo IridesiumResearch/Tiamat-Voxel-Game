@@ -6,8 +6,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tiamat_core::identity::registry::RotationRecord;
-
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::db::{Db, DbError};
@@ -49,25 +47,21 @@ impl Service {
             None => Db::in_memory()?,
         };
 
-        let stored: Vec<Vec<u8>> = db.with(|connection| {
-            let mut statement = connection.prepare("SELECT record FROM rotations ORDER BY seq")?;
-            let rows = statement.query_map([], |row| row.get(0))?;
-            rows.collect()
-        })?;
-        let mut rotations = Vec::with_capacity(stored.len());
-        for (index, bytes) in stored.iter().enumerate() {
-            rotations.push(
-                RotationRecord::from_bytes(bytes)
-                    .map_err(|source| KeyError::BadRotation { index, source })?,
-            );
-        }
-
         // The design says the service sweeps its own limit rows. Startup is the
         // one moment the database is not answering requests, so it happens here
         // rather than on a timer nobody watches.
         db.with(|connection| crate::limits::sweep(connection, clock.now()))?;
 
-        let keys = RegistryKeys::open(config.key_seed, config.next_key_hash, rotations)?;
+        // Today's backup, if it is missing — the day's first request would
+        // otherwise be the only trigger, and a redeploy right after midnight
+        // should not lose a day of protection.
+        if let Some(dir) = &config.data_dir
+            && let Err(error) = crate::backup::backup_once(&db, dir, clock.now())
+        {
+            tracing::warn!(error = %error, "the startup backup failed");
+        }
+
+        let keys = crate::keys::from_database(&db, config.key_seed, config.next_key_hash)?;
         Ok(Self {
             config,
             db,
@@ -117,8 +111,17 @@ impl Service {
     /// [`DbError`] when the database fails.
     pub fn advance(&self) -> Result<usize, DbError> {
         let now = self.now();
-        self.db
-            .with(|connection| crate::recover::advance(connection, now))
+        let moved = self
+            .db
+            .with(|connection| crate::recover::advance(connection, now))?;
+        // The day's backup rides the same call: a failed backup is a log line,
+        // never a failed request — the request is about a name, not a file.
+        if let Some(dir) = &self.config.data_dir
+            && let Err(error) = crate::backup::backup_once(&self.db, dir, now)
+        {
+            tracing::warn!(error = %error, "the daily backup failed");
+        }
+        Ok(moved)
     }
 }
 
@@ -175,7 +178,7 @@ mod tests {
     use crate::mail::SinkMailer;
     use ed25519_dalek::SigningKey;
     use tiamat_core::identity::keyset::commit_to;
-    use tiamat_core::identity::registry::{ROTATION_VERSION, Signature64};
+    use tiamat_core::identity::registry::{ROTATION_VERSION, RotationRecord, Signature64};
 
     fn test_dir(name: &str) -> std::path::PathBuf {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use tiamat_registry::hex;
 use tiamat_registry::keys;
 use tiamat_registry::mail::{SmtpMailer, Unavailable};
-use tiamat_registry::{Config, Mailer, serve};
+use tiamat_registry::{Config, Mailer, admin, serve};
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -53,6 +53,68 @@ enum AdminCommand {
         /// Which key operation.
         #[command(subcommand)]
         command: KeyCommand,
+    },
+
+    /// Print what the deployment holds, in one screen.
+    Stats,
+
+    /// Group this window's claims by network, biggest first.
+    Claims {
+        /// How far back to look: `48h`, `30m`, `7d`.
+        #[arg(long, value_name = "window", default_value = "48h")]
+        since: String,
+    },
+
+    /// Revoke every name claimed from a network in a window.
+    ///
+    /// The burst remedy: one line undoes a squatter's morning, and the reason
+    /// goes to the audit table and the revocation list.
+    Revoke {
+        /// The network, as it is written in the claim log: `203.0.113.0/24`.
+        #[arg(long, value_name = "subnet")]
+        subnet: String,
+        /// How far back to look: `48h`, `30d`.
+        #[arg(long, value_name = "window", default_value = "48h")]
+        since: String,
+        /// Why, in the operator's words. Required.
+        #[arg(long, value_name = "text")]
+        reason: String,
+    },
+
+    /// Reserve a name so no claim may take it.
+    Reserve {
+        /// The canonical name.
+        name: String,
+    },
+
+    /// Release a reservation.
+    Unreserve {
+        /// The canonical name.
+        name: String,
+    },
+
+    /// Change the display casing of a held name; the canonical form cannot move.
+    Rename {
+        /// The holder's UUID, 64 hex characters.
+        #[arg(long, value_name = "hex")]
+        uuid: String,
+        /// The new display casing.
+        #[arg(long, value_name = "name")]
+        display: String,
+    },
+
+    /// Publish a rotation to a successor key.
+    ///
+    /// Run with the **current** key still in the environment: the record is
+    /// signed by the key being retired. Afterwards set `REGISTRY_KEY` from the
+    /// successor's file and `REGISTRY_NEXT_KEY_HASH` to the new commitment.
+    Rotate {
+        /// The successor's seed file, as written by `admin key next`.
+        #[arg(long, value_name = "path")]
+        successor: PathBuf,
+        /// The successor's own commitment, from a fresh `admin key next`.
+        #[arg(long, value_name = "hex")]
+        next: String,
     },
 }
 
@@ -156,7 +218,97 @@ fn wait_for_interrupt() -> Result<(), Box<dyn std::error::Error>> {
 fn admin_command(command: AdminCommand) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         AdminCommand::Key { command } => key_command(command),
+        AdminCommand::Stats => with_admin(|admin| {
+            let stats = admin.stats()?;
+            println!("names held:          {}", stats.held);
+            println!("names released:      {}", stats.released);
+            println!("recovery addresses:  {}", stats.emails);
+            println!("revoked serials:     {}", stats.revocations);
+            println!("recovery notices:    {}", stats.pending_recoveries);
+            println!("claims in the last day: {}", stats.claims_today);
+            Ok(())
+        }),
+        AdminCommand::Claims { since } => with_admin(|admin| {
+            let since = admin::parse_window(&since, admin.now()).map_err(failure)?;
+            let groups = admin.claims_by_subnet(since)?;
+            if groups.is_empty() {
+                println!("no claims in that window");
+            }
+            for group in groups {
+                println!("{:>6}  {}", group.claims, group.subnet);
+            }
+            Ok(())
+        }),
+        AdminCommand::Revoke {
+            subnet,
+            since,
+            reason,
+        } => with_admin(|admin| {
+            let since = admin::parse_window(&since, admin.now()).map_err(failure)?;
+            let revoked = admin.revoke_subnet(&subnet, since, &reason)?;
+            println!(
+                "released {} name(s) and revoked {} certificate(s) from {subnet}",
+                revoked.names, revoked.serials
+            );
+            println!("the reason is in the audit table, and the serials on the revocation list");
+            Ok(())
+        }),
+        AdminCommand::Reserve { name } => with_admin(|admin| {
+            admin.reserve(&name)?;
+            println!("reserved `{name}`");
+            Ok(())
+        }),
+        AdminCommand::Unreserve { name } => with_admin(|admin| {
+            if admin.unreserve(&name)? {
+                println!("released the reservation on `{name}`");
+            } else {
+                println!("`{name}` was not reserved");
+            }
+            Ok(())
+        }),
+        AdminCommand::Rename { uuid, display } => with_admin(|admin| {
+            let name = admin.rename(&uuid, &display)?;
+            println!("{} now shows as `{}`", name.canonical(), name.display());
+            Ok(())
+        }),
+        AdminCommand::Rotate { successor, next } => with_admin(|admin| {
+            let seed = read_secret(&successor)?;
+            let next = hex::decode::<32>(&next)
+                .ok_or("--next must be 64 hex characters, the commitment from `admin key next`")?;
+            let record = admin.rotate(seed, next)?;
+            println!(
+                "rotation published, signed by {}",
+                hex::encode(&record.retired)
+            );
+            println!("successor public key: {}", hex::encode(&record.successor));
+            println!();
+            println!("Now set, and restart the service:");
+            println!("  REGISTRY_KEY  = the seed in {}", successor.display());
+            println!("  REGISTRY_NEXT_KEY_HASH={}", hex::encode(&next));
+            Ok(())
+        }),
     }
+}
+
+/// Runs a command that needs the deployment's database.
+fn with_admin(
+    command: impl FnOnce(&admin::Admin) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::from_env()?;
+    let admin = admin::Admin::open(&config)?;
+    command(&admin)
+}
+
+/// A one-line failure for the operator.
+fn failure(message: String) -> Box<dyn std::error::Error> {
+    message.into()
+}
+
+/// Reads a seed from the hex file `admin key new` or `key next` wrote.
+fn read_secret(path: &Path) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    hex::decode::<32>(text.trim())
+        .ok_or_else(|| format!("{} does not hold a 64-character hex seed", path.display()).into())
 }
 
 /// Makes key material.

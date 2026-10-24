@@ -314,6 +314,16 @@ pub enum DbError {
     /// A previous holder of the connection panicked, so its state is unknown.
     #[error("a previous request panicked while holding the database connection")]
     Poisoned,
+
+    /// A backup could not be written or the old ones could not be pruned.
+    #[error("a backup could not be written at `{path}`")]
+    Backup {
+        /// Where it was going, or what could not be removed.
+        path: String,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]

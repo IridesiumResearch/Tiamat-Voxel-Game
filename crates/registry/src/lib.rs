@@ -39,6 +39,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admin;
+pub mod backup;
 pub mod clock;
 pub mod config;
 pub mod db;
