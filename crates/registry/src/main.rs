@@ -16,7 +16,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use tiamat_registry::hex;
 use tiamat_registry::keys;
-use tiamat_registry::mail::Unavailable;
+use tiamat_registry::mail::{SmtpMailer, Unavailable};
 use tiamat_registry::{Config, Mailer, serve};
 
 /// Command-line arguments.
@@ -118,9 +118,19 @@ fn serve_command() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     tracing::debug!(?config, "starting the registry");
 
-    // The SMTP transport arrives with the email flow; until then the service
-    // answers email requests with "mail is not configured", which is the truth.
-    let mailer: Arc<dyn Mailer> = Arc::new(Unavailable);
+    // A configured SMTP URL is a startup dependency: a registry that boots
+    // without mail and only says so when a player asks for a link has hidden
+    // the error behind a support conversation.
+    let mailer: Arc<dyn Mailer> = match (&config.mail_from, &config.smtp_url) {
+        (Some(from), Some(url)) => {
+            tracing::info!(from, "mail is configured");
+            Arc::new(SmtpMailer::new(url, from)?)
+        }
+        _ => {
+            tracing::warn!("no mail is configured; recovery and email links cannot be sent");
+            Arc::new(Unavailable)
+        }
+    };
     let handle = serve(config, mailer)?;
     tracing::info!(addr = %handle.local_addr(), "the registry is listening");
 

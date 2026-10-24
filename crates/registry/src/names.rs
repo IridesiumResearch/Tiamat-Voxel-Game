@@ -50,15 +50,15 @@ pub const EXPIRY_AFTER_RENEWAL: i64 = 365 * DAY;
 
 /// A binding as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Binding {
-    canonical: String,
-    display: String,
-    uuid: [u8; 32],
-    claimed: i64,
-    renewed: i64,
-    released: Option<i64>,
-    hold_until: Option<i64>,
-    renewals: i64,
+pub(crate) struct Binding {
+    pub(crate) canonical: String,
+    pub(crate) display: String,
+    pub(crate) uuid: [u8; 32],
+    pub(crate) claimed: i64,
+    pub(crate) renewed: i64,
+    pub(crate) released: Option<i64>,
+    pub(crate) hold_until: Option<i64>,
+    pub(crate) renewals: i64,
 }
 
 /// Which quota refused a request.
@@ -228,6 +228,14 @@ pub fn claim(
         &claimed.uuid,
         now,
     )?;
+    record_issue(
+        &transaction,
+        serial,
+        &claimed.uuid,
+        &canonical,
+        &keys.public_key().to_bytes(),
+        now,
+    )?;
     audit(
         &transaction,
         &uuid,
@@ -236,10 +244,11 @@ pub fn claim(
         &client.to_string(),
     )?;
     let certificate = keys.issue(&claimed.name, claimed.uuid, now, serial);
+    let notice = crate::recover::pending_notice(&transaction, &canonical, now)?;
     transaction.commit()?;
     Ok(ClaimOutcome::Issued {
         certificate,
-        notice: None,
+        notice,
     })
 }
 
@@ -272,6 +281,14 @@ pub fn renew(
          WHERE canonical = ?3",
         params![now, claimed.name.display(), canonical],
     )?;
+    record_issue(
+        &transaction,
+        serial,
+        &claimed.uuid,
+        &canonical,
+        &keys.public_key().to_bytes(),
+        now,
+    )?;
     audit(
         &transaction,
         &uuid,
@@ -280,10 +297,11 @@ pub fn renew(
         "renewal",
     )?;
     let certificate = keys.issue(&claimed.name, claimed.uuid, now, serial);
+    let notice = crate::recover::pending_notice(&transaction, &canonical, now)?;
     transaction.commit()?;
     Ok(RenewOutcome::Renewed {
         certificate,
-        notice: None,
+        notice,
     })
 }
 
@@ -384,7 +402,10 @@ fn reserved_here(connection: &Connection, canonical: &str) -> rusqlite::Result<b
 }
 
 /// One binding by canonical name.
-fn binding(connection: &Connection, canonical: &str) -> rusqlite::Result<Option<Binding>> {
+pub(crate) fn binding(
+    connection: &Connection,
+    canonical: &str,
+) -> rusqlite::Result<Option<Binding>> {
     connection
         .query_row(
             "SELECT canonical, display, uuid, claimed, renewed, released, hold_until, renewals
@@ -396,7 +417,10 @@ fn binding(connection: &Connection, canonical: &str) -> rusqlite::Result<Option<
 }
 
 /// The active binding of one identity, if it has one.
-fn active_binding(connection: &Connection, uuid: &PlayerUuid) -> rusqlite::Result<Option<Binding>> {
+pub(crate) fn active_binding(
+    connection: &Connection,
+    uuid: &PlayerUuid,
+) -> rusqlite::Result<Option<Binding>> {
     connection
         .query_row(
             "SELECT canonical, display, uuid, claimed, renewed, released, hold_until, renewals
@@ -507,10 +531,37 @@ fn next_serial(connection: &Connection) -> rusqlite::Result<u64> {
     Ok(next)
 }
 
+/// Records a certificate the registry has issued, for a later revocation.
+///
+/// The certificate itself is the client's; this is the serial and the key that
+/// signed it, which is all a revocation names. A recovery needs every serial of
+/// the old identity, and there is no way to reconstruct them from a hash.
+fn record_issue(
+    connection: &Connection,
+    serial: u64,
+    uuid: &PlayerUuid,
+    canonical: &str,
+    registry_key: &[u8; 32],
+    now: i64,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO issued (serial, registry_key, uuid, canonical, issued)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            serial,
+            registry_key.as_slice(),
+            uuid.as_bytes().as_slice(),
+            canonical,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 /// Writes one audit row.
 ///
 /// `who` is a UUID rather than a name: names change, identities do not.
-fn audit(
+pub(crate) fn audit(
     connection: &Connection,
     who: &str,
     what: &str,

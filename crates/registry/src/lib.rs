@@ -52,11 +52,13 @@ mod api;
 mod http;
 mod limits;
 mod names;
+mod recover;
+mod tokens;
 
 pub use clock::{Clock, SystemClock};
 pub use config::{Config, ConfigError};
 pub use db::{Db, DbError, SCHEMA_VERSION};
 pub use http::{MAX_BODY_BYTES, ServerHandle, serve, serve_with};
 pub use keys::{GeneratedKey, GeneratedSuccessor, KeyError, RegistryKeys};
-pub use mail::{Mail, MailError, Mailer, SinkMailer, Unavailable};
+pub use mail::{Mail, MailError, Mailer, SinkMailer, SmtpMailer, Unavailable};
 pub use service::{Service, StartError};

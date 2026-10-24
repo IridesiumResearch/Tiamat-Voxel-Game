@@ -106,6 +106,20 @@ impl Service {
     pub fn now(&self) -> i64 {
         self.clock.now()
     }
+
+    /// Completes any recovery notice whose fourteen days are up.
+    ///
+    /// Called at startup and by the handlers that read a name, so a notice
+    /// ends even if nobody visits the site at the minute it expires.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] when the database fails.
+    pub fn advance(&self) -> Result<usize, DbError> {
+        let now = self.now();
+        self.db
+            .with(|connection| crate::recover::advance(connection, now))
+    }
 }
 
 impl std::fmt::Debug for Service {

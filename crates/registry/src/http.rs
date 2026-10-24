@@ -175,12 +175,17 @@ fn dispatch(
     client: Option<IpAddr>,
     body: &[u8],
 ) -> Reply {
-    let path = url.split('?').next().unwrap_or(url);
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
     match (method, path) {
         ("GET", "/healthz") => api::health(service),
         ("GET", "/v1/keys") => api::keys(service),
         ("POST", "/v1/claim") => api::claim(service, body, client),
         ("POST", "/v1/release") => api::release(service, body),
+        ("POST", "/v1/email") => api::email(service, body, client),
+        ("GET", "/v1/email/verify") => api::email_verify(service, query),
+        ("POST", "/v1/recover") => api::recover_start(service, body, client),
+        ("GET", "/v1/recover/confirm") => api::recover_confirm(service, query),
+        ("POST", "/v1/recover/cancel") => api::recover_cancel(service, body),
         ("GET", path) if path.starts_with(NAME_PREFIX) => {
             api::name_page(service, &path[NAME_PREFIX.len()..])
         }
@@ -191,8 +196,18 @@ fn dispatch(
 
 /// Whether a path exists at all, for telling 404 from 405.
 fn is_known(path: &str) -> bool {
-    matches!(path, "/healthz" | "/v1/keys" | "/v1/claim" | "/v1/release")
-        || path.starts_with(NAME_PREFIX)
+    matches!(
+        path,
+        "/healthz"
+            | "/v1/keys"
+            | "/v1/claim"
+            | "/v1/release"
+            | "/v1/email"
+            | "/v1/email/verify"
+            | "/v1/recover"
+            | "/v1/recover/confirm"
+            | "/v1/recover/cancel"
+    ) || path.starts_with(NAME_PREFIX)
 }
 
 /// Reads a request body, refusing an oversized one before reading it.

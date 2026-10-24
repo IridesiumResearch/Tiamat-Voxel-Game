@@ -26,7 +26,14 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 /// The schema this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Every migration, oldest first, with the version it brings the database to.
+///
+/// A migration is applied in order when the stored version is below its
+/// target. The list is append-only: changing an entry that has shipped would
+/// migrate a database that already ran it into a different shape.
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
 
 /// The schema, in one statement batch.
 ///
@@ -145,6 +152,24 @@ CREATE TABLE IF NOT EXISTS rotations (
 );
 ";
 
+/// Schema 2: what the registry has issued.
+///
+/// A recovery moves a name to a new identity and must revoke every certificate
+/// the old identity was given (§4). The registry does not keep certificates —
+/// they are the client's — so this table keeps the one thing a revocation needs:
+/// the serial and the registry key that signed it. It is append-only in
+/// practice; a row is never updated.
+const SCHEMA_V2: &str = r"
+CREATE TABLE IF NOT EXISTS issued (
+    serial       INTEGER PRIMARY KEY,
+    registry_key BLOB NOT NULL,
+    uuid         BLOB NOT NULL,
+    canonical    TEXT NOT NULL,
+    issued       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS issued_uuid ON issued(uuid);
+";
+
 /// The registry's database handle.
 pub struct Db {
     connection: Mutex<Connection>,
@@ -211,6 +236,25 @@ impl Db {
         let mut connection = self.connection.lock().map_err(|_| DbError::Poisoned)?;
         work(&mut connection).map_err(DbError::Sql)
     }
+
+    /// Runs `work` with the one connection, for a closure with its own error.
+    ///
+    /// The flows in `recover` fail for more reasons than SQL (a token's
+    /// randomness, a mail transport), so they carry a wider error; this lets
+    /// them use the same lock without the database layer knowing their
+    /// vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the closure returns, plus [`DbError::Poisoned`] converted into
+    /// the closure's error type.
+    pub fn try_with<T, E: From<DbError>>(
+        &self,
+        work: impl FnOnce(&mut Connection) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut connection = self.connection.lock().map_err(|_| DbError::Poisoned)?;
+        work(&mut connection)
+    }
 }
 
 impl std::fmt::Debug for Db {
@@ -225,10 +269,16 @@ fn migrate(connection: &mut Connection) -> Result<(), DbError> {
     if version > SCHEMA_VERSION {
         return Err(DbError::TooNew { found: version });
     }
-    if version < 1 {
+    if version < SCHEMA_VERSION {
+        // One transaction for the whole chain: a crash halfway through leaves
+        // the version and the tables where they were, not half-migrated.
         let transaction = connection.transaction()?;
-        transaction.execute_batch(SCHEMA_V1)?;
-        transaction.pragma_update(None, "user_version", 1)?;
+        for (target, sql) in MIGRATIONS {
+            if version < *target {
+                transaction.execute_batch(sql)?;
+            }
+        }
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
     }
     Ok(())
@@ -307,6 +357,7 @@ mod tests {
         for expected in [
             "audit",
             "emails",
+            "issued",
             "limits",
             "meta",
             "names",
@@ -320,6 +371,38 @@ mod tests {
                 tables.iter().any(|table| table == expected),
                 "{expected} is missing from {tables:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_schema_one_database_gains_the_issued_table() {
+        let dir = test_dir("migrate-1-to-2");
+        let path = dir.join("registry.sqlite");
+        {
+            let db = Db::open(&path).expect("open");
+            // Turn it into what a schema-1 build would have written: no
+            // `issued` table, and the version that says so.
+            db.with(|connection| {
+                connection.execute("DROP TABLE issued", [])?;
+                connection.pragma_update(None, "user_version", 1)?;
+                Ok(())
+            })
+            .expect("downgrade");
+        }
+        {
+            let db = Db::open(&path).expect("migrate forward");
+            assert_eq!(version(&db), SCHEMA_VERSION);
+            let count: i64 = db
+                .with(|connection| {
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'table' AND name = 'issued'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("issued");
+            assert_eq!(count, 1, "the migration did not create `issued`");
         }
     }
 

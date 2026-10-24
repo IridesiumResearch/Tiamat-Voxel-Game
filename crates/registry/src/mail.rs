@@ -104,6 +104,66 @@ impl Mailer for Unavailable {
     }
 }
 
+/// The real transport: SMTP over TLS.
+///
+/// Built from `REGISTRY_SMTP_URL` (`smtps://user:pass@host:465`) and
+/// `REGISTRY_MAIL_FROM`. `lettre` is taken with `default-features = false` and
+/// `rustls-tls`, so no `openssl-sys` enters the graph — `deny.toml` forbids it,
+/// and the engine already links rustls for QUIC.
+pub struct SmtpMailer {
+    transport: lettre::SmtpTransport,
+    from: lettre::message::Mailbox,
+}
+
+impl SmtpMailer {
+    /// Builds the transport, or says why it cannot.
+    ///
+    /// # Errors
+    ///
+    /// [`MailError::Transport`] when the URL is not an SMTP URL or the `From`
+    /// address is not a mailbox. Both are configuration errors that should stop
+    /// the process at startup, not at the first player who asks for a link.
+    pub fn new(url: &str, from: &str) -> Result<Self, MailError> {
+        let transport = lettre::SmtpTransport::from_url(url)
+            .map_err(|error| MailError::Transport(format!("REGISTRY_SMTP_URL: {error}")))?
+            // `from_url` gives a builder so credentials and pool settings can
+            // be changed; this service wants exactly what the URL says.
+            .build();
+        let from: lettre::message::Mailbox = from.parse().map_err(|error| {
+            MailError::Transport(format!("REGISTRY_MAIL_FROM is not a mailbox: {error}"))
+        })?;
+        Ok(Self { transport, from })
+    }
+}
+
+impl std::fmt::Debug for SmtpMailer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The transport holds the SMTP password. Never print it.
+        f.debug_struct("SmtpMailer")
+            .field("from", &format!("{}", self.from))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Mailer for SmtpMailer {
+    fn send(&self, mail: &Mail) -> Result<(), MailError> {
+        use lettre::Transport as _;
+        let to = mail.to.parse().map_err(|error| {
+            MailError::Transport(format!("the recipient is not a mailbox: {error}"))
+        })?;
+        let message = lettre::Message::builder()
+            .from(self.from.clone())
+            .to(to)
+            .subject(mail.subject.clone())
+            .body(mail.body.clone())
+            .map_err(|error| MailError::Transport(error.to_string()))?;
+        self.transport
+            .send(&message)
+            .map(|_| ())
+            .map_err(|error| MailError::Transport(error.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,6 +56,16 @@ pub fn start_with(config: Config, clock: Arc<dyn Clock>) -> ServerHandle {
     serve_with(config, Arc::new(SinkMailer::default()), clock).expect("start")
 }
 
+/// A service with a chosen clock, and the mail sink it sends to.
+///
+/// The recovery tests follow the links out of the sink, which is the whole
+/// reason the transport is a trait.
+pub fn start_with_mail(config: Config, clock: Arc<dyn Clock>) -> (ServerHandle, Arc<SinkMailer>) {
+    let sink = Arc::new(SinkMailer::default());
+    let handle = serve_with(config, sink.clone(), clock).expect("start");
+    (handle, sink)
+}
+
 /// A directory under the workspace target: this environment's sandbox denies
 /// writes under the system temp directory, and the suite should run anywhere.
 pub fn test_dir(name: &str) -> PathBuf {
