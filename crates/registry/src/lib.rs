@@ -50,6 +50,8 @@ pub mod wire;
 
 mod api;
 mod http;
+mod limits;
+mod names;
 
 pub use clock::{Clock, SystemClock};
 pub use config::{Config, ConfigError};

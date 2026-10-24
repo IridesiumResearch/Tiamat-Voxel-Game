@@ -14,6 +14,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use tiamat_core::identity::registry::{DEFAULT_WORK_BITS, MAX_WORK_BITS};
+
 use crate::hex;
 
 /// Everything the service needs to start.
@@ -43,6 +45,13 @@ pub struct Config {
     /// Whether `X-Forwarded-For` may be believed. On at Dokploy, behind
     /// Traefik; off everywhere else.
     pub trust_forwarded_for: bool,
+
+    /// The proof-of-work difficulty a quiet network is asked for.
+    ///
+    /// [`DEFAULT_WORK_BITS`] in production; a lower number exists for tests,
+    /// which would otherwise mine for a second per request. Above
+    /// [`MAX_WORK_BITS`] a client could not solve it.
+    pub work_bits: u32,
 }
 
 impl Config {
@@ -124,6 +133,23 @@ impl Config {
             }
         };
 
+        let work_bits = match lookup("REGISTRY_WORK_BITS").filter(|value| !value.is_empty()) {
+            None => DEFAULT_WORK_BITS,
+            Some(value) => {
+                let bits: u32 = value.parse().map_err(|_| ConfigError::Invalid {
+                    name: "REGISTRY_WORK_BITS",
+                    why: format!("`{value}` is not a whole number"),
+                })?;
+                if bits > MAX_WORK_BITS {
+                    return Err(ConfigError::Invalid {
+                        name: "REGISTRY_WORK_BITS",
+                        why: format!("nothing can be mined above {MAX_WORK_BITS} bits"),
+                    });
+                }
+                bits
+            }
+        };
+
         Ok(Self {
             data_dir: Some(data_dir),
             bind,
@@ -133,6 +159,7 @@ impl Config {
             mail_from,
             smtp_url,
             trust_forwarded_for,
+            work_bits,
         })
     }
 }
@@ -168,6 +195,7 @@ impl std::fmt::Debug for Config {
             .field("mail_from", &self.mail_from)
             .field("smtp_url", &self.smtp_url.as_ref().map(|_| "<redacted>"))
             .field("trust_forwarded_for", &self.trust_forwarded_for)
+            .field("work_bits", &self.work_bits)
             .finish()
     }
 }
@@ -235,6 +263,7 @@ mod tests {
         assert_eq!(config.base_url, "https://registry.tiamatengine.com");
         assert!(!config.trust_forwarded_for);
         assert!(config.smtp_url.is_none());
+        assert_eq!(config.work_bits, DEFAULT_WORK_BITS);
     }
 
     #[test]
@@ -311,6 +340,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_work_difficulty_is_a_number_in_range() {
+        let mut pairs = minimal();
+        pairs.push(("REGISTRY_WORK_BITS", "8"));
+        assert_eq!(Config::from_lookup(env(&pairs)).expect("bits").work_bits, 8);
+
+        let mut pairs = minimal();
+        pairs.push(("REGISTRY_WORK_BITS", "nonsense"));
+        assert!(matches!(
+            Config::from_lookup(env(&pairs)),
+            Err(ConfigError::Invalid {
+                name: "REGISTRY_WORK_BITS",
+                ..
+            })
+        ));
+
+        let mut pairs = minimal();
+        pairs.push(("REGISTRY_WORK_BITS", "64"));
+        assert!(matches!(
+            Config::from_lookup(env(&pairs)),
+            Err(ConfigError::Invalid {
+                name: "REGISTRY_WORK_BITS",
+                ..
+            })
+        ));
     }
 
     #[test]

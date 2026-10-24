@@ -164,27 +164,35 @@ fn serve_one(mut request: Request, service: &Service) {
     }
 }
 
+/// The prefix of the public name page.
+const NAME_PREFIX: &str = "/v1/name/";
+
 /// Routes a request to a handler, or to the status line that says why not.
 fn dispatch(
     service: &Service,
     method: &str,
     url: &str,
-    _client: Option<IpAddr>,
-    _body: &[u8],
+    client: Option<IpAddr>,
+    body: &[u8],
 ) -> Reply {
     let path = url.split('?').next().unwrap_or(url);
     match (method, path) {
         ("GET", "/healthz") => api::health(service),
         ("GET", "/v1/keys") => api::keys(service),
+        ("POST", "/v1/claim") => api::claim(service, body, client),
+        ("POST", "/v1/release") => api::release(service, body),
+        ("GET", path) if path.starts_with(NAME_PREFIX) => {
+            api::name_page(service, &path[NAME_PREFIX.len()..])
+        }
         _ if is_known(path) => Reply::error(405, "method", "this path does not answer that method"),
         _ => Reply::error(404, "not_found", "there is nothing at this path"),
     }
 }
 
-/// Whether a path exists at all, for telling 404 from 405. The list grows with
-/// every route a later increment adds.
+/// Whether a path exists at all, for telling 404 from 405.
 fn is_known(path: &str) -> bool {
-    matches!(path, "/healthz" | "/v1/keys")
+    matches!(path, "/healthz" | "/v1/keys" | "/v1/claim" | "/v1/release")
+        || path.starts_with(NAME_PREFIX)
 }
 
 /// Reads a request body, refusing an oversized one before reading it.
@@ -300,6 +308,23 @@ impl Reply {
         )
     }
 
+    /// The proof-of-work refusal, which carries the difficulty to re-mine at.
+    ///
+    /// The service raises the difficulty when a subnet is busy (`limits::
+    /// required_work_bits`), so a client that mined at the default needs the
+    /// new number to retry without guessing. It is the one error a machine is
+    /// expected to read.
+    pub(crate) fn error_work(status: u16, found: u32, required: u32) -> Self {
+        Self::json(
+            status,
+            format!(
+                "{{\"error\":\"work\",\"message\":\"this network's names are busy right now: \
+                 the proof of work needs {required} leading zero bits and this request has \
+                 {found}\",\"required_bits\":{required},\"found_bits\":{found}}}"
+            ),
+        )
+    }
+
     /// Wraps it for tiny_http.
     fn into_response(self) -> Response<std::io::Cursor<Vec<u8>>> {
         let mut response = Response::from_data(self.body).with_status_code(StatusCode(self.status));
@@ -331,7 +356,7 @@ impl std::fmt::Debug for Reply {
 /// quote a name, and a name arrives from the network. `serde_json` would do
 /// this properly and is a dependency for one function; the rule here is the
 /// conservative one — escape everything that is not printable ASCII.
-fn json_escape(text: &str) -> String {
+pub(crate) fn json_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
         match character {

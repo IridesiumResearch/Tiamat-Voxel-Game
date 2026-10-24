@@ -62,6 +62,11 @@ impl Service {
             );
         }
 
+        // The design says the service sweeps its own limit rows. Startup is the
+        // one moment the database is not answering requests, so it happens here
+        // rather than on a timer nobody watches.
+        db.with(|connection| crate::limits::sweep(connection, clock.now()))?;
+
         let keys = RegistryKeys::open(config.key_seed, config.next_key_hash, rotations)?;
         Ok(Self {
             config,
@@ -181,6 +186,7 @@ mod tests {
             mail_from: None,
             smtp_url: None,
             trust_forwarded_for: false,
+            work_bits: 4,
         }
     }
 

@@ -15,7 +15,7 @@
 //! appended but never inserted or removed** without agreeing a new endpoint
 //! version — the same rule the protocol follows.
 
-use tiamat_core::identity::registry::RotationRecord;
+use tiamat_core::identity::registry::{NameCertificate, RotationRecord};
 
 /// The answer to `GET /v1/keys`.
 ///
@@ -31,4 +31,16 @@ pub struct KeysResponse {
     pub next: Option<[u8; 32]>,
     /// Every rotation the registry has published, oldest first.
     pub rotations: Vec<RotationRecord>,
+}
+
+/// The answer to `POST /v1/claim`, for both a claim and a renewal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaimResponse {
+    /// The certificate to present when joining a server.
+    pub certificate: NameCertificate,
+    /// Set when a recovery is in flight against this name: the Unix time its
+    /// notice ends. The holder renewing during the notice is how a stolen
+    /// mailbox is caught (§4), so the client shows it as a notice with a
+    /// cancel.
+    pub pending_recovery_until: Option<i64>,
 }
