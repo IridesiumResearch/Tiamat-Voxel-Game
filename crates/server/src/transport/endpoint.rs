@@ -102,10 +102,10 @@ pub struct Shared {
     /// known once `World::open` has read it, on that thread. So this starts as
     /// the candidate and the simulation corrects it the moment it knows better.
     ///
-    /// A client that joined in the gap between the two would be told the
-    /// candidate. That window is the time it takes to open a database and no
-    /// listener is accepting yet, and the cost of being wrong is one wrong
-    /// number on an overlay — not worth a lock on the join path.
+    /// The accept loop does not begin until that correction has happened
+    /// (`ServerHandle::start`), so no join is ever answered with the candidate.
+    /// It stays an atomic rather than becoming a lock on the join path because
+    /// the correction is one store made once.
     pub seed: std::sync::atomic::AtomicU64,
     /// The resolved mod set from Task 05.
     pub mods: Vec<ModEntry>,

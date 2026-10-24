@@ -2816,12 +2816,29 @@ impl ServerHandle {
             drop(guard);
         }
 
+        // **No join before the world has been opened.** `Shared::seed` starts as
+        // the launcher's candidate and is corrected once `World::open` has read
+        // the stored one, so a client that joined in between was told the
+        // candidate. The listener is bound here (the address `start` returns is
+        // real), but its accept loop waits for the simulation to say the world
+        // is open. A failed simulation never says so, and then nothing accepts:
+        // a player who could connect to a server with no world would get a
+        // broken session rather than a clean refusal.
+        let (world_opened, world_ready) = std::sync::mpsc::channel::<bool>();
+
         let network = {
             let endpoint = endpoint.clone();
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("network".to_owned())
                 .spawn(move || {
+                    // Thirty seconds is a backstop for a simulation thread that
+                    // panicked before saying anything; a world open is orders of
+                    // magnitude quicker than that.
+                    match world_ready.recv_timeout(std::time::Duration::from_secs(30)) {
+                        Ok(true) => {}
+                        _ => return,
+                    }
                     runtime.block_on(transport::accept_loop(endpoint, shared));
                     // Dropping the runtime here, on this thread, rather than
                     // wherever the handle happens to be dropped: a tokio runtime
@@ -2849,6 +2866,9 @@ impl ServerHandle {
                         Ok(world) => world,
                         Err(err) => {
                             error!("could not read the world seed: {err}");
+                            // Nothing will accept: a server with no world is
+                            // not a server.
+                            let _ = world_opened.send(false);
                             return;
                         }
                     };
@@ -2902,6 +2922,10 @@ impl ServerHandle {
                         Ok(None) => {}
                         Err(err) => error!("could not read the time of day: {err}"),
                     }
+
+                    // The world is open, its seed and hour are authoritative,
+                    // and the accept loop has been waiting for exactly this.
+                    let _ = world_opened.send(true);
 
                     // One per server, opened on the simulation thread because
                     // that is the only thread that writes to it.
