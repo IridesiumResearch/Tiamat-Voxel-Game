@@ -1,16 +1,17 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The transport: one blocking HTTP server, a body cap, and a status line for
-//! everything that is not a handler.
+//! The transport: one blocking HTTP server, a body cap, a request deadline, and
+//! a status line for everything that is not a handler.
 //!
 //! `tiny_http` is blocking and thread-per-connection. That is the right size
 //! for this service — a handful of requests per player per ninety days — and it
 //! has no TLS of its own, deliberately: TLS is the reverse proxy's job at
-//! Dokploy, and so is timing out a slow client. What this module owns is the
-//! part that touches a stranger's bytes, so it is where the caps live: a
-//! request body is refused **before** it is read, and a path this service does
-//! not serve gets a status line rather than a handler.
+//! Dokploy, and so is timing out a slow **client**. What this module owns is the
+//! part that touches a stranger's bytes, so it is where the caps live: a request
+//! body is refused **before** it is read, a handler's work is bounded at two
+//! seconds ([`REQUEST_TIMEOUT`]), and a path this service does not serve gets a
+//! status line rather than a handler.
 
 use std::io::{ErrorKind, Read};
 use std::net::{IpAddr, SocketAddr};
@@ -134,10 +135,10 @@ pub fn serve_with(
 }
 
 /// The accept loop, until the stop flag is set.
-fn run(server: &Server, service: &Service, stop: &AtomicBool) {
+fn run(server: &Server, service: &Arc<Service>, stop: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(request)) => serve_one(request, service),
+            Ok(Some(request)) => serve_one(request, Arc::clone(service)),
             Ok(None) => {}
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
             Err(err) => {
@@ -150,13 +151,74 @@ fn run(server: &Server, service: &Service, stop: &AtomicBool) {
     }
 }
 
-/// Reads the body (under its cap), dispatches, and answers.
-fn serve_one(mut request: Request, service: &Service) {
+/// How long a request's work may take before the client is told to retry.
+///
+/// The design's two seconds. The database's own `busy_timeout` is the same
+/// number, but this bounds the *whole* handler: a query that waits, a
+/// verification that is slow, a machine whose disk has stopped answering. A
+/// client gets a status line instead of a socket that never closes.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The outcome of work done under a deadline.
+enum Deadline<T> {
+    /// It finished in time.
+    Met(T),
+    /// It was still running when the deadline passed; its thread continues
+    /// into a dropped channel and its result is discarded.
+    Missed,
+    /// No thread could be started for it.
+    NoThread,
+}
+
+/// Runs `work` on its own thread and waits at most `timeout` for the result.
+///
+/// The serving thread must keep owning the request — only it can answer — so
+/// the handler runs beside it and the answer is handed back through a channel.
+/// A timed-out worker is **not** killed (Rust cannot do that safely); it ends
+/// when its database call does, which is bounded by the same two seconds.
+fn within<T: Send + 'static>(
+    timeout: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Deadline<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("registry-request".to_owned())
+        .spawn(move || {
+            let _ = sender.send(work());
+        });
+    match spawned {
+        Ok(_) => match receiver.recv_timeout(timeout) {
+            Ok(value) => Deadline::Met(value),
+            Err(_) => Deadline::Missed,
+        },
+        Err(_) => Deadline::NoThread,
+    }
+}
+
+/// Reads the body (under its cap), dispatches under the deadline, and answers.
+fn serve_one(mut request: Request, service: Arc<Service>) {
     let method = request.method().as_str().to_owned();
     let url = request.url().to_owned();
     let client = client_ip(&request, service.config().trust_forwarded_for);
     let reply = match read_body(&mut request) {
-        Ok(body) => dispatch(service, &method, &url, client, &body),
+        Ok(body) => {
+            let worker_service = Arc::clone(&service);
+            match within(REQUEST_TIMEOUT, move || {
+                dispatch(&worker_service, &method, &url, client, &body)
+            }) {
+                Deadline::Met(reply) => reply,
+                Deadline::Missed => Reply::error(
+                    504,
+                    "timeout",
+                    "the registry took longer than two seconds to answer; try again",
+                ),
+                Deadline::NoThread => Reply::error(
+                    503,
+                    "busy",
+                    "the registry could not start a request worker; try again in a moment",
+                ),
+            }
+        }
         Err(reply) => reply,
     };
     if let Err(err) = request.respond(reply.into_response()) {
@@ -397,6 +459,23 @@ pub(crate) fn json_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_under_a_deadline_finishes_or_times_out() {
+        assert!(matches!(
+            within(Duration::from_millis(500), || 7),
+            Deadline::Met(7)
+        ));
+        // The slow worker is still running when this returns; it ends on its
+        // own and its answer goes into a dropped channel.
+        assert!(matches!(
+            within(Duration::from_millis(10), || {
+                std::thread::sleep(Duration::from_millis(80));
+                7
+            }),
+            Deadline::Missed
+        ));
+    }
 
     #[test]
     fn json_escaping_covers_quotes_backslashes_and_controls() {

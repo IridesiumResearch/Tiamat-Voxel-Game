@@ -23,7 +23,10 @@ points:
 
 It speaks plain HTTP inside its container. TLS is the reverse proxy's job,
 because the proxy already has a certificate and a renewal story and this binary
-has no business owning a second one.
+has no business owning a second one. A request's *work* — everything after its
+body is read — is bounded at two seconds; past that the client is told to retry
+rather than left holding a socket. A slow *client* is the proxy's problem,
+which is where the connection timeouts already live.
 
 ## Environment
 
