@@ -100,9 +100,11 @@ NameCertificate (postcard, then signed; ≤ 256 bytes on the wire)
   this rule never issued. Eighteen fits the protocol's 32-byte name limit
   with room.
 - **Reserved**: `iridesium`, `tiamat`, `admin`, `server`, `system`, `console`,
-  `moderator`, `support`, every default mod's id, and a short list the
-  operator keeps in the registry's own table. Reserved names are refused
-  with the reason.
+  `moderator`, `support` are the engine's own list; every default mod's id and
+  the operator's short list are **the registry's**, seeded from
+  `REGISTRY_RESERVED` into its table at startup — the engine must not carry a
+  mod's name, and an engine test enforces it. Reserved names are refused with
+  the reason.
 - **One name per identity.** A rename is a release and a claim; the released
   name is held for the same UUID for 30 days so a slip is undone. Renames are
   limited to three in any 30 days per identity.

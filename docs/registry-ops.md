@@ -41,6 +41,7 @@ which is where the connection timeouts already live.
 | `REGISTRY_SMTP_URL` | `smtps://user:pass@host:465`. A secret. Set with the next one or not at all. |
 | `REGISTRY_MAIL_FROM` | the `From:` address, on a domain with SPF and DKIM set for the provider. |
 | `REGISTRY_WORK_BITS` | proof-of-work difficulty for a quiet network. Default 20, about a second. Leave it. |
+| `REGISTRY_RESERVED` | comma-separated names nobody may claim — the default mods' ids, mostly. Seeded into the reserved table at startup. |
 
 A service with no mail configured still serves certificates, claims and
 releases; only the recovery address and recovery flows answer `503`.
@@ -157,6 +158,11 @@ registry admin rename --uuid <hex> --display <Casing>
 
 `rename` changes the display casing only. The canonical form is what uniqueness
 is decided on and never moves.
+
+The default mods' ids are reserved by the **host**, not by the engine: the engine
+must not know a mod's name, so the list travels in `REGISTRY_RESERVED` (or an
+`admin reserve` per name) and lands in the same table. A deployment that runs
+the default mods sets it to their ids; a deployment that runs none need not.
 
 ## What this service does not do (yet)
 

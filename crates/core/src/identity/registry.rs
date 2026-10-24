@@ -134,37 +134,28 @@ pub const CLAIM_VERSION: u8 = 1;
 /// Release request format this build reads.
 pub const RELEASE_VERSION: u8 = 1;
 
-/// Names the registry will not issue.
+/// Names no registry will issue: the administrative set.
 ///
-/// First the administrative set — names a player could mistake for Iridesium's
-/// own — then every default mod's id, because a player called `core_worldgen`
-/// would be indistinguishable from the mod. Ids longer than [`MAX_NAME_CHARS`]
-/// (`tiamat_default_science` and its siblings) can never be canonical names, so
-/// they need no entry. The operator's own short list lives in the registry's
-/// database (§3), which is the right place for something that changes without
-/// a release.
+/// These are names a player could mistake for Iridesium's own, so they are the
+/// engine's business and every registry holds them.
+///
+/// **The default mods' ids are deliberately not here.** They are content, and
+/// the engine must not know a mod's name — an engine test greps the source for
+/// one of them, and this module is not above the rule. Reserving them is
+/// registry policy: the service seeds its own `reserved` table from
+/// `REGISTRY_RESERVED` at startup and the operator can add more with an admin
+/// command, both of which are in `docs/registry-ops.md`. The design's intent is
+/// unchanged — a player named after a mod is still refused — but the list lives
+/// with the content it names, not in the engine.
 pub const RESERVED_NAMES: &[&str] = &[
     "admin",
     "console",
-    "core",
-    "core_chest",
-    "core_gear",
-    "core_milk",
-    "core_mimic",
-    "core_plans",
-    "core_sky",
-    "core_space",
-    "core_tools",
-    "core_ui",
-    "core_worldgen",
     "iridesium",
     "moderator",
-    "relief",
     "server",
     "support",
     "system",
     "tiamat",
-    "tiamat_weather",
 ];
 
 /// Something a registry record or request got wrong.
@@ -2084,7 +2075,7 @@ mod tests {
                 name: "admin".to_owned()
             }
         );
-        assert!(is_reserved("tiamat_weather"));
+        assert!(is_reserved("moderator"));
         assert!(!is_reserved("alice"));
         assert!(Name::claim("alice", "Alice").is_ok());
     }

@@ -61,6 +61,23 @@ impl Service {
             tracing::warn!(error = %error, "the startup backup failed");
         }
 
+        // The host's reserved list is registry policy, not engine content: the
+        // default mods' ids arrive through `REGISTRY_RESERVED` and land in the
+        // table the claim path already consults.
+        if !config.reserved.is_empty() {
+            let reserved = &config.reserved;
+            db.with(|connection| {
+                for name in reserved {
+                    connection.execute(
+                        "INSERT OR IGNORE INTO reserved (canonical) VALUES (?1)",
+                        [name.as_str()],
+                    )?;
+                }
+                Ok(())
+            })?;
+            tracing::info!(count = config.reserved.len(), "reserved names seeded");
+        }
+
         let keys = crate::keys::from_database(&db, config.key_seed, config.next_key_hash)?;
         Ok(Self {
             config,
@@ -204,7 +221,27 @@ mod tests {
             smtp_url: None,
             trust_forwarded_for: false,
             work_bits: 4,
+            reserved: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_hosts_reserved_names_reach_the_table() {
+        let mut settings = config(None, [7; 32], None);
+        settings.reserved = vec!["alice".to_owned()];
+        let service = Service::open(
+            settings,
+            Arc::new(SinkMailer::default()),
+            Arc::new(SystemClock),
+        )
+        .expect("start");
+        let reserved: i64 = service
+            .db()
+            .with(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM reserved", [], |row| row.get(0))
+            })
+            .expect("count");
+        assert_eq!(reserved, 1);
     }
 
     #[test]

@@ -52,6 +52,15 @@ pub struct Config {
     /// which would otherwise mine for a second per request. Above
     /// [`MAX_WORK_BITS`] a client could not solve it.
     pub work_bits: u32,
+
+    /// Names the host wants nobody to claim, seeded into the reserved table at
+    /// startup: the default mods' ids, mostly.
+    ///
+    /// **Here rather than in core, because they are content.** The engine's own
+    /// reserved list is the administrative set; a mod's id belongs with the
+    /// deployment that runs the mods, and an engine test exists to keep those
+    /// names out of `crates/`. See [`MAX_RESERVED_NAMES`].
+    pub reserved: Vec<String>,
 }
 
 impl Config {
@@ -150,6 +159,33 @@ impl Config {
             }
         };
 
+        let reserved = match lookup("REGISTRY_RESERVED").filter(|value| !value.is_empty()) {
+            None => Vec::new(),
+            Some(value) => {
+                let names: Vec<String> = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if names.len() > MAX_RESERVED_NAMES {
+                    return Err(ConfigError::Invalid {
+                        name: "REGISTRY_RESERVED",
+                        why: format!("more than {MAX_RESERVED_NAMES} names"),
+                    });
+                }
+                for name in &names {
+                    tiamat_core::identity::registry::check_canonical(name).map_err(|error| {
+                        ConfigError::Invalid {
+                            name: "REGISTRY_RESERVED",
+                            why: format!("`{name}` is not a canonical name: {error}"),
+                        }
+                    })?;
+                }
+                names
+            }
+        };
+
         Ok(Self {
             data_dir: Some(data_dir),
             bind,
@@ -160,9 +196,16 @@ impl Config {
             smtp_url,
             trust_forwarded_for,
             work_bits,
+            reserved,
         })
     }
 }
+
+/// The most names a host may reserve through the environment.
+///
+/// The default mods are a dozen; sixty-four leaves room and bounds a
+/// misconfigured variable.
+pub const MAX_RESERVED_NAMES: usize = 64;
 
 /// A key from the environment: `None` when unset, an error when it is not 64
 /// hex characters.
@@ -196,6 +239,7 @@ impl std::fmt::Debug for Config {
             .field("smtp_url", &self.smtp_url.as_ref().map(|_| "<redacted>"))
             .field("trust_forwarded_for", &self.trust_forwarded_for)
             .field("work_bits", &self.work_bits)
+            .field("reserved", &self.reserved.len())
             .finish()
     }
 }
@@ -264,6 +308,30 @@ mod tests {
         assert!(!config.trust_forwarded_for);
         assert!(config.smtp_url.is_none());
         assert_eq!(config.work_bits, DEFAULT_WORK_BITS);
+        // Nothing is reserved unless the host says so: content names are the
+        // deployment's, never the engine's.
+        assert!(config.reserved.is_empty());
+    }
+
+    #[test]
+    fn the_host_may_reserve_names() {
+        let mut pairs = minimal();
+        pairs.push(("REGISTRY_RESERVED", "alice, bobby"));
+        let config = Config::from_lookup(env(&pairs)).expect("reserved");
+        assert_eq!(
+            config.reserved,
+            vec!["alice".to_owned(), "bobby".to_owned()]
+        );
+
+        let mut pairs = minimal();
+        pairs.push(("REGISTRY_RESERVED", "Alice"));
+        assert!(matches!(
+            Config::from_lookup(env(&pairs)),
+            Err(ConfigError::Invalid {
+                name: "REGISTRY_RESERVED",
+                ..
+            })
+        ));
     }
 
     #[test]

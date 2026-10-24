@@ -38,6 +38,7 @@ pub fn config(data_dir: Option<PathBuf>) -> Config {
         // Four bits, not twenty: a test that mines for a second per request is
         // a test nobody runs.
         work_bits: 4,
+        reserved: Vec::new(),
     }
 }
 
