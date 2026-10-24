@@ -253,6 +253,16 @@ pub enum RegistryError {
         character: char,
     },
 
+    /// A recovery address that is not one.
+    ///
+    /// Shallow on purpose: the only proof an address is real is the link that
+    /// comes back from it, so a deep parser would earn nothing.
+    #[error("`{address}` is not an email address")]
+    EmailAddress {
+        /// What was supplied.
+        address: String,
+    },
+
     /// `expires` is not after `issued`, or the span is not a sane lifetime.
     #[error("a certificate runs from {issued} to {expires}, which is not a sane lifetime")]
     CertificateLifetime {
@@ -1287,11 +1297,7 @@ impl ClaimRequest {
 
     /// Refuses a timestamp outside the skew, in either direction.
     fn check_clock(&self, now: i64) -> Result<(), RegistryError> {
-        let delta = now.checked_sub(self.timestamp);
-        match delta {
-            Some(delta) if delta.unsigned_abs() <= CLOCK_SKEW_SECONDS.unsigned_abs() => Ok(()),
-            _ => Err(RegistryError::StaleRequest),
-        }
+        check_timestamp(self.timestamp, now)
     }
 }
 
@@ -1399,11 +1405,7 @@ impl ReleaseRequest {
     /// [`RegistryError::SignatureInvalid`].
     pub fn verify(&self, now: i64) -> Result<VerifiedRelease, RegistryError> {
         check_canonical(&self.name)?;
-        let delta = now.checked_sub(self.timestamp);
-        match delta {
-            Some(delta) if delta.unsigned_abs() <= CLOCK_SKEW_SECONDS.unsigned_abs() => {}
-            _ => return Err(RegistryError::StaleRequest),
-        }
+        check_timestamp(self.timestamp, now)?;
         let key =
             public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
         verify_signature(&key, &self.signing_payload(), &self.signature)?;
@@ -1413,6 +1415,380 @@ impl ReleaseRequest {
             public_key: key,
         })
     }
+}
+
+/// The longest recovery address accepted: the RFC's 254-byte path limit.
+///
+/// Validation here is deliberately shallow — one `@`, both sides non-empty, a
+/// dot in the domain, printable ASCII — because the only proof an address is
+/// real is the link that comes back from it. A deep RFC 5322 parser would be a
+/// parser on the hostile-input path earning nothing.
+pub const MAX_EMAIL_BYTES: usize = 254;
+
+/// Email-request format this build reads.
+pub const EMAIL_VERSION: u8 = 1;
+
+/// Recovery-request format this build reads.
+pub const RECOVERY_VERSION: u8 = 1;
+
+/// Recovery-cancellation format this build reads.
+pub const CANCEL_VERSION: u8 = 1;
+
+/// Checks a recovery address, shallowly.
+///
+/// # Errors
+///
+/// [`RegistryError::EmailAddress`] when it is not one.
+pub fn check_email_address(address: &str) -> Result<(), RegistryError> {
+    let invalid = || RegistryError::EmailAddress {
+        address: address.to_owned(),
+    };
+    if address.len() > MAX_EMAIL_BYTES
+        || !address.is_ascii()
+        || address
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(invalid());
+    }
+    let mut parts = address.split('@');
+    let Some(local) = parts.next() else {
+        return Err(invalid());
+    };
+    let Some(domain) = parts.next() else {
+        return Err(invalid());
+    };
+    if parts.next().is_some() || local.is_empty() || domain.is_empty() || !domain.contains('.') {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// A request's timestamp must be within [`CLOCK_SKEW_SECONDS`] of ours.
+fn check_timestamp(at: i64, now: i64) -> Result<(), RegistryError> {
+    match now.checked_sub(at) {
+        Some(delta) if delta.unsigned_abs() <= CLOCK_SKEW_SECONDS.unsigned_abs() => Ok(()),
+        _ => Err(RegistryError::StaleRequest),
+    }
+}
+
+/// A signed request to bind, change, or remove the recovery address.
+///
+/// The address is **not** stored by a request: a token is mailed to it, and
+/// only following the link stores it (§4). `address: None` removes a bound
+/// address, with the same signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailRequest {
+    /// [`EMAIL_VERSION`].
+    pub version: u8,
+    /// The identity the address belongs to.
+    pub uuid: [u8; 32],
+    /// The public key that signed this.
+    pub public_key: [u8; 32],
+    /// The address to bind or change to; `None` removes the bound one.
+    pub address: Option<String>,
+    /// When it was made, Unix seconds.
+    pub timestamp: i64,
+    /// The player key's signature over [`Self::signing_payload`].
+    pub signature: Signature64,
+}
+
+impl EmailRequest {
+    /// Reads a request under the cap, checking its version and its address.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
+    /// [`RegistryError::EmailAddress`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
+        let request: Self = decode("email request", bytes, MAX_REQUEST_BYTES)?;
+        if request.version != EMAIL_VERSION {
+            return Err(RegistryError::Version {
+                what: "email request",
+                found: request.version,
+                expected: EMAIL_VERSION,
+            });
+        }
+        if let Some(address) = &request.address {
+            check_email_address(address)?;
+        }
+        Ok(request)
+    }
+
+    /// The bytes the player's key signs.
+    #[must_use]
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(96);
+        payload.extend_from_slice(b"tiamat:registry-email:v1");
+        payload.push(self.version);
+        payload.extend_from_slice(&self.uuid);
+        payload.extend_from_slice(&self.public_key);
+        match &self.address {
+            Some(address) => {
+                payload.push(1);
+                push_str(&mut payload, address);
+            }
+            None => payload.push(0),
+        }
+        payload.extend_from_slice(&self.timestamp.to_le_bytes());
+        payload
+    }
+
+    /// Signs the request and records the key that did it.
+    pub fn sign(&mut self, identity: &Identity) {
+        self.public_key = identity.public_key().to_bytes();
+        self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
+    }
+
+    /// Verifies the signature and the clock.
+    ///
+    /// Whether the key belongs to the UUID is the service's question, as it is
+    /// for a claim.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Version`], [`RegistryError::EmailAddress`],
+    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
+    /// [`RegistryError::SignatureInvalid`].
+    pub fn verify(&self, now: i64) -> Result<VerifiedEmail, RegistryError> {
+        if self.version != EMAIL_VERSION {
+            return Err(RegistryError::Version {
+                what: "email request",
+                found: self.version,
+                expected: EMAIL_VERSION,
+            });
+        }
+        if let Some(address) = &self.address {
+            check_email_address(address)?;
+        }
+        check_timestamp(self.timestamp, now)?;
+        let key =
+            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
+        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        Ok(VerifiedEmail {
+            uuid: PlayerUuid::from_bytes(self.uuid),
+            address: self.address.clone(),
+            public_key: key,
+            timestamp: self.timestamp,
+        })
+    }
+}
+
+/// An email request that verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedEmail {
+    /// The identity the address belongs to.
+    pub uuid: PlayerUuid,
+    /// The address to bind, or `None` to remove the bound one.
+    pub address: Option<String>,
+    /// The key that signed the request.
+    pub public_key: VerifyingKey,
+    /// The request's timestamp, already inside the skew.
+    pub timestamp: i64,
+}
+
+/// A signed request from a **new** identity to recover a name.
+///
+/// Signed by the new key, not the old one: this is the player who has lost the
+/// phrase and the device and wants the name moved to what they hold now. The
+/// registry mails the bound address, and the notice that follows is what the
+/// current holder can cancel (§4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryRequest {
+    /// [`RECOVERY_VERSION`].
+    pub version: u8,
+    /// The canonical name being recovered.
+    pub name: String,
+    /// The identity it would move to.
+    pub new_uuid: [u8; 32],
+    /// The new identity's public key, which signed this.
+    pub public_key: [u8; 32],
+    /// When it was made, Unix seconds.
+    pub timestamp: i64,
+    /// The new key's signature over [`Self::signing_payload`].
+    pub signature: Signature64,
+}
+
+impl RecoveryRequest {
+    /// Reads a request under the cap.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
+    /// the canonical-name rules.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
+        let request: Self = decode("recovery request", bytes, MAX_REQUEST_BYTES)?;
+        if request.version != RECOVERY_VERSION {
+            return Err(RegistryError::Version {
+                what: "recovery request",
+                found: request.version,
+                expected: RECOVERY_VERSION,
+            });
+        }
+        check_canonical(&request.name)?;
+        Ok(request)
+    }
+
+    /// The bytes the new identity's key signs.
+    #[must_use]
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(128);
+        payload.extend_from_slice(b"tiamat:registry-recovery:v1");
+        payload.push(self.version);
+        push_str(&mut payload, &self.name);
+        payload.extend_from_slice(&self.new_uuid);
+        payload.extend_from_slice(&self.public_key);
+        payload.extend_from_slice(&self.timestamp.to_le_bytes());
+        payload
+    }
+
+    /// Signs the request and records the key that did it.
+    pub fn sign(&mut self, identity: &Identity) {
+        self.public_key = identity.public_key().to_bytes();
+        self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
+    }
+
+    /// Verifies the signature and the clock.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Version`], the canonical-name rules,
+    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
+    /// [`RegistryError::SignatureInvalid`].
+    pub fn verify(&self, now: i64) -> Result<VerifiedRecovery, RegistryError> {
+        if self.version != RECOVERY_VERSION {
+            return Err(RegistryError::Version {
+                what: "recovery request",
+                found: self.version,
+                expected: RECOVERY_VERSION,
+            });
+        }
+        check_canonical(&self.name)?;
+        check_timestamp(self.timestamp, now)?;
+        let key =
+            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
+        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        Ok(VerifiedRecovery {
+            name: self.name.clone(),
+            new_uuid: PlayerUuid::from_bytes(self.new_uuid),
+            public_key: key,
+            timestamp: self.timestamp,
+        })
+    }
+}
+
+/// A recovery request that verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRecovery {
+    /// The canonical name asked for.
+    pub name: String,
+    /// The identity it would move to.
+    pub new_uuid: PlayerUuid,
+    /// The new identity's key.
+    pub public_key: VerifyingKey,
+    /// The request's timestamp, already inside the skew.
+    pub timestamp: i64,
+}
+
+/// A signed request from the **current** holder to stop a recovery.
+///
+/// This is the defence against a stolen mailbox: the holder is still playing,
+/// and one signed request ends the fourteen-day notice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelRecoveryRequest {
+    /// [`CANCEL_VERSION`].
+    pub version: u8,
+    /// The canonical name whose recovery is cancelled.
+    pub name: String,
+    /// The identity that holds it now.
+    pub uuid: [u8; 32],
+    /// The holder's public key, which signed this.
+    pub public_key: [u8; 32],
+    /// When it was made, Unix seconds.
+    pub timestamp: i64,
+    /// The holder's signature over [`Self::signing_payload`].
+    pub signature: Signature64,
+}
+
+impl CancelRecoveryRequest {
+    /// Reads a request under the cap.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
+    /// the canonical-name rules.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
+        let request: Self = decode("recovery cancellation", bytes, MAX_REQUEST_BYTES)?;
+        if request.version != CANCEL_VERSION {
+            return Err(RegistryError::Version {
+                what: "recovery cancellation",
+                found: request.version,
+                expected: CANCEL_VERSION,
+            });
+        }
+        check_canonical(&request.name)?;
+        Ok(request)
+    }
+
+    /// The bytes the holder's key signs.
+    #[must_use]
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(128);
+        payload.extend_from_slice(b"tiamat:registry-recovery-cancel:v1");
+        payload.push(self.version);
+        push_str(&mut payload, &self.name);
+        payload.extend_from_slice(&self.uuid);
+        payload.extend_from_slice(&self.public_key);
+        payload.extend_from_slice(&self.timestamp.to_le_bytes());
+        payload
+    }
+
+    /// Signs the request and records the key that did it.
+    pub fn sign(&mut self, identity: &Identity) {
+        self.public_key = identity.public_key().to_bytes();
+        self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
+    }
+
+    /// Verifies the signature and the clock.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Version`], the canonical-name rules,
+    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
+    /// [`RegistryError::SignatureInvalid`].
+    pub fn verify(&self, now: i64) -> Result<VerifiedCancellation, RegistryError> {
+        if self.version != CANCEL_VERSION {
+            return Err(RegistryError::Version {
+                what: "recovery cancellation",
+                found: self.version,
+                expected: CANCEL_VERSION,
+            });
+        }
+        check_canonical(&self.name)?;
+        check_timestamp(self.timestamp, now)?;
+        let key =
+            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
+        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        Ok(VerifiedCancellation {
+            name: self.name.clone(),
+            uuid: PlayerUuid::from_bytes(self.uuid),
+            public_key: key,
+            timestamp: self.timestamp,
+        })
+    }
+}
+
+/// A cancellation that verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCancellation {
+    /// The canonical name whose recovery is cancelled.
+    pub name: String,
+    /// The identity that holds it.
+    pub uuid: PlayerUuid,
+    /// The holder's key.
+    pub public_key: VerifyingKey,
+    /// The request's timestamp, already inside the skew.
+    pub timestamp: i64,
 }
 
 #[cfg(test)]
@@ -2004,5 +2380,102 @@ mod tests {
         stale.timestamp = NOW + CLOCK_SKEW_SECONDS + 1;
         stale.sign(&alice);
         assert_eq!(stale.verify(NOW), Err(RegistryError::StaleRequest));
+    }
+
+    #[test]
+    fn an_email_request_binds_removes_and_refuses_a_bad_address() {
+        let alice = player(1);
+        let mut request = EmailRequest {
+            version: EMAIL_VERSION,
+            uuid: *alice.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            address: Some("alice@example.com".to_owned()),
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        request.sign(&alice);
+        let wire = postcard::to_allocvec(&request).expect("encode");
+        let parsed = EmailRequest::from_bytes(&wire).expect("parse");
+        let verified = parsed.verify(NOW).expect("verify");
+        assert_eq!(verified.address.as_deref(), Some("alice@example.com"));
+        assert_eq!(verified.uuid, alice.uuid_as_root());
+
+        // Removal is the same request with no address.
+        let mut removal = EmailRequest {
+            address: None,
+            ..parsed
+        };
+        removal.sign(&alice);
+        assert_eq!(removal.verify(NOW).expect("verify").address, None);
+
+        // A bad address never reaches a mailer.
+        let mut bad = EmailRequest {
+            version: EMAIL_VERSION,
+            uuid: *alice.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            address: Some("not an address".to_owned()),
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        bad.sign(&alice);
+        assert!(matches!(
+            EmailRequest::from_bytes(&postcard::to_allocvec(&bad).expect("encode")),
+            Err(RegistryError::EmailAddress { .. })
+        ));
+        assert!(matches!(
+            bad.verify(NOW),
+            Err(RegistryError::EmailAddress { .. })
+        ));
+
+        // A valid address on a stale request is still stale.
+        let mut stale = EmailRequest {
+            timestamp: NOW - CLOCK_SKEW_SECONDS - 1,
+            ..request
+        };
+        stale.sign(&alice);
+        assert_eq!(stale.verify(NOW), Err(RegistryError::StaleRequest));
+    }
+
+    #[test]
+    fn a_recovery_and_its_cancellation_verify() {
+        let new_device = player(2);
+        let holder = player(1);
+        let mut recovery = RecoveryRequest {
+            version: RECOVERY_VERSION,
+            name: "alice".to_owned(),
+            new_uuid: *new_device.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        recovery.sign(&new_device);
+        let parsed =
+            RecoveryRequest::from_bytes(&postcard::to_allocvec(&recovery).expect("encode"))
+                .expect("parse");
+        let verified = parsed.verify(NOW).expect("verify");
+        assert_eq!(verified.name, "alice");
+        assert_eq!(verified.new_uuid, new_device.uuid_as_root());
+        assert_eq!(verified.public_key, new_device.public_key());
+
+        // A forged signature is refused.
+        let mut forged = parsed.clone();
+        forged.new_uuid = *holder.uuid_as_root().as_bytes();
+        assert_eq!(forged.verify(NOW), Err(RegistryError::SignatureInvalid));
+
+        let mut cancel = CancelRecoveryRequest {
+            version: CANCEL_VERSION,
+            name: "alice".to_owned(),
+            uuid: *holder.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        cancel.sign(&holder);
+        let parsed =
+            CancelRecoveryRequest::from_bytes(&postcard::to_allocvec(&cancel).expect("encode"))
+                .expect("parse");
+        let verified = parsed.verify(NOW).expect("verify");
+        assert_eq!(verified.name, "alice");
+        assert_eq!(verified.uuid, holder.uuid_as_root());
     }
 }
