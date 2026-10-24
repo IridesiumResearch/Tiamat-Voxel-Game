@@ -56,7 +56,11 @@ enum AdminCommand {
     },
 
     /// Print what the deployment holds, in one screen.
-    Stats,
+    Stats {
+        /// How many days of activity to break down.
+        #[arg(long, value_name = "days", default_value_t = 7)]
+        days: i64,
+    },
 
     /// Group this window's claims by network, biggest first.
     Claims {
@@ -218,7 +222,7 @@ fn wait_for_interrupt() -> Result<(), Box<dyn std::error::Error>> {
 fn admin_command(command: AdminCommand) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         AdminCommand::Key { command } => key_command(command),
-        AdminCommand::Stats => with_admin(|admin| {
+        AdminCommand::Stats { days } => with_admin(|admin| {
             let stats = admin.stats()?;
             println!("names held:          {}", stats.held);
             println!("names released:      {}", stats.released);
@@ -226,6 +230,17 @@ fn admin_command(command: AdminCommand) -> Result<(), Box<dyn std::error::Error>
             println!("revoked serials:     {}", stats.revocations);
             println!("recovery notices:    {}", stats.pending_recoveries);
             println!("claims in the last day: {}", stats.claims_today);
+            let activity = admin.daily_activity(days)?;
+            if !activity.is_empty() {
+                println!();
+                println!("claims / recovery notices by day:");
+                for day in activity {
+                    println!(
+                        "  {}  {:>4} claims  {:>3} recoveries",
+                        day.date, day.claims, day.recoveries
+                    );
+                }
+            }
             Ok(())
         }),
         AdminCommand::Claims { since } => with_admin(|admin| {

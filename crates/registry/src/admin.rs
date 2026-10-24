@@ -92,6 +92,17 @@ pub struct SubnetClaims {
     pub claims: usize,
 }
 
+/// One day's claims and recovery notices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyActivity {
+    /// The date, `YYYY-MM-DD`, UTC.
+    pub date: String,
+    /// Claims that day.
+    pub claims: i64,
+    /// Recovery notices started that day.
+    pub recoveries: i64,
+}
+
 /// What a bulk revocation did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Revoked {
@@ -190,6 +201,41 @@ impl Admin {
                 .then_with(|| left.subnet.cmp(&right.subnet))
         });
         Ok(counts)
+    }
+
+    /// Claims and recovery notices per day, most recent first.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError::Db`] when the audit table cannot be read.
+    pub fn daily_activity(&self, days: i64) -> Result<Vec<DailyActivity>, AdminError> {
+        let since = self.now - days * limits::DAY;
+        let rows: Vec<(i64, String)> = self.db.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT when_at, what FROM audit WHERE when_at >= ?1 ORDER BY when_at DESC",
+            )?;
+            let rows = statement.query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect()
+        })?;
+        let mut by_day: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+        for (at, what) in rows {
+            let day = crate::backup::date_of(at);
+            let entry = by_day.entry(day).or_default();
+            if what.starts_with("claim ") {
+                entry.0 += 1;
+            } else if what.starts_with("recovery notice") {
+                entry.1 += 1;
+            }
+        }
+        Ok(by_day
+            .into_iter()
+            .rev()
+            .map(|(date, (claims, recoveries))| DailyActivity {
+                date,
+                claims,
+                recoveries,
+            })
+            .collect())
     }
 
     /// Revokes every name claimed from a network in a window.
@@ -522,6 +568,28 @@ mod tests {
         assert_eq!(groups[0].subnet, "net:203.0.113.0/24");
         assert_eq!(groups[0].claims, 2);
         assert_eq!(groups[1].subnet, "net:198.51.100.0/24");
+    }
+
+    #[test]
+    fn the_daily_breakdown_counts_claims_and_recoveries() {
+        let admin = admin();
+        hold_name(&admin, "alice", 1, "203.0.113.5");
+        admin
+            .db
+            .with(|connection| {
+                connection.execute(
+                    "INSERT INTO audit (who, what, when_at, why)
+                     VALUES ('operator', 'recovery notice started for alice', ?1, 'link')",
+                    [NOW - 50],
+                )?;
+                Ok(())
+            })
+            .expect("audit");
+        let days = admin.daily_activity(7).expect("activity");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].date, crate::backup::date_of(NOW - 100));
+        assert_eq!(days[0].claims, 1);
+        assert_eq!(days[0].recoveries, 1);
     }
 
     #[test]

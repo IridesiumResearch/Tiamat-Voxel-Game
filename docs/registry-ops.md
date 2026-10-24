@@ -126,7 +126,8 @@ registry admin stats
 ```
 
 Names held and released, addresses, revoked serials, notices running, claims in
-the last day.
+the last day, and a per-day breakdown of claims and recovery notices — a total
+says nothing about whether the service is being farmed this morning.
 
 ```sh
 registry admin claims --since 48h
