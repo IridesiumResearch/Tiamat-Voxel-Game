@@ -61,6 +61,12 @@ allow = [
     "ISC",
     "MIT",
     "MIT-0",
+    # BSD Zero Clause, from `quoted_printable` — a `lettre` dependency used to
+    # encode the two mails the registry sends. 0BSD is a permissive licence with
+    # no attribution clause at all, so it is strictly less demanding than MIT
+    # and GPLv3-compatible; it is listed rather than excepted because it is a
+    # licence, not a judgement call about a crate.
+    "0BSD",
     "MPL-2.0",
     # Mozilla's root certificate list, which `webpki-roots` ships for the
     # update check's TLS. A permissive licence for DATA rather than code: it
