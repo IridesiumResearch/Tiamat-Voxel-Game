@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::clock::Clock;
 use crate::config::Config;
@@ -19,6 +20,8 @@ pub struct Service {
     keys: RegistryKeys,
     mailer: Arc<dyn Mailer>,
     clock: Arc<dyn Clock>,
+    /// When the limit and revocation sweep last ran, Unix seconds.
+    last_sweep: AtomicI64,
 }
 
 impl Service {
@@ -47,10 +50,11 @@ impl Service {
             None => Db::in_memory()?,
         };
 
-        // The design says the service sweeps its own limit rows. Startup is the
-        // one moment the database is not answering requests, so it happens here
-        // rather than on a timer nobody watches.
-        db.with(|connection| crate::limits::sweep(connection, clock.now()))?;
+        // The design says the service sweeps its own limit rows. It happens
+        // here, and then at most hourly from `advance`, so a service that runs
+        // for months does not keep every counter it ever wrote.
+        let started = clock.now();
+        sweep(&db, started)?;
 
         // Today's backup, if it is missing — the day's first request would
         // otherwise be the only trigger, and a redeploy right after midnight
@@ -85,6 +89,7 @@ impl Service {
             keys,
             mailer,
             clock,
+            last_sweep: AtomicI64::new(started),
         })
     }
 
@@ -118,10 +123,11 @@ impl Service {
         self.clock.now()
     }
 
-    /// Completes any recovery notice whose fourteen days are up.
+    /// Completes any recovery notice whose fourteen days are up, and once an
+    /// hour sweeps spent limit rows and revocations that protect nobody.
     ///
-    /// Called at startup and by the handlers that read a name, so a notice
-    /// ends even if nobody visits the site at the minute it expires.
+    /// Called by the handlers that read or change a name, so a notice ends
+    /// even if nobody visits the site at the minute it expires.
     ///
     /// # Errors
     ///
@@ -131,6 +137,16 @@ impl Service {
         let moved = self
             .db
             .with(|connection| crate::recover::advance(connection, now))?;
+        let last = self.last_sweep.load(Ordering::Relaxed);
+        // `compare_exchange` so two requests arriving together sweep once.
+        if now.saturating_sub(last) >= crate::limits::SWEEP_INTERVAL
+            && self
+                .last_sweep
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            sweep(&self.db, now)?;
+        }
         // The day's backup rides the same call: a failed backup is a log line,
         // never a failed request — the request is about a name, not a file.
         if let Some(dir) = &self.config.data_dir
@@ -140,6 +156,15 @@ impl Service {
         }
         Ok(moved)
     }
+}
+
+/// Deletes spent limit rows and revocations whose certificates have expired.
+fn sweep(db: &Db, now: i64) -> Result<(), DbError> {
+    db.with(|connection| {
+        crate::limits::sweep(connection, now)?;
+        crate::names::prune_revocations(connection, now)?;
+        Ok(())
+    })
 }
 
 impl std::fmt::Debug for Service {
@@ -185,6 +210,14 @@ pub enum StartError {
     /// The listener thread could not be spawned.
     #[error("could not start the registry's HTTP thread")]
     Thread(#[source] std::io::Error),
+
+    /// The listener reported an address that is not a TCP socket address.
+    ///
+    /// Unreachable through [`crate::serve`], which binds TCP; a variant rather
+    /// than a panic because `tiny_http`'s address type has a Unix-socket case
+    /// on Unix targets and core's rule is that nothing here panics on it.
+    #[error("the registry's listener is not bound to a TCP address")]
+    NotTcp,
 }
 
 #[cfg(test)]
@@ -275,6 +308,57 @@ mod tests {
         )
         .expect("start");
         assert_eq!(service.now(), 1_000);
+    }
+
+    #[test]
+    fn advance_sweeps_spent_limits_at_most_hourly() {
+        #[derive(Debug)]
+        struct Moving(std::sync::atomic::AtomicI64);
+        impl Clock for Moving {
+            fn now(&self) -> i64 {
+                self.0.load(Ordering::Relaxed)
+            }
+        }
+        const START: i64 = 1_800_000_000;
+        let clock = Arc::new(Moving(AtomicI64::new(START)));
+        let service = Service::open(
+            config(None, [7; 32], None),
+            Arc::new(SinkMailer::default()),
+            clock.clone(),
+        )
+        .expect("start");
+        // A day's address count from a month ago, written after startup.
+        let stale =
+            crate::limits::window_start(START - 30 * crate::limits::DAY, crate::limits::DAY);
+        let rows = || {
+            service
+                .db()
+                .with(|connection| {
+                    connection.query_row("SELECT COUNT(*) FROM limits", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                })
+                .expect("count")
+        };
+        service
+            .db()
+            .with(|connection| {
+                crate::limits::take(connection, "ip:203.0.113.1", stale, 2)?;
+                Ok(())
+            })
+            .expect("seed");
+
+        // Not an hour since the startup sweep: kept.
+        clock.0.store(START + 60, Ordering::Relaxed);
+        service.advance().expect("advance");
+        assert_eq!(rows(), 1);
+
+        // An hour on, the next request sweeps it.
+        clock
+            .0
+            .store(START + crate::limits::SWEEP_INTERVAL, Ordering::Relaxed);
+        service.advance().expect("advance");
+        assert_eq!(rows(), 0);
     }
 
     #[test]

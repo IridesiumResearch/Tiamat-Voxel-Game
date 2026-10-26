@@ -15,9 +15,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use common::{body_text, config, request, start_with_mail};
 use tiamat_core::identity::Identity;
+use tiamat_core::identity::keyset::add_key_payload;
 use tiamat_core::identity::registry::{
-    CANCEL_VERSION, CancelRecoveryRequest, ClaimRequest, EMAIL_VERSION, EmailRequest, Name,
-    RECOVERY_VERSION, RecoveryRequest,
+    CANCEL_VERSION, CancelRecoveryRequest, ClaimRequest, EMAIL_VERSION, EmailRequest,
+    KEY_SET_PROOF_VERSION, KeyAuthorisation, KeySetProof, Name, RECOVERY_VERSION, RecoveryRequest,
+    Signature64,
 };
 use tiamat_registry::Clock;
 use tiamat_registry::mail::SinkMailer;
@@ -84,16 +86,45 @@ fn recovery_body(identity: &Identity, canonical: &str, timestamp: i64) -> Vec<u8
 }
 
 fn cancel_body(identity: &Identity, canonical: &str, timestamp: i64) -> Vec<u8> {
-    let mut request = CancelRecoveryRequest {
-        version: CANCEL_VERSION,
-        name: canonical.to_owned(),
-        uuid: *identity.uuid_as_root().as_bytes(),
-        public_key: [0; 32],
-        timestamp,
-        signature: tiamat_core::identity::registry::Signature64([0; 64]),
-    };
+    let mut request = CancelRecoveryRequest::new(identity, canonical, timestamp);
+    assert_eq!(request.version, CANCEL_VERSION);
     request.sign(identity);
     postcard::to_allocvec(&request).expect("encode")
+}
+
+/// A cancellation signed by `signer` that names `holder`'s UUID.
+fn cancel_body_naming(signer: &Identity, holder: &Identity, canonical: &str, at: i64) -> Vec<u8> {
+    let mut request = CancelRecoveryRequest::new(signer, canonical, at);
+    request.uuid = *holder.uuid_as_root().as_bytes();
+    request.sign(signer);
+    postcard::to_allocvec(&request).expect("encode")
+}
+
+/// A cancellation from the holder's **second device**, with its key-set proof.
+fn device_cancel_body(root: &Identity, device: &Identity, canonical: &str, at: i64) -> Vec<u8> {
+    let uuid = root.uuid_as_root();
+    let payload = add_key_payload(&uuid, &device.public_key(), None);
+    let proof = KeySetProof {
+        version: KEY_SET_PROOF_VERSION,
+        root: root.public_key().to_bytes(),
+        chain: vec![KeyAuthorisation {
+            key: device.public_key().to_bytes(),
+            next_key_hash: None,
+            added_by: root.public_key().to_bytes(),
+            signature: Signature64(root.sign(&payload).to_bytes()),
+        }],
+    };
+    let mut request = CancelRecoveryRequest::for_device(device, &uuid, proof, canonical, at);
+    request.sign(device);
+    postcard::to_allocvec(&request).expect("encode")
+}
+
+/// Presses the button on a mailed link's page: the POST that does the work.
+///
+/// The link itself (a GET) only shows the page, so a mail scanner that follows
+/// it changes nothing; `a_mailed_link_only_opens_a_page` pins that.
+fn follow(addr: std::net::SocketAddr, path: &str, token: &str) -> (u16, Vec<u8>) {
+    request(addr, "POST", path, format!("t={token}").as_bytes())
 }
 
 /// The token from the one link in the mail.
@@ -132,7 +163,7 @@ fn a_recovery_moves_a_name_to_its_new_identity() {
     );
     assert_eq!(status, 202);
     let token = token_of(&mailer);
-    let (status, body) = request(addr, "GET", &format!("/v1/email/verify?t={token}"), b"");
+    let (status, body) = follow(addr, "/v1/email/verify", &token);
     assert_eq!(status, 200, "{}", body_text(&body));
 
     // A fresh identity asks to recover it; the link mails the bound address.
@@ -144,7 +175,7 @@ fn a_recovery_moves_a_name_to_its_new_identity() {
     );
     assert_eq!(status, 202);
     let token = token_of(&mailer);
-    let (status, body) = request(addr, "GET", &format!("/v1/recover/confirm?t={token}"), b"");
+    let (status, body) = follow(addr, "/v1/recover/confirm", &token);
     assert_eq!(status, 200, "{}", body_text(&body));
     assert!(
         body_text(&body).contains(&format!("\"notice_until\":{}", NOW + NOTICE)),
@@ -168,11 +199,15 @@ fn a_recovery_moves_a_name_to_its_new_identity() {
     let renewed: ClaimResponse = postcard::from_bytes(&body).expect("postcard");
     assert_eq!(renewed.pending_recovery_until, Some(NOW + NOTICE));
 
-    // The name has not moved yet.
+    // The name has not moved yet, and its public page says a move is coming
+    // and when: the notice the design promises anyone who looks.
     let (_, body) = request(addr, "GET", "/v1/name/alice", b"");
+    let page = body_text(&body);
+    assert!(page.contains(&alice.uuid_as_root().to_hex()), "{page}");
+    assert!(page.contains("\"recovery_pending\":true"), "{page}");
     assert!(
-        body_text(&body).contains(&alice.uuid_as_root().to_hex()),
-        "{body:?}"
+        page.contains(&format!("\"recovery_notice_until\":{}", NOW + NOTICE)),
+        "{page}"
     );
 
     // Fourteen days later, reading the name completes the move.
@@ -206,7 +241,7 @@ fn the_holder_can_cancel_a_recovery() {
     );
     assert_eq!(status, 202);
     let token = token_of(&mailer);
-    let (status, _) = request(addr, "GET", &format!("/v1/email/verify?t={token}"), b"");
+    let (status, _) = follow(addr, "/v1/email/verify", &token);
     assert_eq!(status, 200);
 
     let (status, _) = request(
@@ -217,8 +252,25 @@ fn the_holder_can_cancel_a_recovery() {
     );
     assert_eq!(status, 202);
     let token = token_of(&mailer);
-    let (status, _) = request(addr, "GET", &format!("/v1/recover/confirm?t={token}"), b"");
+    let (status, _) = follow(addr, "/v1/recover/confirm", &token);
     assert_eq!(status, 200);
+
+    // A stranger cannot cancel it by naming Bob's UUID (public on the name
+    // page) and signing with their own key: that would let anyone keep a lost
+    // name lost.
+    let eve = player(5);
+    let (status, body) = request(
+        addr,
+        "POST",
+        "/v1/recover/cancel",
+        &cancel_body_naming(&eve, &bob, "bobby", NOW + 30),
+    );
+    assert_eq!(status, 403, "{}", body_text(&body));
+    assert!(
+        body_text(&body).contains("not_root"),
+        "{}",
+        body_text(&body)
+    );
 
     // The holder, still playing, ends it with one signed request.
     let (status, body) = request(
@@ -237,6 +289,136 @@ fn the_holder_can_cancel_a_recovery() {
         "{}",
         body_text(&body)
     );
+    assert!(handle.stop());
+}
+
+#[test]
+fn the_holders_second_device_can_cancel_a_recovery() {
+    let clock = Arc::new(TestClock::new(NOW));
+    let (handle, mailer) = start_with_mail(config(None), clock.clone());
+    let addr = handle.local_addr();
+    let carol = player(8);
+    let carols_phone = player(9);
+    let mallory = player(10);
+
+    let (status, _) = request(addr, "POST", "/v1/claim", &claim_body(&carol, "carol", NOW));
+    assert_eq!(status, 200);
+    let (status, _) = request(
+        addr,
+        "POST",
+        "/v1/email",
+        &email_body(&carol, Some("carol@example.com"), NOW),
+    );
+    assert_eq!(status, 202);
+    let token = token_of(&mailer);
+    let (status, _) = follow(addr, "/v1/email/verify", &token);
+    assert_eq!(status, 200);
+    let (status, _) = request(
+        addr,
+        "POST",
+        "/v1/recover",
+        &recovery_body(&mallory, "carol", NOW),
+    );
+    assert_eq!(status, 202);
+    let token = token_of(&mailer);
+    let (status, _) = follow(addr, "/v1/recover/confirm", &token);
+    assert_eq!(status, 200);
+
+    // The design's "the current key can cancel": the phone is a key of the
+    // set, not the root, and it vetoes with the proof that reaches it.
+    let (status, body) = request(
+        addr,
+        "POST",
+        "/v1/recover/cancel",
+        &device_cancel_body(&carol, &carols_phone, "carol", NOW + 60),
+    );
+    assert_eq!(status, 200, "{}", body_text(&body));
+
+    clock.set(NOW + NOTICE + 1);
+    let (_, body) = request(addr, "GET", "/v1/name/carol", b"");
+    assert!(
+        body_text(&body).contains(&carol.uuid_as_root().to_hex()),
+        "{}",
+        body_text(&body)
+    );
+    assert!(handle.stop());
+}
+
+#[test]
+fn a_mailed_link_only_opens_a_page() {
+    let clock = Arc::new(TestClock::new(NOW));
+    let (handle, mailer) = start_with_mail(config(None), clock);
+    let addr = handle.local_addr();
+    let erin = player(11);
+    let mallory = player(12);
+    let (status, _) = request(addr, "POST", "/v1/claim", &claim_body(&erin, "erin", NOW));
+    assert_eq!(status, 200);
+
+    // The address link, followed by a scanner: a page, and nothing bound.
+    let (status, _) = request(
+        addr,
+        "POST",
+        "/v1/email",
+        &email_body(&erin, Some("erin@example.com"), NOW),
+    );
+    assert_eq!(status, 202);
+    let token = token_of(&mailer);
+    for _ in 0..3 {
+        let (status, body) = request(addr, "GET", &format!("/v1/email/verify?t={token}"), b"");
+        assert_eq!(status, 200);
+        let page = body_text(&body);
+        assert!(page.contains("<form method=\"post\""), "{page}");
+        assert!(page.contains(&token), "{page}");
+    }
+    // Without a bound address there is nothing to recover through, which is
+    // how "nothing was bound" shows from outside.
+    let (status, body) = request(
+        addr,
+        "POST",
+        "/v1/recover",
+        &recovery_body(&mallory, "erin", NOW),
+    );
+    assert_eq!(status, 409, "{}", body_text(&body));
+    assert!(body_text(&body).contains("no_email"), "{body:?}");
+
+    // The button binds it, once; the link's token is then spent.
+    let (status, body) = follow(addr, "/v1/email/verify", &token);
+    assert_eq!(status, 200, "{}", body_text(&body));
+    let (status, _) = follow(addr, "/v1/email/verify", &token);
+    assert_eq!(status, 400);
+
+    // The recovery link, followed by a scanner: no notice starts.
+    let (status, _) = request(
+        addr,
+        "POST",
+        "/v1/recover",
+        &recovery_body(&mallory, "erin", NOW),
+    );
+    assert_eq!(status, 202);
+    let token = token_of(&mailer);
+    let (status, body) = request(addr, "GET", &format!("/v1/recover/confirm?t={token}"), b"");
+    assert_eq!(status, 200);
+    assert!(body_text(&body).contains("action=\"/v1/recover/confirm\""));
+    let (_, body) = request(addr, "GET", "/v1/name/erin", b"");
+    assert!(
+        body_text(&body).contains("\"recovery_pending\":false"),
+        "a GET started the notice: {}",
+        body_text(&body)
+    );
+    // A token that is not one is refused before it reaches a page.
+    let (status, _) = request(
+        addr,
+        "GET",
+        "/v1/recover/confirm?t=<script>alert(1)</script>",
+        b"",
+    );
+    assert_eq!(status, 400);
+
+    // The button starts it.
+    let (status, body) = follow(addr, "/v1/recover/confirm", &token);
+    assert_eq!(status, 200, "{}", body_text(&body));
+    let (_, body) = request(addr, "GET", "/v1/name/erin", b"");
+    assert!(body_text(&body).contains("\"recovery_pending\":true"));
     assert!(handle.stop());
 }
 

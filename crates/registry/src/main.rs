@@ -377,13 +377,19 @@ fn key_command(command: KeyCommand) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Writes a seed to a file only its owner can read, as lowercase hex.
+/// Writes a seed to a **new** file only its owner can read, as lowercase hex.
 ///
 /// A registry seed in a world-readable file is a registry anyone can sign with.
-/// The file is created with default permissions first and restricted
-/// immediately; on Unix that is `0600`. On Windows the file inherits the
-/// profile's ACL, as the identity key file does, and the operator's profile is
-/// the boundary there.
+/// On Unix the file is created `0600` in the same call that creates it, so
+/// there is no moment at which it exists with the umask's permissions (the old
+/// create-then-chmod left one). On Windows the file inherits the profile's
+/// ACL, as the identity key file does, and the operator's profile is the
+/// boundary there.
+///
+/// **It never overwrites.** The successor's seed is generated ninety days
+/// before it is needed and kept offline; a second `key new` pointed at the
+/// same path would otherwise destroy the one key the published commitment
+/// names, and the registry could never rotate again.
 fn write_secret(path: &Path, seed: &[u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path
         .parent()
@@ -391,29 +397,66 @@ fn write_secret(path: &Path, seed: &[u8; 32]) -> Result<(), Box<dyn std::error::
     {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::File::create(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "{} already exists; a key file is never overwritten — move it aside first",
+                path.display()
+            )
+            .into()
+        } else {
+            Box::<dyn std::error::Error>::from(error)
+        }
+    })?;
     writeln!(file, "{}", hex::encode(seed))?;
-    restrict(path)?;
+    file.sync_all()?;
     Ok(())
 }
 
-/// Makes a key file readable only by its owner.
-///
-/// Infallible on Windows (the profile's ACL is the boundary) and fallible on
-/// Unix; one signature for both callers, as the identity key file's helper does.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "infallible on Windows, fallible on Unix; one signature for both callers"
-)]
-fn restrict(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/registry-tests")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        dir
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
+
+    #[test]
+    fn a_secret_is_written_once_and_never_overwritten() {
+        let path = test_dir("write-secret").join("current.key");
+        write_secret(&path, &[7; 32]).expect("first write");
+        let written = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(written.trim(), hex::encode(&[7; 32]));
+
+        let error = write_secret(&path, &[8; 32]).expect_err("a second write is refused");
+        assert!(error.to_string().contains("never overwritten"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            written,
+            "the first key was replaced"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "group or others can read the key: {mode:o}"
+            );
+        }
     }
-    Ok(())
 }

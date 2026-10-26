@@ -33,6 +33,16 @@ RUN apt-get update \
 
 COPY --from=build /src/target/release/registry /usr/local/bin/registry
 
+# Not root. The service parses strangers' bytes and holds the registry key; a
+# bug in either should not come with the container's root. A fixed UID so an
+# operator can `chown` a volume to it before the first start (see
+# docs/registry-ops.md), and `/data` made and owned here so a fresh volume
+# inherits that owner.
+RUN useradd --system --uid 10001 --user-group --no-create-home registry \
+    && mkdir -p /data \
+    && chown registry:registry /data
+USER registry
+
 # The database, the daily backups and the logs live here. Dokploy mounts a
 # volume over it; without one the whole registry forgets itself on redeploy.
 ENV REGISTRY_DATA=/data

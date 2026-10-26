@@ -34,13 +34,21 @@ pub const DAY: i64 = 24 * 60 * 60;
 /// The thirty-day window the per-identity rules use.
 pub const THIRTY_DAYS: i64 = 30 * DAY;
 
-/// How long a spent limit row is kept before the sweep deletes it.
+/// How long a limit row is kept **after its window ends**, before the sweep
+/// deletes it.
 ///
-/// Seven days, from the design. Nothing reads a row this old: the longest
-/// window is thirty days, so the *window* rows stay; this is the retention of
-/// rows whose window began more than seven days ago and can no longer be the
-/// current one for any check.
+/// Seven days, from the design. Measured from the window's end, not its start:
+/// a thirty-day window that started eight days ago is still the current one,
+/// and deleting it would hand every identity a fresh claim allowance in the
+/// middle of the month.
 pub const LIMIT_RETENTION: i64 = 7 * DAY;
+
+/// How often the service sweeps, at most: an hour.
+///
+/// The sweep rides [`crate::service::Service::advance`], which runs before most
+/// requests; once an hour is often enough that the table stays small and rare
+/// enough that no request pays for it twice.
+pub const SWEEP_INTERVAL: i64 = 60 * 60;
 
 /// Claims allowed per address per day.
 pub const CLAIMS_PER_IP: i64 = 2;
@@ -194,15 +202,35 @@ pub fn required_work_bits(
     Ok((base + extra).min(MAX_WORK_BITS))
 }
 
-/// Deletes limit rows whose window is older than the retention.
+/// Deletes limit rows whose window **ended** more than [`LIMIT_RETENTION`] ago.
+///
+/// The window's end is its start plus the length of its scope's window, known
+/// from the scope's prefix — the scopes are this crate's own strings: `ip:` and
+/// `net:` count by the day, `mail:` and `mailnet:` (in `recover`) by the hour,
+/// and the claim and rename allowances by thirty days. So a thirty-day
+/// allowance lives as long as it counts, and a day's address count is gone a
+/// week after its day. An unknown prefix is given the **longest** window: a
+/// sweep that keeps a row too long costs a few bytes, and one that deletes a
+/// live row resets somebody's limit.
 ///
 /// # Errors
 ///
 /// Any SQL failure.
 pub fn sweep(connection: &Connection, now: i64) -> rusqlite::Result<usize> {
+    // One statement over the `limits_window` index rather than a row-by-row
+    // loop; the `ELSE` is the unknown-prefix default.
     connection.execute(
-        "DELETE FROM limits WHERE window < ?1",
-        [now - LIMIT_RETENTION],
+        "DELETE FROM limits WHERE window + CASE
+             WHEN scope LIKE 'ip:%' OR scope LIKE 'net:%' THEN ?2
+             WHEN scope LIKE 'mail:%' OR scope LIKE 'mailnet:%' THEN ?3
+             ELSE ?4
+         END < ?1",
+        rusqlite::params![
+            now - LIMIT_RETENTION,
+            DAY,
+            crate::recover::HOUR,
+            THIRTY_DAYS
+        ],
     )
 }
 
@@ -294,6 +322,45 @@ mod tests {
             Ok(())
         })
         .expect("work");
+    }
+
+    #[test]
+    fn the_sweep_keeps_a_thirty_day_window_for_all_thirty_days() {
+        let db = connection();
+        db.with(|connection| {
+            let start = window_start(NOW, THIRTY_DAYS);
+            let scope = claim_scope("abcd");
+            assert!(take(connection, &scope, start, CLAIMS_PER_IDENTITY)?);
+            // Day 8 through day 30 of the window: the allowance is still spent.
+            for day in [8, 15, 29] {
+                sweep(connection, start + day * DAY)?;
+                assert_eq!(used(connection, &scope, start)?, 1, "day {day}");
+                assert!(
+                    !take(connection, &scope, start, CLAIMS_PER_IDENTITY)?,
+                    "day {day}: a second claim in the same thirty days"
+                );
+            }
+            // A week after the window ends, the row goes.
+            sweep(connection, start + THIRTY_DAYS + LIMIT_RETENTION + 1)?;
+            assert_eq!(used(connection, &scope, start)?, 0);
+            Ok(())
+        })
+        .expect("sweep");
+        // The hour windows go a week after their hour, and a scope this sweep
+        // does not know is kept as long as the longest window.
+        db.with(|connection| {
+            let hour = window_start(NOW, crate::recover::HOUR);
+            take(connection, "mailnet:net:203.0.113.0/24", hour, 10)?;
+            take(connection, "something-new:x", hour, 10)?;
+            sweep(
+                connection,
+                hour + crate::recover::HOUR + LIMIT_RETENTION + 1,
+            )?;
+            assert_eq!(used(connection, "mailnet:net:203.0.113.0/24", hour)?, 0);
+            assert_eq!(used(connection, "something-new:x", hour)?, 1);
+            Ok(())
+        })
+        .expect("sweep");
     }
 
     #[test]

@@ -15,6 +15,15 @@
 //! registry that issues certificates.
 
 use std::sync::Mutex;
+use std::time::Duration;
+
+/// How long one SMTP exchange may take before the send is given up.
+///
+/// `lettre`'s own default is sixty seconds. Ten is generous for a provider
+/// that is answering and short enough that a provider that is not cannot keep
+/// a request worker for a minute. The mail is sent outside the database lock
+/// (`recover`), so this bounds one request, never the service.
+pub const SMTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One plain-text message. The service never sends HTML.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +136,9 @@ impl SmtpMailer {
         let transport = lettre::SmtpTransport::from_url(url)
             .map_err(|error| MailError::Transport(format!("REGISTRY_SMTP_URL: {error}")))?
             // `from_url` gives a builder so credentials and pool settings can
-            // be changed; this service wants exactly what the URL says.
+            // be changed; this service wants what the URL says, and a bound on
+            // how long a provider may take to say anything.
+            .timeout(Some(SMTP_TIMEOUT))
             .build();
         let from: lettre::message::Mailbox = from.parse().map_err(|error| {
             MailError::Transport(format!("REGISTRY_MAIL_FROM is not a mailbox: {error}"))
@@ -187,6 +198,19 @@ mod tests {
         assert_eq!(taken[0].to, "a@example.com");
         assert_eq!(taken[1].to, "b@example.com");
         assert_eq!(sink.count(), 0);
+    }
+
+    #[test]
+    fn an_smtp_transport_builds_with_its_timeout() {
+        // `lettre` does not expose the timeout it was built with, so this pins
+        // the constant and that a URL builds; the call is in `SmtpMailer::new`.
+        assert_eq!(SMTP_TIMEOUT, Duration::from_secs(10));
+        let mailer = SmtpMailer::new(
+            "smtps://user:secret@smtp.example.com:465",
+            "Tiamat <registry@tiamatengine.com>",
+        )
+        .expect("a well-formed URL builds without connecting");
+        assert!(!format!("{mailer:?}").contains("secret"));
     }
 
     #[test]

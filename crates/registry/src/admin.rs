@@ -22,7 +22,7 @@ use tiamat_core::identity::PlayerUuid;
 use tiamat_core::identity::registry::{Name, RegistryError, RotationRecord, check_canonical};
 
 use crate::config::Config;
-use crate::db::{Db, DbError};
+use crate::db::{Db, DbError, write_transaction};
 use crate::hex;
 use crate::keys::{KeyError, RegistryKeys};
 use crate::limits;
@@ -56,6 +56,17 @@ pub enum AdminError {
     /// No active name for a UUID.
     #[error("no identity with an active name has that UUID")]
     UnknownIdentity,
+
+    /// A bulk revocation whose network and window matched no claim.
+    ///
+    /// An error rather than "revoked 0": the operator typed this because they
+    /// saw a burst, so matching nothing means the subnet or the window was
+    /// mistyped, and a quiet success would leave the burst standing.
+    #[error("no claim from {subnet} in that window; check the subnet and --since")]
+    NoMatchingClaims {
+        /// The subnet as it was matched.
+        subnet: String,
+    },
 
     /// The minute clock is wrong.
     #[error("could not read the system clock")]
@@ -241,22 +252,30 @@ impl Admin {
     /// Revokes every name claimed from a network in a window.
     ///
     /// The burst remedy from §7: one line undoes a squatter's morning. Each
-    /// name is released with the ordinary thirty-day hold, its certificates go
-    /// on the revocation list, and the reason goes to the audit table.
+    /// name is released with the ordinary thirty-day hold, its certificates
+    /// that can still verify go on the revocation list, the identity is barred
+    /// from claiming that name back (`revoked_holders`), and the reason goes
+    /// to the audit table.
+    ///
+    /// `subnet` is accepted as `admin claims` prints it (`net:203.0.113.0/24`)
+    /// or bare (`203.0.113.0/24`), so pasting the one into the other works.
     ///
     /// # Errors
     ///
-    /// [`AdminError::Db`] when a query fails.
+    /// [`AdminError::Db`] when a query fails, and
+    /// [`AdminError::NoMatchingClaims`] when nothing matched.
     pub fn revoke_subnet(
         &self,
         subnet: &str,
         since: i64,
         reason: &str,
     ) -> Result<Revoked, AdminError> {
-        let wanted = format!("net:{}", subnet.trim());
+        let bare = subnet.trim();
+        let bare = bare.strip_prefix("net:").unwrap_or(bare);
+        let wanted = format!("net:{bare}");
         let now = self.now;
         let revoked = self.db.with(|connection| {
-            let transaction = connection.transaction()?;
+            let transaction = write_transaction(connection)?;
             let rows: Vec<(String, String)> = {
                 let mut statement = transaction.prepare(
                     "SELECT who, why FROM audit WHERE what LIKE 'claim %' AND when_at >= ?1",
@@ -281,16 +300,32 @@ impl Admin {
                 }
             }
 
+            if identities.is_empty() {
+                // Nothing to write; the transaction's drop is the rollback.
+                return Ok(None);
+            }
+
             let mut serials = 0;
             let mut names = 0;
             for uuid in &identities {
-                let issues: Vec<(Vec<u8>, i64)> = {
-                    let mut statement = transaction
-                        .prepare("SELECT registry_key, serial FROM issued WHERE uuid = ?1")?;
-                    let rows = statement
-                        .query_map([uuid.as_slice()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                let issues = crate::names::live_issues(&transaction, uuid.as_slice(), now)?;
+                // The names this identity holds now: each is barred to it
+                // after the release, or the release would be undone by the
+                // next claim (a released name is its holder's to reclaim).
+                let held: Vec<String> = {
+                    let mut statement = transaction.prepare(
+                        "SELECT canonical FROM names WHERE uuid = ?1 AND released IS NULL",
+                    )?;
+                    let rows = statement.query_map([uuid.as_slice()], |row| row.get(0))?;
                     rows.collect::<rusqlite::Result<Vec<_>>>()?
                 };
+                for canonical in &held {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO revoked_holders (canonical, uuid, revoked_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![canonical, uuid.as_slice(), now],
+                    )?;
+                }
                 for (registry_key, serial) in issues {
                     serials += transaction.execute(
                         "INSERT OR IGNORE INTO revocations (registry_key, serial, when_at, reason)
@@ -314,9 +349,11 @@ impl Admin {
                 )?;
             }
             transaction.commit()?;
-            Ok(Revoked { names, serials })
+            Ok(Some(Revoked { names, serials }))
         })?;
-        Ok(revoked)
+        revoked.ok_or_else(|| AdminError::NoMatchingClaims {
+            subnet: wanted.clone(),
+        })
     }
 
     /// Reserves a name, so no claim may take it.
@@ -475,21 +512,30 @@ impl std::fmt::Debug for Admin {
 /// A sentence when the text is not a window.
 pub fn parse_window(text: &str, now: i64) -> Result<i64, String> {
     let trimmed = text.trim();
-    let (number, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    // By character, not byte: `split_at` on a byte index panics inside a
+    // multi-byte character, and an operator's typo is not a reason to panic.
+    let mut characters = trimmed.chars();
+    let Some(unit) = characters.next_back() else {
+        return Err(format!("`{text}` is not a window like 48h, 30m or 7d"));
+    };
+    let number = characters.as_str();
     let count: i64 = number
         .parse()
         .map_err(|_| format!("`{text}` is not a window like 48h, 30m or 7d"))?;
     if count < 0 {
         return Err(format!("`{text}` is a negative window"));
     }
-    let seconds = match unit {
-        "m" => 60,
-        "h" => 60 * 60,
-        "d" => 24 * 60 * 60,
-        "w" => 7 * 24 * 60 * 60,
+    let seconds: i64 = match unit {
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
+        'w' => 7 * 24 * 60 * 60,
         _ => return Err(format!("`{text}` has no unit; use m, h, d or w")),
     };
-    Ok(now - count * seconds)
+    count
+        .checked_mul(seconds)
+        .and_then(|span| now.checked_sub(span))
+        .ok_or_else(|| format!("`{text}` is longer than any window this registry has"))
 }
 
 /// A player's UUID from hex, for a command that prints one.
@@ -556,6 +602,12 @@ mod tests {
         assert!(parse_window("48", NOW).is_err());
         assert!(parse_window("h", NOW).is_err());
         assert!(parse_window("x h", NOW).is_err());
+        // A trailing multi-byte character, an empty string, and a window so
+        // long it overflows: refusals, not panics.
+        assert!(parse_window("48é", NOW).is_err());
+        assert!(parse_window("é", NOW).is_err());
+        assert!(parse_window("", NOW).is_err());
+        assert!(parse_window("9223372036854775807w", NOW).is_err());
     }
 
     #[test]
@@ -638,6 +690,55 @@ mod tests {
             })
             .expect("audit");
         assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn a_revoked_squatter_cannot_claim_the_name_back() {
+        let admin = admin();
+        hold_name(&admin, "alice", 1, "203.0.113.5");
+        admin
+            .revoke_subnet("203.0.113.0/24", NOW - 3600, "burst")
+            .expect("revoke");
+
+        // The same identity, at once, from another network: before the mark,
+        // `is_free`'s "a released name is its holder's" let it straight back.
+        let squatter = SigningKey::from_bytes(&[1; 32]);
+        let verified = tiamat_core::identity::registry::VerifiedClaim {
+            name: Name::from_parts("alice", "alice").expect("name"),
+            uuid: PlayerUuid::from_root_key(&squatter.verifying_key()),
+            public_key: squatter.verifying_key(),
+            timestamp: NOW + 10,
+        };
+        let ip: IpAddr = "198.51.100.9".parse().expect("ip");
+        let outcome = admin
+            .db
+            .with(|connection| {
+                crate::names::claim(connection, &admin.keys, &verified, NOW + 10, ip)
+            })
+            .expect("claim");
+        assert!(
+            matches!(outcome, crate::names::ClaimOutcome::Revoked),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_subnet_pasted_from_the_claims_view_matches_and_a_miss_is_an_error() {
+        let admin = admin();
+        hold_name(&admin, "alice", 1, "203.0.113.5");
+        let shown = admin.claims_by_subnet(NOW - 3600).expect("groups")[0]
+            .subnet
+            .clone();
+        assert_eq!(shown, "net:203.0.113.0/24");
+        let revoked = admin
+            .revoke_subnet(&shown, NOW - 3600, "burst")
+            .expect("the printed form is accepted");
+        assert_eq!(revoked.names, 1);
+
+        assert!(matches!(
+            admin.revoke_subnet("192.0.2.0/24", NOW - 3600, "typo"),
+            Err(AdminError::NoMatchingClaims { .. })
+        ));
     }
 
     #[test]

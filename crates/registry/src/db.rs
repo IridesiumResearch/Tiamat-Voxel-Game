@@ -20,20 +20,20 @@
 //! previous version intact.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 /// The schema this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Every migration, oldest first, with the version it brings the database to.
 ///
 /// A migration is applied in order when the stored version is below its
 /// target. The list is append-only: changing an entry that has shipped would
 /// migrate a database that already ran it into a different shape.
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
 
 /// The schema, in one statement batch.
 ///
@@ -170,6 +170,41 @@ CREATE TABLE IF NOT EXISTS issued (
 CREATE INDEX IF NOT EXISTS issued_uuid ON issued(uuid);
 ";
 
+/// Schema 3: who the operator revoked a name from.
+///
+/// An operator's revocation releases the binding with the ordinary hold, and a
+/// released name is its old holder's to reclaim at once (that is what makes a
+/// rename a release plus a claim). Without a mark, the squatter a revocation
+/// was aimed at would simply claim the name back. A table rather than a column
+/// on `names` because `CREATE TABLE IF NOT EXISTS` is idempotent and `ALTER
+/// TABLE ADD COLUMN` is not, and a migration that can run twice is one that
+/// cannot half-apply.
+const SCHEMA_V3: &str = r"
+CREATE TABLE IF NOT EXISTS revoked_holders (
+    canonical  TEXT NOT NULL,
+    uuid       BLOB NOT NULL,
+    revoked_at INTEGER NOT NULL,
+    PRIMARY KEY (canonical, uuid)
+);
+";
+
+/// Begins a transaction that takes SQLite's write lock **at `BEGIN`**.
+///
+/// rusqlite's default is a deferred transaction, which reads first and asks for
+/// the write lock at its first write. In WAL mode, if another connection (the
+/// admin CLI, run beside the service) committed in between, that upgrade fails
+/// with `SQLITE_BUSY_SNAPSHOT` at once — `busy_timeout` cannot help, because
+/// waiting would not make the stale snapshot fresh. Every path here that reads
+/// and then writes therefore begins `IMMEDIATE`, which waits for the lock up
+/// front and then sees the latest data.
+///
+/// # Errors
+///
+/// Any SQL failure, including `SQLITE_BUSY` once `busy_timeout` has passed.
+pub fn write_transaction(connection: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
+    connection.transaction_with_behavior(TransactionBehavior::Immediate)
+}
+
 /// The registry's database handle.
 pub struct Db {
     connection: Mutex<Connection>,
@@ -227,13 +262,12 @@ impl Db {
     ///
     /// # Errors
     ///
-    /// [`DbError::Sql`] if the closure's SQL failed, [`DbError::Poisoned`] if a
-    /// previous holder panicked.
+    /// [`DbError::Sql`] if the closure's SQL failed.
     pub fn with<T>(
         &self,
         work: impl FnOnce(&mut Connection) -> rusqlite::Result<T>,
     ) -> Result<T, DbError> {
-        let mut connection = self.connection.lock().map_err(|_| DbError::Poisoned)?;
+        let mut connection = self.lock();
         work(&mut connection).map_err(DbError::Sql)
     }
 
@@ -246,14 +280,41 @@ impl Db {
     ///
     /// # Errors
     ///
-    /// Whatever the closure returns, plus [`DbError::Poisoned`] converted into
-    /// the closure's error type.
+    /// Whatever the closure returns.
     pub fn try_with<T, E: From<DbError>>(
         &self,
         work: impl FnOnce(&mut Connection) -> Result<T, E>,
     ) -> Result<T, E> {
-        let mut connection = self.connection.lock().map_err(|_| DbError::Poisoned)?;
+        let mut connection = self.lock();
         work(&mut connection)
+    }
+
+    /// The connection, recovered if a previous holder panicked.
+    ///
+    /// **Recovering is safe here, and refusing is not.** A handler that panics
+    /// mid-transaction unwinds through the `Transaction`'s drop, which rolls it
+    /// back (the workspace does not set `panic = "abort"`), so the connection
+    /// is in the state the last commit left it. Treating the poison as fatal
+    /// instead turned one bad request into a registry that answers 500 to every
+    /// request until it is restarted.
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.connection.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("a request panicked holding the database; recovering the connection");
+            self.connection.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
+    /// Whether the connection is held right now.
+    ///
+    /// For tests that prove slow work (a mail send) happens **outside** the
+    /// lock: a transport that asks this from inside `send` must see `false`.
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        matches!(
+            self.connection.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 }
 
@@ -272,7 +333,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DbError> {
     if version < SCHEMA_VERSION {
         // One transaction for the whole chain: a crash halfway through leaves
         // the version and the tables where they were, not half-migrated.
-        let transaction = connection.transaction()?;
+        let transaction = write_transaction(connection)?;
         for (target, sql) in MIGRATIONS {
             if version < *target {
                 transaction.execute_batch(sql)?;
@@ -310,10 +371,6 @@ pub enum DbError {
     /// A statement failed.
     #[error("the registry database reported: {0}")]
     Sql(#[from] rusqlite::Error),
-
-    /// A previous holder of the connection panicked, so its state is unknown.
-    #[error("a previous request panicked while holding the database connection")]
-    Poisoned,
 
     /// A backup could not be written or the old ones could not be pruned.
     #[error("a backup could not be written at `{path}`")]
@@ -374,6 +431,7 @@ mod tests {
             "recoveries",
             "reserved",
             "revocations",
+            "revoked_holders",
             "rotations",
             "tokens",
         ] {
@@ -462,14 +520,85 @@ mod tests {
     }
 
     #[test]
-    fn a_poisoned_connection_is_an_error_not_a_panic() {
+    fn a_poisoned_connection_is_recovered_with_its_transaction_rolled_back() {
         let db = std::sync::Arc::new(Db::in_memory().expect("open"));
         let poisoned = std::sync::Arc::clone(&db);
         let _ = std::thread::spawn(move || {
-            let _guard = poisoned.connection.lock().expect("lock");
-            panic!("deliberate, to poison the mutex");
+            let _ = poisoned.with(|connection| -> rusqlite::Result<()> {
+                let transaction = write_transaction(connection)?;
+                transaction.execute("INSERT INTO meta (key, value) VALUES ('half', X'01')", [])?;
+                panic!("deliberate, to poison the mutex mid-transaction");
+            });
         })
         .join();
-        assert!(matches!(db.with(|_| Ok(())), Err(DbError::Poisoned)));
+        assert!(db.connection.is_poisoned());
+
+        // The next request is answered, and sees no trace of the half-written
+        // transaction the panic unwound through.
+        let rows: i64 = db
+            .with(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM meta WHERE key = 'half'", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("a poisoned connection is recovered, not refused");
+        assert_eq!(rows, 0);
+        assert!(!db.connection.is_poisoned());
+    }
+
+    #[test]
+    fn a_write_transaction_takes_the_write_lock_at_begin() {
+        let dir = test_dir("immediate");
+        let path = dir.join("registry.sqlite");
+        drop(Db::open(&path).expect("create"));
+        let mut first = Connection::open(&path).expect("first");
+        let second = Connection::open(&path).expect("second");
+        second.busy_timeout(Duration::ZERO).expect("no wait");
+
+        // Held before any statement: a deferred transaction would hold nothing
+        // yet, and the other connection's write would slip in between this
+        // transaction's read and its write.
+        let transaction = write_transaction(&mut first).expect("begin");
+        let refused = second.execute("INSERT INTO meta (key, value) VALUES ('other', X'01')", []);
+        assert!(
+            matches!(
+                refused,
+                Err(rusqlite::Error::SqliteFailure(ref error, _))
+                    if error.code == rusqlite::ErrorCode::DatabaseBusy
+            ),
+            "{refused:?}"
+        );
+        transaction.commit().expect("commit");
+        second
+            .execute("INSERT INTO meta (key, value) VALUES ('other', X'01')", [])
+            .expect("free once the first commits");
+    }
+
+    #[test]
+    fn a_schema_two_database_gains_the_revoked_holders_table() {
+        let dir = test_dir("migrate-2-to-3");
+        let path = dir.join("registry.sqlite");
+        {
+            let db = Db::open(&path).expect("open");
+            db.with(|connection| {
+                connection.execute("DROP TABLE revoked_holders", [])?;
+                connection.pragma_update(None, "user_version", 2)?;
+                Ok(())
+            })
+            .expect("downgrade");
+        }
+        let db = Db::open(&path).expect("migrate forward");
+        assert_eq!(version(&db), SCHEMA_VERSION);
+        let count: i64 = db
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'revoked_holders'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("revoked_holders");
+        assert_eq!(count, 1);
     }
 }

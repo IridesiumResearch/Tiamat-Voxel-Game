@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use tiny_http::{Header, ListenAddr, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 use crate::api;
 use crate::clock::{Clock, SystemClock};
@@ -30,12 +30,19 @@ use crate::service::{Service, StartError};
 
 /// The largest request body the registry will read.
 ///
-/// The largest record a client sends is a claim: a name, a display, a UUID, a
-/// public key, a timestamp, a nonce and a signature — under two hundred bytes.
+/// The largest record a client sends is a claim, release or cancellation
+/// carrying a key-set proof: at most
+/// [`MAX_PROVEN_REQUEST_BYTES`](tiamat_core::identity::registry::MAX_PROVEN_REQUEST_BYTES),
+/// about two and a half kilobytes, which each record's own parser enforces.
 /// Thirty-two kilobytes is the design's cap, and it is checked from
 /// `Content-Length` before a byte of body is read as well as enforced on the
 /// read itself, so a lying header cannot make the service allocate.
 pub const MAX_BODY_BYTES: usize = 32 * 1024;
+
+// The transport's cap must never be the one that refuses a record its parser
+// would accept: a second device's request would fail as "too large" with no
+// way for the client to know why.
+const _: () = assert!(MAX_BODY_BYTES >= tiamat_core::identity::registry::MAX_PROVEN_REQUEST_BYTES);
 
 /// A running registry.
 pub struct ServerHandle {
@@ -114,9 +121,12 @@ pub fn serve_with(
         addr: asked,
         source,
     })?);
-    // `ListenAddr` has one variant with the feature set this crate uses (no
-    // TLS, no Unix sockets), so this destructuring is irrefutable.
-    let ListenAddr::IP(addr) = server.server_addr();
+    // `ListenAddr` grows a `Unix` variant on Unix targets, so this is not an
+    // irrefutable pattern there even though `Server::http` only ever binds a
+    // TCP address. Refusing to start is the honest answer to the impossible.
+    let Some(addr) = server.server_addr().to_ip() else {
+        return Err(StartError::NotTcp);
+    };
 
     let stop = Arc::new(AtomicBool::new(false));
     let thread_server = Arc::clone(&server);
@@ -245,9 +255,13 @@ fn dispatch(
         ("POST", "/v1/claim") => api::claim(service, body, client),
         ("POST", "/v1/release") => api::release(service, body),
         ("POST", "/v1/email") => api::email(service, body, client),
-        ("GET", "/v1/email/verify") => api::email_verify(service, query),
+        // A link in a mail is a page; only its button's POST changes anything,
+        // so a mail scanner that follows every link changes nothing.
+        ("GET", "/v1/email/verify") => api::email_verify_page(query),
+        ("POST", "/v1/email/verify") => api::email_verify(service, query, body),
         ("POST", "/v1/recover") => api::recover_start(service, body, client),
-        ("GET", "/v1/recover/confirm") => api::recover_confirm(service, query),
+        ("GET", "/v1/recover/confirm") => api::recover_confirm_page(query),
+        ("POST", "/v1/recover/confirm") => api::recover_confirm(service, query, body),
         ("POST", "/v1/recover/cancel") => api::recover_cancel(service, body),
         ("GET", path) if path.starts_with(NAME_PREFIX) => {
             api::name_page(service, &path[NAME_PREFIX.len()..])
@@ -372,6 +386,15 @@ impl Reply {
         }
     }
 
+    /// An HTML page: only the confirmation pages a mailed link opens.
+    pub(crate) fn html(status: u16, body: String) -> Self {
+        Self {
+            status,
+            content_type: HTML,
+            body: body.into_bytes(),
+        }
+    }
+
     /// The one error shape: `{"error": "<code>", "message": "<sentence>"}`.
     ///
     /// The code is for a client to match on; the message is for a person. Both
@@ -416,9 +439,30 @@ impl Reply {
         {
             response = response.with_header(header);
         }
+        if let Ok(header) =
+            Header::from_bytes(b"X-Content-Type-Options".as_slice(), b"nosniff".as_slice())
+        {
+            response = response.with_header(header);
+        }
+        if self.content_type == HTML
+            && let Ok(header) = Header::from_bytes(
+                b"Content-Security-Policy".as_slice(),
+                PAGE_POLICY.as_bytes(),
+            )
+        {
+            response = response.with_header(header);
+        }
         response
     }
 }
+
+/// The content type of the confirmation pages.
+const HTML: &str = "text/html; charset=utf-8";
+
+/// What a confirmation page may do: post its one form back here, and nothing
+/// else — no script, no style, no frame around it, no other origin.
+const PAGE_POLICY: &str =
+    "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 impl std::fmt::Debug for Reply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

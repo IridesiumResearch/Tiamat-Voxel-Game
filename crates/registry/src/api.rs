@@ -105,6 +105,11 @@ pub(crate) fn claim(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
                 "already_named",
                 "this identity already holds a name; release it to take another",
             ),
+            Ok(ClaimOutcome::Revoked) => Reply::error(
+                403,
+                "revoked",
+                "the registry's operator revoked that name from this identity",
+            ),
             Ok(ClaimOutcome::Limited(limit)) => Reply::error(429, "limited", limit.message()),
             Err(error) => internal(error),
         }
@@ -207,6 +212,9 @@ pub(crate) fn name_page(service: &Service, canonical: &str) -> Reply {
         ",\"reserved\":{},\"recovery_pending\":{}",
         status.reserved, status.recovery_pending
     ));
+    if let Some(until) = status.recovery_notice_until {
+        json.push_str(&format!(",\"recovery_notice_until\":{until}"));
+    }
     if let Some(free_after) = status.free_after {
         json.push_str(&format!(",\"free_after\":{free_after}"));
     }
@@ -231,17 +239,17 @@ pub(crate) fn email(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
         Ok(verified) => verified,
         Err(error) => return refused(&error),
     };
-    let base_url = service.config().base_url.clone();
-    match service.db().try_with(|connection| {
-        recover::bind_email(
-            connection,
-            service.mailer(),
-            &base_url,
-            &verified,
-            now,
-            client,
-        )
-    }) {
+    // `bind_email` takes the database itself, not a held connection: it sends
+    // the mail after releasing the lock, so an SMTP round trip never stalls
+    // the requests queued behind it.
+    match recover::bind_email(
+        service.db(),
+        service.mailer(),
+        &service.config().base_url,
+        &verified,
+        now,
+        client,
+    ) {
         Ok(EmailOutcome::Sent) => Reply::json(202, "{\"sent\":true}".to_owned()),
         Ok(EmailOutcome::Removed) => Reply::json(200, "{\"removed\":true}".to_owned()),
         Ok(EmailOutcome::NotRoot) => not_root(),
@@ -252,10 +260,31 @@ pub(crate) fn email(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
 }
 
 /// `GET /v1/email/verify?t=<token>` — the link in the verification mail.
-pub(crate) fn email_verify(service: &Service, query: &str) -> Reply {
-    let now = service.now();
+///
+/// **A page, not the action.** Mail gateways and link scanners follow every
+/// link in a message to look for malware; if following one bound the address,
+/// a scanner would bind it for whoever asked. So the link opens a page with
+/// one button, and the button's `POST` ([`email_verify`]) does the work. The
+/// token is not looked up here, so a scanner spends nothing.
+pub(crate) fn email_verify_page(query: &str) -> Reply {
     let Some(token) = token_from_query(query) else {
         return Reply::error(400, "token", "the link carries no token");
+    };
+    confirmation_page(
+        "Bind your Tiamat recovery address",
+        "Press the button to bind this address to your Tiamat identity. It will \
+         only ever be used to confirm a name recovery you ask for.",
+        "/v1/email/verify",
+        token,
+        "Bind this address",
+    )
+}
+
+/// `POST /v1/email/verify` — the page's button: binds the address, once.
+pub(crate) fn email_verify(service: &Service, query: &str, body: &[u8]) -> Reply {
+    let now = service.now();
+    let Some(token) = token_from_form(body, query) else {
+        return Reply::error(400, "token", "the request carries no token");
     };
     match service
         .db()
@@ -275,6 +304,11 @@ pub(crate) fn email_verify(service: &Service, query: &str) -> Reply {
 
 /// `POST /v1/recover` — ask to move a lost name to a new identity.
 pub(crate) fn recover_start(service: &Service, body: &[u8], client: Option<IpAddr>) -> Reply {
+    // Finish any notice that is due first: a name whose recovery has just
+    // completed must not be asked about as if it still had its old holder.
+    if let Err(error) = service.advance() {
+        return internal(error);
+    }
     let now = service.now();
     let Some(client) = client else {
         return Reply::error(400, "address", "the client's address could not be read");
@@ -287,17 +321,15 @@ pub(crate) fn recover_start(service: &Service, body: &[u8], client: Option<IpAdd
         Ok(verified) => verified,
         Err(error) => return refused(&error),
     };
-    let base_url = service.config().base_url.clone();
-    match service.db().try_with(|connection| {
-        recover::start_recovery(
-            connection,
-            service.mailer(),
-            &base_url,
-            &verified,
-            now,
-            client,
-        )
-    }) {
+    // As for `email`: the mail goes out after the lock is released.
+    match recover::start_recovery(
+        service.db(),
+        service.mailer(),
+        &service.config().base_url,
+        &verified,
+        now,
+        client,
+    ) {
         Ok(StartOutcome::Sent) => Reply::json(202, "{\"sent\":true}".to_owned()),
         Ok(StartOutcome::NotRoot) => not_root(),
         Ok(StartOutcome::UnknownName) => {
@@ -324,11 +356,35 @@ pub(crate) fn recover_start(service: &Service, body: &[u8], client: Option<IpAdd
     }
 }
 
-/// `GET /v1/recover/confirm?t=<token>` — following the mail starts the notice.
-pub(crate) fn recover_confirm(service: &Service, query: &str) -> Reply {
-    let now = service.now();
+/// `GET /v1/recover/confirm?t=<token>` — the link in the recovery mail.
+///
+/// A page with a button, for the reason [`email_verify_page`] gives, and with
+/// more at stake: a scanner following this link would start a fourteen-day
+/// notice to move somebody's name without anyone having pressed anything.
+pub(crate) fn recover_confirm_page(query: &str) -> Reply {
     let Some(token) = token_from_query(query) else {
         return Reply::error(400, "token", "the link carries no token");
+    };
+    confirmation_page(
+        "Confirm a Tiamat name recovery",
+        "Pressing the button starts a fourteen-day public notice. When it ends, the \
+         name moves to the identity that asked for it, unless its current holder \
+         cancels. If you did not ask for this, close this page: nothing happens \
+         until the button is pressed.",
+        "/v1/recover/confirm",
+        token,
+        "Start the recovery notice",
+    )
+}
+
+/// `POST /v1/recover/confirm` — the page's button: starts the notice.
+pub(crate) fn recover_confirm(service: &Service, query: &str, body: &[u8]) -> Reply {
+    if let Err(error) = service.advance() {
+        return internal(error);
+    }
+    let now = service.now();
+    let Some(token) = token_from_form(body, query) else {
+        return Reply::error(400, "token", "the request carries no token");
     };
     match service
         .db()
@@ -359,6 +415,11 @@ pub(crate) fn recover_confirm(service: &Service, query: &str) -> Reply {
 
 /// `POST /v1/recover/cancel` — the holder ends a notice in one request.
 pub(crate) fn recover_cancel(service: &Service, body: &[u8]) -> Reply {
+    // A notice that has run its fourteen days completes before a late cancel
+    // is read, rather than being undone by it.
+    if let Err(error) = service.advance() {
+        return internal(error);
+    }
     let now = service.now();
     let request = match CancelRecoveryRequest::from_bytes(body) {
         Ok(request) => request,
@@ -393,27 +454,13 @@ pub(crate) fn recover_cancel(service: &Service, body: &[u8]) -> Reply {
 /// the revoked certificate.
 pub(crate) fn revocations(service: &Service) -> Reply {
     let now = service.now();
-    let entries = match service.db().with(|connection| {
-        let mut statement = connection.prepare(
-            "SELECT registry_key, serial FROM revocations
-             ORDER BY when_at DESC LIMIT ?1",
-        )?;
-        let rows = statement.query_map(
-            [tiamat_core::identity::registry::MAX_REVOCATIONS as i64],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (key, serial) = row?;
-            if let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) {
-                entries.push(tiamat_core::identity::registry::Revocation {
-                    registry_key: key,
-                    serial: u64::try_from(serial).unwrap_or(0),
-                });
-            }
-        }
-        Ok(entries)
-    }) {
+    // Only revocations whose certificate could still verify somewhere: the
+    // list is capped, and an expired serial on it would push off one that
+    // matters.
+    let entries = match service
+        .db()
+        .with(|connection| names::revocations_in_force(connection, now))
+    {
         Ok(entries) => entries,
         Err(error) => return internal(error),
     };
@@ -425,12 +472,53 @@ pub(crate) fn revocations(service: &Service) -> Reply {
 }
 
 /// The token from a link's query string, if it is the right shape.
+///
+/// The right shape is exactly what `tokens` issues — 32 bytes as 64 hex
+/// characters — and nothing else, because the page echoes it into HTML: a
+/// value that is only hex digits cannot be markup.
 fn token_from_query(query: &str) -> Option<&str> {
     query
         .split('&')
         .find_map(|pair| pair.strip_prefix("t="))
-        // 32 bytes as hex, the only length `tokens` issues.
-        .filter(|value| value.len() == 64)
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// The token from a form post (`t=<hex>` in the body), or failing that from
+/// the query string, for a client that posts to the link itself.
+fn token_from_form<'a>(body: &'a [u8], query: &'a str) -> Option<&'a str> {
+    std::str::from_utf8(body)
+        .ok()
+        .map(str::trim)
+        .and_then(token_from_query)
+        .or_else(|| token_from_query(query))
+}
+
+/// A page with one sentence and one button that posts the token back.
+///
+/// Plain HTML with nothing to load: no script, no style sheet, no image — the
+/// response's content security policy forbids all of them, and the page needs
+/// none. `token` is already known to be 64 hex digits (`token_from_query`), so
+/// it is safe to place in an attribute; the other strings are this module's
+/// own constants.
+fn confirmation_page(
+    title: &str,
+    explanation: &str,
+    action: &str,
+    token: &str,
+    button: &str,
+) -> Reply {
+    Reply::html(
+        200,
+        format!(
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+             <meta name=\"robots\" content=\"noindex\">\n<title>{title}</title>\n</head>\n\
+             <body>\n<h1>{title}</h1>\n<p>{explanation}</p>\n\
+             <form method=\"post\" action=\"{action}\">\n\
+             <input type=\"hidden\" name=\"t\" value=\"{token}\">\n\
+             <button type=\"submit\">{button}</button>\n</form>\n</body>\n</html>\n"
+        ),
+    )
 }
 
 /// The answer to a mail that could not be handed off.

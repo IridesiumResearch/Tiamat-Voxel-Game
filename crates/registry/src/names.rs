@@ -23,6 +23,13 @@
 //!   rule (§4).
 //! - **Reserved names cannot be claimed**, from core's constant list or the
 //!   operator's table.
+//! - **A name the operator revoked from an identity stays out of its reach.**
+//!   A release is its holder's to undo; a revocation is not (`revoked_holders`).
+//! - **A renewal mints a certificate only when one is due.** Until the current
+//!   certificate is inside its renewal window ([`RENEW_BEFORE_SECONDS`]), a
+//!   renewal is answered with that same certificate — same serial, same expiry
+//!   — so a client looping on renew cannot mint serials, and a recovery's
+//!   revocation of "every certificate the old identity holds" stays small.
 //! - **A claim names an identity, not just a key.** `verify_claim` has already
 //!   shown the signing key to be the identity's own — the root, or a device a
 //!   signed key-set chain reaches from it — so this layer takes the UUID as
@@ -33,9 +40,11 @@ use std::net::IpAddr;
 use rusqlite::{Connection, OptionalExtension, params};
 use tiamat_core::identity::PlayerUuid;
 use tiamat_core::identity::registry::{
-    NameCertificate, VerifiedClaim, VerifiedRelease, is_reserved,
+    CERTIFICATE_LIFETIME_SECONDS, CLOCK_SKEW_SECONDS, MAX_REVOCATIONS, NameCertificate,
+    RENEW_BEFORE_SECONDS, Revocation, VerifiedClaim, VerifiedRelease, is_reserved,
 };
 
+use crate::db::write_transaction;
 use crate::keys::RegistryKeys;
 use crate::limits::{self, DAY};
 
@@ -47,6 +56,20 @@ pub const EXPIRY_NEVER_RENEWED: i64 = 90 * DAY;
 
 /// When a name that has been renewed stops being the holder's.
 pub const EXPIRY_AFTER_RENEWAL: i64 = 365 * DAY;
+
+/// The least time between two certificates minted for one binding: a day.
+///
+/// The renewal window ([`RENEW_BEFORE_SECONDS`]) already implies it at today's
+/// lifetimes; it is stated on its own so a later, shorter lifetime cannot turn
+/// renewals back into a serial mint.
+pub const MIN_REISSUE_INTERVAL: i64 = DAY;
+
+/// How long after its issue a certificate can still verify somewhere.
+///
+/// Its lifetime plus the clock skew a verifier allows. A revocation of a
+/// certificate older than this protects nobody, which is what lets a recovery
+/// and the published list leave it out.
+pub const CERTIFICATE_LIVE_SECONDS: i64 = CERTIFICATE_LIFETIME_SECONDS + CLOCK_SKEW_SECONDS;
 
 /// A binding as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +134,8 @@ pub enum ClaimOutcome {
     Taken,
     /// This identity already has an active name.
     AlreadyNamed,
+    /// The operator revoked this name from this identity.
+    Revoked,
     /// A quota refused it.
     Limited(Limit),
 }
@@ -160,13 +185,18 @@ pub fn claim(
 ) -> rusqlite::Result<ClaimOutcome> {
     let canonical = claimed.name.canonical().to_owned();
     let uuid = claimed.uuid.to_hex();
-    let transaction = connection.transaction()?;
+    let transaction = write_transaction(connection)?;
 
     if is_reserved(&canonical) || reserved_here(&transaction, &canonical)? {
         return Ok(ClaimOutcome::Reserved);
     }
     if active_binding(&transaction, &claimed.uuid)?.is_some() {
         return Ok(ClaimOutcome::AlreadyNamed);
+    }
+    // Before `is_free`, whose shortcut lets a releasing holder straight back
+    // in: a revocation is not a release, and its target is not let back in.
+    if revoked_from(&transaction, &canonical, &claimed.uuid)? {
+        return Ok(ClaimOutcome::Revoked);
     }
     if let Some(existing) = binding(&transaction, &canonical)?
         && !is_free(&existing, &claimed.uuid, now)
@@ -246,6 +276,16 @@ pub fn claim(
 
 /// Renews the binding `claimed.name` already holds, or says why not.
 ///
+/// A renewal before the current certificate is due (more than
+/// [`RENEW_BEFORE_SECONDS`] left, or minted less than [`MIN_REISSUE_INTERVAL`]
+/// ago) is answered with **that certificate again** — the same serial, issue
+/// time and expiry, in the casing asked for — rather than refused, because a
+/// client restoring from its phrase on a new device needs the certificate it
+/// lost, and a refusal would leave it nameless for two months. It is not a
+/// renewal for the expiry rules either: only a certificate minted inside the
+/// window moves `renewed`, so claiming and renewing at once does not buy a
+/// squatter the renewed name's twelve months.
+///
 /// # Errors
 ///
 /// Any SQL failure.
@@ -257,12 +297,42 @@ pub fn renew(
 ) -> rusqlite::Result<RenewOutcome> {
     let canonical = claimed.name.canonical().to_owned();
     let uuid = claimed.uuid.to_hex();
-    let transaction = connection.transaction()?;
+    let transaction = write_transaction(connection)?;
     let Some(existing) = active_binding(&transaction, &claimed.uuid)? else {
         return Ok(RenewOutcome::Unknown);
     };
     if existing.canonical != canonical {
         return Ok(RenewOutcome::NotYours);
+    }
+
+    let current_key = keys.public_key().to_bytes();
+    if let Some(latest) = latest_issue(&transaction, &claimed.uuid, &canonical)?
+        // A certificate from a retired key is replaced at once: after a
+        // rotation every client is meant to move to the new key.
+        && latest.registry_key == current_key
+        && (now - latest.issued < MIN_REISSUE_INTERVAL
+            || latest.issued + CERTIFICATE_LIFETIME_SECONDS - now > RENEW_BEFORE_SECONDS)
+    {
+        if existing.display != claimed.name.display() {
+            transaction.execute(
+                "UPDATE names SET display = ?1 WHERE canonical = ?2",
+                params![claimed.name.display(), canonical],
+            )?;
+            audit(
+                &transaction,
+                &uuid,
+                &format!("display {canonical}"),
+                now,
+                "renewal",
+            )?;
+        }
+        let certificate = keys.issue(&claimed.name, claimed.uuid, latest.issued, latest.serial);
+        let notice = crate::recover::pending_notice(&transaction, &canonical, now)?;
+        transaction.commit()?;
+        return Ok(RenewOutcome::Renewed {
+            certificate,
+            notice,
+        });
     }
 
     let serial = next_serial(&transaction)?;
@@ -308,7 +378,7 @@ pub fn release(
     now: i64,
 ) -> rusqlite::Result<ReleaseOutcome> {
     let uuid = request.uuid.to_hex();
-    let transaction = connection.transaction()?;
+    let transaction = write_transaction(connection)?;
     let Some(existing) = active_binding(&transaction, &request.uuid)? else {
         return Ok(ReleaseOutcome::Unknown);
     };
@@ -348,6 +418,12 @@ pub struct NameStatus {
     pub reserved: bool,
     /// Whether a recovery is in flight against it.
     pub recovery_pending: bool,
+    /// When that recovery's public notice ends, while one is running.
+    ///
+    /// This is the notice the design promises (§4): the page is where anyone —
+    /// the holder on another machine, a friend, a server operator — sees that
+    /// the name is about to move, and when.
+    pub recovery_notice_until: Option<i64>,
     /// When a name that is not free becomes claimable, if that is knowable.
     pub free_after: Option<i64>,
 }
@@ -366,21 +442,157 @@ pub fn status(connection: &Connection, canonical: &str, now: i64) -> rusqlite::R
             uuid: None,
             reserved,
             recovery_pending: false,
+            recovery_notice_until: None,
             free_after: None,
         }),
         Some(binding) => {
             let free_at = free_at(&binding);
             let held = binding.released.is_none() && now < free_at;
+            // Only a held name can be recovered: a notice against a released
+            // one is cancelled when the notice would end, so it is not news.
+            let notice = if held {
+                crate::recover::pending_notice(connection, canonical, now)?
+            } else {
+                None
+            };
             Ok(NameStatus {
                 canonical: canonical.to_owned(),
                 display: held.then(|| binding.display.clone()),
                 uuid: held.then(|| PlayerUuid::from_bytes(binding.uuid).to_hex()),
                 reserved,
-                recovery_pending: false,
+                recovery_pending: notice.is_some(),
+                recovery_notice_until: notice,
                 free_after: (!held && free_at > now).then_some(free_at),
             })
         }
     }
+}
+
+/// The newest certificate minted for one identity's binding of one name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Issue {
+    serial: u64,
+    registry_key: [u8; 32],
+    issued: i64,
+}
+
+/// The newest row of `issued` for `uuid` and `canonical`, if any.
+fn latest_issue(
+    connection: &Connection,
+    uuid: &PlayerUuid,
+    canonical: &str,
+) -> rusqlite::Result<Option<Issue>> {
+    let row: Option<(i64, Vec<u8>, i64)> = connection
+        .query_row(
+            "SELECT serial, registry_key, issued FROM issued
+             WHERE uuid = ?1 AND canonical = ?2 ORDER BY serial DESC LIMIT 1",
+            params![uuid.as_bytes().as_slice(), canonical],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    // Written by this service: a serial is never negative and a key is always
+    // 32 bytes. A row that is neither is treated as absent, which mints a fresh
+    // certificate rather than re-signing a guess.
+    Ok(row.and_then(|(serial, key, issued)| {
+        Some(Issue {
+            serial: u64::try_from(serial).ok()?,
+            registry_key: <[u8; 32]>::try_from(key.as_slice()).ok()?,
+            issued,
+        })
+    }))
+}
+
+/// The certificates issued to `uuid` that could still verify at `now`.
+///
+/// What a recovery or an operator's revocation puts on the list: an older one
+/// has expired everywhere already, and listing it would only crowd out the
+/// revocations that matter (the list is capped at [`MAX_REVOCATIONS`]).
+///
+/// # Errors
+///
+/// Any SQL failure.
+pub(crate) fn live_issues(
+    connection: &Connection,
+    uuid: &[u8],
+    now: i64,
+) -> rusqlite::Result<Vec<(Vec<u8>, i64)>> {
+    let mut statement = connection
+        .prepare("SELECT registry_key, serial FROM issued WHERE uuid = ?1 AND issued > ?2")?;
+    let rows = statement.query_map(params![uuid, now - CERTIFICATE_LIVE_SECONDS], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+    rows.collect()
+}
+
+/// The revocations worth publishing at `now`, newest first, capped.
+///
+/// A revocation whose certificate has expired everywhere is left out. One with
+/// no `issued` row (nothing this service writes, but an operator's hand-made
+/// row is possible) is kept, because its expiry cannot be known and leaving
+/// out a revocation that still matters is the worse mistake.
+///
+/// # Errors
+///
+/// Any SQL failure.
+pub fn revocations_in_force(
+    connection: &Connection,
+    now: i64,
+) -> rusqlite::Result<Vec<Revocation>> {
+    let mut statement = connection.prepare(
+        "SELECT r.registry_key, r.serial FROM revocations r
+         LEFT JOIN issued i ON i.serial = r.serial AND i.registry_key = r.registry_key
+         WHERE i.serial IS NULL OR i.issued > ?1
+         ORDER BY r.when_at DESC, r.serial DESC LIMIT ?2",
+    )?;
+    let rows = statement.query_map(
+        params![now - CERTIFICATE_LIVE_SECONDS, MAX_REVOCATIONS as i64],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let mut entries = Vec::new();
+    for row in rows {
+        let (key, serial) = row?;
+        if let (Ok(key), Ok(serial)) = (<[u8; 32]>::try_from(key.as_slice()), u64::try_from(serial))
+        {
+            entries.push(Revocation {
+                registry_key: key,
+                serial,
+            });
+        }
+    }
+    Ok(entries)
+}
+
+/// Deletes revocations whose certificate can no longer verify anywhere.
+///
+/// The audit table keeps the action; this keeps the published list to the
+/// revocations that still protect someone.
+///
+/// # Errors
+///
+/// Any SQL failure.
+pub fn prune_revocations(connection: &Connection, now: i64) -> rusqlite::Result<usize> {
+    connection.execute(
+        "DELETE FROM revocations WHERE EXISTS (
+             SELECT 1 FROM issued i
+             WHERE i.serial = revocations.serial
+               AND i.registry_key = revocations.registry_key
+               AND i.issued <= ?1)",
+        [now - CERTIFICATE_LIVE_SECONDS],
+    )
+}
+
+/// Whether the operator revoked `canonical` from `uuid`.
+fn revoked_from(
+    connection: &Connection,
+    canonical: &str,
+    uuid: &PlayerUuid,
+) -> rusqlite::Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM revoked_holders WHERE canonical = ?1 AND uuid = ?2",
+        params![canonical, uuid.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 /// Whether a name is in the operator's reserved table.
@@ -807,11 +1019,13 @@ mod tests {
     fn a_renewal_issues_a_fresh_serial_and_keeps_the_binding() {
         let mut fixture = Fixture::new();
         let first = Fixture::certificate_of(fixture.claim("alice", "Alice", 1, "203.0.113.1", NOW));
-        match fixture.renew("alice", "ALICE", 1, NOW + 100) {
+        // Inside the renewal window (under thirty days left): a new serial.
+        let due = NOW + 61 * DAY;
+        match fixture.renew("alice", "ALICE", 1, due) {
             RenewOutcome::Renewed { certificate, .. } => {
                 assert_eq!(certificate.serial, first.serial + 1);
                 assert_eq!(certificate.display, "ALICE");
-                assert_eq!(certificate.expires, NOW + 100 + 90 * DAY);
+                assert_eq!(certificate.expires, due + 90 * DAY);
             }
             other => panic!("expected a renewal, got {other:?}"),
         }
@@ -842,10 +1056,109 @@ mod tests {
     }
 
     #[test]
+    fn a_renewal_before_it_is_due_answers_the_current_certificate() {
+        let mut fixture = Fixture::new();
+        let first = Fixture::certificate_of(fixture.claim("alice", "Alice", 1, "203.0.113.1", NOW));
+        // A client looping on renew: every answer is the same certificate,
+        // and the registry has minted exactly one serial for this identity.
+        for step in 1..=50 {
+            match fixture.renew("alice", "Alice", 1, NOW + step * 60) {
+                RenewOutcome::Renewed { certificate, .. } => assert_eq!(certificate, first),
+                other => panic!("expected the current certificate, got {other:?}"),
+            }
+        }
+        // A new casing is honoured on the same serial and the same expiry.
+        match fixture.renew("alice", "ALICE", 1, NOW + 59 * DAY) {
+            RenewOutcome::Renewed { certificate, .. } => {
+                assert_eq!(certificate.serial, first.serial);
+                assert_eq!(certificate.expires, first.expires);
+                assert_eq!(certificate.display, "ALICE");
+            }
+            other => panic!("expected the current certificate, got {other:?}"),
+        }
+        let (minted, renewals): (i64, i64) = fixture
+            .db
+            .with(|connection| {
+                Ok((
+                    connection.query_row("SELECT COUNT(*) FROM issued", [], |row| row.get(0))?,
+                    connection.query_row(
+                        "SELECT renewals FROM names WHERE canonical = 'alice'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("counts");
+        assert_eq!(minted, 1);
+        // Not a renewal for the expiry rules: claim-and-renew does not buy the
+        // twelve months a genuinely renewed name gets.
+        assert_eq!(renewals, 0);
+    }
+
+    #[test]
+    fn a_recovery_or_the_list_names_only_certificates_that_can_still_verify() {
+        let fixture = Fixture::new();
+        let uuid = Fixture::uuid_of(1);
+        let key = fixture.keys.public_key().to_bytes();
+        fixture
+            .db
+            .with(|connection| {
+                for (serial, issued) in [
+                    (1_i64, NOW - 400 * DAY),
+                    (2, NOW - 100 * DAY),
+                    (3, NOW - DAY),
+                ] {
+                    connection.execute(
+                        "INSERT INTO issued (serial, registry_key, uuid, canonical, issued)
+                         VALUES (?1, ?2, ?3, 'alice', ?4)",
+                        params![serial, key.as_slice(), uuid.as_bytes().as_slice(), issued],
+                    )?;
+                    connection.execute(
+                        "INSERT INTO revocations (registry_key, serial, when_at, reason)
+                         VALUES (?1, ?2, ?3, 'test')",
+                        params![key.as_slice(), serial, NOW],
+                    )?;
+                }
+                // A hand-made revocation with no issue row is kept.
+                connection.execute(
+                    "INSERT INTO revocations (registry_key, serial, when_at, reason)
+                     VALUES (?1, 99, ?2, 'operator')",
+                    params![key.as_slice(), NOW],
+                )?;
+                Ok(())
+            })
+            .expect("seed");
+
+        let live = fixture
+            .db
+            .with(|connection| live_issues(connection, uuid.as_bytes(), NOW))
+            .expect("live");
+        assert_eq!(
+            live.iter().map(|(_, serial)| *serial).collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        let published = fixture
+            .db
+            .with(|connection| revocations_in_force(connection, NOW))
+            .expect("published");
+        let mut serials: Vec<u64> = published.iter().map(|entry| entry.serial).collect();
+        serials.sort_unstable();
+        assert_eq!(serials, vec![3, 99]);
+
+        let pruned = fixture
+            .db
+            .with(|connection| prune_revocations(connection, NOW))
+            .expect("prune");
+        assert_eq!(pruned, 2);
+    }
+
+    #[test]
     fn a_renewed_name_expires_a_year_after_its_last_renewal() {
         let mut fixture = Fixture::new();
         fixture.claim("alice", "Alice", 1, "203.0.113.1", NOW);
-        fixture.renew("alice", "Alice", 1, NOW + 100);
+        let renewed = NOW + 61 * DAY;
+        fixture.renew("alice", "Alice", 1, renewed);
         // Long past the never-renewed expiry, still the holder's.
         assert!(matches!(
             fixture.claim(
@@ -857,7 +1170,7 @@ mod tests {
             ),
             ClaimOutcome::Taken
         ));
-        let free = NOW + 100 + EXPIRY_AFTER_RENEWAL + HOLD_AFTER_RELEASE;
+        let free = renewed + EXPIRY_AFTER_RENEWAL + HOLD_AFTER_RELEASE;
         assert!(matches!(
             fixture.claim("alice", "Alice", 2, "198.51.100.1", free),
             ClaimOutcome::Issued { .. }
@@ -876,7 +1189,41 @@ mod tests {
         assert_eq!(page.uuid, Some(Fixture::uuid_of(1).to_hex()));
         assert!(!page.reserved);
         assert!(!page.recovery_pending);
+        assert_eq!(page.recovery_notice_until, None);
         assert_eq!(page.free_after, None);
+
+        // A notice running against the name is on its page, with its end.
+        let until = NOW + 14 * DAY;
+        fixture
+            .db
+            .with(|connection| {
+                connection.execute(
+                    "INSERT INTO recoveries
+                         (canonical, from_uuid, to_uuid, confirmed_at, notice_until, state)
+                     VALUES ('alice', ?1, ?2, ?3, ?4, 'pending')",
+                    params![
+                        Fixture::uuid_of(1).as_bytes().as_slice(),
+                        Fixture::uuid_of(2).as_bytes().as_slice(),
+                        NOW,
+                        until
+                    ],
+                )?;
+                Ok(())
+            })
+            .expect("notice");
+        let page = fixture
+            .db
+            .with(|connection| status(connection, "alice", NOW + 2))
+            .expect("status");
+        assert!(page.recovery_pending);
+        assert_eq!(page.recovery_notice_until, Some(until));
+        fixture
+            .db
+            .with(|connection| {
+                connection.execute("DELETE FROM recoveries", [])?;
+                Ok(())
+            })
+            .expect("clear");
 
         fixture.release("alice", 1, NOW + 10);
         let page = fixture
