@@ -32,7 +32,7 @@ which is where the connection timeouts already live.
 
 | variable | what |
 |---|---|
-| `REGISTRY_DATA` | the directory holding `registry.sqlite`, backups and logs. **Required**, and it must be a mounted volume. |
+| `REGISTRY_DATA` | the directory holding `registry.sqlite` and its backups. **Required**, and it must be a mounted volume. Logs go to stdout, where Dokploy keeps them. |
 | `REGISTRY_KEY` | the current registry key's 32-byte seed, 64 hex characters. **A secret.** |
 | `REGISTRY_NEXT_KEY_HASH` | `BLAKE3` of the pre-committed successor, 64 hex characters. Not a secret. |
 | `REGISTRY_BASE_URL` | the public base URL, e.g. `https://registry.tiamatengine.com`. Mail links are built from it. |
@@ -86,20 +86,41 @@ Dokploy never compiles Rust.
 
 1. **Application**, provider *Docker image*, that image.
 2. **Volume** mounted at `/data`, with the daily backups in `/data/backups`.
+   The image runs as UID 10001 (`registry`), not root. A fresh volume is
+   created owned by it; a volume from an earlier image is owned by root and
+   must be handed over once before redeploying, e.g.
+   `docker run --rm -v <volume>:/data debian:bookworm-slim chown -R 10001:10001 /data`,
+   or the service cannot open its database.
 3. **Domain** `registry.tiamatengine.com`, HTTPS on (Traefik certifies it).
 4. **Health check**: `GET /healthz`.
 5. **Environment**: the table above. `REGISTRY_KEY` and `REGISTRY_SMTP_URL` are
-   secrets; `REGISTRY_TRUST_PROXY=1`.
-6. **DNS**: an `A` record for `registry` on the Dokploy host.
-7. Updates are a new image tag and *Redeploy*. The database migrates itself
+   secrets; `REGISTRY_TRUST_PROXY=1`; and `REGISTRY_RESERVED` set to the default
+   mods' ids, because nothing else sets it and a fresh registry would otherwise
+   let anyone claim one. The engine does not carry that list on purpose (a
+   mod's name is the mod's), so take it from the manifests of the mods the
+   deployment ships, from an engine checkout with `game/` filled:
+
+   ```sh
+   printf 'REGISTRY_RESERVED=%s\n' "$(grep -h '^id' game/*/mod.toml | cut -d'"' -f2 | paste -sd,)"
+   ```
+
+   (An id longer than eighteen characters could not be claimed anyway; listing
+   it costs nothing and survives a change to the length rule.)
+6. **Do not publish port 8080 on the host.** The container is reached through
+   Traefik only. With `REGISTRY_TRUST_PROXY=1` the service believes
+   `X-Forwarded-For`, so a client that could reach the port directly would
+   choose its own address for every per-address limit.
+7. **DNS**: an `A` record for `registry` on the Dokploy host.
+8. Updates are a new image tag and *Redeploy*. The database migrates itself
    forward on start, never back: a newer image's schema is refused by an older
    one rather than guessed at.
 
 ### Mail
 
 Any transactional SMTP provider with the `From` address on `tiamatengine.com`
-and that domain's SPF and DKIM records set for it. The service sends plain text
-with one link. It never writes to an address except to verify it or to confirm
+and that domain's SPF and DKIM records set for it. The service sends plain text with one link. The link opens a confirmation
+page and only its button (a `POST` to the same path) binds the address or
+starts a recovery, so a mail gateway's link scanner changes nothing. It never writes to an address except to verify it or to confirm
 a recovery the player asked for. Limits: three messages an hour per address,
 ten per `/24`.
 
@@ -145,8 +166,9 @@ registry admin revoke --subnet 203.0.113.0/24 --since 48h --reason "bulk claim, 
 ```
 
 The burst remedy, in one line. Every name claimed from that network in the
-window is released with the ordinary thirty-day hold, every certificate the
-holder was issued goes on the revocation list, and the reason is written to the
+window is released with the ordinary thirty-day hold, every certificate the holder was issued that can still verify goes on the
+revocation list, and that identity may not claim the name back. `--subnet`
+accepts the `net:` form `admin claims` prints; matching nothing is an error, and the reason is written to the
 audit table. The names are not deleted: the rows stay for the operator's
 record and the hold does what it would have done.
 
@@ -166,8 +188,7 @@ the default mods sets it to their ids; a deployment that runs none need not.
 
 ## What this service does not do (yet)
 
-- **Email and recovery need the identity's root key.** Claims and renewals do
-  not: a second device presents the signed chain of add-key authorisations from
+- **Email and recovery need the identity's root key.** Claims, renewals, releases and recovery cancellations do not: a second device presents the signed chain of add-key authorisations from
   the root (`KeySetProof` in `core::identity::registry`), which the service
   verifies without keeping a key store of its own. Binding a recovery address
   or starting a recovery from an added device is the part still to do; the

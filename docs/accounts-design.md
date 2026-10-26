@@ -81,8 +81,11 @@ NameCertificate (postcard, then signed; ≤ 256 bytes on the wire)
   registry publishes and the client fetches with its renewal; a server
   accepts the new key only if it matches the hash it already had. A server
   built before a rotation still verifies certificates signed by the key it
-  knows until they expire, which is the 90 days it takes for every client to
-  renew under the new key.
+  knows until they expire, which is the 90 days it takes for every client to renew
+under the new key. A server that has accepted the rotation honours the
+retired key only for a certificate issued before the rotation and expiring
+no more than 90 days after it, so a stolen retired key cannot back-date a
+year-long certificate.
 - **Hostile input, as everything from a client is** (charter rule 14):
   fixed-size fields, one bounded string, parsed before any allocation, with a
   `cargo fuzz` target in the same change as the parser.
@@ -134,11 +137,15 @@ added — its key, the successor it committed to, the key that authorised it, an
 that key's signature. The last link's key is the one that signed the request.
 The registry verifies every link and re-derives the UUID from the root, so a
 proof cannot be moved to another identity, and a stolen device key alone still
-cannot claim. Claims and renewals carry one; the email and recovery requests do
-not yet, and so still want the root key (§7's limitation).
+cannot claim. Claims, renewals, releases and recovery cancellations carry one; the email
+and recovery requests do not yet, and so still want the root key (§7's
+limitation). No request is accepted on its signature alone: the key must be
+the UUID's root or reached from it.
 
-**Renew.** The same request with the same name, without the work; answered
-with a fresh certificate while the binding stands.
+**Renew.** The same request with the same name, without the work; answered with a fresh certificate while the binding stands once the
+current one has fewer than 30 days left; before that, with the current
+certificate again (same serial and expiry, in the casing asked for), which
+does not count as a renewal for the expiry rule.
 
 **Release.** Signed like a claim; the binding is marked released with the
 30-day hold.
@@ -156,15 +163,16 @@ Nothing else ever goes to that address: no news, no notices of joins.
 
 **Everything lost — no phrase, no device — with an email bound.** On a new
 identity the player asks to recover the name: the new key signs `{ name,
-new_uuid }`, the registry mails the bound address a confirmation link, and
-following it starts a **fourteen-day public notice**: the name's public page
+new_uuid }`, the registry mails the bound address a link to a confirmation page, and
+pressing its button (a POST; opening the link alone does nothing) starts a
+**fourteen-day public notice**: the name's public page
 (§7, `GET /v1/name/`) says a recovery is pending, every renewal the current
 key makes in that time is answered with the same notice, and the current
 key can **cancel** it with one signed request, which is what stops a stolen
 mailbox from taking a name whose holder is still playing. When the notice
 ends uncancelled, the binding moves to the new UUID, the email binding with
-it, and every certificate issued to the old UUID is put on the revocation
-list by serial. A player without a bound email who loses both phrase and
+it, and every certificate issued to the old UUID that could still verify is put on
+the revocation list by serial. A player without a bound email who loses both phrase and
 device has lost the name; the charter's honest limit for the identity
 stands and the registry inherits it.
 
@@ -275,8 +283,8 @@ fashion.
 |---|---|
 | `POST /v1/claim` | §4 claim or renew; answers the certificate |
 | `POST /v1/release` | §4 release |
-| `POST /v1/email` | bind, change or remove the recovery address; `GET /v1/email/verify?t=` is the link in the mail |
-| `POST /v1/recover` | start a recovery; `GET /v1/recover/confirm?t=` is the link; `POST /v1/recover/cancel` is the holder's veto |
+| `POST /v1/email` | bind, change or remove the recovery address; `GET /v1/email/verify?t=` is the link in the mail and shows a page whose button `POST`s the token to the same path |
+| `POST /v1/recover` | start a recovery; `GET /v1/recover/confirm?t=` is the link's page and `POST /v1/recover/confirm` its button; `POST /v1/recover/cancel` is the holder's veto |
 | `GET /v1/name/{canonical}` | whether a name is held, by which UUID, and whether a recovery is pending — public, so a server with internet may ask, and so a player can check before claiming |
 | `GET /v1/keys` | the current registry public key, the hash of its successor, and the signed rotation records |
 | `GET /v1/revocations` | the signed revocation list, small, cacheable |
@@ -286,9 +294,11 @@ fashion.
 hold_until, renewals), `emails` (uuid, address, verified_at), `tokens`
 (hash, purpose, uuid, expires), `recoveries` (canonical, from_uuid, to_uuid,
 confirmed_at, notice_until, state), `reserved`, `revocations` (serial, when,
-reason), `audit` (who, what, when, why), `limits` (ip, subnet or uuid,
-window, count; rows older than seven days are deleted by the service
-itself).
+reason), `issued` (serial, registry_key, uuid, canonical, issued),
+`revoked_holders` (canonical, uuid, revoked_at — an operator's revocation,
+which bars that identity from the name), `audit` (who, what, when, why),
+`limits` (ip, subnet or uuid, window, count; a row is deleted by the service
+itself seven days after its window ends).
 
 **Limits, set for the bulk squatter** (the designer, §11.8): two claims a
 day per IP address and six per `/24`; one claim and three renames per
