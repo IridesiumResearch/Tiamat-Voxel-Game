@@ -1351,6 +1351,11 @@ impl Renderer {
     ///
     /// Currently infallible; the signature leaves room for shader compilation
     /// to be reported rather than panicked on.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the field list is the renderer's constructor; splitting it would hide which \
+                  defaults are chosen for which target"
+    )]
     pub fn new(gpu: Gpu, mode: RenderMode, width: u32, height: u32) -> Result<Self, RenderError> {
         let shader = gpu
             .device
@@ -3059,6 +3064,28 @@ impl Culled {
     /// passes whether or not it was on screen — most of a crowd is behind the
     /// camera. With no frustum (a renderer that has not culled yet) every
     /// figure is kept, which is what every figure was.
+    /// Records a chunk the camera can see in every list it belongs to.
+    fn push_visible(&mut self, pos: ChunkPos, instance: u32, distance2: f32) {
+        self.visible.push((pos, instance));
+        self.opaque.push((pos, instance));
+        if distance2 < SPRITE_DRAW_BLOCKS * SPRITE_DRAW_BLOCKS {
+            self.sprites.push((pos, instance));
+        }
+        if distance2 < CUTOUT_DRAW_BLOCKS * CUTOUT_DRAW_BLOCKS {
+            self.cutout.push((pos, instance));
+        } else {
+            self.cutout_far.push((pos, instance));
+        }
+    }
+
+    /// Sorts the opaque lists near-to-far for early-Z.
+    fn sort_lists(&mut self, camera: &Camera) {
+        sort_near_to_far(camera, &mut self.opaque);
+        sort_near_to_far(camera, &mut self.sprites);
+        sort_near_to_far(camera, &mut self.cutout);
+        sort_near_to_far(camera, &mut self.cutout_far);
+    }
+
     fn shows_figure(&self, at: [f32; 3], radius: f32) -> bool {
         let reach = glam::Vec3::splat(radius);
         let at = glam::Vec3::from(at);
@@ -3177,18 +3204,8 @@ impl Renderer {
             // costs is one `BTreeMap` probe per drawn chunk per frame.
             let instance = instances.len() as u32;
             if seen {
-                culled.visible.push((*pos, instance));
-                culled.opaque.push((*pos, instance));
                 let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
-                let distance2 = centre.length_squared();
-                if distance2 < SPRITE_DRAW_BLOCKS * SPRITE_DRAW_BLOCKS {
-                    culled.sprites.push((*pos, instance));
-                }
-                if distance2 < CUTOUT_DRAW_BLOCKS * CUTOUT_DRAW_BLOCKS {
-                    culled.cutout.push((*pos, instance));
-                } else {
-                    culled.cutout_far.push((*pos, instance));
-                }
+                culled.push_visible(*pos, instance, centre.length_squared());
             }
             for (index, cast) in casts.iter().enumerate() {
                 if *cast {
@@ -3228,10 +3245,7 @@ impl Renderer {
         // Opaque draws go near-to-far so the depth test can reject what is
         // behind something already drawn. The blended lists keep their
         // historical order — see `Culled::opaque`.
-        sort_near_to_far(camera, &mut culled.opaque);
-        sort_near_to_far(camera, &mut culled.sprites);
-        sort_near_to_far(camera, &mut culled.cutout);
-        sort_near_to_far(camera, &mut culled.cutout_far);
+        culled.sort_lists(camera);
 
         // The body rides at the end of the same array, so drawing it is one
         // more instance index rather than a second buffer and a second binding.
