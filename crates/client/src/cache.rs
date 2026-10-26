@@ -25,7 +25,7 @@
 //! Re-hashing costs a few microseconds against a disk read that costs
 //! milliseconds. There is no version of this worth optimising away.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -66,6 +66,26 @@ pub enum CacheError {
     },
 }
 
+/// What a verified file looked like on disk when it was verified.
+///
+/// Size and modification time are what a `stat` gives for free; a file that
+/// has been replaced or rewritten since shows a different pair, and the memo
+/// entry carrying the old one is no longer trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl Stamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
 /// A directory of content-addressed files.
 ///
 /// **Verified once, remembered after.** Reading an item re-hashes it against
@@ -78,12 +98,21 @@ pub enum CacheError {
 /// caller wants its bytes — but only once per use, not once more per question
 /// asked about it. The memo is shared between clones, since the cache is
 /// cloned into the network task and the one that opened it.
+///
+/// **What the memo vouches for, honestly.** It remembers the file's size and
+/// modification time as verified, and `contains` trusts it only while a
+/// `stat` still shows both; a file replaced or rewritten since is read and
+/// hashed again. A rewrite that keeps the size and lands inside the clock's
+/// resolution would pass that check, so `contains` and `missing` decide only
+/// what to ask the server for, and the bytes anything decodes come through
+/// `get`, which hashes them every time.
 #[derive(Debug, Clone)]
 pub struct ContentCache {
     root: PathBuf,
     /// Hashes whose file was read and matched its name since the cache was
-    /// opened. Cleared for an item the moment a read finds it wrong.
-    verified: Arc<Mutex<HashSet<ContentHash>>>,
+    /// opened, with the file's size and modification time as it was then.
+    /// Cleared for an item the moment a read finds it wrong.
+    verified: Arc<Mutex<HashMap<ContentHash, Stamp>>>,
     /// Files read from disk, so a test can prove the memo is consulted.
     reads: Arc<AtomicUsize>,
 }
@@ -101,7 +130,7 @@ impl ContentCache {
         })?;
         Ok(Self {
             root: root.to_path_buf(),
-            verified: Arc::new(Mutex::new(HashSet::new())),
+            verified: Arc::new(Mutex::new(HashMap::new())),
             reads: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -141,7 +170,10 @@ impl ContentCache {
         let bytes = std::fs::read(&path).ok()?;
 
         if tiamat_core::content::hash_bytes(&bytes) == *hash {
-            self.remember(hash);
+            // The stamp from before the read: a file replaced between the
+            // read and now shows a different one, and the next `contains`
+            // reads again rather than trusting this verdict.
+            self.remember(hash, Stamp::of(&metadata));
             Some(bytes)
         } else {
             // Something wrote into the cache that was not this client storing a
@@ -160,17 +192,23 @@ impl ContentCache {
     /// Whether an item is present and intact.
     ///
     /// An item verified earlier this run is answered from the memo and a
-    /// `stat` — the file must still be there — rather than read and hashed
-    /// again. One that is not is read once through [`Self::get`], which
-    /// remembers it.
+    /// `stat` — the file must still be there, at the size and modification
+    /// time it was verified with — rather than read and hashed again. One
+    /// that is not, or whose file has changed since, is read once through
+    /// [`Self::get`], which remembers it or discards it. See the type's
+    /// documentation for what that does not cover.
     #[must_use]
     pub fn contains(&self, hash: &ContentHash) -> bool {
-        if self.verified().contains(hash) {
-            if std::fs::metadata(self.path_of(hash)).is_ok() {
-                return true;
+        let remembered = self.verified().get(hash).copied();
+        if let Some(stamp) = remembered {
+            match std::fs::metadata(self.path_of(hash)) {
+                Ok(metadata) if Stamp::of(&metadata) == stamp => return true,
+                Ok(_) => {}
+                Err(_) => {
+                    self.forget(hash);
+                    return false;
+                }
             }
-            self.forget(hash);
-            return false;
         }
         self.get(hash).is_some()
     }
@@ -181,15 +219,15 @@ impl ContentCache {
         self.reads.load(Ordering::Relaxed)
     }
 
-    fn verified(&self) -> MutexGuard<'_, HashSet<ContentHash>> {
-        // The set holds nothing a panic could leave half-written.
+    fn verified(&self) -> MutexGuard<'_, HashMap<ContentHash, Stamp>> {
+        // The map holds nothing a panic could leave half-written.
         self.verified
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn remember(&self, hash: &ContentHash) {
-        self.verified().insert(*hash);
+    fn remember(&self, hash: &ContentHash, stamp: Stamp) {
+        self.verified().insert(*hash, stamp);
     }
 
     fn forget(&self, hash: &ContentHash) {
@@ -231,8 +269,12 @@ impl ContentCache {
                 source,
             }
         })?;
-        // Just hashed and just written: as verified as a read would find it.
-        self.remember(hash);
+        // Just hashed and just written: as verified as a read would find it,
+        // stamped as the file now is. If the stat fails the memo stays empty
+        // for it and the next question reads, which is the safe way round.
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            self.remember(hash, Stamp::of(&metadata));
+        }
         Ok(())
     }
 
@@ -426,6 +468,38 @@ mod tests {
         std::fs::remove_file(cache.path_of(&hash)).expect("delete");
         assert!(!cache.contains(&hash));
         assert_eq!(cache.missing(&[hash]), vec![hash]);
+    }
+
+    #[test]
+    fn a_file_rewritten_in_place_is_read_again_rather_than_vouched_for() {
+        let cache = cache("memo-rewrite");
+        let bytes = b"the verified bytes".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        cache.put(&hash, &bytes).expect("put");
+        assert!(cache.contains(&hash));
+        assert_eq!(cache.disk_reads(), 0);
+
+        // Same size, a different time: the stat no longer matches, so the
+        // file is read and hashed, found wrong, and discarded.
+        let path = cache.path_of(&hash);
+        std::fs::write(&path, b"the tampered bytes").expect("rewrite");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(later)
+            .expect("touch");
+        assert!(!cache.contains(&hash), "not vouched for on an old stamp");
+        assert_eq!(cache.disk_reads(), 1, "read and hashed again");
+        assert!(!path.exists(), "and discarded");
+
+        // A different size needs no clock at all.
+        cache.put(&hash, &bytes).expect("put again");
+        assert!(cache.contains(&hash));
+        std::fs::write(&path, b"short").expect("rewrite");
+        assert!(!cache.contains(&hash));
+        assert_eq!(cache.disk_reads(), 2);
     }
 
     #[test]
