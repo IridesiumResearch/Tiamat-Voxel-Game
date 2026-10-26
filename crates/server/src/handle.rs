@@ -1381,6 +1381,21 @@ const SAVE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 /// changes how often a given block comes up and stops nothing.
 const MAX_RANDOM_TICK_CHUNKS: usize = 512;
 
+/// Where a tick's random-tick window starts in the sorted resident list.
+///
+/// A fixed prefix samples the same chunks for ever; a tick-derived offset gives
+/// every chunk a turn while remaining a property of the tick number, so two
+/// servers replaying the same inputs sample the same chunks.
+fn random_tick_start(tick: u64, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    usize::try_from(
+        tick.wrapping_mul(MAX_RANDOM_TICK_CHUNKS as u64) % count as u64,
+    )
+    .unwrap_or(0)
+}
+
 /// How often the time of day goes out, in ticks.
 ///
 /// Once a second. The clock advances every tick, but a client interpolates
@@ -5397,12 +5412,21 @@ impl ServerHandle {
                             Vec::new();
                         if !random_tick_materials.is_empty() {
                             let seed = world.seed();
-                            let mut budget = MAX_RANDOM_TICK_CHUNKS;
-                            for chunk in world.resident_positions(tiamat_core::domain::OVERWORLD) {
-                                if budget == 0 {
-                                    break;
-                                }
-                                budget -= 1;
+                            // **A rotating window, not the first 512 for ever.**
+                            // The positions are sorted, so taking a prefix meant
+                            // a world with more than `MAX_RANDOM_TICK_CHUNKS`
+                            // resident chunks gave every tick to the same
+                            // low-coordinate corner and none to the rest — the
+                            // opposite of what the budget's comment promises.
+                            // Starting at a tick-derived offset gives every chunk
+                            // its turn and keeps the sampled set deterministic.
+                            let chunks =
+                                world.resident_positions(tiamat_core::domain::OVERWORLD);
+                            let count = chunks.len();
+                            let take = count.min(MAX_RANDOM_TICK_CHUNKS);
+                            let start = random_tick_start(tick, count);
+                            for offset in 0..take {
+                                let chunk = chunks[(start + offset) % count];
                                 for pos in tiamat_core::tick::random::cells(seed, chunk, tick) {
                                     let Some(material) = world.material_at(tiamat_core::domain::OVERWORLD, pos) else {
                                         continue;
@@ -8077,5 +8101,25 @@ mod default_tool_tests {
             default_tool_among([("x:y", false)].into_iter(), &reference),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod random_tick_tests {
+    use super::random_tick_start;
+
+    #[test]
+    fn the_window_advances_and_wraps() {
+        // 5,000 resident chunks: one tick's 512 must not be the next tick's
+        // 512, and after the list is wrapped through it starts over.
+        let count = 5_000;
+        let first = random_tick_start(0, count);
+        let second = random_tick_start(1, count);
+        assert_ne!(first, second, "the same 512 chunks were sampled twice");
+        assert!(first < count && second < count);
+        // 4,096 is exactly eight windows; the ninth tick starts over.
+        let wrap_count = 4_096;
+        assert_eq!(random_tick_start(8, wrap_count), 0);
+        assert_eq!(random_tick_start(0, 0), 0, "an empty world divided by zero");
     }
 }
