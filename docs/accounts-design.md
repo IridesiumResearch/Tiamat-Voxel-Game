@@ -206,6 +206,17 @@ name, and one rule:
 - **Policy, `registry` in server.toml:** `honour` (the default; what is
   above), `require` (a public server: no valid certificate, no join; told
   why), `off` (certificates ignored; a LAN world, an embedded host).
+- **The pinned strings, and a startup that refuses a mistyped one.**
+  `registry_key` carries the registry's current public key (64 hex
+  characters) and `registry_next_key_hash` the BLAKE3 of its pre-committed
+  successor (also 64), the pair design §2 says the engine ships. Both are
+  shape-checked at load, not at the first join; `require` without a key
+  refuses to start, because a server in that state would turn every player
+  away and look broken rather than misconfigured; and a successor hash
+  without a key is refused as a trust set with nothing to rotate from.
+  The successor is only checked for shape: nothing can prove it belongs to
+  the current key until a rotation record arrives, which is what
+  pre-commitment means.
 - **RCON `rename`** on a certified player is refused with the reason; the
   registry owns that name. `rebind` is unchanged.
 - **Verification** is a pure function in core: the certificate's bytes, the

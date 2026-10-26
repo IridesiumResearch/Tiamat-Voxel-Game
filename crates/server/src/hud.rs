@@ -50,6 +50,12 @@ impl tiamat_core::hud::Access for Shared {
         self.endpoint.is_operator(&PlayerUuid::from_bytes(player))
     }
 
+    fn is_certified(&self, player: [u8; 32]) -> bool {
+        // The server's answer, not the mod's memory: a player who rejoined
+        // without a certificate is not still marked from the last join.
+        self.endpoint.is_certified(&PlayerUuid::from_bytes(player))
+    }
+
     fn chat_to(&self, player: [u8; 32], text: &str) -> bool {
         let uuid = PlayerUuid::from_bytes(player);
         if !self.endpoint.is_online(&uuid) {

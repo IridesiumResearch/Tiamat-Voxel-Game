@@ -485,11 +485,31 @@ impl Bot {
     ///
     /// [`BotError::Refused`] if the server rejected the hello.
     pub async fn hello(&mut self, display_name: &str) -> Result<[u8; 32], BotError> {
+        self.hello_with_certificate(display_name, None).await
+    }
+
+    /// Sends `Hello` carrying a name certificate, and returns the challenge
+    /// nonce.
+    ///
+    /// The certificate is the registry's signed statement that this identity
+    /// holds a name (`docs/accounts-design.md` §2); a server with a pinned
+    /// registry key checks it offline, and one with no pin treats the join as
+    /// uncertified. `None` is the ordinary join a bot made before certificates
+    /// existed.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Refused`] if the server rejected the hello.
+    pub async fn hello_with_certificate(
+        &mut self,
+        display_name: &str,
+        certificate: Option<&[u8]>,
+    ) -> Result<[u8; 32], BotError> {
         self.send(&ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             public_key: *self.identity.public_key().as_bytes(),
             display_name: display_name.to_owned(),
-            name_certificate: None,
+            name_certificate: certificate.map(<[u8]>::to_vec),
         })
         .await?;
 
@@ -545,7 +565,25 @@ impl Bot {
     ///
     /// [`BotError::Refused`] if the server disconnected at any point.
     pub async fn join(&mut self, display_name: &str) -> Result<(), BotError> {
-        self.join_with_skins(display_name, &[]).await
+        self.join_full(display_name, None, &[]).await
+    }
+
+    /// Joins carrying a name certificate, so a server that pins the registry
+    /// can bind the certified name (design §5).
+    ///
+    /// The certificate has to name this bot's own UUID. The server checks it
+    /// against the identity that proved the key, so one for another identity
+    /// is simply an uncertified join — and, under `require`, a refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Refused`] if the server disconnected at any point.
+    pub async fn join_with_certificate(
+        &mut self,
+        display_name: &str,
+        certificate: &[u8],
+    ) -> Result<(), BotError> {
+        self.join_full(display_name, Some(certificate), &[]).await
     }
 
     /// Joins as [`Self::join`] does, offering skins of the player's own on
@@ -561,7 +599,20 @@ impl Bot {
         display_name: &str,
         skins: &[(Option<String>, Vec<u8>)],
     ) -> Result<(), BotError> {
-        let nonce = self.hello(display_name).await?;
+        self.join_full(display_name, None, skins).await
+    }
+
+    /// The join flow with both optional pieces, so neither public helper has
+    /// to duplicate the handshake.
+    async fn join_full(
+        &mut self,
+        display_name: &str,
+        certificate: Option<&[u8]>,
+        skins: &[(Option<String>, Vec<u8>)],
+    ) -> Result<(), BotError> {
+        let nonce = self
+            .hello_with_certificate(display_name, certificate)
+            .await?;
         self.authenticate(&nonce).await?;
         self.recv_until(|m| matches!(m, ServerMessage::ModManifest { .. }))
             .await?;

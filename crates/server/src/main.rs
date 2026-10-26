@@ -167,11 +167,10 @@ fn run(cli: &Cli) -> Result<(), ServerError> {
         max_players: config.max_players,
         allow_custom_skins: config.allow_custom_skins,
         sticky_names: config.sticky_names,
-        // §5 wiring follows the core change; a server with no pinned key
-        // honours nothing, which is the honest baseline for every existing
-        // server.toml.
-        name_policy: tiamat_core::session::NamePolicy::Off,
-        registry_trust: None,
+        name_policy: config.registry,
+        // Already shape-checked by `Config::load`; a bad pair would have
+        // refused startup rather than trusting the wrong chain.
+        registry_trust: config.registry_trust(config_path)?,
         allowlist: Allowlist::open(),
         operators: config.operators.clone(),
         seed: config.seed,

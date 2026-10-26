@@ -31,6 +31,34 @@ max_players = 16
 # else holds gets a numbered variant, `player 2`.
 #sticky_names = true
 
+# What this server does with name certificates from the registry at
+# tiamatengine.com (docs/accounts-design.md §5):
+#
+#   "honour"  — the default. A certificate that verifies against the pinned
+#               registry key wins its name; every other join is as it was. A
+#               name the registry has issued to a player who has never joined
+#               here can still be worn by someone else until they do.
+#   "require" — a public server: no valid certificate, no join. Needs
+#               `registry_key` below, or no certificate can verify and the
+#               server refuses to start.
+#   "off"     — certificates ignored. A LAN world, or an embedded host: there
+#               is no registry to check against and nothing to impersonate.
+#
+# Servers never call the registry: the certificate is checked offline against
+# the key below, so a join never waits on the network and the registry being
+# down cannot stop anyone playing.
+#registry = "honour"
+
+# The registry's current public key, as 64 hex characters. The engine ships
+# the same key and its pre-committed successor. Without it no certificate can
+# verify, which is the honest state of a server that has not pinned one.
+#registry_key = "paste-the-registry-public-key-here"
+
+# BLAKE3 of the registry's pre-committed successor, 64 hex characters. Held so
+# a rotation is accepted only against the commitment the server already has,
+# exactly as the updater holds the release key's. Not a secret.
+#registry_next_key_hash = "paste-the-successor-hash-here"
+
 # Directory to load mods from, relative to the server's working directory.
 #
 # **On by default here, because a server with no mods has no blocks.** Absent is

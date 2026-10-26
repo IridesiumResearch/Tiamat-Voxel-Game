@@ -310,6 +310,26 @@ pub struct Shared {
     /// Display names of everyone currently in world, for `status`.
     pub online: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, String>>,
 
+    /// Everyone in world whose name a registry certificate issued (design §5).
+    ///
+    /// **Beside the roster rather than in it.** `online` is read by `status`
+    /// and by every mod asking "who is here"; a certified flag is a narrower
+    /// question RCON and `game.player_certified` ask, and folding it into the
+    /// roster would make every name lookup handle a pair it does not need.
+    ///
+    /// A player is in the set only while they are in world; it is maintained by
+    /// [`PlayerSlot`], the same guard that owns the roster and the player
+    /// count, so a connection that ends by any path leaves both.
+    pub certified: std::sync::Mutex<std::collections::BTreeSet<PlayerUuid>>,
+
+    /// Names the registry has bound to a live identity since it joined.
+    ///
+    /// A certified join displaces the uncertified holder of its name (design
+    /// §5). That holder's `Session` is owned by another connection task, so the
+    /// variant waits here until that connection next wakes; the roster already
+    /// shows it and that session adopts it then.
+    pub renames: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, String>>,
+
     /// Chunks connections have asked the simulation to encode.
     ///
     /// The simulation owns the world, so it is the only thing that may read a
@@ -3639,6 +3659,51 @@ impl Shared {
             .is_ok_and(|online| online.contains_key(uuid))
     }
 
+    /// Whether this player's name is the one a registry certificate issued
+    /// (design §5).
+    ///
+    /// `false` for a player who is not connected, for a server with the policy
+    /// off, and for a certificate that did not verify. The engine proved the
+    /// key at the join; this only says the registry vouched for the name, and
+    /// the UUID stays the identity (charter rule 13).
+    #[must_use]
+    pub fn is_certified(&self, uuid: &PlayerUuid) -> bool {
+        self.certified
+            .lock()
+            .is_ok_and(|certified| certified.contains(uuid))
+    }
+
+    /// Renames a live player after the registry binding moved their name.
+    ///
+    /// Design §5: a certified holder takes the name, the uncertified holder is
+    /// moved to a numbered variant. The roster changes here and the variant
+    /// waits in [`Self::renames`] for that player's own connection to adopt it
+    /// into its session. A player who is not online is not renamed: there is no
+    /// session to carry it, and their binding is already the variant, so they
+    /// get it at their next join.
+    pub fn rename_player(&self, uuid: PlayerUuid, name: String) {
+        let Ok(mut online) = self.online.lock() else {
+            return;
+        };
+        let Some(slot) = online.get_mut(&uuid) else {
+            return;
+        };
+        *slot = name.clone();
+        drop(online);
+        if let Ok(mut renames) = self.renames.lock() {
+            renames.insert(uuid, name);
+        }
+    }
+
+    /// Takes the name one live session should adopt, if the registry moved it.
+    #[must_use]
+    pub fn take_rename(&self, uuid: &PlayerUuid) -> Option<String> {
+        self.renames
+            .lock()
+            .ok()
+            .and_then(|mut renames| renames.remove(uuid))
+    }
+
     /// Everyone currently in world, name and identity.
     #[must_use]
     pub fn online_players(&self) -> Vec<(PlayerUuid, String)> {
@@ -3669,10 +3734,13 @@ struct PlayerSlot<'a> {
 }
 
 impl<'a> PlayerSlot<'a> {
-    fn claim(shared: &'a Shared, uuid: PlayerUuid, name: String) -> Self {
+    fn claim(shared: &'a Shared, uuid: PlayerUuid, name: String, certified: bool) -> Self {
         shared.players.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut online) = shared.online.lock() {
             online.insert(uuid, name);
+        }
+        if certified && let Ok(mut set) = shared.certified.lock() {
+            set.insert(uuid);
         }
         // The simulated body is claimed and released by the same guard as the
         // slot and the roster. Creating it at the join site instead would leak
@@ -3691,6 +3759,15 @@ impl Drop for PlayerSlot<'_> {
         // list players who left.
         if let Ok(mut online) = self.shared.online.lock() {
             online.remove(&self.uuid);
+        }
+        if let Ok(mut certified) = self.shared.certified.lock() {
+            certified.remove(&self.uuid);
+        }
+        // A rename queued for a connection that then ended must not follow the
+        // identity into its next one: the binding already carries the variant,
+        // and the join event will report it.
+        if let Ok(mut renames) = self.shared.renames.lock() {
+            renames.remove(&self.uuid);
         }
         self.shared.remove_player(&self.uuid);
     }
@@ -3859,6 +3936,16 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
     let mut pending: Vec<Awaiting> = Vec::new();
 
     loop {
+        // **A certified holder may have taken this player's name** while they
+        // were in world (design §5). The roster already shows the numbered
+        // variant; this is the session's own copy learning it, because that
+        // session lives on this connection and only it may mutate itself.
+        if let Some(uuid) = session.uuid()
+            && let Some(name) = shared.take_rename(&uuid)
+        {
+            session.rename_to(name);
+        }
+
         // Read from the client and forward broadcasts on the same task. A
         // connection that only read would never deliver another player's edits;
         // a second task writing to the same stream would interleave two
@@ -4180,6 +4267,22 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
             session.handle(&message, &context, &auth, &mut identities)
         };
 
+        // **A certified join may have taken somebody else's name**, and that
+        // somebody is on another connection. Core decides the rename and
+        // composes the words (`certified_displacement_notice`); the server owns
+        // both halves of finishing it: the roster and the waiting variant here,
+        // and the line for that player's own connection to deliver.
+        if let Some(displaced) = session.take_displacement() {
+            shared.rename_player(displaced.player, displaced.name);
+            // Only a player who is here can be told now. One who is not gets
+            // the variant at their next join, where the join hook and the
+            // notice already name it; queueing a line for nobody would keep an
+            // entry per departed identity for ever.
+            if shared.is_online(&displaced.player) {
+                shared.tell(&displaced.player, displaced.notice);
+            }
+        }
+
         // Claim the slot the moment the session reaches the world, so the
         // "server full" check counts players rather than connections.
         if !was_in_world && session.phase() == tiamat_core::session::Phase::InWorld {
@@ -4188,6 +4291,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                     shared,
                     uuid,
                     session.display_name().unwrap_or("<unnamed>").to_owned(),
+                    session.is_certified(),
                 )
             });
             if let Some(uuid) = session.uuid() {
@@ -5011,6 +5115,8 @@ mod tests {
             rainbows: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            certified: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            renames: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             bodies: Arc::default(),
             tools: std::collections::BTreeMap::new(),
             hardness: std::collections::BTreeMap::new(),
@@ -5233,7 +5339,7 @@ mod tests {
         let shared = shared();
         {
             let (uuid, name) = player(1);
-            let _slot = PlayerSlot::claim(&shared, uuid, name);
+            let _slot = PlayerSlot::claim(&shared, uuid, name, false);
             assert_eq!(shared.players.load(Ordering::Acquire), 1);
             assert_eq!(shared.online_players().len(), 1);
         }
@@ -5245,6 +5351,41 @@ mod tests {
     }
 
     #[test]
+    fn a_certified_slot_is_remembered_and_forgotten_with_the_roster() {
+        // Design §5's server-side fact: `game.player_certified` and the RCON
+        // refusal read this set, and it must live exactly as long as the
+        // player does — a flag left behind would mark a player who rejoined
+        // without a certificate.
+        let shared = shared();
+        let (uuid, name) = player(5);
+        {
+            let _slot = PlayerSlot::claim(&shared, uuid, name, true);
+            assert!(shared.is_certified(&uuid));
+
+            // A certified holder displacing them renames the roster and leaves
+            // the variant for this connection to adopt.
+            shared.rename_player(uuid, "Alice 2".to_owned());
+            assert!(
+                shared
+                    .online_players()
+                    .iter()
+                    .any(|(who, worn)| *who == uuid && worn == "Alice 2"),
+                "the roster must show the name the registry bound"
+            );
+            assert_eq!(shared.take_rename(&uuid).as_deref(), Some("Alice 2"));
+            assert_eq!(shared.take_rename(&uuid), None, "taken once");
+        }
+        assert!(
+            !shared.is_certified(&uuid),
+            "a player who left must not stay certified"
+        );
+
+        let (other, other_name) = player(6);
+        let _slot = PlayerSlot::claim(&shared, other, other_name, false);
+        assert!(!shared.is_certified(&other));
+    }
+
+    #[test]
     fn a_player_slot_is_released_when_the_handler_panics() {
         // The case the guard exists for. An explicit decrement at the end of
         // the handler would leak the slot here, and the server would slowly
@@ -5252,7 +5393,7 @@ mod tests {
         let shared = shared();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (uuid, name) = player(2);
-            let _slot = PlayerSlot::claim(&shared, uuid, name);
+            let _slot = PlayerSlot::claim(&shared, uuid, name, false);
             assert_eq!(shared.players.load(Ordering::Acquire), 1);
             panic!("connection handler blew up");
         }));
@@ -5366,8 +5507,8 @@ mod tests {
         let shared = shared();
         let (uuid_a, name_a) = player(3);
         let (uuid_b, name_b) = player(4);
-        let first = PlayerSlot::claim(&shared, uuid_a, name_a);
-        let second = PlayerSlot::claim(&shared, uuid_b, name_b);
+        let first = PlayerSlot::claim(&shared, uuid_a, name_a, false);
+        let second = PlayerSlot::claim(&shared, uuid_b, name_b, false);
         assert_eq!(shared.players.load(Ordering::Acquire), 2);
         assert_eq!(shared.online_players().len(), 2);
         drop(first);

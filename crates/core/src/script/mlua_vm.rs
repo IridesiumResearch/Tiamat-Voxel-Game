@@ -3981,6 +3981,9 @@ impl ScriptVm for MluaVm {
     fn player_join(&mut self, event: &crate::script::JoinEvent) -> HookOutcome {
         let Ok(table) = self.hook_event(event.player).and_then(|table| {
             table.set("name", event.name.as_str())?;
+            // Who vouched for the name (design §5): a mark for a mod to show,
+            // never a substitute for the UUID (charter rule 13).
+            table.set("certified", event.certified)?;
             // Life ask 23: the skin of their own they arrived in, as hex, or
             // nil — the same spelling a content hash has everywhere a mod
             // sees one.
@@ -8805,23 +8808,10 @@ impl MluaVm {
         game.set("set_hud", set)
             .map_err(|err| self.vm_error(&err))?;
 
-        // `game.is_operator(uuid)` — Life mod's ask 8. A mod's admin powers
-        // belong to the people the server already trusts, and the only way to
-        // say so was to keep a parallel list certain to disagree one day.
-        let slot = std::sync::Arc::clone(&self.hud);
-        let is_operator = self
-            .lua
-            .create_function(move |_, uuid: String| {
-                let player = player_of(&uuid, "is_operator")?;
-                Ok(slot
-                    .lock()
-                    .ok()
-                    .and_then(|slot| slot.as_ref().map(|access| access.is_operator(player)))
-                    .unwrap_or(false))
-            })
-            .map_err(|err| self.vm_error(&err))?;
-        game.set("is_operator", is_operator)
-            .map_err(|err| self.vm_error(&err))?;
+        // `game.is_operator(uuid)` and `game.player_certified(uuid)` — the two
+        // questions a mod asks about somebody's standing, one of which is new
+        // in design §5.
+        self.install_player_questions(game)?;
 
         // `game.chat_to(uuid, text)` — Life mod's ask 3, and a bug report:
         // the stubs' own worked example has called this for months and
@@ -8845,6 +8835,51 @@ impl MluaVm {
             })
             .map_err(|err| self.vm_error(&err))?;
         game.set("chat_to", chat_to)
+            .map_err(|err| self.vm_error(&err))
+    }
+
+    /// Puts `game.is_operator` and `game.player_certified` on the `game` table.
+    ///
+    /// **`game.is_operator`** is Life mod's ask 8: a mod's admin powers belong
+    /// to the people the server already trusts, and the only way to say so was
+    /// to keep a parallel list certain to disagree one day.
+    ///
+    /// **`game.player_certified`** is design §5's companion to `event.certified`
+    /// on the join hook: a mark a mod draws later, not only at the join. The
+    /// answer is the server's, read live, so a player who rejoins without a
+    /// certificate is not still marked from the last join.
+    ///
+    /// Split out because [`Self::install_hud_api`] was at clippy's line limit,
+    /// not because these are a different concern from its own values.
+    fn install_player_questions(&self, game: &Table) -> Result<(), ScriptError> {
+        let slot = std::sync::Arc::clone(&self.hud);
+        let is_operator = self
+            .lua
+            .create_function(move |_, uuid: String| {
+                let player = player_of(&uuid, "is_operator")?;
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.is_operator(player)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("is_operator", is_operator)
+            .map_err(|err| self.vm_error(&err))?;
+
+        let slot = std::sync::Arc::clone(&self.hud);
+        let is_certified = self
+            .lua
+            .create_function(move |_, uuid: String| {
+                let player = player_of(&uuid, "player_certified")?;
+                Ok(slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|access| access.is_certified(player)))
+                    .unwrap_or(false))
+            })
+            .map_err(|err| self.vm_error(&err))?;
+        game.set("player_certified", is_certified)
             .map_err(|err| self.vm_error(&err))
     }
 
@@ -17956,14 +17991,16 @@ mod tests {
             player: [0x33; 32],
             name: "Ada".to_owned(),
             skin: None,
+            certified: true,
         });
         assert!(outcome.faults.is_empty(), "the hook raised: {outcome:?}");
         vm.eval_in(
             "greeter",
             "assert(seen.player == string.rep('33', 32), 'uuid')\n\
-             assert(seen.name == 'Ada', 'name')",
+             assert(seen.name == 'Ada', 'name')\n\
+             assert(seen.certified == true, 'a certificate is reported to the hook')",
         )
-        .expect("the hook should see both");
+        .expect("the hook should see all three");
     }
 
     /// A body moving from the overworld into a ship.
@@ -18144,6 +18181,37 @@ mod tests {
         }
     }
 
+    /// A player whose name a registry certificate vouches for (design §5).
+    struct Marks;
+
+    impl crate::hud::Access for Marks {
+        fn set_hud(&self, mod_id: &str, player: [u8; 32], values: crate::hud::Values) -> bool {
+            let _ = (mod_id, player, values);
+            false
+        }
+
+        fn is_certified(&self, player: [u8; 32]) -> bool {
+            player == [0x55; 32]
+        }
+    }
+
+    #[test]
+    fn a_mod_can_ask_whether_a_players_name_is_certified() {
+        // Design §5's second addition: the join event says it once, and this
+        // says it at any time after — a mark drawn beside a name, not a fact
+        // remembered from the join and stale after a rejoin.
+        let mut vm = vm();
+        vm.set_hud_access(std::sync::Arc::new(Marks));
+        load(
+            &mut vm,
+            "marksman",
+            "assert(game.player_certified(string.rep('55', 32)) == true, 'certified')\n\
+             assert(game.player_certified(string.rep('66', 32)) == false, 'uncertified')\n\
+             assert(pcall(game.player_certified, 'not-a-uuid') == false, 'a bad uuid is an error')",
+        )
+        .expect("the api should answer, and refuse a malformed uuid");
+    }
+
     #[test]
     fn a_join_hook_cannot_refuse_entry() {
         // There is nothing to refuse: the player is already in the world by the
@@ -18163,6 +18231,7 @@ mod tests {
             player: [0x44; 32],
             name: "Nobody".to_owned(),
             skin: None,
+            certified: false,
         });
         assert!(outcome.faults.is_empty());
     }

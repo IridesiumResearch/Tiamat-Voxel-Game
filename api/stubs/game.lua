@@ -1581,6 +1581,17 @@ function game.line_of_sight(from, to) end
 ---called on this server, which is a claim bound to that UUID and can be rebound
 ---(charter rule 13) — store the UUID, print the name.
 ---
+---`certified` says whether the name is one the registry at tiamatengine.com
+---issued to this identity (`docs/accounts-design.md`). `true` means the client
+---presented a certificate that verified against the key the server pins, so the
+---name is vouched for rather than claimed here first-come; `false` is every
+---ordinary join, including a server whose policy is `off`, a player with no
+---certificate and one whose certificate did not verify. **It is not
+---authentication and not a measure of trustworthiness**: the key was proved
+---before this hook ran, and a name is unique rather than a person accountable.
+---Use it to draw a mark, or — on a server that chose `require` — to refuse an
+---uncertified player; `game.player_certified` asks the same question later.
+---
 ---Runs on the simulation thread inside the tick, before that player's first
 ---tick, so `game.spawn_entity`, `game.line_of_sight` and the rest all work here.
 ---
@@ -1591,7 +1602,7 @@ function game.line_of_sight(from, to) end
 ---    end
 ---end)
 ---```
----@param callback fun(event: { player: string, name: string, skin: string|nil })
+---@param callback fun(event: { player: string, name: string, certified: boolean, skin: string|nil })
 function game.register_on_player_join(callback) end
 
 ---Called when a player's feet cross into another block.
@@ -2525,6 +2536,33 @@ function game.set_hud(player, values) end
 ---@param player string The player's UUID, in hex.
 ---@return boolean operator
 function game.is_operator(player) end
+
+---Whether this player's name is one the registry issued to their identity.
+---
+---Design §5's companion to `event.certified` on `register_on_player_join`: the
+---event tells you once, when they arrive; this answers at any time after, so a
+---mark you draw can follow a player who rejoins. It is **the server's answer,
+---read live**, not a flag you remember from the join.
+---
+---`false` for a player who is not here, for a server whose `server.toml` does
+---not pin a registry key, and for a certificate that did not verify. Those are
+---the same answer on purpose: a mod has nothing to decide between them.
+---
+---**It is not authentication.** The engine proved the player's key at the join
+---(charter rule 13); this says only that the registry vouched for the NAME.
+---Key everything you store on the UUID, as always, and treat `certified` as a
+---mark to show — or, on a server whose policy is `require`, a fact already
+---enforced before the player reached you.
+---
+---```lua
+---game.register_on_player_join(function(event)
+---    -- your own HUD script draws the mark under their name
+---    game.set_hud(event.player, { certified = game.player_certified(event.player) })
+---end)
+---```
+---@param player string The player's UUID, in hex.
+---@return boolean certified
+function game.player_certified(player) end
 
 ---Sets what one player may do: fly, how fast they move, whether they may sprint,
 ---and how heavy gravity is for them.

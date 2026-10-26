@@ -1106,6 +1106,24 @@ pub struct UseEntityEvent {
 /// The UUID is the identity and the name is a per-server claim bound to it
 /// (charter rule 13). Both are here because a mod needs the first to remember
 /// anything and the second to say anything.
+///
+/// # What `certified` says, and what it does not
+///
+/// A server that honours the name registry (design §5, `registry` in
+/// `server.toml`) checks the certificate a client carries at the join. `true`
+/// means this identity presented one that verified against the registry key
+/// the server pins, so the name is one the registry vouches for rather than a
+/// first-come claim here. `false` is every ordinary join: a server with the
+/// policy off, a player with no certificate, or one whose certificate did not
+/// verify — the policy decides whether that is allowed in, never what a mod is
+/// told.
+///
+/// **It is not a measure of trustworthiness.** A name is unique, not a person
+/// accountable (charter rule 13's honest limit): a certificate proves the
+/// registry issued that name to that UUID, and nothing about who that is. A
+/// mod may show a mark or, on a server that chose `require`, refuse an
+/// uncertified player — but it must not treat the flag as identity or as
+/// authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinEvent {
     /// Who arrived, canonically.
@@ -1116,6 +1134,8 @@ pub struct JoinEvent {
     /// host takes one and it fits the body they wear (Life ask 23); a mod
     /// may still overrule it with `set_player_skin`.
     pub skin: Option<[u8; 32]>,
+    /// Whether this identity's name is the one a registry certificate issued.
+    pub certified: bool,
 }
 
 /// A player's feet crossed into another block (Progress ask 3).

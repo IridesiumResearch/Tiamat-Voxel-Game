@@ -299,6 +299,15 @@ async fn execute(input: &str, context: &RconContext) -> Reply {
             let Some(uuid) = identities.name_holder(current) else {
                 return Reply::error(format!("no player named `{current}`"));
             };
+            // **The registry owns a certified name** (design §5). A rename here
+            // would be undone at that player's next join, and every player who
+            // saw it would have seen a name the registry never issued.
+            if shared.is_certified(&uuid) {
+                return Reply::error(format!(
+                    "`{current}` is a name the registry issued to this identity; it follows \
+                     their certificate, and only a rename at the registry changes it"
+                ));
+            }
             if identities.name_holder(new).is_some_and(|held| held != uuid) {
                 return Reply::error(format!("`{new}` is already held by someone else"));
             }

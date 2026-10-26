@@ -142,6 +142,44 @@ pub struct Config {
     #[serde(default)]
     pub sticky_names: bool,
 
+    /// What this server does with name certificates: `off`, `honour` (the
+    /// default) or `require` (design §5).
+    ///
+    /// `honour` costs nothing and is what an ordinary server wants: a
+    /// certificate that verifies wins its name, and every other join is as it
+    /// was. `require` is for a public server that will not take an uncertified
+    /// player, and needs [`Self::registry_key`] pinned. `off` is a LAN world or
+    /// an embedded host, where there is no registry to check against.
+    #[serde(default)]
+    pub registry: tiamat_core::session::NamePolicy,
+
+    /// The registry's current public key, as 64 hex characters.
+    ///
+    /// The same key the engine ships and a client pins (`docs/accounts-design.md`
+    /// §2); a server checks a certificate offline against it, so a join never
+    /// waits on the network. Absent means no certificate can verify, which is
+    /// the honest state of a server that has not pinned one.
+    ///
+    /// A typo here refuses startup rather than silently trusting the wrong
+    /// chain: every join would then be uncertified under `honour`, or refused
+    /// under `require`.
+    #[serde(default)]
+    pub registry_key: Option<String>,
+
+    /// `BLAKE3` of the registry's pre-committed successor, as 64 hex
+    /// characters.
+    ///
+    /// Held so a rotation can be accepted only against the commitment the
+    /// server already has, exactly as the updater holds the release key's
+    /// (`docs/distribution.md` §2). It is checked for shape at load; nothing
+    /// can prove it belongs to the current key until a rotation record
+    /// arrives, and that is the point of pre-commitment.
+    ///
+    /// Requires [`Self::registry_key`]: a hash with nothing to rotate from is
+    /// a configuration mistake, not a trust set.
+    #[serde(default)]
+    pub registry_next_key_hash: Option<String>,
+
     /// How far players can see vertically, in chunks.
     #[serde(default = "Config::default_vertical_view_distance")]
     pub vertical_view_distance: u8,
@@ -256,7 +294,93 @@ impl Config {
                 });
             }
         }
+
+        // **A policy that can never be satisfied is refused here, not at the
+        // first join.** `require` with no pinned key means every certificate
+        // fails verification and every player is told no — a server that looks
+        // up and turns everyone away. And a key that is not a key is the same
+        // mistake one step earlier.
+        if self.registry == tiamat_core::session::NamePolicy::Require
+            && self.pinned_registry_key().is_none()
+        {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message: "registry = \"require\" needs `registry_key` pinned; without one no \
+                          certificate can verify and every join would be refused"
+                    .to_owned(),
+            });
+        }
+        if self.pinned_next_key_hash().is_some() && self.pinned_registry_key().is_none() {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message: "registry_next_key_hash needs `registry_key`; a successor with nothing \
+                          to succeed cannot be checked"
+                    .to_owned(),
+            });
+        }
+        // Shape-check both strings now. `RegistryTrust::from_hex` is the same
+        // parser a join will trust, so this is the one place a typo can be
+        // caught while the operator is still reading the error.
+        if let Some(key) = self.pinned_registry_key() {
+            let hash = self.pinned_next_key_hash();
+            tiamat_core::identity::registry::RegistryTrust::from_hex(key, hash).map_err(|_| {
+                ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: "registry_key and registry_next_key_hash must each be 64 hex \
+                              characters, and registry_key must name a valid Ed25519 public key"
+                        .to_owned(),
+                }
+            })?;
+        }
         Ok(())
+    }
+
+    /// The pinned registry key, if the operator wrote a non-empty one.
+    ///
+    /// An empty string is treated as absent rather than as a key: a blank line
+    /// in the example file is the ordinary state of a server that has not
+    /// pinned one, and refusing it would be a worse reading than "not set".
+    fn pinned_registry_key(&self) -> Option<&str> {
+        self.registry_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    }
+
+    /// The committed successor's hash, if one was written.
+    fn pinned_next_key_hash(&self) -> Option<&str> {
+        self.registry_next_key_hash
+            .as_deref()
+            .map(str::trim)
+            .filter(|hash| !hash.is_empty())
+    }
+
+    /// The trust set a join is checked against, from the pinned strings.
+    ///
+    /// [`Self::load`] has already validated them, so this only re-parses the
+    /// two hex strings for the server that asked. It is a `Result` rather than
+    /// an `expect` because a misconfiguration must be an error the operator
+    /// sees, never a panic (and no `unwrap()` outside tests).
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] if a pinned string is not the shape
+    /// [`Self::validate`] promised.
+    pub fn registry_trust(
+        &self,
+        path: &Path,
+    ) -> Result<Option<tiamat_core::identity::registry::RegistryTrust>, ConfigError> {
+        let Some(key) = self.pinned_registry_key() else {
+            return Ok(None);
+        };
+        tiamat_core::identity::registry::RegistryTrust::from_hex(key, self.pinned_next_key_hash())
+            .map(Some)
+            .map_err(|_| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message: "registry_key and registry_next_key_hash must each be 64 hex characters, \
+                          and registry_key must name a valid Ed25519 public key"
+                    .to_owned(),
+            })
     }
 }
 
@@ -274,6 +398,9 @@ impl Default for Config {
             view_distance: Self::default_view_distance(),
             allow_custom_skins: false,
             sticky_names: false,
+            registry: tiamat_core::session::NamePolicy::default(),
+            registry_key: None,
+            registry_next_key_hash: None,
             vertical_view_distance: Self::default_vertical_view_distance(),
             rcon: None,
         }
@@ -353,6 +480,166 @@ max_players = 64
 
         let err = Config::load(&path).expect_err("missing file should be an error");
         assert!(matches!(err, ConfigError::Read { .. }), "got {err:?}");
+    }
+
+    /// A valid 64-character registry key, as `server.toml` carries it.
+    fn registry_key_hex() -> String {
+        let identity = tiamat_core::identity::Identity::generate().expect("identity");
+        identity
+            .public_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn the_registry_policy_defaults_to_honour() {
+        // Design §5: a server that says nothing honours a certificate that
+        // verifies and is otherwise exactly what it was. `off` is the LAN
+        // case a host opts into, not the default a new operator inherits.
+        let path = temp_config("registry-default", "max_players = 2\n");
+        let config = Config::load(&path).expect("partial config should load");
+        assert_eq!(config.registry, tiamat_core::session::NamePolicy::Honour);
+        assert_eq!(config.registry_key, None);
+        assert_eq!(config.registry_next_key_hash, None);
+    }
+
+    #[test]
+    fn the_registry_policy_reads_the_three_words_of_the_design() {
+        for (text, expected) in [
+            ("off", tiamat_core::session::NamePolicy::Off),
+            ("honour", tiamat_core::session::NamePolicy::Honour),
+            ("require", tiamat_core::session::NamePolicy::Require),
+        ] {
+            let key = registry_key_hex();
+            let path = temp_config(
+                &format!("registry-{text}"),
+                &format!("registry = \"{text}\"\nregistry_key = \"{key}\"\n"),
+            );
+            let config = Config::load(&path)
+                .unwrap_or_else(|err| panic!("`registry = {text}` should load: {err}"));
+            assert_eq!(config.registry, expected);
+        }
+
+        let path = temp_config("registry-typo", "registry = \"honor\"\n");
+        assert!(
+            matches!(Config::load(&path), Err(ConfigError::Parse { .. })),
+            "a misspelt policy must be a parse error, not a silent default"
+        );
+    }
+
+    #[test]
+    fn require_without_a_pinned_key_refuses_to_start() {
+        // The state the design calls out: no key means no certificate can
+        // verify, so `require` would turn every player away and look like a
+        // broken server rather than a misconfiguration.
+        let path = temp_config("registry-require-bare", "registry = \"require\"\n");
+        let err = Config::load(&path).expect_err("require needs a key");
+        assert!(
+            matches!(err, ConfigError::Invalid { ref message, .. } if message.contains("registry_key")),
+            "got {err:?}"
+        );
+
+        // The same server with a key is the valid public-server shape.
+        let key = registry_key_hex();
+        let path = temp_config(
+            "registry-require-key",
+            &format!("registry = \"require\"\nregistry_key = \"{key}\"\n"),
+        );
+        let config = Config::load(&path).expect("require with a key should load");
+        let trust = config
+            .registry_trust(&path)
+            .expect("a validated key parses")
+            .expect("a trust");
+        assert!(
+            trust.next_commitment().is_none(),
+            "no successor was pinned, so nothing is committed"
+        );
+    }
+
+    #[test]
+    fn a_malformed_registry_key_or_successor_refuses_to_start() {
+        let bad_keys = [
+            "not-hex".to_owned(),
+            "ab".repeat(31),
+            "zz".repeat(32), // 64 characters, and not a number at all
+        ];
+        for (index, key) in bad_keys.iter().enumerate() {
+            let path = temp_config(
+                &format!("registry-bad-key-{index}"),
+                &format!("registry_key = \"{key}\"\n"),
+            );
+            let err = Config::load(&path).expect_err("a bad key must be refused");
+            assert!(matches!(err, ConfigError::Invalid { .. }), "got {err:?}");
+        }
+
+        let key = registry_key_hex();
+        let path = temp_config(
+            "registry-bad-successor",
+            &format!("registry_key = \"{key}\"\nregistry_next_key_hash = \"abc\"\n"),
+        );
+        let err = Config::load(&path).expect_err("a bad successor hash must be refused");
+        assert!(matches!(err, ConfigError::Invalid { .. }), "got {err:?}");
+
+        // A successor with nothing to succeed is a trust set that cannot be
+        // used; refused rather than dropped silently.
+        let path = temp_config(
+            "registry-successor-bare",
+            &format!("registry_next_key_hash = \"{}\"\n", "ab".repeat(32)),
+        );
+        let err = Config::load(&path).expect_err("a hash needs a key");
+        assert!(
+            matches!(err, ConfigError::Invalid { ref message, .. } if message.contains("registry_key")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_successor_is_carried_into_the_trust_set() {
+        let key = registry_key_hex();
+        let successor = "cd".repeat(32);
+        let path = temp_config(
+            "registry-with-successor",
+            &format!("registry_key = \"{key}\"\nregistry_next_key_hash = \"{successor}\"\n"),
+        );
+        let config = Config::load(&path).expect("a key and its committed successor should load");
+        let trust = config
+            .registry_trust(&path)
+            .expect("a validated pair parses")
+            .expect("a trust");
+        assert_eq!(
+            trust.next_commitment(),
+            Some([0xcd; 32]),
+            "the successor hash must reach the trust set, or a rotation can never be accepted"
+        );
+    }
+
+    #[test]
+    fn a_blank_pinned_string_is_absent_rather_than_a_key() {
+        // "I left the line blank" is the ordinary state of the example file,
+        // and it must mean "not pinned", not "pinned to the empty key".
+        let path = temp_config(
+            "registry-blank",
+            "registry_key = \"\"\nregistry_next_key_hash = \"  \"\n",
+        );
+        let config = Config::load(&path).expect("blank values are not keys");
+        assert!(
+            config
+                .registry_trust(&path)
+                .expect("nothing invalid to refuse")
+                .is_none()
+        );
+
+        // And it cannot satisfy `require`, which is the same rule as no key.
+        let path = temp_config(
+            "registry-require-blank",
+            "registry = \"require\"\nregistry_key = \"\"\n",
+        );
+        assert!(
+            matches!(Config::load(&path), Err(ConfigError::Invalid { .. })),
+            "a blank key must not satisfy require"
+        );
     }
 
     #[test]

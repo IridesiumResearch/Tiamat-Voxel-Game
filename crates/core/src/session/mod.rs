@@ -285,7 +285,8 @@ impl Response {
 /// `registry` in `server.toml` (design §5). The default is [`NamePolicy::Honour`],
 /// which costs nothing: a certificate that verifies wins its name, and one that
 /// does not is simply absent, exactly as before certificates existed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NamePolicy {
     /// Ignore certificates. A LAN world or an embedded host, where there is no
     /// registry to pin and no reason to make a player carry one.
@@ -453,10 +454,9 @@ pub struct Session {
     certificate: Option<Vec<u8>>,
     /// Whether this session's name is the one a certificate issued.
     certified: bool,
-    /// An identity a certified join renamed off its name, that name, and the
-    /// variant it now wears. The server tells them; see
-    /// [`certified_displacement_notice`].
-    displacement: Option<(PlayerUuid, String, String)>,
+    /// An identity a certified join renamed off its name, if any. The server
+    /// tells them and rebinds their own session; see [`Self::take_displacement`].
+    displacement: Option<CertifiedDisplacement>,
     uuid: Option<PlayerUuid>,
 }
 
@@ -484,6 +484,23 @@ pub fn certified_displacement_notice(name: &str, variant: &str) -> String {
         "`{name}` is registered to another identity; you are `{variant}` here until \
          an operator renames you"
     )
+}
+
+/// An identity a certified join moved off a name it held on this server.
+///
+/// Design §5 says the uncertified holder is renamed to a numbered variant and
+/// told why. The registry binding is changed where the certificate is applied;
+/// this is what the server needs to finish the job on the other connection —
+/// the variant to bind in that session and the line to send it — because the
+/// session that wears the old name is not the one that caused the rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedDisplacement {
+    /// The identity that now wears the numbered variant.
+    pub player: PlayerUuid,
+    /// The variant this server bound for them.
+    pub name: String,
+    /// The line to send them, from [`certified_displacement_notice`].
+    pub notice: String,
 }
 
 impl Default for Session {
@@ -531,17 +548,28 @@ impl Session {
         self.certified
     }
 
-    /// Takes the identity a certified join displaced off its name, with the
-    /// variant it now wears.
+    /// Takes the identity a certified join displaced off its name.
     ///
     /// Core decides the rename and composes the words
     /// ([`certified_displacement_notice`]); the server owns delivery, because
-    /// the displaced player is on another connection.
+    /// the displaced player is on another connection, and owns applying
+    /// [`CertifiedDisplacement::name`] to that player's session — see
+    /// [`Self::rename_to`].
     #[must_use]
-    pub fn take_displacement(&mut self) -> Option<(PlayerUuid, String)> {
-        self.displacement
-            .take()
-            .map(|(uuid, name, variant)| (uuid, certified_displacement_notice(&name, &variant)))
+    pub fn take_displacement(&mut self) -> Option<CertifiedDisplacement> {
+        self.displacement.take()
+    }
+
+    /// Applies a name this server has bound to this identity after its join.
+    ///
+    /// The one caller is a certified join displacing the uncertified holder
+    /// (design §5): the session that wears the name lives on another
+    /// connection, so the server hands it the variant the registry binding
+    /// chose. Anything else that renames a live player — RCON is refused on a
+    /// certified player and rebinds an uncertified one in the registry — goes
+    /// through the registry, not through this.
+    pub fn rename_to(&mut self, name: String) {
+        self.claimed_name = Some(name);
     }
 
     /// The certificate carried in `Hello`, verified against this server's pin
@@ -936,9 +964,14 @@ impl Session {
                         self.renamed_from = Some((asked, WhyRenamed::Certified));
                     }
                     let certified_display = bound.name.clone();
-                    self.displacement = bound
-                        .displaced
-                        .map(|(uuid, variant)| (uuid, certified_display, variant));
+                    self.displacement =
+                        bound
+                            .displaced
+                            .map(|(uuid, variant)| CertifiedDisplacement {
+                                player: uuid,
+                                notice: certified_displacement_notice(&certified_display, &variant),
+                                name: variant,
+                            });
                     self.claimed_name = Some(bound.name);
                     self.certified = true;
                 }
@@ -2432,10 +2465,29 @@ mod tests {
         assert!(session.is_certified());
         assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
         let displaced = session.take_displacement().expect("a displacement");
-        assert_eq!(displaced.0, bob.uuid_as_root());
-        assert!(displaced.1.contains("Alice 2"), "{displaced:?}");
+        assert_eq!(displaced.player, bob.uuid_as_root());
+        assert_eq!(displaced.name, "Alice 2");
+        assert!(displaced.notice.contains("Alice 2"), "{displaced:?}");
         assert_eq!(registry.name_of(&bob.uuid_as_root()), Some("Alice 2"));
         assert!(certified_displacement_notice("Alice", "Alice 2").contains("registered"));
+    }
+
+    #[test]
+    fn a_session_adopts_a_name_the_server_bound_after_the_join() {
+        // The one caller is the connection of a player a certified join
+        // displaced (design §5). That session is not the one that caused the
+        // rename, so it learns the variant here and nowhere else — the roster
+        // and the database were changed by the server.
+        let mut session = Session::new();
+        session.rename_to("Alice 2".to_owned());
+        assert_eq!(session.display_name(), Some("Alice 2"));
+
+        session.rename_to("Alice 3".to_owned());
+        assert_eq!(
+            session.display_name(),
+            Some("Alice 3"),
+            "a second displacement replaces the first"
+        );
     }
 
     #[test]

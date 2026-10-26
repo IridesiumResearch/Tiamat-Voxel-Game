@@ -2758,6 +2758,8 @@ impl ServerHandle {
             view_distance: settings.view_distance,
             kicks: tokio::sync::broadcast::channel(64).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            certified: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            renames: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             bodies: std::sync::Arc::default(),
             hardness,
             held_slot: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -4044,6 +4046,10 @@ impl ServerHandle {
                                         player: *uuid.as_bytes(),
                                         name,
                                         skin: shared.own_skin_worn(uuid),
+                                        // Design §5: a name the registry vouched
+                                        // for, read live from the certified set
+                                        // the join owns.
+                                        certified: shared.is_certified(uuid),
                                     });
                                     // **The ground under a new player, this
                                     // tick.** Their connection asks for it too,

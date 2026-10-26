@@ -209,6 +209,24 @@ pub trait Access: Send + Sync {
         false
     }
 
+    /// Whether this player's name is the one a registry certificate issued.
+    ///
+    /// Design §5's one addition to the mod API for accounts: a mod may show a
+    /// mark beside a certified name, or, on a server whose policy is
+    /// `require`, act on the difference. **It is not authentication.** The
+    /// engine already proved the key at the join; this says only that the
+    /// registry vouched for the name, and the UUID remains the identity
+    /// (charter rule 13).
+    ///
+    /// `false` for a player who is not connected, for a server whose policy
+    /// is `off`, and for one whose certificate did not verify — the same
+    /// answer for "no certificate" and "a bad one", because a mod has no
+    /// reason to tell them apart.
+    fn is_certified(&self, player: [u8; 32]) -> bool {
+        let _ = player;
+        false
+    }
+
     /// Says one line to one player, in their own chat.
     ///
     /// **The stubs promised this for months and nothing registered it** — the

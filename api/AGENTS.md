@@ -54,6 +54,17 @@ is a mechanism a mod may now use; none of them changes a mod that ignores it.
 Everything listed is in API 1.0; from 1.1 on, an entry names the minor it
 arrived in, and a deprecation is an entry here too.
 
+- **A name the registry vouched for** (2026-10-26, accounts N3; protocol 94).
+  `event.certified` on `register_on_player_join`, and
+  `game.player_certified(player)` at any time after: `true` when the player
+  presented a name certificate that verified against the registry key the
+  server pins (`docs/accounts-design.md` §5). `false` is every ordinary join —
+  a server whose `server.toml` leaves the policy off, a player with no
+  certificate, or one whose certificate did not verify. **It is a mark, not
+  authentication**: the key was proved before the hook ran, the UUID is still
+  the identity, and a name is unique rather than a person accountable. Draw the
+  mark, or act on it on a server that chose `require`; `game.is_operator` is
+  still the question to ask about powers.
 - **One schematic at a root the generator chose** (2026-10-22, Structures
   ask ST-E1). `buf:place(schematic, root, { turn })` stamps a `game.schematic`
   at a world block position, turned as `game.stamp_schematic` turns, clipped
@@ -342,6 +353,7 @@ exists and one that is not does not.
 - `game.set_player_skin(player, file)` — Puts a skin on a player's body: a PNG the body they wear declared in `skins` on `game.register_player_model`, by that path, or `nil` for the model's own texture (Life ask 23).
 - `game.custom_skins_allowed()` — Whether this host takes a skin a player chose for their own body (Life ask 23): `allow_custom_skins` in the server's `server.toml`, off by default.
 - `game.is_operator(player)` — Whether the server already trusts this player with operator powers.
+- `game.player_certified(player)` — Whether this player's name is one the registry issued to their identity.
 - `game.looking_at(player)` — What a connected player's crosshair is on, within their reach.
 - `game.look_direction(player)` — Which way a player is looking, as a unit vector, and from which domain.
 - `game.heading(dx, dz)` — The heading of a direction across the ground, in radians.

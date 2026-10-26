@@ -175,6 +175,7 @@ AREAS = [
             "game.set_player_skin",
             "game.custom_skins_allowed",
             "game.is_operator",
+            "game.player_certified",
             "game.looking_at",
             "game.look_direction",
             "game.heading",

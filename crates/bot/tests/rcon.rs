@@ -6,8 +6,10 @@
 use std::time::Duration;
 
 use bot::Bot;
+use tiamat_core::identity::registry::{Name, NameCertificate, RegistryTrust};
 use tiamat_core::identity::{Allowlist, Identity};
 use tiamat_core::proto::ServerMessage;
+use tiamat_core::session::NamePolicy;
 use tiamat_server::{ServerHandle, Settings};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
@@ -15,11 +17,16 @@ use tokio::net::TcpStream;
 const TOKEN: &str = "a-sufficiently-long-test-token";
 
 fn start(name: &str) -> (ServerHandle, std::net::SocketAddr) {
-    start_with(name, false)
+    start_with(name, false, None)
 }
 
-/// [`start`], on a server that keeps names or not.
-fn start_with(name: &str, sticky_names: bool) -> (ServerHandle, std::net::SocketAddr) {
+/// [`start`], on a server that keeps names or not, and optionally pins a
+/// registry key.
+fn start_with(
+    name: &str,
+    sticky_names: bool,
+    registry_trust: Option<RegistryTrust>,
+) -> (ServerHandle, std::net::SocketAddr) {
     let dir = std::env::temp_dir().join("tiamat-rcon-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -38,8 +45,12 @@ fn start_with(name: &str, sticky_names: bool) -> (ServerHandle, std::net::Socket
         max_players: 8,
         allow_custom_skins: false,
         sticky_names,
-        name_policy: tiamat_core::session::NamePolicy::Off,
-        registry_trust: None,
+        name_policy: if registry_trust.is_some() {
+            NamePolicy::Honour
+        } else {
+            NamePolicy::Off
+        },
+        registry_trust,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
         rcon: Some((rcon_addr, TOKEN.to_owned())),
@@ -329,7 +340,7 @@ fn with_sticky_names_only_a_rename_changes_what_a_player_is_called() {
     // `sticky_names = true`: a player who joins under a new name keeps the
     // old one; an operator's rename is what moves it, and the name moved
     // from is free for somebody else.
-    let (server, rcon_addr) = start_with("sticky-rename", true);
+    let (server, rcon_addr) = start_with("sticky-rename", true, None);
     let addr = server.local_addr();
     let fingerprint = server.cert_fingerprint();
 
@@ -403,6 +414,68 @@ fn with_sticky_names_only_a_rename_changes_what_a_player_is_called() {
     });
 
     server.stop();
+}
+
+#[test]
+fn rename_is_refused_on_a_player_whose_name_the_registry_issued() {
+    // Design §5: the registry owns a certified name, and an operator's rename
+    // would be undone at that player's next join. Refused with the reason, not
+    // obeyed and quietly reverted later.
+    let registry = ed25519_dalek::SigningKey::from_bytes(&[0x6B; 32]);
+    let trust = RegistryTrust::new(registry.verifying_key(), None);
+    let (server, rcon_addr) = start_with("certified-rename", false, Some(trust));
+    let addr = server.local_addr();
+    let fingerprint = server.cert_fingerprint();
+
+    block_on(async {
+        let mut admin = Admin::connect(rcon_addr).await;
+        admin.authenticate().await;
+
+        let identity = Identity::generate().expect("identity");
+        let uuid = identity.uuid_as_root();
+        let name = Name::from_parts("alice", "Alice").expect("a valid name");
+        let certificate = NameCertificate::issue(&registry, &name, uuid, unix_now(), 1)
+            .to_bytes()
+            .expect("a certificate encodes");
+        let mut alice = Bot::connect(addr, identity, fingerprint)
+            .await
+            .expect("connect");
+        alice
+            .join_with_certificate("anything", &certificate)
+            .await
+            .expect("join");
+
+        let mut reply = String::new();
+        for _ in 0..100 {
+            reply = admin.send("rename Alice Alicia").await;
+            if !reply.contains("no player named") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(reply.starts_with("error:"), "got `{reply}`");
+        assert!(
+            reply.contains("registry"),
+            "the refusal must say who owns the name, got `{reply}`"
+        );
+
+        let identities = server.shared().identities.lock().await;
+        assert_eq!(
+            identities.name_holder("Alice"),
+            Some(uuid),
+            "a refused rename must not have moved the name"
+        );
+        drop(identities);
+        alice.disconnect().await;
+    });
+
+    server.stop();
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0))
 }
 
 #[test]
