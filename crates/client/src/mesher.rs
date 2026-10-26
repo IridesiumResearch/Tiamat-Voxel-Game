@@ -41,7 +41,10 @@
 
 // `face_shade` here is the mode 1 directional constant below; the light
 // sampler comes in under a name that says which one it is.
-use crate::shade::{BlockLight, Shade, face_shade as sample_corner_light};
+use crate::shade::{
+    BlockLight, CornerLightCache, Shade, face_shade as sample_corner_light,
+    face_shade_cached as sample_corner_light_cached,
+};
 use tiamat_core::block::{BlockView, subnode_index};
 use tiamat_core::chunk::Chunk;
 use tiamat_core::coords::LocalBlock;
@@ -459,23 +462,25 @@ impl SubNodeGrid {
             fill_skirt(&mut materials, &mut columns, &mut wet, &mut heights, skirt);
         }
 
-        // **Derived from the cells, and only when there is glass to find.**
+        // **Derived from the cells, in one pass, and only when there is a kind
+        // to find.** A pass over 110,592 cells is not free, and nearly every
+        // chunk in a world holds none of these — so the `Transparency::any_*`
+        // gates skip it exactly as `FluidFill::any` gates the fluid columns,
+        // and a world without windows meshes as it always did. See
+        // [`classify`] for why it is one pass rather than seven.
         //
-        // A pass over 110,592 cells is not free, and nearly every chunk in a
-        // world has no glass in it — so `Transparency::any` gates it exactly as
-        // `FluidFill::any` gates the fluid columns. A world without windows
-        // meshes as it always did.
-        //
-        // **And never a wet cell** — see [`is_wet`]. Every scan below reads
-        // the material a cell holds, and a wet cell holds the fluid's.
+        // **And never a wet cell** — see [`is_wet`]. The pass reads the
+        // material a cell holds, and a wet cell holds the fluid's.
         let dry = wet.as_ref();
-        let glass = glass_columns(&materials, dry, transparent);
-        let cutout = cutout_columns(&materials, dry, transparent);
-        let sprites = billboards_of(&materials, dry, transparent);
-        let sprite_columns = sprite_columns_of(&materials, dry, transparent);
-        let model_columns = model_columns_of(&materials, dry, transparent);
-        let models = model_instances_of(&materials, dry, transparent);
-        let flickers = flicker_sources_of(&materials, dry, transparent);
+        let Derived {
+            glass,
+            cutout,
+            sprites,
+            sprite_columns,
+            model_columns,
+            models,
+            flickers,
+        } = classify(&materials, dry, transparent);
 
         let mut grid = Self {
             materials,
@@ -2084,6 +2089,10 @@ struct Scratch {
     /// One slice's worth of corner light, reused across every slice and
     /// direction. Entries for cells with no face are never read.
     shades: Vec<Shade>,
+    /// The corner light per lattice point of the slice being shaded, shared
+    /// by the four cells that meet at each point and by the slice's four
+    /// planes. See [`CornerLightCache`].
+    corners: CornerLightCache,
     /// The fluid surface's merge keys, which only the fluid pass fills and only
     /// a chunk with fluid in it allocates.
     keys: Vec<u32>,
@@ -2107,6 +2116,7 @@ impl Scratch {
                 Vec::new()
             },
             shades: vec![Shade::default(); N * N],
+            corners: CornerLightCache::new(),
             keys: if wet { vec![0u32; N * N] } else { Vec::new() },
             fluid: Vec::new(),
             mesh: Mesh::default(),
@@ -2326,11 +2336,15 @@ fn merge_slice(
     (axis, positive, w): (usize, bool, usize),
     scratch: &mut Scratch,
 ) {
+    // One slice, one layer of air in front of it: the four planes below share
+    // every corner they meet at.
+    scratch.corners.next_slice();
     shade_and_merge(
         grid,
         light,
         &mut scratch.plane[w * N..(w + 1) * N],
         &mut scratch.shades,
+        &mut scratch.corners,
         None,
         (axis, positive, w),
         &mut scratch.mesh.quads,
@@ -2342,6 +2356,7 @@ fn merge_slice(
             light,
             &mut scratch.glass_plane[w * N..(w + 1) * N],
             &mut scratch.shades,
+            &mut scratch.corners,
             None,
             (axis, positive, w),
             &mut scratch.mesh.glass_quads,
@@ -2354,6 +2369,7 @@ fn merge_slice(
             light,
             &mut scratch.cutout_plane[w * N..(w + 1) * N],
             &mut scratch.shades,
+            &mut scratch.corners,
             None,
             (axis, positive, w),
             &mut scratch.mesh.cutout_quads,
@@ -2368,6 +2384,7 @@ fn merge_slice(
         light,
         &mut scratch.wet_plane[w * N..(w + 1) * N],
         &mut scratch.shades,
+        &mut scratch.corners,
         Some(&mut scratch.keys),
         (axis, positive, w),
         &mut scratch.fluid,
@@ -2570,11 +2587,18 @@ fn lit_billboards(grid: &SubNodeGrid, light: &impl BlockLight) -> Vec<Billboard>
 /// against — measured at 2.3× the mesh time on realistic content, which is most
 /// of the way to the Task 02b gate for no reason. The fluid's merge keys ride
 /// the same pass for the same reason, and only the fluid pass asks for them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one slice's shading needs the grid, the light, the plane, the two scratch \
+              buffers it fills, the fluid's keys, which face it is, and where the quads go; \
+              every one is a distinct input"
+)]
 fn shade_and_merge(
     grid: &SubNodeGrid,
     light: &impl BlockLight,
     slice: &mut [u64],
     shades: &mut [Shade],
+    corners: &mut CornerLightCache,
     keys: Option<&mut [u32]>,
     (axis, positive, w): (usize, bool, usize),
     out: &mut Vec<Quad>,
@@ -2586,7 +2610,17 @@ fn shade_and_merge(
             let v = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let (cx, cy, cz) = SubNodeGrid::cell(axis, u, v, w);
-            shades[u * N + v] = shade_at(light, grid, axis, positive, cx, cy, cz);
+            // The corner light comes from the slice's cache — each lattice
+            // point sampled once however many faces meet at it — and the
+            // occlusion is computed per corner as before. See `CornerLightCache`.
+            shades[u * N + v] = sample_corner_light_cached(
+                light,
+                grid,
+                axis,
+                positive,
+                (cx as i32, cy as i32, cz as i32),
+                corners,
+            );
             if let Some(keys) = keys.as_deref_mut() {
                 keys[u * N + v] = grid.surface_key(cx, cy, cz);
             }
@@ -2648,6 +2682,251 @@ fn is_wet(wet: Option<&[Vec<u64>; 3]>, x: usize, y: usize, z: usize) -> bool {
     wet.is_some_and(|wet| wet[0][y * N + z] & (1 << (x as u32 + FIRST)) != 0)
 }
 
+/// A material's kinds as one byte: which derived sets its cells belong in.
+const KIND_GLASS: u8 = 1 << 0;
+const KIND_CUTOUT: u8 = 1 << 1;
+const KIND_BILLBOARD: u8 = 1 << 2;
+const KIND_CROSS: u8 = 1 << 3;
+const KIND_MODEL: u8 = 1 << 4;
+const KIND_FLICKER: u8 = 1 << 5;
+/// The table has asked the material set about this material; zero below it
+/// means opaque. Without this, a material of no kind would be asked about at
+/// every one of its cells.
+const KIND_KNOWN: u8 = 1 << 7;
+
+/// Which kinds are in play at all, from the `any_*` gates.
+///
+/// The same gates the seven passes this replaced were each skipped by, so an
+/// implementation whose `any_cutout` says no is never asked `is_cutout`, and a
+/// set that answers the two inconsistently is read exactly as it was. A world
+/// with nothing registered gives zero, and then [`classify`] walks nothing.
+fn kind_gates(transparent: &impl Transparency) -> u8 {
+    let mut gates = 0;
+    if transparent.any() {
+        gates |= KIND_GLASS;
+    }
+    if transparent.any_cutout() {
+        gates |= KIND_CUTOUT;
+    }
+    if transparent.any_billboard() {
+        gates |= KIND_BILLBOARD | KIND_CROSS;
+    }
+    if transparent.any_model() {
+        gates |= KIND_MODEL;
+    }
+    if transparent.any_flicker() {
+        gates |= KIND_FLICKER;
+    }
+    gates
+}
+
+/// Asks the material set about one material, once, under the gates.
+fn probe_kind(transparent: &impl Transparency, material: u16, gates: u8) -> u8 {
+    let mut kind = KIND_KNOWN;
+    if gates & KIND_GLASS != 0 && transparent.is_transparent(material) {
+        kind |= KIND_GLASS;
+    }
+    if gates & KIND_CUTOUT != 0 && transparent.is_cutout(material) {
+        kind |= KIND_CUTOUT;
+    }
+    if gates & KIND_BILLBOARD != 0 && transparent.is_billboard(material) {
+        kind |= KIND_BILLBOARD;
+        if transparent.is_cross(material) {
+            kind |= KIND_CROSS;
+        }
+    }
+    if gates & KIND_MODEL != 0 && transparent.is_model(material) {
+        kind |= KIND_MODEL;
+    }
+    if gates & KIND_FLICKER != 0 && transparent.is_flicker(material) {
+        kind |= KIND_FLICKER;
+    }
+    kind
+}
+
+/// Everything the grid derives from its cells and the material set.
+///
+/// Each column set is `None` rather than zeroed when nothing was found, so a
+/// chunk that COULD have held glass and does not costs the same as one that
+/// could not — the culling then takes its original path rather than an extra
+/// mask per column.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Derived {
+    glass: Option<[Vec<u64>; 3]>,
+    cutout: Option<[Vec<u64>; 3]>,
+    sprites: Vec<Sprite>,
+    sprite_columns: Option<[Vec<u64>; 3]>,
+    model_columns: Option<[Vec<u64>; 3]>,
+    models: Vec<ModelInstance>,
+    flickers: Vec<ModelInstance>,
+}
+
+fn fresh_columns() -> [Vec<u64>; 3] {
+    [vec![0u64; N * N], vec![0u64; N * N], vec![0u64; N * N]]
+}
+
+/// Sets one cell's bit in each of the three column orientations.
+fn mark(columns: &mut [Vec<u64>; 3], x: usize, y: usize, z: usize) {
+    columns[0][y * N + z] |= 1 << (x as u32 + FIRST);
+    columns[1][x * N + z] |= 1 << (y as u32 + FIRST);
+    columns[2][x * N + y] |= 1 << (z as u32 + FIRST);
+}
+
+/// Records a cell's material against its block, keeping the lowest id per
+/// block (Contract §8.6: a block holding two model materials is one instance,
+/// of the lower).
+fn lowest_per_block(
+    found: &mut std::collections::BTreeMap<[u8; 3], u16>,
+    x: usize,
+    y: usize,
+    z: usize,
+    material: u16,
+) {
+    let per = SUBNODES_PER_AXIS as usize;
+    let key = [(x / per) as u8, (y / per) as u8, (z / per) as u8];
+    let entry = found.entry(key).or_insert(material);
+    *entry = (*entry).min(material);
+}
+
+/// One walk over the cells for every derived set.
+///
+/// **Why one pass.** This used to be seven: the glass columns, the cutout
+/// columns, the sprite runs, the sprite columns, the model columns, the model
+/// instances and the flicker sources each walked all 110,592 cells and asked
+/// the material set — a `BTreeSet` lookup — about every non-air cell. The
+/// gates were global, so on a world where glass, foliage, sprites, models and
+/// flickers are all registered (every world with the default mods) a chunk of
+/// plain stone paid all seven walks to learn it held none of them. Now each
+/// distinct material is asked about once, through a dense table indexed by
+/// id, and every cell after that costs one byte read; the walk fills every set
+/// at once.
+///
+/// **What is preserved, exactly.** Air (material 0) and wet cells (see
+/// [`is_wet`]) are in no derived set. A column set is `None` when nothing was
+/// found. The column bit layout is [`mark`]'s. Model and flicker instances are
+/// one per block in block order with the lowest material, as
+/// [`lowest_per_block`] keeps them. Sprite runs are found bottom-up, a
+/// different billboard material starts a new run, and a run is lit where it
+/// stands — see [`sprite_runs`], which reads the sprite columns this pass
+/// built. A kind the gates rule out is never asked about. The seven passes it
+/// replaced are kept under `cfg(test)` as the oracle the parity test compares
+/// this against.
+fn classify(
+    materials: &[u16],
+    wet: Option<&[Vec<u64>; 3]>,
+    transparent: &impl Transparency,
+) -> Derived {
+    let gates = kind_gates(transparent);
+    let mut derived = Derived::default();
+    if gates == 0 {
+        return derived;
+    }
+    // Dense by material id, filled as materials are met. Sixty-four kilobytes
+    // zeroed once per grid is a small price beside the cells; a table sized to
+    // the set would need the set enumerated, which the trait cannot do.
+    let mut table = vec![0u8; usize::from(u16::MAX) + 1];
+    let mut models = std::collections::BTreeMap::new();
+    let mut flickers = std::collections::BTreeMap::new();
+    for z in 0..N {
+        for y in 0..N {
+            for x in 0..N {
+                let material = materials[x + N * y + N * N * z];
+                if material == 0 {
+                    continue;
+                }
+                let slot = &mut table[usize::from(material)];
+                if *slot == 0 {
+                    *slot = probe_kind(transparent, material, gates);
+                }
+                let kind = *slot & !KIND_KNOWN;
+                if kind == 0 || is_wet(wet, x, y, z) {
+                    continue;
+                }
+                if kind & KIND_GLASS != 0 {
+                    mark(derived.glass.get_or_insert_with(fresh_columns), x, y, z);
+                }
+                if kind & KIND_CUTOUT != 0 {
+                    mark(derived.cutout.get_or_insert_with(fresh_columns), x, y, z);
+                }
+                if kind & KIND_BILLBOARD != 0 {
+                    mark(
+                        derived.sprite_columns.get_or_insert_with(fresh_columns),
+                        x,
+                        y,
+                        z,
+                    );
+                }
+                if kind & KIND_MODEL != 0 {
+                    mark(
+                        derived.model_columns.get_or_insert_with(fresh_columns),
+                        x,
+                        y,
+                        z,
+                    );
+                    lowest_per_block(&mut models, x, y, z, material);
+                }
+                if kind & KIND_FLICKER != 0 {
+                    lowest_per_block(&mut flickers, x, y, z, material);
+                }
+            }
+        }
+    }
+    derived.models = models
+        .into_iter()
+        .map(|(local, material)| ModelInstance { local, material })
+        .collect();
+    derived.flickers = flickers
+        .into_iter()
+        .map(|(local, material)| ModelInstance { local, material })
+        .collect();
+    derived.sprites = sprite_runs(materials, derived.sprite_columns.as_ref(), &table);
+    derived
+}
+
+/// Every run of billboard cells, one sprite each, from the sprite columns.
+///
+/// **A run, not a cell.** Sub-Node Contract §8.4: three stacked cells of grass
+/// are one sprite a yard tall, not three copies of the same texture stacked a
+/// third of a yard apart. Walks each column upward so a run is found from its
+/// base, which is where the sprite stands and is lit; a different billboard
+/// material above it starts its own sprite, because two plants sharing a
+/// column are two plants. The column word says where the dry billboard cells
+/// are, so only those are visited; the run's extent is read from the
+/// materials, as it always was.
+fn sprite_runs(materials: &[u16], columns: Option<&[Vec<u64>; 3]>, table: &[u8]) -> Vec<Sprite> {
+    let Some(columns) = columns else {
+        return Vec::new();
+    };
+    let mut sprites = Vec::new();
+    for z in 0..N {
+        for x in 0..N {
+            let word = columns[1][x * N + z] >> FIRST;
+            let mut y = 0;
+            while y < N {
+                let rest = word >> y;
+                if rest == 0 {
+                    break;
+                }
+                y += rest.trailing_zeros() as usize;
+                let material = materials[x + N * y + N * N * z];
+                let mut height = 1;
+                while y + height < N && materials[x + N * (y + height) + N * N * z] == material {
+                    height += 1;
+                }
+                sprites.push(Sprite {
+                    cell: [x as u8, y as u8, z as u8],
+                    height: u8::try_from(height).unwrap_or(u8::MAX),
+                    material,
+                    cross: table[usize::from(material)] & KIND_CROSS != 0,
+                });
+                y += height;
+            }
+        }
+    }
+    sprites
+}
+
+#[cfg(test)]
 fn glass_columns(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2717,6 +2996,7 @@ pub struct Billboard {
 /// The same walk as [`glass_columns`] over the other flag. Two passes rather
 /// than one that sorts into both, because a world has glass or foliage or
 /// neither far more often than both, and each pass is skipped whole.
+#[cfg(test)]
 fn cutout_columns(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2749,6 +3029,7 @@ fn cutout_columns(
 /// The same walk `cutout_columns` does over the other flag, and needed for the
 /// opposite reason: these cells are removed from the geometry rather than added
 /// to a second set of it.
+#[cfg(test)]
 fn sprite_columns_of(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2778,6 +3059,7 @@ fn sprite_columns_of(
 
 /// The occupancy columns of every model-material cell, or `None` if there are
 /// none. The sprite walk over the other flag (Contract §8.6).
+#[cfg(test)]
 fn model_columns_of(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2807,6 +3089,7 @@ fn model_columns_of(
 
 /// One instance per block that holds a model material's cell, in block order.
 /// If a block holds two model materials the lowest id wins (Contract §8.6).
+#[cfg(test)]
 fn model_instances_of(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2819,6 +3102,7 @@ fn model_instances_of(
 }
 
 /// The blocks whose light flickers, one entry per block, lowest material.
+#[cfg(test)]
 fn flicker_sources_of(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2831,6 +3115,7 @@ fn flicker_sources_of(
 }
 
 /// One entry per block holding a cell `wanted`, lowest material of them.
+#[cfg(test)]
 fn instances_of(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -2872,6 +3157,7 @@ fn instances_of(
 ///
 /// Walks columns upward so a run is found from its base, which is where the
 /// sprite stands.
+#[cfg(test)]
 fn billboards_of(
     materials: &[u16],
     wet: Option<&[Vec<u64>; 3]>,
@@ -4312,6 +4598,208 @@ mod tests {
             steps > 100,
             "the work should be split into many steps, took {steps}"
         );
+    }
+
+    #[test]
+    fn one_classification_pass_matches_the_seven_scans_it_replaced() {
+        // The seven passes are the oracle: over random cells of every kind,
+        // with and without wet cells, the one pass must derive byte-for-byte
+        // the same sets — the same columns, the same instances in the same
+        // order, the same sprite runs. Material 13 is a model that also
+        // flickers; 9 and 10 are two billboard materials, one of them crossed.
+        let sight = Sight {
+            glass: [7].into(),
+            foliage: [8].into(),
+            sprites: [9, 10].into(),
+            crosses: [10].into(),
+            models: [11, 13].into(),
+            flickers: [12, 13].into(),
+        };
+        let palette = [0u16, 0, 0, 1, 1, 2, 7, 8, 9, 9, 10, 11, 12, 13];
+        for (seed, wet_too) in [
+            (0x9E37_79B9_7F4A_7C15u64, false),
+            (0xD1B5_4A32_D192_ED03, true),
+            (42, true),
+        ] {
+            let mut state = seed;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let materials: Vec<u16> = (0..CELLS)
+                .map(|_| palette[(next() % palette.len() as u64) as usize])
+                .collect();
+            let wet = wet_too.then(|| {
+                let mut wet = fresh_columns();
+                for word in &mut wet[0] {
+                    *word = (next() & ((1u64 << N) - 1)) << FIRST;
+                }
+                wet
+            });
+            let dry = wet.as_ref();
+
+            let derived = classify(&materials, dry, &sight);
+            assert_eq!(derived.glass, glass_columns(&materials, dry, &sight));
+            assert_eq!(derived.cutout, cutout_columns(&materials, dry, &sight));
+            assert_eq!(
+                derived.sprite_columns,
+                sprite_columns_of(&materials, dry, &sight)
+            );
+            assert_eq!(
+                derived.model_columns,
+                model_columns_of(&materials, dry, &sight)
+            );
+            assert_eq!(derived.models, model_instances_of(&materials, dry, &sight));
+            assert_eq!(
+                derived.flickers,
+                flicker_sources_of(&materials, dry, &sight)
+            );
+            assert_eq!(derived.sprites, billboards_of(&materials, dry, &sight));
+            assert!(
+                derived.glass.is_some()
+                    && !derived.sprites.is_empty()
+                    && !derived.models.is_empty(),
+                "the fixture must exercise every kind"
+            );
+        }
+
+        // One kind at a time, through the test sets whose `any` gates differ
+        // from `Sight`'s: a gate that says no is never asked, as before.
+        let materials: Vec<u16> = (0..CELLS).map(|i| (i % 5) as u16).collect();
+        for (name, derived, expected) in [
+            (
+                "glass",
+                classify(&materials, None, &Glass(MaterialId(3))).glass,
+                glass_columns(&materials, None, &Glass(MaterialId(3))),
+            ),
+            (
+                "leaves",
+                classify(&materials, None, &Leaves(MaterialId(3))).cutout,
+                cutout_columns(&materials, None, &Leaves(MaterialId(3))),
+            ),
+        ] {
+            assert_eq!(derived, expected, "{name}");
+            assert!(derived.is_some(), "{name}: the fixture holds the material");
+        }
+        assert_eq!(
+            classify(&materials, None, &Sprites(MaterialId(4))).sprites,
+            billboards_of(&materials, None, &Sprites(MaterialId(4)))
+        );
+
+        // Nothing in play: nothing derived, and nothing walked.
+        assert_eq!(
+            classify(&vec![7u16; CELLS], None, &NoGlass),
+            Derived::default()
+        );
+    }
+
+    #[test]
+    fn a_populated_sight_meshes_one_of_each_kind() {
+        let sight = Sight {
+            glass: [7].into(),
+            foliage: [8].into(),
+            sprites: [9, 10].into(),
+            crosses: [10].into(),
+            models: [11].into(),
+            flickers: [12].into(),
+        };
+        let mut world = empty();
+        for (x, material) in [(2, 7), (4, 8), (10, 11), (12, 12)] {
+            world
+                .set_block(
+                    BlockPos::new(x, 2, 2),
+                    BlockValue::Uniform(MaterialId(material)),
+                )
+                .expect("in chunk");
+        }
+        for (x, plant) in [(6, 9), (8, 10)] {
+            world
+                .set_subnode(BlockPos::new(x, 2, 2).subnode(1, 0, 1), MaterialId(plant))
+                .expect("in chunk");
+        }
+        let mesh = mesh_chunk(
+            &world,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &NoFluid,
+            &sight,
+        );
+        assert!(!mesh.glass_quads.is_empty(), "the pane");
+        assert!(!mesh.cutout_quads.is_empty(), "the leaves");
+        assert_eq!(mesh.billboards.len(), 2, "the grass and the flower");
+        assert_eq!(
+            mesh.billboards.iter().filter(|sprite| sprite.cross).count(),
+            1
+        );
+        assert_eq!(
+            mesh.models,
+            vec![ModelInstance {
+                local: [10, 2, 2],
+                material: 11
+            }]
+        );
+        assert_eq!(
+            mesh.flickers,
+            vec![ModelInstance {
+                local: [12, 2, 2],
+                material: 12
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stepped_job_under_varying_light_matches_a_one_shot_mesh_corner_for_corner() {
+        // The corner cache lives in the scratch state and is stamped per
+        // slice, so a job spread over frames must shade exactly as one call
+        // does — under light that differs from block to block, where a stale
+        // entry from an earlier slice would show as a changed corner.
+        struct Dappled;
+        impl BlockLight for Dappled {
+            fn at(&self, x: i32, y: i32, z: i32) -> tiamat_core::light::Light {
+                let step = u8::try_from((x.abs() / 2 + y.abs() / 2 + z.abs() / 2) % 4).unwrap_or(0);
+                tiamat_core::light::Light::new(tiamat_core::light::MAX_LEVEL - step, 0, 0, 0)
+            }
+        }
+        let mut world = empty();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..6 {
+                    world
+                        .set_block(BlockPos::new(x, y, z), BlockValue::Uniform(MaterialId(2)))
+                        .expect("in chunk");
+                }
+            }
+        }
+        world
+            .set_block(BlockPos::new(7, 5, 7), BlockValue::Uniform(MaterialId::AIR))
+            .expect("in chunk");
+        let one_shot = mesh_chunk(
+            &world,
+            &Neighbours::open(),
+            Absent::Air,
+            &Dappled,
+            &NoFluid,
+            &NoGlass,
+        );
+        assert!(
+            one_shot
+                .quads
+                .iter()
+                .any(|quad| quad.shade.light[0] != quad.shade.light[2]),
+            "the light must vary across a quad for this to test anything"
+        );
+        let mut job = MeshJob::start(&world, &Neighbours::open(), Absent::Air, &NoFluid, &NoGlass)
+            .expect("not empty air");
+        let mut steps = 0;
+        while !job.step(&Dappled) {
+            steps += 1;
+            assert!(steps < 10_000, "the job did not terminate");
+        }
+        let stepped = job.finish(&Dappled);
+        assert_eq!(stepped.quads, one_shot.quads, "stepping changed a corner");
     }
 
     #[test]

@@ -671,12 +671,71 @@ fn load(spec: &WorkerSpec) -> Result<ModHost<MluaVm>, String> {
     Ok(host)
 }
 
-/// Generates one chunk and everything computable from it.
+/// Generates one chunk and everything computable from it, whatever happens.
 ///
-/// A panic inside generation — a bug, since a mod's errors are caught by the
-/// VM — answers with air rather than never answering: a job that vanished is a
-/// request parked for ever and a player's in-flight slot never freed.
+/// A panic ANYWHERE in the job — generation, tint and fog, the summary chain,
+/// fault collection — is a bug, since a mod's errors are caught by the VM, and
+/// it answers with air rather than never answering. Why the whole body and
+/// not just the mod callbacks: a panic outside them used to unwind the worker
+/// thread, so the job's key stayed in the pool's `in_flight` for the life of
+/// the process (the chunk reading "generating" for ever) and a worker was
+/// lost. Every answer, including this one, is what removes the key.
 fn generate(
+    host: &mut ModHost<MluaVm>,
+    job: &Job,
+    fluids: &tiamat_core::fluid::Fluids,
+    materials: &tiamat_core::persist::idmap::MaterialMap,
+    known_faulted: &mut BTreeSet<String>,
+) -> Done {
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        generate_job(host, job, fluids, materials, known_faulted)
+    }));
+    match run {
+        Ok(done) => done,
+        Err(payload) => {
+            error!(
+                pos = ?job.pos,
+                "generation job panicked ({}); the chunk is air",
+                panic_message(payload.as_ref())
+            );
+            let chunk = Chunk::new(job.pos, MaterialId::AIR);
+            let fluid = tiamat_core::fluid::FluidLayer::default();
+            // The chain of an empty chunk; if even that panics the answer
+            // still goes out, with no summaries, rather than not at all.
+            let summaries = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::world::World::encode_chain(&chunk, &fluid, fluids, materials)
+            }))
+            .unwrap_or_default();
+            // A panic may have left the VM half-run; faults it recorded before
+            // dying are not trusted, the tick learns of real ones through the
+            // next job's own bookkeeping.
+            Done {
+                job: job.clone(),
+                chunk,
+                fluid,
+                tint: tiamat_core::proto::Tint::NEUTRAL,
+                fog: None,
+                summaries,
+                faults: Vec::new(),
+                took: std::time::Duration::ZERO,
+            }
+        }
+    }
+}
+
+/// The text of a panic payload, `&str` or `String`, or a fallback.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "no message".to_owned()
+    }
+}
+
+/// The job body `generate` guards.
+fn generate_job(
     host: &mut ModHost<MluaVm>,
     job: &Job,
     fluids: &tiamat_core::fluid::Fluids,
@@ -722,6 +781,11 @@ fn generate(
             )
         }
     };
+    #[cfg(test)]
+    assert!(
+        job.pos != tests::PANIC_AFTER_GENERATION,
+        "test seam: a panic after generation"
+    );
     let summaries = crate::world::World::encode_chain(&chunk, &fluid, fluids, materials);
     let after: BTreeSet<String> = host.disabled().into_iter().collect();
     let faults: Vec<String> = after.difference(&before).cloned().collect();
@@ -743,6 +807,10 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// A position whose job panics after generation in tests, where a panic in
+    /// `encode_chain` would otherwise be unreachable.
+    pub(super) const PANIC_AFTER_GENERATION: ChunkPos = ChunkPos::new(777, 777, 777);
 
     /// Instants a second apart, as the tick looks.
     fn seconds_from_now() -> impl Iterator<Item = Instant> {
@@ -1006,6 +1074,37 @@ mod tests {
         }
         assert_eq!(pool.generated(), positions.len() as u64);
         assert_eq!(pool.in_flight(), 0);
+    }
+
+    #[test]
+    fn a_panic_after_generation_is_answered_with_air_and_the_worker_lives() {
+        // Perf audit B8. The panic is raised after the mod callbacks, where
+        // the old per-callback guard did not reach. One worker, so the next
+        // job proves the same thread survived.
+        let root = write_mod("panic_after", "");
+        let (_host, spec) = spec_for(&root);
+        let mut pool = Pool::start(&spec, 1).expect("pool");
+        assert!(pool.submit("overworld", PANIC_AFTER_GENERATION, 5));
+        let bad = wait_for(&mut pool, 1).remove(0);
+        assert_eq!(bad.job.pos, PANIC_AFTER_GENERATION);
+        assert!(bad.chunk.is_uniform().is_some(), "the answer is air");
+        assert!(bad.faults.is_empty());
+        assert!(!pool.is_generating("overworld", PANIC_AFTER_GENERATION));
+        assert_eq!(pool.in_flight(), 0);
+        assert!(pool.is_alive());
+        assert!(pool.submit("overworld", ChunkPos::new(0, 0, 0), 5));
+        let good = wait_for(&mut pool, 1).remove(0);
+        assert!(
+            good.chunk.is_uniform().is_none(),
+            "the next job generates normally"
+        );
+    }
+
+    #[test]
+    fn panic_messages_read_str_string_and_fall_back() {
+        assert_eq!(panic_message(&"static"), "static");
+        assert_eq!(panic_message(&String::from("owned")), "owned");
+        assert_eq!(panic_message(&42_u8), "no message");
     }
 
     #[test]

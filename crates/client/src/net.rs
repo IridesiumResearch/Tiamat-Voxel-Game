@@ -31,7 +31,7 @@
 //! limits set before allocation. A malformed asset becomes a magenta checker
 //! and a warning; it never takes the client down.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1043,10 +1043,37 @@ struct Pending {
     partial: BTreeMap<ContentHash, Vec<u8>>,
     /// Bytes for a hash, once complete and verified.
     complete: BTreeMap<ContentHash, Vec<u8>>,
+    /// Every hash this connection has asked the server for.
+    ///
+    /// The gate on [`accept_slice`]: a slice for a hash that is not in here was
+    /// not requested, and a server that pushes content nobody asked for is
+    /// either broken or hostile. Only ever grows, and only by what the client
+    /// itself decided to want — so it is bounded by the mod set, not by the
+    /// server.
+    requested: BTreeSet<ContentHash>,
     /// What was asked for and has not arrived.
     outstanding: usize,
     /// Whether `JoinWorld` has been sent.
     joined: bool,
+}
+
+impl Pending {
+    /// The request message for `hashes`, remembered as asked for.
+    ///
+    /// Every `ContentRequest` goes through here, so the set that gates
+    /// [`accept_slice`] cannot drift from what was actually sent.
+    fn request(&mut self, hashes: Vec<ContentHash>) -> ClientMessage {
+        for hash in &hashes {
+            // Asking again starts the item over. Whatever part of an earlier
+            // delivery is still held — a slice that failed its bound, say —
+            // would make the server's fresh first slice look out of order,
+            // and the server now does send again when asked (its send cap
+            // allows three).
+            self.partial.remove(hash);
+            self.requested.insert(*hash);
+        }
+        ClientMessage::ContentRequest { hashes }
+    }
 }
 
 /// Drives one connection until it ends.
@@ -1303,9 +1330,7 @@ async fn session(
                 }
                 let missing = cache.missing(&wanted);
                 if !missing.is_empty()
-                    && let Err(err) = send
-                        .write(&ClientMessage::ContentRequest { hashes: missing })
-                        .await
+                    && let Err(err) = send.write(&pending.request(missing)).await
                 {
                     finish(format!("could not ask for a dialog's pictures: {err}"));
                     break;
@@ -1359,7 +1384,17 @@ async fn session(
                         pending.complete.insert(*hash, bytes);
                     }
                 }
-                let missing = cache.missing(&wanted);
+                // What is missing is what that loop did not find; asking the
+                // cache again would be a second question about every file.
+                // Sorted and deduplicated as `ContentCache::missing` answers,
+                // so the request is a property of what is missing.
+                let mut missing: Vec<ContentHash> = wanted
+                    .iter()
+                    .filter(|hash| !pending.complete.contains_key(*hash))
+                    .copied()
+                    .collect();
+                missing.sort_unstable();
+                missing.dedup();
                 pending.outstanding = missing.len();
 
                 if missing.is_empty() {
@@ -1377,10 +1412,7 @@ async fn session(
                         break;
                     }
                     pending.joined = true;
-                } else if let Err(err) = send
-                    .write(&ClientMessage::ContentRequest { hashes: missing })
-                    .await
-                {
+                } else if let Err(err) = send.write(&pending.request(missing)).await {
                     finish(format!("could not ask for content: {err}"));
                     break;
                 }
@@ -1608,6 +1640,7 @@ async fn session(
                     &events,
                     &mut send,
                     &say,
+                    &mut pending,
                 )
                 .await;
                 let _ = events.send(Event::EntitySpawn(entities));
@@ -1623,6 +1656,7 @@ async fn session(
                     &events,
                     &mut send,
                     &say,
+                    &mut pending,
                 )
                 .await;
                 let _ = events.send(Event::EntityLooked(entities));
@@ -1637,6 +1671,7 @@ async fn session(
                     &events,
                     &mut send,
                     &say,
+                    &mut pending,
                 )
                 .await;
                 let _ = events.send(Event::PlayerLook { model, skin });
@@ -1758,9 +1793,7 @@ async fn session(
                     decode_when_ready(sound, &cache, &events);
                 }
                 if !missing.is_empty()
-                    && let Err(err) = send
-                        .write(&ClientMessage::ContentRequest { hashes: missing })
-                        .await
+                    && let Err(err) = send.write(&pending.request(missing)).await
                 {
                     say(format!("could not ask for sounds: {err}"));
                 }
@@ -1831,9 +1864,7 @@ async fn session(
                 }
                 awaited_fonts = fonts;
                 if !missing.is_empty()
-                    && let Err(err) = send
-                        .write(&ClientMessage::ContentRequest { hashes: missing })
-                        .await
+                    && let Err(err) = send.write(&pending.request(missing)).await
                 {
                     finish(format!("could not ask for the fonts: {err}"));
                     break;
@@ -1869,9 +1900,7 @@ async fn session(
                 }
                 awaited_models = models;
                 if !missing.is_empty()
-                    && let Err(err) = send
-                        .write(&ClientMessage::ContentRequest { hashes: missing })
-                        .await
+                    && let Err(err) = send.write(&pending.request(missing)).await
                 {
                     say(format!("could not ask for the models: {err}"));
                 }
@@ -1915,9 +1944,7 @@ async fn session(
                 }
                 let missing = cache.missing(&wanted);
                 if !missing.is_empty()
-                    && let Err(err) = send
-                        .write(&ClientMessage::ContentRequest { hashes: missing })
-                        .await
+                    && let Err(err) = send.write(&pending.request(missing)).await
                 {
                     finish(format!("could not ask for the pictures: {err}"));
                     break;
@@ -1937,9 +1964,7 @@ async fn session(
                     offer_hud_script(script, &cache, &events);
                 }
                 if !missing.is_empty()
-                    && let Err(err) = send
-                        .write(&ClientMessage::ContentRequest { hashes: missing })
-                        .await
+                    && let Err(err) = send.write(&pending.request(missing)).await
                 {
                     say(format!("could not ask for the HUD scripts: {err}"));
                 }
@@ -1995,10 +2020,39 @@ async fn session(
     reader.abort();
 }
 
+/// Bounds on what one connection may hold of content it has yet to finish
+/// receiving.
+///
+/// Every number is checked **before** the bytes it bounds are allocated
+/// (charter rule 14): a server's sizes are claims, and the only thing a
+/// client can trust about a slice is how big it is allowed to let it become.
+#[derive(Debug, Clone, Copy)]
+struct ContentLimits {
+    /// Items that may be part-way through delivery at once. A server sends
+    /// one item's slices in order before the next, so this is generous.
+    partial_items: usize,
+    /// Bytes held across every part-way item: one mod pack's worth.
+    partial_bytes: u64,
+    /// The most plain bytes one slice may expand to — the server's own slice
+    /// size, which it never exceeds.
+    slice_bytes: usize,
+}
+
+impl ContentLimits {
+    /// The limits a real connection uses.
+    const DEFAULT: Self = Self {
+        partial_items: 64,
+        partial_bytes: tiamat_core::content::MAX_MOD_BYTES,
+        slice_bytes: tiamat_server::content::SLICE_BYTES,
+    };
+}
+
 /// Accepts one content slice, returning whether it completed an item.
 ///
-/// An `Err` names something the player should see: the server sent slices out
-/// of order, or bytes that do not hash to what was asked for.
+/// An `Err` names something the player should see: the server sent content
+/// nobody asked for, slices out of order, a slice that expands past what one
+/// may carry, more in flight than a client holds, or bytes that do not hash to
+/// what was asked for.
 fn accept_slice(
     pending: &mut Pending,
     cache: &ContentCache,
@@ -2006,6 +2060,27 @@ fn accept_slice(
     offset: u64,
     total_len: u64,
     data: &[u8],
+) -> Result<bool, String> {
+    accept_slice_within(
+        pending,
+        cache,
+        hash,
+        offset,
+        total_len,
+        data,
+        ContentLimits::DEFAULT,
+    )
+}
+
+/// [`accept_slice`] under explicit limits, so a test can reach the caps.
+fn accept_slice_within(
+    pending: &mut Pending,
+    cache: &ContentCache,
+    hash: ContentHash,
+    offset: u64,
+    total_len: u64,
+    data: &[u8],
+    limits: ContentLimits,
 ) -> Result<bool, String> {
     // Bounded before the allocation, not after: `total_len` is a claim.
     if total_len > crate::cache::MAX_ITEM_BYTES {
@@ -2016,19 +2091,68 @@ fn accept_slice(
         ));
     }
 
-    let plain = zstd::decode_all(data).map_err(|err| {
-        format!("the server sent a content slice that would not decompress: {err}")
-    })?;
+    // **Only what was asked for.** Content arrives by hash, and the client
+    // chose every hash it wants; a slice for any other is a server filling
+    // this client's memory and disk with things it has no use for.
+    if !pending.requested.contains(&hash) && !pending.complete.contains_key(&hash) {
+        return Err(
+            "the server pushed content this client never asked for; it was refused.".to_owned(),
+        );
+    }
 
-    let buffer = pending.partial.entry(hash).or_default();
-    if buffer.len() as u64 != offset {
-        let held = buffer.len();
+    // The checks that need no decoding come before the decode.
+    let held = pending.partial.get(&hash).map_or(0, Vec::len);
+    if held as u64 != offset {
         pending.partial.remove(&hash);
         return Err(format!(
             "the server sent content slices out of order (offset {offset} with {held} bytes \
              held); that asset was discarded."
         ));
     }
+    let Some(remaining) = total_len.checked_sub(offset) else {
+        pending.partial.remove(&hash);
+        return Err(format!(
+            "the server sent a content slice past the end of its asset (offset {offset} of \
+             {total_len} bytes); that asset was discarded."
+        ));
+    };
+    if held == 0 && pending.partial.len() >= limits.partial_items {
+        return Err(format!(
+            "the server has {} assets in flight at once, over the limit; it was refused.",
+            pending.partial.len()
+        ));
+    }
+
+    // **The decode is bounded by what the item still needs and what one slice
+    // may carry**, whichever is smaller, plus a byte to tell "exactly full"
+    // from "overran". A frame that would expand past that fails inside the
+    // decoder with nothing larger allocated — however many gigabytes it
+    // claims to hold.
+    let cap = usize::try_from(remaining).map_or(limits.slice_bytes, |remaining| {
+        remaining.min(limits.slice_bytes)
+    });
+    let plain = zstd::bulk::decompress(data, cap + 1).map_err(|err| {
+        format!(
+            "the server sent a content slice that would not decompress within {cap} bytes: {err}"
+        )
+    })?;
+    if plain.len() > cap {
+        return Err(format!(
+            "the server sent a content slice that expands to {} bytes, more than the {cap} it \
+             may carry; it was refused.",
+            plain.len()
+        ));
+    }
+    let buffered: u64 = pending.partial.values().map(|held| held.len() as u64).sum();
+    if buffered + plain.len() as u64 > limits.partial_bytes {
+        return Err(format!(
+            "the server has more content in flight ({} bytes) than this client holds; it was \
+             refused.",
+            buffered + plain.len() as u64
+        ));
+    }
+
+    let buffer = pending.partial.entry(hash).or_default();
     buffer.extend_from_slice(&plain);
 
     if (buffer.len() as u64) < total_len {
@@ -2248,6 +2372,7 @@ async fn want_skins(
     events: &mpsc::UnboundedSender<Event>,
     send: &mut tiamat_server::transport::Link,
     say: &impl Fn(String),
+    pending: &mut Pending,
 ) {
     let fresh: Vec<tiamat_core::proto::ContentHash> = wanted
         .iter()
@@ -2263,9 +2388,7 @@ async fn want_skins(
     }
     let missing = cache.missing(&fresh);
     if !missing.is_empty()
-        && let Err(err) = send
-            .write(&ClientMessage::ContentRequest { hashes: missing })
-            .await
+        && let Err(err) = send.write(&pending.request(missing)).await
     {
         say(format!("could not ask for a skin: {err}"));
     }
@@ -2601,6 +2724,156 @@ mod tests {
         ContentCache::open(&dir).expect("cache")
     }
 
+    /// The join state after the client asked for `hash`.
+    fn pending_for(hash: ContentHash) -> Pending {
+        let mut pending = Pending::default();
+        pending.requested.insert(hash);
+        pending
+    }
+
+    #[test]
+    fn a_slice_that_would_expand_past_its_bound_is_refused_inside_the_decoder() {
+        // A few hundred compressed bytes that stand for four megabytes of
+        // zeros: the zstd bomb. The item claims to be 100 bytes, so the decode
+        // is bounded at 101 and fails there — with nothing larger allocated,
+        // which is why the refusal says "within".
+        let cache = cache("bomb");
+        let plain = vec![0u8; 4 * 1024 * 1024];
+        let hash = tiamat_core::content::hash_bytes(&plain);
+        let compressed = zstd::encode_all(plain.as_slice(), 3).expect("compress");
+        assert!(
+            compressed.len() < 4096,
+            "a bomb is small: {} bytes",
+            compressed.len()
+        );
+
+        let mut pending = pending_for(hash);
+        let err = accept_slice(&mut pending, &cache, hash, 0, 100, &compressed)
+            .expect_err("must be refused");
+        assert!(err.contains("within 100 bytes"), "got {err}");
+        assert!(pending.partial.is_empty(), "nothing was held");
+
+        // Claiming its true size does not help: one slice may not carry more
+        // than the server's slice size, whatever the item's size.
+        let mut pending = pending_for(hash);
+        let err = accept_slice(
+            &mut pending,
+            &cache,
+            hash,
+            0,
+            plain.len() as u64,
+            &compressed,
+        )
+        .expect_err("must be refused");
+        assert!(
+            err.contains(&format!(
+                "within {} bytes",
+                tiamat_server::content::SLICE_BYTES
+            )),
+            "got {err}"
+        );
+        assert!(pending.partial.is_empty());
+        assert!(!cache.contains(&hash), "and nothing reached the disk");
+    }
+
+    #[test]
+    fn content_nobody_asked_for_is_refused_before_it_is_held() {
+        let cache = cache("unrequested");
+        let bytes = b"a file the client never wanted".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        let compressed = zstd::encode_all(bytes.as_slice(), 3).expect("compress");
+
+        let mut pending = Pending::default();
+        let err = accept_slice(
+            &mut pending,
+            &cache,
+            hash,
+            0,
+            bytes.len() as u64,
+            &compressed,
+        )
+        .expect_err("must be refused");
+        assert!(err.contains("never asked for"), "got {err}");
+        assert!(pending.partial.is_empty() && pending.complete.is_empty());
+        assert!(!cache.contains(&hash), "and nothing reached the disk");
+
+        // Asked for, the same bytes are welcome — and `request` is the only
+        // way to ask, so the set cannot drift from what was sent.
+        let message = pending.request(vec![hash]);
+        assert!(
+            matches!(message, ClientMessage::ContentRequest { hashes } if hashes == vec![hash])
+        );
+        let done = accept_slice(
+            &mut pending,
+            &cache,
+            hash,
+            0,
+            bytes.len() as u64,
+            &compressed,
+        )
+        .expect("accepted once asked for");
+        assert!(done);
+    }
+
+    #[test]
+    fn asking_again_for_an_item_starts_it_over() {
+        let cache = cache("ask-again");
+        let bytes: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        let first = zstd::encode_all(&bytes[..100], 3).expect("compress");
+        let second = zstd::encode_all(&bytes[100..], 3).expect("compress");
+
+        let mut pending = pending_for(hash);
+        assert!(!accept_slice(&mut pending, &cache, hash, 0, 200, &first).expect("first half"));
+        assert_eq!(pending.partial[&hash].len(), 100, "half an item is held");
+
+        // The client asks again (a later slice failed, say): the held half is
+        // dropped, so the server's fresh first slice is in order, and the
+        // item completes from the start.
+        let _ = pending.request(vec![hash]);
+        assert!(!pending.partial.contains_key(&hash));
+        assert!(!accept_slice(&mut pending, &cache, hash, 0, 200, &first).expect("again"));
+        assert!(accept_slice(&mut pending, &cache, hash, 100, 200, &second).expect("done"));
+        assert!(cache.contains(&hash));
+    }
+
+    #[test]
+    fn items_in_flight_and_bytes_in_flight_are_capped() {
+        let cache = cache("in-flight");
+        let limits = ContentLimits {
+            partial_items: 2,
+            partial_bytes: 250,
+            slice_bytes: tiamat_server::content::SLICE_BYTES,
+        };
+        let items: Vec<(ContentHash, Vec<u8>)> = (0u8..3)
+            .map(|fill| {
+                let bytes = vec![fill; 200];
+                (tiamat_core::content::hash_bytes(&bytes), bytes)
+            })
+            .collect();
+        let mut pending = Pending::default();
+        pending
+            .requested
+            .extend(items.iter().map(|(hash, _)| *hash));
+        let slice = |pending: &mut Pending, index: usize, offset: u64| {
+            let (hash, bytes) = &items[index];
+            let data = zstd::encode_all(&bytes[offset as usize..offset as usize + 100], 3)
+                .expect("compress");
+            accept_slice_within(pending, &cache, *hash, offset, 200, &data, limits)
+        };
+        assert!(!slice(&mut pending, 0, 0).expect("the first item starts"));
+        assert!(!slice(&mut pending, 1, 0).expect("so does a second"));
+        let err = slice(&mut pending, 2, 0).expect_err("a third in flight is one too many");
+        assert!(err.contains("in flight"), "got {err}");
+        assert_eq!(pending.partial.len(), 2, "and it was not held");
+
+        // 200 bytes are held; a slice that would take the total past 250 is
+        // refused, and the item it belongs to is left as it was.
+        let err = slice(&mut pending, 0, 100).expect_err("over the byte cap");
+        assert!(err.contains("more content in flight"), "got {err}");
+        assert_eq!(pending.partial[&items[0].0].len(), 100);
+    }
+
     fn png(image: &Image) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut encoder = png::Encoder::new(&mut bytes, image.width, image.height);
@@ -2619,7 +2892,7 @@ mod tests {
         let hash = tiamat_core::content::hash_bytes(&bytes);
         let compressed = zstd::encode_all(bytes.as_slice(), 3).expect("compress");
 
-        let mut pending = Pending::default();
+        let mut pending = pending_for(hash);
         let completed = accept_slice(
             &mut pending,
             &cache,
@@ -2643,7 +2916,7 @@ mod tests {
         let sent = b"something else".to_vec();
         let compressed = zstd::encode_all(sent.as_slice(), 3).expect("compress");
 
-        let mut pending = Pending::default();
+        let mut pending = pending_for(asked_for);
         let err = accept_slice(
             &mut pending,
             &cache,
@@ -2667,7 +2940,7 @@ mod tests {
         let hash = tiamat_core::content::hash_bytes(b"whatever");
         let compressed = zstd::encode_all(&b"tail"[..], 3).expect("compress");
 
-        let mut pending = Pending::default();
+        let mut pending = pending_for(hash);
         let err = accept_slice(&mut pending, &cache, hash, 99, 200, &compressed)
             .expect_err("an offset past what we hold is a protocol error");
         assert!(err.contains("out of order"), "got {err}");
@@ -2684,7 +2957,7 @@ mod tests {
         let cache = cache("oversized");
         let hash = tiamat_core::content::hash_bytes(b"x");
 
-        let mut pending = Pending::default();
+        let mut pending = pending_for(hash);
         let err = accept_slice(
             &mut pending,
             &cache,
