@@ -2759,6 +2759,7 @@ impl ServerHandle {
             kicks: tokio::sync::broadcast::channel(64).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             certified: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            registry_rotation_warned: std::sync::atomic::AtomicBool::new(false),
             renames: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             bodies: std::sync::Arc::default(),
             hardness,

@@ -87,6 +87,20 @@ pub struct IdentityRegistry {
     /// resolves which by looking it up, so a bind-then-release between flushes
     /// collapses to one write instead of two.
     dirty_names: BTreeSet<String>,
+
+    /// Bound names that a registry certificate issued (design §5).
+    ///
+    /// **Kept with the binding, not with the connection.** The online set the
+    /// server keeps answers "is this player, here now, certified"; this answers
+    /// "will this binding come back from a certificate at the next join", which
+    /// is the question an operator's RCON `rename` has to ask of a player who
+    /// is not here — renaming them would be undone when they return, and would
+    /// push out whoever had taken the name meanwhile. Every name in here is
+    /// bound: releasing or moving a binding takes its mark with it.
+    certified: BTreeSet<String>,
+    /// Names whose certified mark changed since the last flush, resolved the
+    /// way `dirty_names` is: by looking the mark up at flush time.
+    dirty_certified: BTreeSet<String>,
 }
 
 impl IdentityRegistry {
@@ -131,6 +145,49 @@ impl IdentityRegistry {
         self.names.insert(name.to_owned(), uuid);
     }
 
+    /// Marks a bound name as certified **without** marking it dirty, for
+    /// loading. A name nobody holds is not marked: the mark lives with a
+    /// binding, and there is none.
+    pub fn mark_certified_clean(&mut self, name: &str) {
+        if self.names.contains_key(name) {
+            self.certified.insert(name.to_owned());
+        }
+    }
+
+    /// Whether the binding of `name` is one a registry certificate issued, so
+    /// the identity that holds it gets it back from their certificate at the
+    /// next join whatever this server does to it in the meantime.
+    ///
+    /// Read by RCON `rename`, which refuses such a name whether the player is
+    /// here or not. Not the same question as the server's online set, which
+    /// is about this join and is what `game.player_certified` reads.
+    #[must_use]
+    pub fn is_certified_name(&self, name: &str) -> bool {
+        self.certified.contains(name)
+    }
+
+    /// Drops the certified mark from whatever name `uuid` holds: the identity
+    /// joined without a certificate this server honours, so the binding it
+    /// wears now is this server's, and an operator may move it.
+    pub fn clear_certified(&mut self, uuid: &PlayerUuid) {
+        if let Some(name) = self.name_of(uuid).map(ToOwned::to_owned) {
+            self.unmark_certified(&name);
+        }
+    }
+
+    /// Certified marks changed since the last [`clear_dirty`](Self::clear_dirty).
+    #[must_use]
+    pub fn dirty_certified(&self) -> Vec<String> {
+        self.dirty_certified.iter().cloned().collect()
+    }
+
+    /// Removes a name's certified mark, recording the change for the flush.
+    fn unmark_certified(&mut self, name: &str) {
+        if self.certified.remove(name) {
+            self.dirty_certified.insert(name.to_owned());
+        }
+    }
+
     /// Identities changed since the last [`clear_dirty`](Self::clear_dirty).
     #[must_use]
     pub fn dirty_identities(&self) -> Vec<PlayerUuid> {
@@ -146,7 +203,9 @@ impl IdentityRegistry {
     /// Whether anything is waiting to be written.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_identities.is_empty() || !self.dirty_names.is_empty()
+        !self.dirty_identities.is_empty()
+            || !self.dirty_names.is_empty()
+            || !self.dirty_certified.is_empty()
     }
 
     /// Marks everything flushed.
@@ -157,6 +216,7 @@ impl IdentityRegistry {
     pub fn clear_dirty(&mut self) {
         self.dirty_identities.clear();
         self.dirty_names.clear();
+        self.dirty_certified.clear();
     }
 
     /// The identity a key belongs to, if it is currently authorised.
@@ -223,6 +283,8 @@ impl IdentityRegistry {
                 // otherwise a player could hoard names by reconnecting.
                 if let Some(previous) = self.name_of(&uuid).map(ToOwned::to_owned) {
                     self.names.remove(&previous);
+                    // A mark lives with its binding, so it goes with the name.
+                    self.unmark_certified(&previous);
                     // The release is a change too. Without this the old name
                     // would stay bound in the database after a rename, and a
                     // restart would hand the player back a name they no longer
@@ -298,6 +360,10 @@ impl IdentityRegistry {
     /// can tell them. The certified identity's previous name, if any, is
     /// released: a certified player's name follows the certificate.
     ///
+    /// The bound name is marked certified ([`Self::is_certified_name`]); the
+    /// displaced holder's mark, if a stale certificate had given them one, goes
+    /// with the name they lost, and their variant is unmarked.
+    ///
     /// # Errors
     ///
     /// [`RegistryError::NameTaken`] if every variant up to `most` is held and
@@ -337,6 +403,9 @@ impl IdentityRegistry {
             self.release_name(&previous);
         }
         self.bind_name(display, uuid)?;
+        if self.certified.insert(display.to_owned()) {
+            self.dirty_certified.insert(display.to_owned());
+        }
         let displaced = match (worn, variant) {
             (Some((_, holder)), Some(variant)) => {
                 self.bind_name(&variant, holder)?;
@@ -373,11 +442,13 @@ impl IdentityRegistry {
         })
     }
 
-    /// Releases a name. **Admin operation** (RCON `rename`).
+    /// Releases a name, and its certified mark with it. **Admin operation**
+    /// (RCON `rename`).
     pub fn release_name(&mut self, name: &str) {
         if self.names.remove(name).is_some() {
             self.dirty_names.insert(name.to_owned());
         }
+        self.unmark_certified(name);
     }
 
     /// Every binding, in a stable order.
@@ -825,5 +896,88 @@ mod tests {
         assert_eq!(registry.name_of(&alice.uuid_as_root()), None);
         assert_eq!(registry.name_of(&carol.uuid_as_root()), Some("alice 2"));
         assert_eq!(registry.name_of(&dave.uuid_as_root()), Some("alice 3"));
+    }
+
+    #[test]
+    fn a_certified_binding_is_marked_and_the_mark_goes_with_the_name() {
+        // The mark RCON reads for a player who is not here: set where the
+        // certificate is applied, and gone the moment the binding moves.
+        let alice = identity().uuid_as_root();
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_certified("Alice", "alice", alice, 99)
+            .expect("bind");
+        assert!(registry.is_certified_name("Alice"));
+        assert_eq!(registry.dirty_certified(), vec!["Alice".to_owned()]);
+        registry.clear_dirty();
+
+        // The same certificate again changes nothing that needs writing.
+        registry
+            .bind_certified("Alice", "alice", alice, 99)
+            .expect("rebind");
+        assert!(registry.is_certified_name("Alice"));
+        assert!(!registry.is_dirty());
+
+        // A new name — the identity's own, uncertified — releases the old one
+        // and its mark; the new binding is unmarked.
+        registry.bind_name("Alicia", alice).expect("rename");
+        assert!(!registry.is_certified_name("Alice"));
+        assert!(!registry.is_certified_name("Alicia"));
+        assert_eq!(registry.dirty_certified(), vec!["Alice".to_owned()]);
+
+        // A release takes the mark too.
+        registry
+            .bind_certified("Alice", "alice", alice, 99)
+            .expect("bind again");
+        registry.release_name("Alice");
+        assert!(!registry.is_certified_name("Alice"));
+        assert_eq!(registry.name_holder("Alice"), None);
+    }
+
+    #[test]
+    fn a_displaced_certified_holder_loses_the_mark_with_the_name() {
+        // Two certificates for one name (a stale one, after a rename at the
+        // registry): the newer holder takes it, and the mark is theirs — the
+        // displaced holder's variant is this server's, not the registry's.
+        let alice = identity().uuid_as_root();
+        let bob = identity().uuid_as_root();
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_certified("Alice", "alice", bob, 99)
+            .expect("bob's stale certificate");
+        assert!(registry.is_certified_name("Alice"));
+
+        let bound = registry
+            .bind_certified("Alice", "alice", alice, 99)
+            .expect("alice's");
+        assert_eq!(bound.displaced, Some((bob, "Alice 2".to_owned())));
+        assert_eq!(registry.name_holder("Alice"), Some(alice));
+        assert!(registry.is_certified_name("Alice"), "alice's mark now");
+        assert!(!registry.is_certified_name("Alice 2"));
+    }
+
+    #[test]
+    fn clearing_an_identitys_mark_leaves_its_binding_and_everyone_elses() {
+        let alice = identity().uuid_as_root();
+        let bob = identity().uuid_as_root();
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_certified("Alice", "alice", alice, 99)
+            .expect("alice");
+        registry.bind_certified("Bob", "bob", bob, 99).expect("bob");
+
+        registry.clear_certified(&alice);
+        assert_eq!(registry.name_holder("Alice"), Some(alice));
+        assert!(!registry.is_certified_name("Alice"));
+        assert!(registry.is_certified_name("Bob"));
+
+        // Nothing to clear for an identity with no name, or no mark.
+        registry.clear_certified(&identity().uuid_as_root());
+        registry.clear_certified(&alice);
+        assert!(registry.is_certified_name("Bob"));
+
+        // A load-time mark only lands on a name somebody holds.
+        registry.mark_certified_clean("Nobody");
+        assert!(!registry.is_certified_name("Nobody"));
     }
 }

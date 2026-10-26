@@ -20,7 +20,10 @@
 //! Then the **verifiers**, because a parse that succeeds hands its fields to
 //! them: the server's real decode-then-verify path (`verify_certificate`) at
 //! the certificate's own issue time and at both extremes of `i64`, a rotation
-//! offered to a trust built from the record's own keys, a revocation list
+//! offered to a trust built from the record's own keys, the same bytes read as
+//! the list of rotation records a challenge answer carries and walked from a
+//! pin at the first record's retiring key (`RegistryTrust::advanced_by`, the
+//! server's join path), a revocation list
 //! checked against its own signer, a key-set proof walked from its own root to
 //! its own last key, and every request verified at **its own timestamp** — so
 //! the clock check passes and the signature, ownership and proof checks behind
@@ -33,12 +36,12 @@
 use libfuzzer_sys::fuzz_target;
 use tiamat_core::identity::keyset::commit_to;
 use tiamat_core::identity::registry::{
-    CancelRecoveryRequest, ClaimRequest, EmailRequest, KeySetProof, MAX_CERTIFICATE_BYTES,
-    MAX_CERTIFICATE_LIFETIME_SECONDS, MAX_EMAIL_BYTES, MAX_KEY_SET_LINKS, MAX_KEY_SET_PROOF_BYTES,
-    MAX_NAME_CHARS, MAX_PROVEN_REQUEST_BYTES, MAX_REQUEST_BYTES, MAX_REVOCATIONS, MIN_NAME_CHARS,
-    Name, NameCertificate, REVOCATION_VERSION, RecoveryRequest, RegistryError, RegistryTrust,
-    ReleaseRequest, RevocationList, RotationRecord, Signature64, check_canonical,
-    check_email_address, verify_certificate, verify_key_set_proof,
+    CancelRecoveryRequest, ClaimRequest, EmailRequest, KeySetProof, MAX_CARRIED_ROTATIONS,
+    MAX_CERTIFICATE_BYTES, MAX_CERTIFICATE_LIFETIME_SECONDS, MAX_EMAIL_BYTES, MAX_KEY_SET_LINKS,
+    MAX_KEY_SET_PROOF_BYTES, MAX_NAME_CHARS, MAX_PROVEN_REQUEST_BYTES, MAX_REQUEST_BYTES,
+    MAX_REVOCATIONS, MIN_NAME_CHARS, Name, NameCertificate, REVOCATION_VERSION, RecoveryRequest,
+    RegistryError, RegistryTrust, ReleaseRequest, RevocationList, RotationRecord, Signature64,
+    check_canonical, check_email_address, verify_certificate, verify_key_set_proof,
 };
 use tiamat_core::identity::{PlayerUuid, public_key_from_bytes};
 
@@ -49,6 +52,7 @@ fuzz_target!(|data: &[u8]| {
     certificate(data);
     revocation_list(data);
     rotation(data);
+    rotation_chain(data);
     key_set_proof(data);
     claim(data);
     release(data);
@@ -175,6 +179,70 @@ fn rotation(data: &[u8]) {
             &retiring,
             "a refused rotation moved the trust"
         );
+    }
+}
+
+/// The bytes as the rotation records a challenge answer carries — each a
+/// little-endian `u16` length and that many bytes, up to one past the cap so the
+/// cap itself is reached — walked from a pin at the first record's retiring key
+/// committed to its successor, the one pin that lets the walk reach
+/// `accept_rotation`.
+///
+/// The property is the security one: whatever the chain, trust only ever flows
+/// from the pin. An accepted chain retired at most as many keys as it carried,
+/// and the first key it retired is the pin's.
+fn rotation_chain(data: &[u8]) {
+    let mut records: Vec<&[u8]> = Vec::new();
+    let mut rest = data;
+    while records.len() <= MAX_CARRIED_ROTATIONS {
+        let [low, high, tail @ ..] = rest else {
+            break;
+        };
+        let len = usize::from(u16::from_le_bytes([*low, *high])).min(tail.len());
+        let (record, after) = tail.split_at(len);
+        records.push(record);
+        rest = after;
+    }
+    let pin = records
+        .first()
+        .and_then(|first| RotationRecord::from_bytes(first).ok())
+        .and_then(|first| {
+            let retiring = public_key_from_bytes(&first.retired).ok()?;
+            let commitment = public_key_from_bytes(&first.successor)
+                .ok()
+                .map(|successor| commit_to(&successor));
+            Some(RegistryTrust::new(retiring, commitment))
+        });
+    let Some(pin) = pin else {
+        return;
+    };
+    for now in [EXTREMES[0], 0, EXTREMES[1]] {
+        match pin.advanced_by(&records, now) {
+            Ok(advanced) => {
+                assert!(
+                    records.len() <= MAX_CARRIED_ROTATIONS,
+                    "a chain over the cap was accepted"
+                );
+                assert!(
+                    advanced.retired().len() <= records.len(),
+                    "a chain retired more keys than it carried"
+                );
+                if let Some(first) = advanced.retired().first() {
+                    assert_eq!(
+                        &first.key,
+                        pin.current(),
+                        "an accepted chain did not start at the pin"
+                    );
+                }
+            }
+            Err(RegistryError::TooManyRotations { found }) => {
+                assert!(
+                    found > MAX_CARRIED_ROTATIONS,
+                    "a chain under the cap refused as over it"
+                );
+            }
+            Err(_) => {}
+        }
     }
 }
 

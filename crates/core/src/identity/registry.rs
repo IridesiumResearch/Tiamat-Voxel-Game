@@ -93,6 +93,16 @@ pub const MAX_CERTIFICATE_BYTES: usize = 256;
 /// Largest registry rotation record read at all, in bytes.
 pub const MAX_ROTATION_BYTES: usize = 512;
 
+/// Most rotation records a client may carry to a server with its certificate.
+///
+/// A server that never calls home learns of a registry rotation only from a
+/// player ([`RegistryTrust::advanced_by`]), so a client carries the records it
+/// fetched with its renewal. The registry rotates rarely — on a schedule
+/// measured in years, or at once if a key leaks — so four records reach back
+/// past any key a running server could still pin, and the cap is what keeps a
+/// join from being a request to verify an unbounded chain of signatures.
+pub const MAX_CARRIED_ROTATIONS: usize = 4;
+
 /// Largest player request read at all, in bytes, before any key-set proof.
 ///
 /// An 18-character claim with every field at its limit is under two hundred
@@ -369,6 +379,42 @@ pub enum RegistryError {
         /// How many it held.
         found: usize,
     },
+
+    /// More rotation records than [`MAX_CARRIED_ROTATIONS`].
+    #[error(
+        "{found} registry rotation records were carried, and {MAX_CARRIED_ROTATIONS} is the most \
+         accepted"
+    )]
+    TooManyRotations {
+        /// How many were carried.
+        found: usize,
+    },
+
+    /// One record of a carried rotation chain was refused.
+    #[error("registry rotation record {index} was refused: {source}")]
+    RotationRefused {
+        /// Its place in the chain, from zero.
+        index: usize,
+        /// Why.
+        source: Box<RegistryError>,
+    },
+
+    /// A carried rotation chain whose records do not follow on from each other:
+    /// one hands over from a key the record before did not hand over to, or is
+    /// stamped before it. A replayed record and one out of order are both this.
+    #[error("registry rotation record {index} does not follow on from the one before it")]
+    RotationChainBroken {
+        /// The record that does not follow, from zero.
+        index: usize,
+    },
+
+    /// A carried rotation chain that never reaches the key this build trusts.
+    #[error("the registry rotation records do not reach the registry key this build trusts")]
+    RotationChainUnrelated,
+
+    /// A rotation stamped later than this clock, beyond the skew.
+    #[error("the registry rotation record is stamped in the future")]
+    RotationNotYet,
 }
 
 /// A 64-byte `Ed25519` signature, on the wire.
@@ -904,6 +950,101 @@ impl RegistryTrust {
         Ok(())
     }
 
+    /// This trust advanced through the rotation records a client carried, for
+    /// verifying the certificate they rode with (design §5); `self` is left as
+    /// it was.
+    ///
+    /// # Why a client carries them
+    ///
+    /// A server checks names offline against the key its operator pinned, so
+    /// the registry's first rotation would otherwise make every certificate
+    /// issued under the successor untrusted on every server until each operator
+    /// edited `server.toml`. The registry publishes a record when it hands over
+    /// to its committed successor and a client fetches it with its renewal, so
+    /// the player who needs the newer key is the one who brings the proof of
+    /// it. **The proof, not the claim:** the trust that results is exactly what
+    /// [`Self::accept_rotation`] would build from the pin, and nothing a client
+    /// can say moves it further.
+    ///
+    /// Applied to a copy, per join. The pin is the operator's, and changes only
+    /// when they change it: a client cannot advance the trust other players are
+    /// checked against, and a server keeps no memory a forged record could
+    /// poison.
+    ///
+    /// # What is accepted
+    ///
+    /// The records are one contiguous chain, oldest first: each hands over from
+    /// the key the record before handed over to, no earlier than it, and none
+    /// is stamped beyond the clock skew. The chain must reach this trust's
+    /// current key, either as a record's retiring key or as the last record's
+    /// successor. Records before that point are history this trust has already
+    /// moved past — a server whose operator pinned a newer key than the oldest
+    /// one a client still carries — and are neither verified nor trusted; every
+    /// record from that point on goes through [`Self::accept_rotation`], so the
+    /// retiring key's signature and the commitment decide, and an
+    /// out-of-order, repeated or forged record refuses the whole chain. A key
+    /// the chain retires is held to the same ninety-day bound as any retired
+    /// key, from the time its record carries.
+    ///
+    /// The number of records the result moved past the pin is
+    /// `result.retired().len() - self.retired().len()`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::TooManyRotations`] past [`MAX_CARRIED_ROTATIONS`];
+    /// [`RegistryError::RotationRefused`] naming the record that failed to
+    /// parse, was stamped in the future ([`RegistryError::RotationNotYet`]), or
+    /// was refused by [`Self::accept_rotation`];
+    /// [`RegistryError::RotationChainBroken`] for records that do not follow on;
+    /// and [`RegistryError::RotationChainUnrelated`] for a chain that never
+    /// reaches this trust's key.
+    pub fn advanced_by<R: AsRef<[u8]>>(
+        &self,
+        records: &[R],
+        now: i64,
+    ) -> Result<Self, RegistryError> {
+        if records.len() > MAX_CARRIED_ROTATIONS {
+            return Err(RegistryError::TooManyRotations {
+                found: records.len(),
+            });
+        }
+        let refused = |index: usize, source: RegistryError| RegistryError::RotationRefused {
+            index,
+            source: Box::new(source),
+        };
+        let mut chain: Vec<RotationRecord> = Vec::with_capacity(records.len());
+        for (index, bytes) in records.iter().enumerate() {
+            let record =
+                RotationRecord::from_bytes(bytes.as_ref()).map_err(|err| refused(index, err))?;
+            if record.rotated_at > now.saturating_add(CLOCK_SKEW_SECONDS) {
+                return Err(refused(index, RegistryError::RotationNotYet));
+            }
+            if let Some(previous) = chain.last()
+                && (record.retired != previous.successor || record.rotated_at < previous.rotated_at)
+            {
+                return Err(RegistryError::RotationChainBroken { index });
+            }
+            chain.push(record);
+        }
+        let Some(last) = chain.last() else {
+            return Ok(self.clone());
+        };
+        let pinned = self.current.to_bytes();
+        let start = match chain.iter().position(|record| record.retired == pinned) {
+            Some(start) => start,
+            // Every record is history: the operator has pinned where it ends.
+            None if last.successor == pinned => chain.len(),
+            None => return Err(RegistryError::RotationChainUnrelated),
+        };
+        let mut advanced = self.clone();
+        for (index, record) in chain.iter().enumerate().skip(start) {
+            advanced
+                .accept_rotation(record)
+                .map_err(|err| refused(index, err))?;
+        }
+        Ok(advanced)
+    }
+
     /// The key that may sign a record valid from `issued` to `valid_until`, if
     /// this build trusts it: the current key, or a retired key for a record
     /// issued before it was retired **and** ending no later than an honest
@@ -1041,6 +1182,22 @@ impl RotationRecord {
             });
         }
         Ok(record)
+    }
+
+    /// Writes the record in the postcard wire form [`Self::from_bytes`] reads —
+    /// what the registry publishes and a client carries to a server
+    /// ([`RegistryTrust::advanced_by`]).
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Malformed`] if `postcard` refuses the value. Every
+    /// field is fixed-size, so this is unreachable; it is a `Result` rather
+    /// than a panic because the rule is that core does not panic on data.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RegistryError> {
+        postcard::to_allocvec(self).map_err(|err| RegistryError::Malformed {
+            what: "rotation record",
+            detail: err.to_string(),
+        })
     }
 
     /// The bytes the retiring key signs.
@@ -2723,6 +2880,209 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// The wire form of a rotation record, as a client carries it.
+    fn wire(record: &RotationRecord) -> Vec<u8> {
+        let bytes = record.to_bytes().expect("encode");
+        assert_eq!(RotationRecord::from_bytes(&bytes).as_ref(), Ok(record));
+        bytes
+    }
+
+    /// The registry's keys 1 → 2 → 3, each committed to by the one before, and
+    /// the two records that join them.
+    fn two_rotations() -> (Vec<SigningKey>, Vec<RotationRecord>) {
+        let keys: Vec<SigningKey> = (1..=4).map(registry_key).collect();
+        let first = rotation(
+            &keys[0],
+            &keys[1],
+            Some(commit_to(&keys[2].verifying_key())),
+            NOW - 1_000,
+        );
+        let second = rotation(
+            &keys[1],
+            &keys[2],
+            Some(commit_to(&keys[3].verifying_key())),
+            NOW - 500,
+        );
+        (keys, vec![first, second])
+    }
+
+    #[test]
+    fn a_carried_chain_advances_a_copy_and_never_the_pin() {
+        let (keys, records) = two_rotations();
+        let pin = RegistryTrust::new(
+            keys[0].verifying_key(),
+            Some(commit_to(&keys[1].verifying_key())),
+        );
+        let carried: Vec<Vec<u8>> = records.iter().map(wire).collect();
+
+        let advanced = pin.advanced_by(&carried, NOW).expect("a genuine chain");
+        assert_eq!(advanced.current(), &keys[2].verifying_key());
+        assert_eq!(
+            advanced.next_commitment(),
+            Some(commit_to(&keys[3].verifying_key()))
+        );
+        assert_eq!(advanced.retired().len() - pin.retired().len(), 2);
+        assert_eq!(advanced.retired()[0].retired_at, NOW - 1_000);
+
+        // The pin is untouched: the next join starts from it again.
+        assert_eq!(pin.current(), &keys[0].verifying_key());
+        assert!(pin.retired().is_empty());
+
+        // Nothing carried is the pin itself.
+        let none: [Vec<u8>; 0] = [];
+        let same = pin.advanced_by(&none, NOW).expect("no records");
+        assert_eq!(same.current(), pin.current());
+        assert!(same.retired().is_empty());
+    }
+
+    #[test]
+    fn history_before_the_pin_is_passed_over_and_trusted_for_nothing() {
+        // A server whose operator pinned the second key, and a client that
+        // still carries the registry's whole list.
+        let (keys, records) = two_rotations();
+        let carried: Vec<Vec<u8>> = records.iter().map(wire).collect();
+        let pin = RegistryTrust::new(
+            keys[1].verifying_key(),
+            Some(commit_to(&keys[2].verifying_key())),
+        );
+        let advanced = pin.advanced_by(&carried, NOW).expect("from the pin on");
+        assert_eq!(advanced.current(), &keys[2].verifying_key());
+        assert_eq!(advanced.retired().len(), 1, "only the link from the pin");
+        assert_eq!(advanced.retired()[0].key, keys[1].verifying_key());
+
+        // Pinned at the end already: every record is history, and the first
+        // key — which this server never trusted — is not trusted now.
+        let up_to_date = RegistryTrust::new(
+            keys[2].verifying_key(),
+            Some(commit_to(&keys[3].verifying_key())),
+        );
+        let same = up_to_date.advanced_by(&carried, NOW).expect("all history");
+        assert_eq!(same.current(), &keys[2].verifying_key());
+        assert!(same.retired().is_empty());
+        let alice = player(1);
+        let old = certificate(&keys[0], &alice, "alice", "Alice", NOW - 2_000, 1);
+        assert_eq!(
+            verify_certificate(&bytes(&old), &alice.uuid_as_root(), NOW, &same, None),
+            Err(RegistryError::UntrustedRegistryKey)
+        );
+    }
+
+    #[test]
+    fn a_carried_chain_is_refused_unless_every_link_holds() {
+        let (keys, records) = two_rotations();
+        let pin = RegistryTrust::new(
+            keys[0].verifying_key(),
+            Some(commit_to(&keys[1].verifying_key())),
+        );
+        let refused = |index: usize, source: RegistryError| {
+            Err(RegistryError::RotationRefused {
+                index,
+                source: Box::new(source),
+            })
+        };
+        let advance = |chain: &[RotationRecord]| {
+            let carried: Vec<Vec<u8>> = chain.iter().map(wire).collect();
+            pin.advanced_by(&carried, NOW).map(|trust| trust.current)
+        };
+
+        // Out of order, and the same record twice.
+        assert_eq!(
+            advance(&[records[1].clone(), records[0].clone()]),
+            Err(RegistryError::RotationChainBroken { index: 1 })
+        );
+        assert_eq!(
+            advance(&[records[0].clone(), records[0].clone()]),
+            Err(RegistryError::RotationChainBroken { index: 1 })
+        );
+        // Linked, but stamped before the record it follows.
+        let mut early = records[1].clone();
+        early.rotated_at = records[0].rotated_at - 1;
+        early.sign(&keys[1]);
+        assert_eq!(
+            advance(&[records[0].clone(), early]),
+            Err(RegistryError::RotationChainBroken { index: 1 })
+        );
+        // A chain that never touches the pin.
+        assert_eq!(
+            advance(&[rotation(&keys[3], &keys[2], None, NOW)]),
+            Err(RegistryError::RotationChainUnrelated)
+        );
+        // Naming the pin as the retiring key, signed by somebody else.
+        let mut forged = rotation(&keys[3], &keys[1], None, NOW);
+        forged.retired = keys[0].verifying_key().to_bytes();
+        assert_eq!(
+            advance(&[forged]),
+            refused(0, RegistryError::SignatureInvalid)
+        );
+        // Signed by the pin, to a successor it never committed to.
+        assert_eq!(
+            advance(&[rotation(&keys[0], &keys[3], None, NOW)]),
+            refused(0, RegistryError::SuccessorMismatch)
+        );
+        // A genuine first link does not carry a bad second one.
+        assert_eq!(
+            advance(&[records[0].clone(), rotation(&keys[1], &keys[3], None, NOW)]),
+            refused(1, RegistryError::SuccessorMismatch)
+        );
+        // Stamped in the future, beyond the skew.
+        assert_eq!(
+            advance(&[rotation(
+                &keys[0],
+                &keys[1],
+                None,
+                NOW + CLOCK_SKEW_SECONDS + 1
+            )]),
+            refused(0, RegistryError::RotationNotYet)
+        );
+
+        // Over the count cap, before a single record is read.
+        let five = vec![wire(&records[0]); MAX_CARRIED_ROTATIONS + 1];
+        assert_eq!(
+            pin.advanced_by(&five, NOW).map(|trust| trust.current),
+            Err(RegistryError::TooManyRotations {
+                found: MAX_CARRIED_ROTATIONS + 1
+            })
+        );
+        // A record over its byte cap, before it is decoded.
+        let huge = vec![vec![0u8; MAX_ROTATION_BYTES + 1]];
+        assert!(matches!(
+            pin.advanced_by(&huge, NOW),
+            Err(RegistryError::RotationRefused { index: 0, ref source })
+                if matches!(**source, RegistryError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn a_retired_key_keeps_its_ninety_day_bound_through_a_carried_chain() {
+        let (keys, records) = two_rotations();
+        let pin = RegistryTrust::new(
+            keys[0].verifying_key(),
+            Some(commit_to(&keys[1].verifying_key())),
+        );
+        let carried = vec![wire(&records[0])];
+        let advanced = pin.advanced_by(&carried, NOW).expect("one link");
+        let retired_at = records[0].rotated_at;
+        let alice = player(1);
+        let uuid = alice.uuid_as_root();
+
+        // Issued before the rotation and within the bound: honoured.
+        let mut honest = certificate(&keys[0], &alice, "alice", "Alice", retired_at - 10, 1);
+        honest.expires = retired_at + CERTIFICATE_LIFETIME_SECONDS;
+        honest.sign(&keys[0]);
+        assert!(verify_certificate(&bytes(&honest), &uuid, NOW, &advanced, None).is_ok());
+
+        // Issued before it, but running a second past the bound: refused, though
+        // the pin alone — where the first key is still current — would take it.
+        let mut stretched = honest.clone();
+        stretched.expires = retired_at + CERTIFICATE_LIFETIME_SECONDS + 1;
+        stretched.sign(&keys[0]);
+        assert_eq!(
+            verify_certificate(&bytes(&stretched), &uuid, NOW, &advanced, None),
+            Err(RegistryError::UntrustedRegistryKey)
+        );
+        assert!(verify_certificate(&bytes(&stretched), &uuid, NOW, &pin, None).is_ok());
     }
 
     /// A claim for alice, mined at `bits` and signed.

@@ -322,6 +322,14 @@ pub struct Shared {
     /// count, so a connection that ends by any path leaves both.
     pub certified: std::sync::Mutex<std::collections::BTreeSet<PlayerUuid>>,
 
+    /// Whether the operator has been told that a join proved a registry
+    /// rotation past what `server.toml` pins (design §5).
+    ///
+    /// Once per process: every renewed player after a rotation carries the same
+    /// records, and a warning on each of their joins would bury the log the
+    /// operator needs to read. See [`Self::note_registry_rotation`].
+    pub registry_rotation_warned: std::sync::atomic::AtomicBool,
+
     /// Names the registry has bound to a live identity since it joined.
     ///
     /// A certified join displaces the uncertified holder of its name (design
@@ -3682,6 +3690,61 @@ impl Shared {
         }
     }
 
+    /// Tells the operator, the first time it happens in this process, that a
+    /// join proved the name registry has rotated past the key `server.toml`
+    /// pins, and what to pin instead. Answers whether this call told them.
+    ///
+    /// **Why the operator, and why only told.** Each join applies the records
+    /// its player carried to a copy of the pin, so nobody is turned away; but
+    /// a join that leaves the records off is still checked against the retired
+    /// key as if it were current, with none of the ninety-day bound a retired
+    /// key is held to. Only the operator can change the pin, and a client must
+    /// never be able to, so the server says what the file should hold and
+    /// when pinning it costs nobody their name.
+    pub fn note_registry_rotation(
+        &self,
+        seen: &tiamat_core::session::RegistryRotationSeen,
+        now: i64,
+    ) -> bool {
+        if self.registry_rotation_warned.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        let next = seen.next_key_hash_hex();
+        let next_line = next.as_deref().map_or_else(
+            || {
+                "and remove registry_next_key_hash (the new key committed to no successor)"
+                    .to_owned()
+            },
+            |hash| format!("and registry_next_key_hash = \"{hash}\""),
+        );
+        // Whole days, rounded up, so a few hours left is not "0 days".
+        let days = seen
+            .old_certificates_lapse_at()
+            .saturating_sub(now)
+            .max(0)
+            .saturating_add(24 * 60 * 60 - 1)
+            / (24 * 60 * 60);
+        let when = if days == 0 {
+            "every one of them has lapsed, so pin it now".to_owned()
+        } else {
+            format!(
+                "the last of them lapses in {days} days, so pin it then, or now if the retired \
+                 key was stolen"
+            )
+        };
+        warn!(
+            registry_key = %seen.current_hex(),
+            registry_next_key_hash = next.as_deref().unwrap_or("none"),
+            "the name registry has rotated its key past the one server.toml pins: a player \
+             carried the signed rotation. Joins that carry it are checked against the new key \
+             already; one that leaves it off is still checked against the retired key, \
+             unbounded. Set registry_key = \"{}\" {next_line} in server.toml. Certificates the \
+             retired key issued stop verifying here once you do; {when}",
+            seen.current_hex(),
+        );
+        true
+    }
+
     /// Renames a live player after the registry binding moved their name.
     ///
     /// Design §5: a certified holder takes the name, the uncertified holder is
@@ -4275,6 +4338,13 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
             };
             session.handle(&message, &context, &auth, &mut identities)
         };
+
+        // **A join may have proved the registry rotated** past the key this
+        // server pins. The join itself was checked against the chain's end;
+        // telling the operator is the server's, once.
+        if let Some(seen) = session.take_registry_rotation() {
+            shared.note_registry_rotation(&seen, unix_now());
+        }
 
         // **A certified join may have taken somebody else's name**, and that
         // somebody is on another connection. Core decides the rename and
@@ -5129,6 +5199,7 @@ mod tests {
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             certified: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            registry_rotation_warned: std::sync::atomic::AtomicBool::new(false),
             renames: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             bodies: Arc::default(),
             tools: std::collections::BTreeMap::new(),
@@ -5361,6 +5432,31 @@ mod tests {
             shared.online_players().is_empty(),
             "the roster and the count must be released together"
         );
+    }
+
+    #[test]
+    fn a_registry_rotation_is_told_to_the_operator_once_per_process() {
+        // Every renewed player carries the same records after a rotation; the
+        // operator needs the line once, not once per join.
+        let shared = shared();
+        let seen = tiamat_core::session::RegistryRotationSeen {
+            current: [0x11; 32],
+            next_key_hash: Some([0x22; 32]),
+            retired_at: 1_000,
+        };
+        assert!(
+            shared.note_registry_rotation(&seen, 2_000),
+            "the first tells"
+        );
+        assert!(
+            !shared.note_registry_rotation(&seen, 3_000),
+            "the rest do not"
+        );
+        let other = tiamat_core::session::RegistryRotationSeen {
+            next_key_hash: None,
+            ..seen
+        };
+        assert!(!shared.note_registry_rotation(&other, 3_000));
     }
 
     #[test]

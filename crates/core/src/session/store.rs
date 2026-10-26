@@ -22,6 +22,19 @@
 //! transaction has committed. Clearing first would mean a failed write leaves
 //! the registry believing the database already has the change, and the binding
 //! would be lost at the next restart with nothing logged.
+//!
+//! # Where a certified mark is kept
+//!
+//! A binding a registry certificate issued is marked so (design §5), and the
+//! mark must outlive the connection: RCON `rename` refuses it for a player who
+//! is not here. It is one `meta` row per marked name, keyed
+//! [`CERTIFIED_META_PREFIX`] + the name, whose value is the holder's UUID in
+//! hex — empty once the mark is gone, since a mark is only ever cleared by a
+//! later write. A row is honoured on load only when that UUID still holds the
+//! name, so a binding moved by a build that knew nothing of marks (a downgrade
+//! and back) is not left wearing someone else's. Kept out of `player_names`
+//! so it needed no schema change, and an older build reading this world sees
+//! the names it always did.
 
 use ed25519_dalek::VerifyingKey;
 
@@ -66,6 +79,17 @@ pub enum StoreError {
         /// Why the set was refused.
         reason: String,
     },
+}
+
+/// The `meta` key a certified name's mark is kept under, before the name.
+///
+/// See the module docs. Public so a tool reading a world file can find the
+/// marks; nothing but this module writes them.
+pub const CERTIFIED_META_PREFIX: &str = "certified_name:";
+
+/// The `meta` key for one name's certified mark.
+fn certified_key(name: &str) -> String {
+    format!("{CERTIFIED_META_PREFIX}{name}")
 }
 
 /// What a [`load`] found, including what it had to skip.
@@ -121,6 +145,15 @@ pub fn load(db: &WorldDb) -> Result<(IdentityRegistry, LoadReport), StoreError> 
                 if registry.contains(&uuid) {
                     registry.bind_name_clean(&name, uuid);
                     report.names += 1;
+                    // The mark, if this binding has one and it is still this
+                    // holder's — see the module docs.
+                    let marked = db
+                        .meta(&certified_key(&name))?
+                        .and_then(|value| String::from_utf8(value).ok())
+                        .and_then(|text| PlayerUuid::from_hex(&text).ok());
+                    if marked == Some(uuid) {
+                        registry.mark_certified_clean(&name);
+                    }
                 } else {
                     report.skipped.push(StoreError::BadKeySet {
                         uuid: uuid_text,
@@ -179,6 +212,16 @@ pub fn flush(db: &WorldDb, registry: &mut IdentityRegistry) -> Result<(), StoreE
             // Absent from the registry means released, so the row goes too.
             None => db.release_name(&name)?,
         }
+    }
+
+    // After the names, so a mark is never written for a binding the database
+    // does not have yet.
+    for name in registry.dirty_certified() {
+        let holder = registry
+            .name_holder(&name)
+            .filter(|_| registry.is_certified_name(&name));
+        let value = holder.map(|uuid| uuid.to_hex()).unwrap_or_default();
+        db.set_meta(&certified_key(&name), value.as_bytes())?;
     }
 
     // Last, and only on success — see the module docs.
@@ -549,6 +592,72 @@ mod tests {
         assert_eq!(restored.name_holder("Ghost"), None);
         assert_eq!(report.names, 0);
         assert_eq!(report.skipped.len(), 1);
+        db.close().expect("close");
+    }
+
+    #[test]
+    fn a_certified_mark_survives_a_restart_and_so_does_its_clearing() {
+        // RCON refuses to rename a certified player who is not here, so the
+        // mark has to be there after a restart — and has to stay gone once an
+        // uncertified join cleared it, or the refusal would outlive its reason.
+        let path = world_path("certified-mark");
+        let alice = Identity::generate().expect("generate");
+        let uuid = alice.uuid_as_root();
+
+        let db = open(&path);
+        let mut registry = alice_registry(&alice);
+        registry
+            .bind_certified("Alice", "alice", uuid, 99)
+            .expect("bind");
+        flush(&db, &mut registry).expect("flush");
+        db.close().expect("close");
+
+        let db = open(&path);
+        let (mut restored, report) = load(&db).expect("load");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(restored.name_holder("Alice"), Some(uuid));
+        assert!(restored.is_certified_name("Alice"), "the mark must reload");
+        assert!(!restored.is_dirty(), "a reloaded mark is not a change");
+
+        restored.clear_certified(&uuid);
+        flush(&db, &mut restored).expect("flush");
+        db.close().expect("close");
+
+        let db = open(&path);
+        let (restored, _) = load(&db).expect("load");
+        assert_eq!(restored.name_holder("Alice"), Some(uuid), "the name stays");
+        assert!(
+            !restored.is_certified_name("Alice"),
+            "the clearing must stick"
+        );
+        db.close().expect("close");
+    }
+
+    #[test]
+    fn a_mark_whose_name_moved_without_it_is_not_honoured() {
+        // A build that knew nothing of marks (a downgrade, and back) can move a
+        // name and leave the old holder's row behind. The row names its holder,
+        // so it is ignored rather than handed to whoever wears the name now.
+        let path = world_path("stale-mark");
+        let alice = Identity::generate().expect("generate");
+        let bob = Identity::generate().expect("generate");
+
+        let db = open(&path);
+        let mut registry = alice_registry(&alice);
+        registry.insert(KeySet::new(bob.public_key(), None, 0));
+        registry
+            .bind_certified("Alice", "alice", alice.uuid_as_root(), 99)
+            .expect("bind");
+        flush(&db, &mut registry).expect("flush");
+        // The older build's rename: the binding row alone.
+        db.set_name("Alice", &bob.uuid_as_root().to_string())
+            .expect("move the binding behind the registry's back");
+        db.close().expect("close");
+
+        let db = open(&path);
+        let (restored, _) = load(&db).expect("load");
+        assert_eq!(restored.name_holder("Alice"), Some(bob.uuid_as_root()));
+        assert!(!restored.is_certified_name("Alice"));
         db.close().expect("close");
     }
 }

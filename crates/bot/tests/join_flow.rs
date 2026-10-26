@@ -332,6 +332,7 @@ fn a_replayed_signature_is_rejected() {
             .send(&ClientMessage::AuthResponse {
                 signature: captured,
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             })
             .await
             .expect("send");
@@ -347,6 +348,7 @@ fn a_replayed_signature_is_rejected() {
             .send(&ClientMessage::AuthResponse {
                 signature: captured,
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             })
             .await
             .expect("send");

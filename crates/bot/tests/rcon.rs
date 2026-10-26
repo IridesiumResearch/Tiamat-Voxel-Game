@@ -27,10 +27,23 @@ fn start_with(
     sticky_names: bool,
     registry_trust: Option<RegistryTrust>,
 ) -> (ServerHandle, std::net::SocketAddr) {
-    let dir = std::env::temp_dir().join("tiamat-rcon-tests").join(name);
+    let dir = world_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
+    start_in(dir, sticky_names, registry_trust)
+}
 
+/// Where the test called `name` keeps its world.
+fn world_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join("tiamat-rcon-tests").join(name)
+}
+
+/// [`start_with`] on a world that is already there, for a restart.
+fn start_in(
+    dir: std::path::PathBuf,
+    sticky_names: bool,
+    registry_trust: Option<RegistryTrust>,
+) -> (ServerHandle, std::net::SocketAddr) {
     // Port 0 for RCON too, so tests can run in parallel.
     let rcon_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
     let listener = std::net::TcpListener::bind(rcon_addr).expect("probe a free port");
@@ -469,6 +482,97 @@ fn rename_is_refused_on_a_player_whose_name_the_registry_issued() {
         alice.disconnect().await;
     });
 
+    server.stop();
+}
+
+#[test]
+fn rename_is_refused_on_a_certified_player_who_is_away_even_after_a_restart() {
+    // The offline half of design §5's refusal (review C8): a rename while the
+    // holder is away would be undone at their next join and would push out
+    // whoever had been given the name. The mark lives with the binding, so it
+    // outlasts the connection and the process — and it goes once the same
+    // identity comes back uncertified, when the name is this server's to move.
+    let registry = ed25519_dalek::SigningKey::from_bytes(&[0x6C; 32]);
+    let trust = RegistryTrust::new(registry.verifying_key(), None);
+    let name = "certified-rename-away";
+    let (server, rcon_addr) = start_with(name, false, Some(trust.clone()));
+    let identity = Identity::generate().expect("identity");
+    let seed = identity.seed();
+    let uuid = identity.uuid_as_root();
+
+    block_on(async {
+        let certificate = NameCertificate::issue(
+            &registry,
+            &Name::from_parts("alice", "Alice").expect("a valid name"),
+            uuid,
+            unix_now(),
+            1,
+        )
+        .to_bytes()
+        .expect("a certificate encodes");
+        let mut alice = Bot::connect(server.local_addr(), identity, server.cert_fingerprint())
+            .await
+            .expect("connect");
+        alice
+            .join_with_certificate("anything", &certificate)
+            .await
+            .expect("join");
+        alice.disconnect().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while server
+            .shared()
+            .online_players()
+            .iter()
+            .any(|(who, _)| *who == uuid)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "alice never left");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !server.shared().is_certified(&uuid),
+            "the live mark left with her"
+        );
+
+        let mut admin = Admin::connect(rcon_addr).await;
+        admin.authenticate().await;
+        let reply = admin.send("rename Alice Alicia").await;
+        assert!(reply.starts_with("error:"), "got `{reply}`");
+        assert!(
+            reply.contains("registry") && reply.contains("next time they join"),
+            "the refusal must say why, got `{reply}`"
+        );
+    });
+    server.stop();
+
+    // A restart reads the mark back with the binding.
+    let (server, rcon_addr) = start_in(world_dir(name), false, Some(trust));
+    block_on(async {
+        let mut admin = Admin::connect(rcon_addr).await;
+        admin.authenticate().await;
+        let reply = admin.send("rename Alice Alicia").await;
+        assert!(
+            reply.starts_with("error:") && reply.contains("registry"),
+            "the mark must survive a restart, got `{reply}`"
+        );
+
+        // Back without a certificate: still `Alice`, but this server's now.
+        let mut alice = Bot::connect(
+            server.local_addr(),
+            Identity::from_seed(&seed),
+            server.cert_fingerprint(),
+        )
+        .await
+        .expect("connect");
+        alice.join("Alice").await.expect("an uncertified rejoin");
+        {
+            let identities = server.shared().identities.lock().await;
+            assert_eq!(identities.name_holder("Alice"), Some(uuid));
+            assert!(!identities.is_certified_name("Alice"));
+        }
+        alice.disconnect().await;
+        let reply = admin.send("rename Alice Alicia").await;
+        assert_eq!(reply, "ok: Alice is now Alicia", "got `{reply}`");
+    });
     server.stop();
 }
 

@@ -111,6 +111,13 @@ pub const PROTOCOL_VERSION: u32 = 94;
 // instead of the `VersionMismatch` that tells a player to update. The challenge
 // answer only ever travels between peers that already agreed on a version, so a
 // field appended to it is safe. `Hello`'s shape never changes; a test pins it.
+// Then `registry_rotations`, appended after the certificate (still v94, which
+// had not shipped): the registry's rotation records the client fetched with its
+// renewal, at most `MAX_REGISTRY_ROTATIONS` of at most
+// `MAX_REGISTRY_ROTATION_BYTES` each. The session applies them to a copy of its
+// pinned registry trust before it verifies the certificate, so a registry
+// rotation reaches a server that never calls home with the first player who
+// needs it, and the server's own pin is never moved by a client.
 // v93 (Life 23, a player's own skin): `ServerMessage::HelloAck` carries
 // `custom_skins`, appended — whether this host takes a skin from a client —
 // and `ClientMessage::Skin { body, bytes }` is appended: a PNG the player
@@ -400,14 +407,28 @@ pub const MAX_CONTENT_CHUNK_BYTES: usize = 256 * 1024;
 /// Longest display name.
 pub const MAX_NAME_BYTES: usize = 32;
 
-/// Largest name certificate a `Hello` may carry.
+/// Largest name certificate a challenge answer may carry.
 ///
 /// A certificate is a version, two short strings, a timestamp, a serial, the
 /// registry key and a signature — 256 is the same bound
 /// `identity::registry::MAX_CERTIFICATE_BYTES` enforces when the certificate is
-/// parsed, and this copy is checked when the message is decoded so a peer cannot
-/// make a session hold more.
+/// parsed, and this copy is checked when the message is validated so a peer
+/// cannot make a session hold more.
 pub const MAX_NAME_CERTIFICATE_BYTES: usize = 256;
+
+/// Most registry rotation records a challenge answer may carry.
+///
+/// The bound the session's check of the chain enforces too
+/// ([`crate::identity::registry::MAX_CARRIED_ROTATIONS`]); checked here, when
+/// the message is validated, so a peer cannot make a session hold more.
+pub const MAX_REGISTRY_ROTATIONS: usize = crate::identity::registry::MAX_CARRIED_ROTATIONS;
+
+/// Largest registry rotation record a challenge answer may carry, in bytes.
+///
+/// The record's own cap ([`crate::identity::registry::MAX_ROTATION_BYTES`]),
+/// named here beside the certificate's so every bound on `AuthResponse` reads
+/// in one place. A record is under two hundred bytes with every field set.
+pub const MAX_REGISTRY_ROTATION_BYTES: usize = crate::identity::registry::MAX_ROTATION_BYTES;
 
 /// Longest chat message.
 pub const MAX_CHAT_BYTES: usize = 512;
@@ -1212,6 +1233,20 @@ pub enum ClientMessage {
         /// [`MAX_NAME_CERTIFICATE_BYTES`]. Here and not on `Hello` because
         /// `Hello` is the version gate — the v94 note at the top of this file.
         name_certificate: Option<Vec<u8>>,
+        /// The registry's rotation records the client fetched with its
+        /// renewal, oldest first, each in postcard form; empty for none
+        /// (protocol 94).
+        ///
+        /// **How a server that never calls home learns the registry rotated.**
+        /// It pins a key and the hash of its committed successor; a
+        /// certificate issued after a rotation is signed by that successor, so
+        /// the player who carries it carries the proof too. Unverified here:
+        /// the session applies the records to a copy of its pin and keeps
+        /// nothing a record says unless the pin's own key and commitment
+        /// vouch for it (design §5). Refused when there are more than
+        /// [`MAX_REGISTRY_ROTATIONS`] or one is over
+        /// [`MAX_REGISTRY_ROTATION_BYTES`].
+        registry_rotations: Vec<Vec<u8>>,
     },
     /// Asks for content the client does not have cached.
     ContentRequest {
@@ -3239,15 +3274,29 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
             }
         }
         ClientMessage::AuthResponse {
-            name_certificate, ..
+            name_certificate,
+            registry_rotations,
+            ..
         } => {
-            // A blob the client chose, capped here before the session keeps a
-            // byte of it (charter rule 14).
+            // Blobs the client chose, capped here before the session keeps a
+            // byte of them (charter rule 14).
             if let Some(certificate) = name_certificate {
                 check_len(
                     "name_certificate",
                     certificate.len(),
                     MAX_NAME_CERTIFICATE_BYTES,
+                )?;
+            }
+            check_len(
+                "registry_rotations",
+                registry_rotations.len(),
+                MAX_REGISTRY_ROTATIONS,
+            )?;
+            for record in registry_rotations {
+                check_len(
+                    "registry_rotation",
+                    record.len(),
+                    MAX_REGISTRY_ROTATION_BYTES,
                 )?;
             }
         }
@@ -4406,6 +4455,7 @@ mod tests {
         let over = ClientMessage::AuthResponse {
             signature,
             name_certificate: Some(vec![0u8; MAX_NAME_CERTIFICATE_BYTES + 1]),
+            registry_rotations: Vec::new(),
         };
         assert!(matches!(
             validate_client_message(&over),
@@ -4417,11 +4467,103 @@ mod tests {
         let at_cap = ClientMessage::AuthResponse {
             signature,
             name_certificate: Some(vec![9u8; MAX_NAME_CERTIFICATE_BYTES]),
+            registry_rotations: Vec::new(),
         };
         assert!(validate_client_message(&at_cap).is_ok());
         let bytes = encode(&at_cap).expect("encode");
         let decoded: ClientMessage = decode(&bytes).expect("decode");
         assert_eq!(decoded, at_cap);
+    }
+
+    #[test]
+    fn the_rotation_records_on_a_challenge_answer_are_capped_before_they_are_kept() {
+        // Charter rule 14: the count and every record's size are checked at
+        // validation, so a session never holds more than the chain check will
+        // read — and an oversized list is a disconnect, not a debug line.
+        let signature = WireSignature([0u8; 64]);
+        let answer = |registry_rotations: Vec<Vec<u8>>| ClientMessage::AuthResponse {
+            signature,
+            name_certificate: Some(vec![9u8; 64]),
+            registry_rotations,
+        };
+
+        let too_many = answer(vec![vec![1u8; 8]; MAX_REGISTRY_ROTATIONS + 1]);
+        assert!(matches!(
+            validate_client_message(&too_many),
+            Err(ProtocolError::FieldTooLarge {
+                field: "registry_rotations",
+                ..
+            })
+        ));
+        let mut one_too_big = vec![vec![1u8; 8]; MAX_REGISTRY_ROTATIONS];
+        one_too_big[2] = vec![2u8; MAX_REGISTRY_ROTATION_BYTES + 1];
+        assert!(matches!(
+            validate_client_message(&answer(one_too_big)),
+            Err(ProtocolError::FieldTooLarge {
+                field: "registry_rotation",
+                ..
+            })
+        ));
+
+        // At both caps at once: valid, and it round-trips whole.
+        let at_caps = answer(vec![
+            vec![3u8; MAX_REGISTRY_ROTATION_BYTES];
+            MAX_REGISTRY_ROTATIONS
+        ]);
+        assert!(validate_client_message(&at_caps).is_ok());
+        let bytes = encode(&at_caps).expect("encode");
+        let decoded: ClientMessage = decode(&bytes).expect("decode");
+        assert_eq!(decoded, at_caps);
+
+        // And the records are the registry's own caps, not a second opinion.
+        assert_eq!(
+            MAX_REGISTRY_ROTATIONS,
+            crate::identity::registry::MAX_CARRIED_ROTATIONS
+        );
+        assert_eq!(
+            MAX_REGISTRY_ROTATION_BYTES,
+            crate::identity::registry::MAX_ROTATION_BYTES
+        );
+    }
+
+    #[test]
+    fn a_real_rotation_record_rides_a_challenge_answer_intact() {
+        // The bytes a client carries are the registry's postcard record, and
+        // the session parses them on the far side; the message must hand them
+        // over byte for byte, in order.
+        use crate::identity::registry::{ROTATION_VERSION, RotationRecord, Signature64};
+        let retiring = ed25519_dalek::SigningKey::from_bytes(&[0x41; 32]);
+        let successor = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut record = RotationRecord {
+            version: ROTATION_VERSION,
+            retired: [0; 32],
+            successor: successor.verifying_key().to_bytes(),
+            next_key_hash: Some([0x43; 32]),
+            rotated_at: 1_800_000_000,
+            signature: Signature64([0; 64]),
+        };
+        record.sign(&retiring);
+        let wire = record.to_bytes().expect("encode the record");
+        assert!(wire.len() <= MAX_REGISTRY_ROTATION_BYTES);
+
+        let message = ClientMessage::AuthResponse {
+            signature: WireSignature([5u8; 64]),
+            name_certificate: None,
+            registry_rotations: vec![wire.clone(), vec![7u8; 3]],
+        };
+        assert!(validate_client_message(&message).is_ok());
+        let decoded: ClientMessage = decode(&encode(&message).expect("encode")).expect("decode");
+        let ClientMessage::AuthResponse {
+            registry_rotations, ..
+        } = decoded
+        else {
+            panic!("decoded as another message: {decoded:?}");
+        };
+        assert_eq!(registry_rotations, vec![wire.clone(), vec![7u8; 3]]);
+        assert_eq!(
+            RotationRecord::from_bytes(&registry_rotations[0]).expect("parse"),
+            record
+        );
     }
 
     #[test]
@@ -4674,6 +4816,7 @@ mod tests {
                 ClientMessage::AuthResponse {
                     signature,
                     name_certificate: None,
+                    registry_rotations: Vec::new(),
                 },
                 1,
             ),
@@ -5977,16 +6120,18 @@ mod tests {
         let message = ClientMessage::AuthResponse {
             signature: WireSignature([7u8; 64]),
             name_certificate: None,
+            registry_rotations: Vec::new(),
         };
         let bytes = encode(&message).expect("encode");
         let decoded: ClientMessage = decode(&bytes).expect("decode");
         assert_eq!(decoded, message);
 
-        // A short signature must not decode. The last byte on the wire is the
-        // certificate's `None` tag, so the byte taken out is the one before it:
-        // the signature's own last byte.
+        // A short signature must not decode. The last two bytes on the wire are
+        // the certificate's `None` tag and the empty rotation list's length, so
+        // the byte taken out is the one before them: the signature's own last
+        // byte.
         let mut truncated = bytes.clone();
-        truncated.remove(bytes.len() - 2);
+        truncated.remove(bytes.len() - 3);
         assert!(decode::<ClientMessage>(&truncated).is_err());
     }
 

@@ -299,13 +299,25 @@ async fn execute(input: &str, context: &RconContext) -> Reply {
             let Some(uuid) = identities.name_holder(current) else {
                 return Reply::error(format!("no player named `{current}`"));
             };
-            // **The registry owns a certified name** (design §5). A rename here
-            // would be undone at that player's next join, and every player who
-            // saw it would have seen a name the registry never issued.
-            if shared.is_certified(&uuid) {
+            // **The registry owns a certified name** (design §5), whether its
+            // holder is here or not. A rename here would be undone at their
+            // next join — the certificate takes the name back — and would
+            // push out whoever had been given it meanwhile, so it is refused
+            // rather than obeyed and quietly reverted. The binding's mark is
+            // what decides for a player who is away; the online set is this
+            // join's, and is checked too. Under `off`, or with no key pinned,
+            // no certificate is honoured here, so nothing would come back and
+            // the binding is this server's to move.
+            let certificates_honoured = shared.name_policy != tiamat_core::session::NamePolicy::Off
+                && shared.registry_trust.is_some();
+            if shared.is_certified(&uuid)
+                || (certificates_honoured && identities.is_certified_name(current))
+            {
                 return Reply::error(format!(
-                    "`{current}` is a name the registry issued to this identity; it follows \
-                     their certificate, and only a rename at the registry changes it"
+                    "`{current}` is a name the registry issued to this identity, so it follows \
+                     their certificate: a rename here would be undone the next time they join, \
+                     and would push out whoever had taken the name by then. Only a rename at \
+                     the registry changes it"
                 ));
             }
             if identities.name_holder(new).is_some_and(|held| held != uuid) {

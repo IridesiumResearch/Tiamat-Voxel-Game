@@ -168,11 +168,26 @@ fn client_messages() -> Vec<Vec<u8>> {
         ClientMessage::AuthResponse {
             signature: WireSignature([0x22; 64]),
             name_certificate: None,
+            registry_rotations: Vec::new(),
         },
         // A challenge answer carrying a certificate-shaped blob (protocol 94).
         ClientMessage::AuthResponse {
             signature: WireSignature([0x22; 64]),
             name_certificate: Some(vec![0x33; 96]),
+            registry_rotations: Vec::new(),
+        },
+        // And the registry's rotation records beside it, at both caps: the
+        // count and one record at its byte limit, so the fuzzer starts at the
+        // edge validation guards (protocol 94).
+        ClientMessage::AuthResponse {
+            signature: WireSignature([0x22; 64]),
+            name_certificate: Some(vec![0x33; 96]),
+            registry_rotations: vec![
+                vec![0x01; 170],
+                vec![0x02; 170],
+                vec![0x03; 170],
+                vec![0x04; tiamat_core::proto::MAX_REGISTRY_ROTATION_BYTES],
+            ],
         },
         ClientMessage::ContentRequest {
             hashes: vec![[0x33; 32]],

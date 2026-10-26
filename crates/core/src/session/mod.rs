@@ -454,6 +454,9 @@ pub struct Session {
     /// An identity a certified join renamed off its name, if any. The server
     /// tells them and rebinds their own session; see [`Self::take_displacement`].
     displacement: Option<CertifiedDisplacement>,
+    /// The registry rotation this join's records proved past the pin, if any;
+    /// see [`Self::take_registry_rotation`].
+    registry_rotation: Option<RegistryRotationSeen>,
     uuid: Option<PlayerUuid>,
 }
 
@@ -503,6 +506,62 @@ pub struct CertifiedDisplacement {
     pub notice: String,
 }
 
+/// A registry rotation a joining player proved past the key this server pins.
+///
+/// A server checks names offline against the `registry_key` and
+/// `registry_next_key_hash` its operator wrote into `server.toml` (design §5).
+/// When the registry hands over to its committed successor, players carry the
+/// signed records with their certificates and each join applies them to a copy
+/// of the pin, so nobody is turned away — but the file still names a key the
+/// registry has retired, and only its operator can change that. This is what a
+/// session hands the server to tell them: the chain's end, in the form the file
+/// takes. It is the end of a chain the pinned key and its commitment vouched
+/// for, never a client's say-so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryRotationSeen {
+    /// The registry key the chain ends at: what `registry_key` should say.
+    pub current: [u8; 32],
+    /// That key's committed successor, or `None` if it committed to none: what
+    /// `registry_next_key_hash` should say.
+    pub next_key_hash: Option<[u8; 32]>,
+    /// When the last key the chain retired handed over, Unix seconds.
+    ///
+    /// Carried because pinning the new key has a cost the operator should
+    /// time: certificates a retired key issued stop verifying on a server
+    /// that no longer knows it — see [`Self::old_certificates_lapse_at`].
+    pub retired_at: i64,
+}
+
+impl RegistryRotationSeen {
+    /// When the last certificate a key this chain retired can still be good,
+    /// Unix seconds: ninety days after the last handover, the bound every
+    /// retired key is held to.
+    ///
+    /// Until then, a server that pins the new key turns away from their
+    /// certified names the players who have not renewed since the rotation;
+    /// after it, nobody holds a certificate the pin would lose.
+    #[must_use]
+    pub fn old_certificates_lapse_at(&self) -> i64 {
+        self.retired_at
+            .saturating_add(crate::identity::registry::CERTIFICATE_LIFETIME_SECONDS)
+    }
+
+    /// [`Self::current`] as the 64 hex characters `registry_key` takes.
+    #[must_use]
+    pub fn current_hex(&self) -> String {
+        crate::release::to_hex(&self.current)
+    }
+
+    /// [`Self::next_key_hash`] as the 64 hex characters
+    /// `registry_next_key_hash` takes, or `None`.
+    #[must_use]
+    pub fn next_key_hash_hex(&self) -> Option<String> {
+        self.next_key_hash
+            .as_ref()
+            .map(|hash| crate::release::to_hex(hash))
+    }
+}
+
 impl Default for Session {
     fn default() -> Self {
         Self::new()
@@ -521,6 +580,7 @@ impl Session {
             renamed_from: None,
             certified: false,
             displacement: None,
+            registry_rotation: None,
             uuid: None,
         }
     }
@@ -559,6 +619,16 @@ impl Session {
         self.displacement.take()
     }
 
+    /// Takes the registry rotation this join proved past the server's pin.
+    ///
+    /// Core verifies the chain and keeps its end; the server owns telling the
+    /// operator, once, that `server.toml` has a newer key to pin — a session
+    /// sees one join and cannot know whether anybody was told already.
+    #[must_use]
+    pub fn take_registry_rotation(&mut self) -> Option<RegistryRotationSeen> {
+        self.registry_rotation.take()
+    }
+
     /// Applies a name this server has bound to this identity after its join.
     ///
     /// The one caller is a certified join displacing the uncertified holder
@@ -577,22 +647,71 @@ impl Session {
     }
 
     /// The certificate that rode with the challenge answer, verified against
-    /// this server's pin and clock for the identity that answer proved.
+    /// this server's pin — advanced through the rotation records that rode with
+    /// it — and clock, for the identity that answer proved.
     ///
     /// `None` for `off`, for a join without one, for a server that pins no key,
     /// and for any certificate that does not verify: under `honour` a bad
     /// certificate is not a refusal, and under `require` its absence refuses.
+    ///
+    /// **The records first, on a copy of the pin.** A certificate issued after
+    /// the registry rotated is signed by the successor this server only knows
+    /// the hash of; the records are the registry's signed proof of each
+    /// handover, and `RegistryTrust::advanced_by` accepts nothing the pin's own
+    /// key and commitment do not vouch for. The certificate is then checked
+    /// against the chain's end and nothing else, so a key the chain retired
+    /// keeps its ninety-day bound, and a chain that does not hold leaves the
+    /// join uncertified however good the certificate is. The pin itself is
+    /// never moved: it is the operator's, and the next join starts from it.
+    ///
+    /// Why a certificate failed is logged at debug level and not shown: the
+    /// refusal the protocol carries for `require`, `NameRequired`, has no
+    /// reason field.
     fn certified_name(
+        &mut self,
         context: &JoinContext<'_>,
         uuid: &PlayerUuid,
         certificate: Option<&[u8]>,
+        rotations: &[Vec<u8>],
     ) -> Option<crate::identity::registry::Name> {
         if context.name_policy == NamePolicy::Off {
             return None;
         }
         let bytes = certificate?;
-        let trust = context.registry_trust?;
-        crate::identity::registry::verify_certificate(bytes, uuid, context.now, trust, None).ok()
+        let pinned = context.registry_trust?;
+        let trust = match pinned.advanced_by(rotations, context.now) {
+            Ok(trust) => trust,
+            Err(reason) => {
+                tracing::debug!(
+                    player = %uuid,
+                    %reason,
+                    "the registry rotation records on a join were refused, so its name \
+                     certificate is not honoured"
+                );
+                return None;
+            }
+        };
+        if trust.retired().len() > pinned.retired().len()
+            && let Some(last) = trust.retired().last()
+        {
+            self.registry_rotation = Some(RegistryRotationSeen {
+                current: trust.current().to_bytes(),
+                next_key_hash: trust.next_commitment(),
+                retired_at: last.retired_at,
+            });
+        }
+        match crate::identity::registry::verify_certificate(bytes, uuid, context.now, &trust, None)
+        {
+            Ok(name) => Some(name),
+            Err(reason) => {
+                tracing::debug!(
+                    player = %uuid,
+                    %reason,
+                    "a name certificate on a join did not verify, so it is not honoured"
+                );
+                None
+            }
+        }
     }
 
     /// The bound display name, once in world.
@@ -680,10 +799,12 @@ impl Session {
                 ClientMessage::AuthResponse {
                     signature,
                     name_certificate,
+                    registry_rotations,
                 },
             ) => self.handle_auth(
                 signature,
                 name_certificate.as_deref(),
+                registry_rotations,
                 context,
                 auth,
                 registry,
@@ -886,6 +1007,7 @@ impl Session {
         &mut self,
         signature: &crate::proto::WireSignature,
         certificate: Option<&[u8]>,
+        rotations: &[Vec<u8>],
         context: &JoinContext<'_>,
         auth: &dyn AuthProvider,
         registry: &mut IdentityRegistry,
@@ -954,7 +1076,7 @@ impl Session {
         // **A certificate, now that there is a proven identity to check it
         // against.** §5: `honour` takes a valid one and ignores a bad one,
         // `require` refuses without one, `off` does not look.
-        let certified = Self::certified_name(context, &uuid, certificate);
+        let certified = self.certified_name(context, &uuid, certificate, rotations);
         if context.name_policy == NamePolicy::Require && certified.is_none() {
             return self.close_with(DisconnectReason::NameRequired);
         }
@@ -1037,6 +1159,11 @@ impl Session {
                     }
                 }
             }
+            // **An uncertified join is this server's binding**, whatever an
+            // earlier certificate said: the identity wears what it wears now
+            // because this server bound it, so the registry no longer stands
+            // behind it and an operator's `rename` may move it.
+            registry.clear_certified(&uuid);
         }
 
         self.uuid = Some(uuid);
@@ -1450,6 +1577,7 @@ mod tests {
         let auth_response = ClientMessage::AuthResponse {
             signature: WireSignature(signature.to_bytes()),
             name_certificate: None,
+            registry_rotations: Vec::new(),
         };
         let response = session.handle(&auth_response, &context, &auth, registry);
         sent.extend(response.send.iter().cloned());
@@ -1749,6 +1877,7 @@ mod tests {
             &ClientMessage::AuthResponse {
                 signature: captured,
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             },
             &context,
             &auth,
@@ -1777,6 +1906,7 @@ mod tests {
             &ClientMessage::AuthResponse {
                 signature: captured,
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             },
             &context,
             &auth,
@@ -1814,6 +1944,7 @@ mod tests {
             &ClientMessage::AuthResponse {
                 signature: WireSignature([0u8; 64]),
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             },
             &context,
             &auth,
@@ -1857,6 +1988,7 @@ mod tests {
             &ClientMessage::AuthResponse {
                 signature: WireSignature(wrong.to_bytes()),
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             },
             &context,
             &auth,
@@ -2183,6 +2315,7 @@ mod tests {
                 &ClientMessage::AuthResponse {
                     signature,
                     name_certificate: None,
+                    registry_rotations: Vec::new(),
                 },
                 &context,
                 &auth,
@@ -2371,6 +2504,29 @@ mod tests {
         registry: &mut IdentityRegistry,
         allowlist: &Allowlist,
     ) -> (Session, Vec<ServerMessage>) {
+        let carried = Carried {
+            certificate,
+            rotations: Vec::new(),
+        };
+        join_carrying(identity, name, carried, trust, policy, registry, allowlist)
+    }
+
+    /// What a client carries on its challenge answer besides the signature.
+    struct Carried {
+        certificate: Option<Vec<u8>>,
+        rotations: Vec<Vec<u8>>,
+    }
+
+    /// [`join_certified`], with the registry's rotation records riding along.
+    fn join_carrying(
+        identity: &Identity,
+        name: &str,
+        carried: Carried,
+        trust: Option<&crate::identity::registry::RegistryTrust>,
+        policy: NamePolicy,
+        registry: &mut IdentityRegistry,
+        allowlist: &Allowlist,
+    ) -> (Session, Vec<ServerMessage>) {
         let mods = Vec::new();
         let mut context = context(allowlist, &mods);
         context.name_policy = policy;
@@ -2399,7 +2555,8 @@ mod tests {
         let signature = identity.sign(&challenge_payload(&nonce, &FINGERPRINT, PROTOCOL_VERSION));
         let auth_response = ClientMessage::AuthResponse {
             signature: WireSignature(signature.to_bytes()),
-            name_certificate: certificate,
+            name_certificate: carried.certificate,
+            registry_rotations: carried.rotations,
         };
         let response = session.handle(&auth_response, &context, &auth, registry);
         sent.extend(response.send.iter().cloned());
@@ -2602,6 +2759,7 @@ mod tests {
             &ClientMessage::AuthResponse {
                 signature: WireSignature(signature.to_bytes()),
                 name_certificate: None,
+                registry_rotations: Vec::new(),
             },
             &context,
             &auth,
@@ -2782,5 +2940,515 @@ mod tests {
             "an expired certificate is not a reason to refuse"
         );
         assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("alice"));
+    }
+
+    // -- the registry's rotation, carried by a player (design §5) -----------
+
+    /// The clock [`context`] runs the join at.
+    const NOW: i64 = 1_700_000_000;
+
+    /// The registry's keys k0 → k1 → k2, each committed to by the one before
+    /// (k2 to k3), and the records joining them as a client carries them.
+    struct Chain {
+        keys: Vec<ed25519_dalek::SigningKey>,
+        records: Vec<Vec<u8>>,
+    }
+
+    impl Chain {
+        fn new() -> Self {
+            let keys: Vec<ed25519_dalek::SigningKey> = (0x70..0x74)
+                .map(|seed| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
+                .collect();
+            let records = vec![
+                rotation_record(&keys[0], &keys[1], Some(&keys[2]), NOW - 1_000),
+                rotation_record(&keys[1], &keys[2], Some(&keys[3]), NOW - 500),
+            ];
+            Self { keys, records }
+        }
+
+        /// What a server pins when its `server.toml` names key `index` and its
+        /// committed successor.
+        fn pin(&self, index: usize) -> crate::identity::registry::RegistryTrust {
+            crate::identity::registry::RegistryTrust::new(
+                self.keys[index].verifying_key(),
+                Some(crate::identity::keyset::commit_to(
+                    &self.keys[index + 1].verifying_key(),
+                )),
+            )
+        }
+
+        /// Alice's certificate from key `index`, issued at `issued`.
+        fn certificate(&self, index: usize, alice: &Identity, issued: i64) -> Vec<u8> {
+            issue_certificate(
+                &self.keys[index],
+                "alice",
+                "Alice",
+                alice.uuid_as_root(),
+                issued,
+            )
+        }
+    }
+
+    /// A rotation record from `retiring` to `successor`, committing to `next`.
+    fn rotation_record(
+        retiring: &ed25519_dalek::SigningKey,
+        successor: &ed25519_dalek::SigningKey,
+        next: Option<&ed25519_dalek::SigningKey>,
+        at: i64,
+    ) -> Vec<u8> {
+        signed_rotation(retiring, successor, next, at)
+            .to_bytes()
+            .expect("encode")
+    }
+
+    fn signed_rotation(
+        retiring: &ed25519_dalek::SigningKey,
+        successor: &ed25519_dalek::SigningKey,
+        next: Option<&ed25519_dalek::SigningKey>,
+        at: i64,
+    ) -> crate::identity::registry::RotationRecord {
+        let mut record = crate::identity::registry::RotationRecord {
+            version: crate::identity::registry::ROTATION_VERSION,
+            retired: [0; 32],
+            successor: successor.verifying_key().to_bytes(),
+            next_key_hash: next.map(|key| crate::identity::keyset::commit_to(&key.verifying_key())),
+            rotated_at: at,
+            signature: crate::identity::registry::Signature64([0; 64]),
+        };
+        record.sign(retiring);
+        record
+    }
+
+    /// Alice joins asking for `Whatever`, carrying `certificate` and `records`.
+    fn carry(
+        alice: &Identity,
+        certificate: Vec<u8>,
+        records: Vec<Vec<u8>>,
+        pin: &crate::identity::registry::RegistryTrust,
+        policy: NamePolicy,
+    ) -> (Session, Vec<ServerMessage>, IdentityRegistry) {
+        let mut registry = IdentityRegistry::default();
+        let allowlist = Allowlist::default();
+        let carried = Carried {
+            certificate: Some(certificate),
+            rotations: records,
+        };
+        let (session, sent) = join_carrying(
+            alice,
+            "Whatever",
+            carried,
+            Some(pin),
+            policy,
+            &mut registry,
+            &allowlist,
+        );
+        (session, sent, registry)
+    }
+
+    /// Whether a join ended in the world wearing the certified name.
+    fn certified_as_alice(
+        session: &Session,
+        registry: &IdentityRegistry,
+        alice: &Identity,
+    ) -> bool {
+        session.phase() == Phase::InWorld
+            && session.is_certified()
+            && registry.name_of(&alice.uuid_as_root()) == Some("Alice")
+    }
+
+    /// The join was turned away for want of a certificate.
+    fn refused_for_a_name(sent: &[ServerMessage]) -> bool {
+        sent.iter().any(|m| {
+            matches!(
+                m,
+                ServerMessage::Disconnect {
+                    reason: DisconnectReason::NameRequired
+                }
+            )
+        })
+    }
+
+    /// The same join under `honour` and `require`: uncertified, then refused.
+    fn assert_not_honoured(
+        alice: &Identity,
+        certificate: &[u8],
+        records: &[Vec<u8>],
+        pin: &crate::identity::registry::RegistryTrust,
+        why: &str,
+    ) {
+        let (session, _, registry) = carry(
+            alice,
+            certificate.to_vec(),
+            records.to_vec(),
+            pin,
+            NamePolicy::Honour,
+        );
+        assert_eq!(
+            session.phase(),
+            Phase::InWorld,
+            "{why}: honour still admits"
+        );
+        assert!(!session.is_certified(), "{why}: honour must not certify");
+        assert_eq!(
+            registry.name_of(&alice.uuid_as_root()),
+            Some("Whatever"),
+            "{why}: the name asked for, not the certificate's"
+        );
+        let (session, sent, registry) = carry(
+            alice,
+            certificate.to_vec(),
+            records.to_vec(),
+            pin,
+            NamePolicy::Require,
+        );
+        assert_ne!(session.phase(), Phase::InWorld, "{why}: require refuses");
+        assert!(refused_for_a_name(&sent), "{why}: {sent:?}");
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), None, "{why}");
+    }
+
+    #[test]
+    fn a_committed_rotation_carried_by_the_player_certifies_the_successors_certificate() {
+        // The case this exists for: the server pins k0 and the hash of k1, the
+        // registry has rotated, and a renewed certificate is signed by k1.
+        let chain = Chain::new();
+        let pin = chain.pin(0);
+        let alice = Identity::generate().expect("alice");
+        let renewed = chain.certificate(1, &alice, NOW - 100);
+
+        // Without the record, k1 is a stranger here.
+        assert_not_honoured(&alice, &renewed, &[], &pin, "no record");
+
+        // With it, under both policies.
+        for policy in [NamePolicy::Honour, NamePolicy::Require] {
+            let (mut session, _, registry) = carry(
+                &alice,
+                renewed.clone(),
+                chain.records[..1].to_vec(),
+                &pin,
+                policy,
+            );
+            assert!(
+                certified_as_alice(&session, &registry, &alice),
+                "{policy:?}"
+            );
+            assert!(registry.is_certified_name("Alice"));
+            // The server is told where the chain ended, once per join.
+            let seen = session.take_registry_rotation().expect("a rotation seen");
+            assert_eq!(seen.current, chain.keys[1].verifying_key().to_bytes());
+            assert_eq!(
+                seen.next_key_hash,
+                Some(crate::identity::keyset::commit_to(
+                    &chain.keys[2].verifying_key()
+                ))
+            );
+            assert_eq!(session.take_registry_rotation(), None);
+        }
+
+        // **The pin never moved**: the next join without the record is a
+        // stranger's again.
+        assert_eq!(pin.current(), &chain.keys[0].verifying_key());
+        assert!(pin.retired().is_empty());
+        assert_not_honoured(&alice, &renewed, &[], &pin, "the pin is the operator's");
+    }
+
+    #[test]
+    fn what_the_server_is_told_to_pin_is_what_server_toml_takes() {
+        let chain = Chain::new();
+        let alice = Identity::generate().expect("alice");
+        let (mut session, _, _) = carry(
+            &alice,
+            chain.certificate(2, &alice, NOW - 100),
+            chain.records.clone(),
+            &chain.pin(0),
+            NamePolicy::Honour,
+        );
+        let seen = session.take_registry_rotation().expect("a rotation seen");
+        let next = seen.next_key_hash_hex().expect("k2 committed to k3");
+        assert_eq!(seen.current_hex().len(), 64);
+        // The last handover is k1 → k2, so k1's certificates are the last to go.
+        assert_eq!(seen.retired_at, NOW - 500);
+        assert_eq!(
+            seen.old_certificates_lapse_at(),
+            NOW - 500 + crate::identity::registry::CERTIFICATE_LIFETIME_SECONDS
+        );
+        let pinned =
+            crate::identity::registry::RegistryTrust::from_hex(&seen.current_hex(), Some(&next))
+                .expect("the strings the operator is told are the strings the file takes");
+        assert_eq!(pinned.current(), &chain.keys[2].verifying_key());
+        assert_eq!(pinned.next_commitment(), seen.next_key_hash);
+
+        // A join that carried nothing beyond the pin tells nothing.
+        let (mut session, _, _) = carry(
+            &alice,
+            chain.certificate(0, &alice, NOW - 100),
+            Vec::new(),
+            &chain.pin(0),
+            NamePolicy::Honour,
+        );
+        assert!(session.is_certified());
+        assert_eq!(session.take_registry_rotation(), None);
+    }
+
+    #[test]
+    fn a_rotation_record_not_signed_by_the_pinned_key_is_refused() {
+        let chain = Chain::new();
+        let pin = chain.pin(0);
+        let alice = Identity::generate().expect("alice");
+        let renewed = chain.certificate(1, &alice, NOW - 100);
+        let mallory = ed25519_dalek::SigningKey::from_bytes(&[0x7F; 32]);
+
+        // The committed successor, named in a record that says it retires the
+        // pinned key — but signed by somebody else.
+        let mut forged = signed_rotation(&mallory, &chain.keys[1], None, NOW - 1_000);
+        forged.retired = chain.keys[0].verifying_key().to_bytes();
+        let forged = forged.to_bytes().expect("encode");
+        assert_not_honoured(&alice, &renewed, &[forged], &pin, "a forged signature");
+
+        // A record that is all the stranger's own, retiring a key nobody pins.
+        let unrelated = rotation_record(&mallory, &chain.keys[1], None, NOW - 1_000);
+        assert_not_honoured(&alice, &renewed, &[unrelated], &pin, "an unrelated key");
+
+        // And a bad record spoils a certificate the pin would take alone.
+        let current = chain.certificate(0, &alice, NOW - 100);
+        let unrelated = rotation_record(&mallory, &chain.keys[1], None, NOW - 1_000);
+        assert_not_honoured(
+            &alice,
+            &current,
+            &[unrelated],
+            &pin,
+            "junk beside a good one",
+        );
+    }
+
+    #[test]
+    fn a_successor_the_pin_never_committed_to_cannot_vouch_for_a_certificate() {
+        // A thief holding the pinned key signs a perfectly good record to a key
+        // of their own. The commitment is what stops it, and the certificate
+        // that key signs is worth nothing.
+        let chain = Chain::new();
+        let pin = chain.pin(0);
+        let alice = Identity::generate().expect("alice");
+        let thief = ed25519_dalek::SigningKey::from_bytes(&[0x7E; 32]);
+        let record = rotation_record(&chain.keys[0], &thief, None, NOW - 1_000);
+        let forged = issue_certificate(&thief, "alice", "Alice", alice.uuid_as_root(), NOW - 100);
+
+        assert_not_honoured(
+            &alice,
+            &forged,
+            std::slice::from_ref(&record),
+            &pin,
+            "a forged successor",
+        );
+        assert_not_honoured(&alice, &forged, &[], &pin, "the thief's key alone");
+        let (mut session, _, _) = carry(&alice, forged, vec![record], &pin, NamePolicy::Honour);
+        assert_eq!(
+            session.take_registry_rotation(),
+            None,
+            "a refused chain is never reported to the operator as a rotation"
+        );
+    }
+
+    #[test]
+    fn a_replayed_or_reordered_chain_is_refused() {
+        let chain = Chain::new();
+        let pin = chain.pin(0);
+        let alice = Identity::generate().expect("alice");
+        let at_k1 = chain.certificate(1, &alice, NOW - 100);
+        let at_k2 = chain.certificate(2, &alice, NOW - 100);
+        let (first, second) = (chain.records[0].clone(), chain.records[1].clone());
+
+        // The first record alone would certify; repeating it spoils the chain.
+        assert_not_honoured(
+            &alice,
+            &at_k1,
+            &[first.clone(), first.clone()],
+            &pin,
+            "a replayed record",
+        );
+        // Both records, the wrong way round, for either key's certificate.
+        for certificate in [&at_k1, &at_k2] {
+            assert_not_honoured(
+                &alice,
+                certificate,
+                &[second.clone(), first.clone()],
+                &pin,
+                "records out of order",
+            );
+        }
+        // The second record without the first starts from a key nobody pins.
+        assert_not_honoured(&alice, &at_k2, &[second], &pin, "a missing link");
+    }
+
+    #[test]
+    fn a_retired_key_keeps_its_ninety_day_bound_after_a_carried_rotation() {
+        use crate::identity::registry::{CERTIFICATE_LIFETIME_SECONDS, NameCertificate};
+        let chain = Chain::new();
+        let pin = chain.pin(0);
+        let alice = Identity::generate().expect("alice");
+        let rotated_at = NOW - 1_000;
+        let old_key = |expires: i64| {
+            let name = crate::identity::registry::Name::from_parts("alice", "Alice").expect("name");
+            let mut certificate = NameCertificate::issue(
+                &chain.keys[0],
+                &name,
+                alice.uuid_as_root(),
+                rotated_at - 10,
+                1,
+            );
+            certificate.expires = expires;
+            certificate.sign(&chain.keys[0]);
+            certificate.to_bytes().expect("bytes")
+        };
+        let record = chain.records[..1].to_vec();
+
+        // Issued before the handover, ending within ninety days of it: good.
+        let (session, _, registry) = carry(
+            &alice,
+            old_key(rotated_at + CERTIFICATE_LIFETIME_SECONDS),
+            record.clone(),
+            &pin,
+            NamePolicy::Honour,
+        );
+        assert!(certified_as_alice(&session, &registry, &alice));
+
+        // A second past it — the back-dated certificate a stolen retired key
+        // would write — is refused once the rotation is shown.
+        let stretched = old_key(rotated_at + CERTIFICATE_LIFETIME_SECONDS + 1);
+        assert_not_honoured(&alice, &stretched, &record, &pin, "past the bound");
+
+        // Issued after the handover: the retired key vouches for nothing new.
+        let later = chain.certificate(0, &alice, NOW - 100);
+        assert_not_honoured(&alice, &later, &record, &pin, "issued after retiring");
+    }
+
+    #[test]
+    fn the_certificate_is_checked_against_the_end_of_the_chain_only() {
+        let chain = Chain::new();
+        let pin = chain.pin(0);
+        let alice = Identity::generate().expect("alice");
+        let both = chain.records.clone();
+
+        // Issued after each key retired: k0's would verify against the pin on
+        // its own, and k1's against the chain's middle — neither against its end.
+        let late_k0 = chain.certificate(0, &alice, NOW - 100);
+        let late_k1 = chain.certificate(1, &alice, NOW - 100);
+        assert_not_honoured(&alice, &late_k0, &both, &pin, "the pin's key, retired");
+        assert_not_honoured(&alice, &late_k1, &both, &pin, "the middle key, retired");
+
+        // k1's from before its own handover is still within its bound.
+        let (session, _, registry) = carry(
+            &alice,
+            chain.certificate(1, &alice, NOW - 800),
+            both,
+            &pin,
+            NamePolicy::Honour,
+        );
+        assert!(certified_as_alice(&session, &registry, &alice));
+    }
+
+    #[test]
+    fn two_chained_rotations_certify_and_history_before_the_pin_is_passed_over() {
+        let chain = Chain::new();
+        let alice = Identity::generate().expect("alice");
+        let at_k2 = chain.certificate(2, &alice, NOW - 100);
+
+        // A server still on k0: both handovers, in order.
+        let (mut session, _, registry) = carry(
+            &alice,
+            at_k2.clone(),
+            chain.records.clone(),
+            &chain.pin(0),
+            NamePolicy::Require,
+        );
+        assert!(certified_as_alice(&session, &registry, &alice));
+        assert_eq!(
+            session.take_registry_rotation().map(|seen| seen.current),
+            Some(chain.keys[2].verifying_key().to_bytes())
+        );
+
+        // A server whose operator already pinned k1, and one already on k2:
+        // the client carries the same list, and the records before each pin
+        // are passed over rather than refusing the join.
+        for index in [1, 2] {
+            let (mut session, _, registry) = carry(
+                &alice,
+                at_k2.clone(),
+                chain.records.clone(),
+                &chain.pin(index),
+                NamePolicy::Require,
+            );
+            assert!(
+                certified_as_alice(&session, &registry, &alice),
+                "pin k{index}"
+            );
+            assert_eq!(
+                session.take_registry_rotation().is_some(),
+                index == 1,
+                "only a chain that moved past the pin is reported (pin k{index})"
+            );
+        }
+    }
+
+    #[test]
+    fn records_are_ignored_where_certificates_are() {
+        let chain = Chain::new();
+        let alice = Identity::generate().expect("alice");
+        let (mut session, _, registry) = carry(
+            &alice,
+            chain.certificate(1, &alice, NOW - 100),
+            chain.records[..1].to_vec(),
+            &chain.pin(0),
+            NamePolicy::Off,
+        );
+        assert!(!session.is_certified());
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Whatever"));
+        assert_eq!(session.take_registry_rotation(), None);
+    }
+
+    #[test]
+    fn an_uncertified_rejoin_clears_the_certified_mark_on_the_binding() {
+        // The mark RCON reads for a player who is not here. A certified join
+        // sets it; the same identity back without a certificate this server
+        // honours wears the name because this server bound it, so it goes.
+        let registry_key = ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]);
+        let trust =
+            crate::identity::registry::RegistryTrust::new(registry_key.verifying_key(), None);
+        let alice = Identity::generate().expect("alice");
+        let allowlist = Allowlist::default();
+        let mut registry = IdentityRegistry::default();
+        let certificate = issue_certificate(
+            &registry_key,
+            "alice",
+            "Alice",
+            alice.uuid_as_root(),
+            NOW - 100,
+        );
+        let (session, _) = join_certified(
+            &alice,
+            "Alice",
+            Some(certificate),
+            Some(&trust),
+            NamePolicy::Honour,
+            &mut registry,
+            &allowlist,
+        );
+        assert!(session.is_certified());
+        assert!(registry.is_certified_name("Alice"));
+
+        let (session, _) = join_certified(
+            &alice,
+            "Alice",
+            None,
+            Some(&trust),
+            NamePolicy::Honour,
+            &mut registry,
+            &allowlist,
+        );
+        assert!(!session.is_certified());
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
+        assert!(
+            !registry.is_certified_name("Alice"),
+            "an uncertified rebinding must clear the mark"
+        );
     }
 }

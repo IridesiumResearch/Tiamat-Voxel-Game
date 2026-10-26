@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bot::Bot;
-use tiamat_core::identity::registry::{Name, NameCertificate, RegistryTrust};
+use tiamat_core::identity::keyset::commit_to;
+use tiamat_core::identity::registry::{
+    Name, NameCertificate, ROTATION_VERSION, RegistryTrust, RotationRecord, Signature64,
+};
 use tiamat_core::identity::{Allowlist, Identity};
 use tiamat_core::proto::{DisconnectReason, ServerMessage};
 use tiamat_core::session::NamePolicy;
@@ -317,5 +320,132 @@ fn the_join_hook_and_the_game_api_agree_and_follow_a_rejoin() {
         assert_eq!(identities.name_of(&uuid), Some("Plain again"));
     });
 
+    server.stop();
+}
+
+/// The registry before and after a rotation: the old key, the new one, the
+/// record the old key signed to hand over, and what a server built before the
+/// rotation pins — the old key and the hash of the new one (design §5).
+struct Rotated {
+    new: ed25519_dalek::SigningKey,
+    record: Vec<u8>,
+    pin: RegistryTrust,
+}
+
+fn rotated() -> Rotated {
+    let old = ed25519_dalek::SigningKey::from_bytes(&[0x5B; 32]);
+    let new = ed25519_dalek::SigningKey::from_bytes(&[0x5C; 32]);
+    let mut record = RotationRecord {
+        version: ROTATION_VERSION,
+        retired: [0; 32],
+        successor: new.verifying_key().to_bytes(),
+        next_key_hash: None,
+        rotated_at: unix_now() - 60,
+        signature: Signature64([0; 64]),
+    };
+    record.sign(&old);
+    let record = record.to_bytes().expect("a record encodes");
+    let pin = RegistryTrust::new(old.verifying_key(), Some(commit_to(&new.verifying_key())));
+    Rotated { new, record, pin }
+}
+
+#[test]
+fn a_registry_rotation_reaches_a_server_pinning_the_old_key_with_the_player() {
+    let rotated = rotated();
+    let server = start(
+        "rotated-honour",
+        NamePolicy::Honour,
+        Some(rotated.pin.clone()),
+        None,
+    );
+    let warned = || {
+        server
+            .shared()
+            .registry_rotation_warned
+            .load(std::sync::atomic::Ordering::Acquire)
+    };
+
+    block_on(async {
+        // Renewed under the new key, carrying the record: certified.
+        let identity = Identity::generate().expect("identity");
+        let uuid = identity.uuid_as_root();
+        let renewed = certificate(&rotated.new, &identity, "alice", "Alice");
+        assert!(!warned(), "nobody has shown this server a rotation yet");
+        let mut alice = connect(&server, identity).await;
+        alice
+            .join_with_certificate_and_rotations(
+                "anything",
+                &renewed,
+                std::slice::from_ref(&rotated.record),
+            )
+            .await
+            .expect("a certified join");
+        assert!(server.shared().is_certified(&uuid));
+        assert!(warned(), "the operator is told the pin is behind");
+        {
+            let identities = server.shared().identities.lock().await;
+            assert_eq!(identities.name_of(&uuid), Some("Alice"));
+            assert!(identities.is_certified_name("Alice"));
+        }
+
+        // The same kind of certificate without the record: the new key is a
+        // stranger to this server, so an ordinary join under `honour`.
+        let identity = Identity::generate().expect("identity");
+        let uuid = identity.uuid_as_root();
+        let renewed = certificate(&rotated.new, &identity, "bob", "Bob");
+        let mut bob = connect(&server, identity).await;
+        bob.join_with_certificate("Plain", &renewed)
+            .await
+            .expect("an uncertified join");
+        assert!(!server.shared().is_certified(&uuid));
+        {
+            let identities = server.shared().identities.lock().await;
+            assert_eq!(identities.name_of(&uuid), Some("Plain"));
+            assert_eq!(identities.name_holder("Bob"), None);
+        }
+
+        bob.disconnect().await;
+        alice.disconnect().await;
+    });
+    server.stop();
+
+    // A public server that pins the same old key: the record is what lets the
+    // renewed player in at all.
+    let server = start(
+        "rotated-require",
+        NamePolicy::Require,
+        Some(rotated.pin),
+        None,
+    );
+    block_on(async {
+        let identity = Identity::generate().expect("identity");
+        let seed = identity.seed();
+        let renewed = certificate(&rotated.new, &identity, "carol", "Carol");
+        let mut carol = connect(&server, identity).await;
+        let err = carol
+            .join_with_certificate("Carol", &renewed)
+            .await
+            .expect_err("no record, no trusted key, no join");
+        assert!(
+            matches!(
+                err,
+                bot::BotError::Refused {
+                    reason: DisconnectReason::NameRequired
+                }
+            ),
+            "expected NameRequired, got {err}"
+        );
+
+        let mut carol = connect(&server, Identity::from_seed(&seed)).await;
+        carol
+            .join_with_certificate_and_rotations(
+                "Carol",
+                &renewed,
+                std::slice::from_ref(&rotated.record),
+            )
+            .await
+            .expect("with the record, admitted");
+        carol.disconnect().await;
+    });
     server.stop();
 }

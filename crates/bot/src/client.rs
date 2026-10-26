@@ -519,17 +519,23 @@ impl Bot {
         nonce: &[u8; 32],
         fingerprint: &[u8],
     ) -> Result<(), BotError> {
-        self.authenticate_full(nonce, fingerprint, None).await
+        self.authenticate_full(nonce, fingerprint, None, &[]).await
     }
 
-    /// Signs a challenge and sends the response, with a name certificate
-    /// riding on it (protocol 94).
+    /// Signs a challenge and sends the response, with a name certificate and
+    /// the registry's rotation records riding on it (protocol 94).
     ///
     /// The certificate is the registry's signed statement that this identity
     /// holds a name (`docs/accounts-design.md` §2); a server with a pinned
     /// registry key checks it offline once this answer has proved the key, and
     /// one with no pin treats the join as uncertified. `None` is the ordinary
     /// join a bot made before certificates existed.
+    ///
+    /// `rotations` are the registry's signed handovers, oldest first, in
+    /// postcard form — what a client fetched with its renewal so a server that
+    /// pins an older registry key can still check a certificate the successor
+    /// signed (design §5). Empty is the ordinary case. They are sent as given,
+    /// unchecked, so a test can carry a forged or reordered chain on purpose.
     ///
     /// # Errors
     ///
@@ -539,6 +545,7 @@ impl Bot {
         nonce: &[u8; 32],
         fingerprint: &[u8],
         certificate: Option<&[u8]>,
+        rotations: &[Vec<u8>],
     ) -> Result<(), BotError> {
         let signature =
             self.identity
@@ -546,6 +553,7 @@ impl Bot {
         self.send(&ClientMessage::AuthResponse {
             signature: WireSignature(signature.to_bytes()),
             name_certificate: certificate.map(<[u8]>::to_vec),
+            registry_rotations: rotations.to_vec(),
         })
         .await
     }
@@ -566,7 +574,7 @@ impl Bot {
     ///
     /// [`BotError::Refused`] if the server disconnected at any point.
     pub async fn join(&mut self, display_name: &str) -> Result<(), BotError> {
-        self.join_full(display_name, None, &[]).await
+        self.join_full(display_name, None, &[], &[]).await
     }
 
     /// Joins carrying a name certificate, so a server that pins the registry
@@ -584,7 +592,25 @@ impl Bot {
         display_name: &str,
         certificate: &[u8],
     ) -> Result<(), BotError> {
-        self.join_full(display_name, Some(certificate), &[]).await
+        self.join_full(display_name, Some(certificate), &[], &[])
+            .await
+    }
+
+    /// Joins as [`Self::join_with_certificate`] does, carrying the registry's
+    /// rotation records too: the shape of a join after the registry rotated
+    /// its key, to a server that still pins the old one (design §5).
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Refused`] if the server disconnected at any point.
+    pub async fn join_with_certificate_and_rotations(
+        &mut self,
+        display_name: &str,
+        certificate: &[u8],
+        rotations: &[Vec<u8>],
+    ) -> Result<(), BotError> {
+        self.join_full(display_name, Some(certificate), rotations, &[])
+            .await
     }
 
     /// Joins as [`Self::join`] does, offering skins of the player's own on
@@ -600,20 +626,21 @@ impl Bot {
         display_name: &str,
         skins: &[(Option<String>, Vec<u8>)],
     ) -> Result<(), BotError> {
-        self.join_full(display_name, None, skins).await
+        self.join_full(display_name, None, &[], skins).await
     }
 
-    /// The join flow with both optional pieces, so neither public helper has
-    /// to duplicate the handshake.
+    /// The join flow with every optional piece, so no public helper has to
+    /// duplicate the handshake.
     async fn join_full(
         &mut self,
         display_name: &str,
         certificate: Option<&[u8]>,
+        rotations: &[Vec<u8>],
         skins: &[(Option<String>, Vec<u8>)],
     ) -> Result<(), BotError> {
         let nonce = self.hello(display_name).await?;
         let fingerprint = self.cert_fingerprint;
-        self.authenticate_full(&nonce, &fingerprint, certificate)
+        self.authenticate_full(&nonce, &fingerprint, certificate, rotations)
             .await?;
         self.recv_until(|m| matches!(m, ServerMessage::ModManifest { .. }))
             .await?;

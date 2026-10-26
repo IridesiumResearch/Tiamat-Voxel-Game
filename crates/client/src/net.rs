@@ -1331,8 +1331,10 @@ async fn session(
                     .write(&ClientMessage::AuthResponse {
                         signature: WireSignature(signature.to_bytes()),
                         // The client claims no name yet (accounts N4 brings the
-                        // certificate store and its renewal).
+                        // certificate store and its renewal, and with it the
+                        // registry's rotation records to carry here).
                         name_certificate: None,
+                        registry_rotations: Vec::new(),
                     })
                     .await
                 {
