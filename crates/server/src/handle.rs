@@ -290,29 +290,55 @@ fn load_domain_fluid(
     domain: &str,
     arrived: &[tiamat_core::ChunkPos],
 ) {
-    let Ok(mut ponds) = fluidics.write() else {
-        return;
+    // **Read the rows before taking the write lock.** This used to hold
+    // `fluidics.write()` across one SQLite read per arrival, so the light
+    // thread's per-event `read()` — and every tick-side write — waited on the
+    // disk. Nothing in the read needs `&mut Ponds`.
+    let wanted: Vec<tiamat_core::ChunkPos> = {
+        let Ok(ponds) = fluidics.read() else {
+            return;
+        };
+        arrived
+            .iter()
+            .copied()
+            .filter(|pos| {
+                // Already read: the lighting defers what it cannot relight by
+                // putting the chunk back on the arrival list, so chunks arrive
+                // twice. Loading again would replace the live layer with the
+                // last thing written.
+                ponds.get(domain).is_none_or(|fluid| !fluid.knows(*pos))
+            })
+            .collect()
     };
-    let fluid = ponds.of(domain);
-    // What the terrain is, for the body test every load makes (Contract §4.5).
-    let terrain = world.solid(domain);
-    for pos in arrived {
-        // Already read: the lighting defers what it cannot relight by putting
-        // the chunk back on the arrival list, so chunks arrive twice. Loading
-        // again would replace the live layer with the last thing written.
-        if fluid.knows(*pos) {
-            continue;
-        }
-        match world.load_fluid(domain, *pos) {
+    let mut loaded: Vec<(tiamat_core::ChunkPos, tiamat_core::fluid::FluidLayer)> =
+        Vec::with_capacity(wanted.len());
+    for pos in wanted {
+        match world.load_fluid(domain, pos) {
             // Recorded as read either way — a chunk with no row is dry, which
             // is an answer.
-            Ok(layer) => fluid.chunk_loaded(*pos, layer.unwrap_or_default(), &terrain),
+            Ok(layer) => loaded.push((pos, layer.unwrap_or_default())),
             Err(err) => {
                 // Left unread so the next arrival retries. Treating a failed
                 // read as "dry" would quietly delete a pond.
                 error!(?pos, "could not load the fluid for a chunk: {err}");
             }
         }
+    }
+    if loaded.is_empty() {
+        return;
+    }
+    let Ok(mut ponds) = fluidics.write() else {
+        return;
+    };
+    let fluid = ponds.of(domain);
+    // What the terrain is, for the body test every load makes (Contract §4.5).
+    let terrain = world.solid(domain);
+    for (pos, layer) in loaded {
+        // A duplicate arrival may have been loaded above; the first one wins.
+        if fluid.knows(pos) {
+            continue;
+        }
+        fluid.chunk_loaded(pos, layer, &terrain);
     }
 }
 
