@@ -132,8 +132,8 @@ pub fn separate(occupants: &[Occupant]) -> Vec<[f32; 3]> {
             }
             candidates.sort_unstable();
             candidates.dedup();
-            for index in 0..candidates.len() {
-                apply_pair(occupants, i, candidates[index], &mut push);
+            for &j in &candidates {
+                apply_pair(occupants, i, j, &mut push);
             }
         }
     } else {
