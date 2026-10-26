@@ -511,3 +511,49 @@ fn a_second_device_claims_and_renews_with_its_key_set_proof() {
     assert!(body_text(&body).contains("not_root"), "{body:?}");
     assert!(handle.stop());
 }
+
+#[test]
+fn a_lookalike_of_a_reserved_name_is_refused_and_a_player_lookalike_is_not() {
+    // A host-reserved id, as `REGISTRY_RESERVED` seeds it, and core's own list.
+    let mut settings = config(None);
+    settings.reserved = vec!["core_testkit".to_owned()];
+    let clock = Arc::new(TestClock::new(NOW));
+    let handle = start_with(settings, clock.clone());
+    let addr = handle.local_addr();
+    for (seed, lookalike) in [
+        (20u8, "lridesium"),
+        (21, "ir1desium"),
+        (22, "c0re_testkit"),
+        (23, "core_testk1t"),
+    ] {
+        let (status, body) = request(
+            addr,
+            "POST",
+            "/v1/claim",
+            &claim_body(&player(seed), lookalike, lookalike, NOW, true),
+        );
+        assert_eq!(status, 403, "{lookalike}: {}", body_text(&body));
+        assert!(
+            body_text(&body).contains("\"error\":\"reserved\""),
+            "{lookalike}: {}",
+            body_text(&body)
+        );
+        let (_, page) = request(addr, "GET", &format!("/v1/name/{lookalike}"), b"");
+        assert!(
+            body_text(&page).contains("\"reserved\":true"),
+            "{lookalike}'s page: {}",
+            body_text(&page)
+        );
+    }
+    // Between players there is no fold: `alice` and `a1ice` are two names.
+    for (seed, name) in [(24u8, "alice"), (25, "a1ice")] {
+        let (status, body) = request(
+            addr,
+            "POST",
+            "/v1/claim",
+            &claim_body(&player(seed), name, name, NOW, true),
+        );
+        assert_eq!(status, 200, "{name}: {}", body_text(&body));
+    }
+    assert!(handle.stop());
+}

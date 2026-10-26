@@ -22,7 +22,9 @@
 //!   thirty days before another player may take them. This is the anti-squatter
 //!   rule (§4).
 //! - **Reserved names cannot be claimed**, from core's constant list or the
-//!   operator's table.
+//!   operator's table — **nor can their lookalikes** (`lridesium`,
+//!   `c0re_testkit`), by the fold in [`crate::confusable`]. The fold is for the
+//!   reserved list only; between players' names it changes nothing.
 //! - **A name the operator revoked from an identity stays out of its reach.**
 //!   A release is its holder's to undo; a revocation is not (`revoked_holders`).
 //! - **A renewal mints a certificate only when one is due.** Until the current
@@ -34,6 +36,9 @@
 //!   shown the signing key to be the identity's own — the root, or a device a
 //!   signed key-set chain reaches from it — so this layer takes the UUID as
 //!   given and keeps no key store.
+//! - **Nothing commits past the request's deadline.** Every write path ends in
+//!   [`crate::deadline::commit`], so a client told "timed out" was told the
+//!   truth: the work rolled back (review B11).
 
 use std::net::IpAddr;
 
@@ -41,10 +46,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tiamat_core::identity::PlayerUuid;
 use tiamat_core::identity::registry::{
     CERTIFICATE_LIFETIME_SECONDS, CLOCK_SKEW_SECONDS, MAX_REVOCATIONS, NameCertificate,
-    RENEW_BEFORE_SECONDS, Revocation, VerifiedClaim, VerifiedRelease, is_reserved,
+    RENEW_BEFORE_SECONDS, RESERVED_NAMES, Revocation, VerifiedClaim, VerifiedRelease, is_reserved,
 };
 
 use crate::db::write_transaction;
+use crate::deadline::{Deadline, commit};
 use crate::keys::RegistryKeys;
 use crate::limits::{self, DAY};
 
@@ -95,6 +101,9 @@ pub enum Limit {
     Claim,
     /// Three renames per identity per thirty days.
     Rename,
+    /// Three casing changes per identity per thirty days, outside a renewal
+    /// that mints.
+    Display,
 }
 
 impl Limit {
@@ -106,6 +115,10 @@ impl Limit {
             Self::Subnet => "this network has claimed its six names for today; try again tomorrow",
             Self::Claim => "this identity has claimed its name for this month",
             Self::Rename => "this identity has renamed three times in thirty days",
+            Self::Display => {
+                "this identity has changed its name's casing three times in thirty days; \
+                 renew in the casing it has"
+            }
         }
     }
 }
@@ -138,6 +151,8 @@ pub enum ClaimOutcome {
     Revoked,
     /// A quota refused it.
     Limited(Limit),
+    /// The request's deadline passed before the commit; nothing was written.
+    Late,
 }
 
 /// What a renewal did.
@@ -158,6 +173,10 @@ pub enum RenewOutcome {
     Unknown,
     /// The identity's name is not the one asked for.
     NotYours,
+    /// A casing change the identity's allowance does not cover.
+    Limited(Limit),
+    /// The request's deadline passed before the commit; nothing was written.
+    Late,
 }
 
 /// What a release did.
@@ -169,6 +188,8 @@ pub enum ReleaseOutcome {
     Unknown,
     /// The identity's name is not the one asked for.
     NotYours,
+    /// The request's deadline passed before the commit; nothing was written.
+    Late,
 }
 
 /// Claims `claimed.name` for `claimed.uuid`, or says why not.
@@ -182,12 +203,13 @@ pub fn claim(
     claimed: &VerifiedClaim,
     now: i64,
     client: IpAddr,
+    deadline: &Deadline,
 ) -> rusqlite::Result<ClaimOutcome> {
     let canonical = claimed.name.canonical().to_owned();
     let uuid = claimed.uuid.to_hex();
     let transaction = write_transaction(connection)?;
 
-    if is_reserved(&canonical) || reserved_here(&transaction, &canonical)? {
+    if reserved_or_lookalike(&transaction, &canonical)? {
         return Ok(ClaimOutcome::Reserved);
     }
     if active_binding(&transaction, &claimed.uuid)?.is_some() {
@@ -263,11 +285,14 @@ pub fn claim(
         &uuid,
         &format!("claim {canonical}"),
         now,
-        &client.to_string(),
+        "claim",
+        Some(client),
     )?;
     let certificate = keys.issue(&claimed.name, claimed.uuid, now, serial);
     let notice = crate::recover::pending_notice(&transaction, &canonical, now)?;
-    transaction.commit()?;
+    if !commit(transaction, deadline)? {
+        return Ok(ClaimOutcome::Late);
+    }
     Ok(ClaimOutcome::Issued {
         certificate,
         notice,
@@ -286,6 +311,12 @@ pub fn claim(
 /// window moves `renewed`, so claiming and renewing at once does not buy a
 /// squatter the renewed name's twelve months.
 ///
+/// A casing change on that path is counted against the identity's allowance
+/// ([`limits::DISPLAY_CHANGES_PER_IDENTITY`] in thirty days) and audited; past
+/// the allowance the renewal is refused, so a client looping on renew with
+/// alternating casings cannot grow the audit table without bound. A renewal
+/// that mints carries its casing in its own audit row and spends nothing.
+///
 /// # Errors
 ///
 /// Any SQL failure.
@@ -294,6 +325,7 @@ pub fn renew(
     keys: &RegistryKeys,
     claimed: &VerifiedClaim,
     now: i64,
+    deadline: &Deadline,
 ) -> rusqlite::Result<RenewOutcome> {
     let canonical = claimed.name.canonical().to_owned();
     let uuid = claimed.uuid.to_hex();
@@ -314,6 +346,14 @@ pub fn renew(
             || latest.issued + CERTIFICATE_LIFETIME_SECONDS - now > RENEW_BEFORE_SECONDS)
     {
         if existing.display != claimed.name.display() {
+            if !limits::take(
+                &transaction,
+                &limits::display_scope(&uuid),
+                limits::window_start(now, limits::THIRTY_DAYS),
+                limits::DISPLAY_CHANGES_PER_IDENTITY,
+            )? {
+                return Ok(RenewOutcome::Limited(Limit::Display));
+            }
             transaction.execute(
                 "UPDATE names SET display = ?1 WHERE canonical = ?2",
                 params![claimed.name.display(), canonical],
@@ -324,11 +364,14 @@ pub fn renew(
                 &format!("display {canonical}"),
                 now,
                 "renewal",
+                None,
             )?;
         }
         let certificate = keys.issue(&claimed.name, claimed.uuid, latest.issued, latest.serial);
         let notice = crate::recover::pending_notice(&transaction, &canonical, now)?;
-        transaction.commit()?;
+        if !commit(transaction, deadline)? {
+            return Ok(RenewOutcome::Late);
+        }
         return Ok(RenewOutcome::Renewed {
             certificate,
             notice,
@@ -357,10 +400,13 @@ pub fn renew(
         &format!("renew {canonical}"),
         now,
         "renewal",
+        None,
     )?;
     let certificate = keys.issue(&claimed.name, claimed.uuid, now, serial);
     let notice = crate::recover::pending_notice(&transaction, &canonical, now)?;
-    transaction.commit()?;
+    if !commit(transaction, deadline)? {
+        return Ok(RenewOutcome::Late);
+    }
     Ok(RenewOutcome::Renewed {
         certificate,
         notice,
@@ -376,6 +422,7 @@ pub fn release(
     connection: &mut Connection,
     request: &VerifiedRelease,
     now: i64,
+    deadline: &Deadline,
 ) -> rusqlite::Result<ReleaseOutcome> {
     let uuid = request.uuid.to_hex();
     let transaction = write_transaction(connection)?;
@@ -400,8 +447,11 @@ pub fn release(
         &format!("release {}", existing.canonical),
         now,
         "release",
+        None,
     )?;
-    transaction.commit()?;
+    if !commit(transaction, deadline)? {
+        return Ok(ReleaseOutcome::Late);
+    }
     Ok(ReleaseOutcome::Released)
 }
 
@@ -434,7 +484,9 @@ pub struct NameStatus {
 ///
 /// Any SQL failure.
 pub fn status(connection: &Connection, canonical: &str, now: i64) -> rusqlite::Result<NameStatus> {
-    let reserved = is_reserved(canonical) || reserved_here(connection, canonical)?;
+    // The page says what a claim would be told: a lookalike of a reserved name
+    // is reported reserved, so a player who checks first is not surprised.
+    let reserved = reserved_or_lookalike(connection, canonical)?;
     match binding(connection, canonical)? {
         None => Ok(NameStatus {
             canonical: canonical.to_owned(),
@@ -595,14 +647,48 @@ fn revoked_from(
     Ok(count > 0)
 }
 
-/// Whether a name is in the operator's reserved table.
-fn reserved_here(connection: &Connection, canonical: &str) -> rusqlite::Result<bool> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM reserved WHERE canonical = ?1",
-        [canonical],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
+/// Whether a name is reserved, or reads as one that is.
+///
+/// Reserved means core's constant list or the operator's table; "reads as" is
+/// [`crate::confusable::lookalikes`], applied to those names and nothing else.
+/// The table is small (the host's list and the operator's additions), so it is
+/// read whole rather than indexed by skeleton.
+pub(crate) fn reserved_or_lookalike(
+    connection: &Connection,
+    canonical: &str,
+) -> rusqlite::Result<bool> {
+    if is_reserved(canonical)
+        || RESERVED_NAMES
+            .iter()
+            .any(|reserved| crate::confusable::lookalikes(canonical, reserved))
+    {
+        return Ok(true);
+    }
+    let mut statement = connection.prepare_cached("SELECT canonical FROM reserved")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for reserved in rows {
+        if crate::confusable::lookalikes(canonical, &reserved?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `uuid` holds a name right now: bound, not released, not lapsed.
+///
+/// What the email flow asks before waiving its proof of work. A lapsed binding
+/// (past its expiry and hold) is not a name held, though its row may remain
+/// until the retention sweep or a new claim replaces it.
+///
+/// # Errors
+///
+/// Any SQL failure.
+pub(crate) fn holds_name(
+    connection: &Connection,
+    uuid: &PlayerUuid,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    Ok(active_binding(connection, uuid)?.is_some_and(|binding| now < free_at(&binding)))
 }
 
 /// One binding by canonical name.
@@ -764,17 +850,21 @@ fn record_issue(
 
 /// Writes one audit row.
 ///
-/// `who` is a UUID rather than a name: names change, identities do not.
+/// `who` is a UUID rather than a name: names change, identities do not. `why`
+/// is a fixed word or the operator's reason, **never** an address: the client
+/// address a rate limit needs goes in `ip`, which the retention sweep clears
+/// after seven days (§8) while the row itself is kept.
 pub(crate) fn audit(
     connection: &Connection,
     who: &str,
     what: &str,
     now: i64,
     why: &str,
+    ip: Option<IpAddr>,
 ) -> rusqlite::Result<()> {
     connection.execute(
-        "INSERT INTO audit (who, what, when_at, why) VALUES (?1, ?2, ?3, ?4)",
-        params![who, what, now, why],
+        "INSERT INTO audit (who, what, when_at, why, ip) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![who, what, now, why, ip.map(|ip| ip.to_string())],
     )?;
     Ok(())
 }
@@ -831,7 +921,16 @@ mod tests {
             };
             let ip: IpAddr = ip.parse().expect("ip");
             self.db
-                .with(|connection| claim(connection, &self.keys, &verified, now, ip))
+                .with(|connection| {
+                    claim(
+                        connection,
+                        &self.keys,
+                        &verified,
+                        now,
+                        ip,
+                        &Deadline::none(),
+                    )
+                })
                 .expect("claim")
         }
 
@@ -844,7 +943,7 @@ mod tests {
                 timestamp: now,
             };
             self.db
-                .with(|connection| renew(connection, &self.keys, &verified, now))
+                .with(|connection| renew(connection, &self.keys, &verified, now, &Deadline::none()))
                 .expect("renew")
         }
 
@@ -856,7 +955,7 @@ mod tests {
                 public_key: identity.verifying_key(),
             };
             self.db
-                .with(|connection| release(connection, &verified, now))
+                .with(|connection| release(connection, &verified, now, &Deadline::none()))
                 .expect("release")
         }
 
@@ -1241,5 +1340,171 @@ mod tests {
             .with(|connection| status(connection, "alice", NOW + 10 + HOLD_AFTER_RELEASE))
             .expect("status");
         assert_eq!(free.free_after, None);
+    }
+
+    fn rows(fixture: &Fixture, table: &str) -> i64 {
+        fixture
+            .db
+            .with(|connection| {
+                connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("count")
+    }
+
+    #[test]
+    fn a_lookalike_of_a_reserved_name_is_refused_with_the_reserved_reason() {
+        let mut fixture = Fixture::new();
+        // A host's reserved id, as `REGISTRY_RESERVED` seeds it.
+        fixture
+            .db
+            .with(|connection| {
+                connection.execute(
+                    "INSERT INTO reserved (canonical) VALUES ('core_testkit')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("reserve");
+        // Core's own list and the host's, folded: `l` and `1` read as `i`, `0`
+        // as `o`.
+        for (seed, lookalike) in [
+            (1u8, "lridesium"),
+            (2, "ir1desium"),
+            (3, "c0re_testkit"),
+            (4, "core_testk1t"),
+            (5, "c0nsole"),
+        ] {
+            let ip = format!("198.51.{seed}.1");
+            assert!(
+                matches!(
+                    fixture.claim(lookalike, lookalike, seed, &ip, NOW),
+                    ClaimOutcome::Reserved
+                ),
+                "{lookalike} was not refused"
+            );
+            let page = fixture
+                .db
+                .with(|connection| status(connection, lookalike, NOW))
+                .expect("status");
+            assert!(page.reserved, "{lookalike}'s page does not say reserved");
+        }
+        assert_eq!(rows(&fixture, "names"), 0);
+    }
+
+    #[test]
+    fn players_names_are_never_folded_against_each_other() {
+        // The owner's decision: the fold is for the reserved list only.
+        let mut fixture = Fixture::new();
+        for (seed, name) in [(1u8, "alice"), (2, "a1ice"), (3, "bob0"), (4, "boboo")] {
+            let ip = format!("198.51.{seed}.1");
+            assert!(
+                matches!(
+                    fixture.claim(name, name, seed, &ip, NOW),
+                    ClaimOutcome::Issued { .. }
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn casing_changes_outside_a_mint_are_three_a_month() {
+        let mut fixture = Fixture::new();
+        let first = Fixture::certificate_of(fixture.claim("alice", "alice", 1, "203.0.113.1", NOW));
+        let thirty = limits::window_start(NOW, limits::THIRTY_DAYS);
+        let mut at = NOW;
+        for display in ["Alice", "ALICE", "aLICE"] {
+            at += 60;
+            match fixture.renew("alice", display, 1, at) {
+                RenewOutcome::Renewed { certificate, .. } => {
+                    assert_eq!(certificate.serial, first.serial);
+                    assert_eq!(certificate.display, display);
+                }
+                other => panic!("{display}: {other:?}"),
+            }
+        }
+        let audited = rows(&fixture, "audit");
+        // The fourth change in the window is refused and writes nothing.
+        assert!(matches!(
+            fixture.renew("alice", "AlIcE", 1, at + 60),
+            RenewOutcome::Limited(Limit::Display)
+        ));
+        assert_eq!(rows(&fixture, "audit"), audited);
+        // The casing it has is still renewable.
+        assert!(matches!(
+            fixture.renew("alice", "aLICE", 1, at + 120),
+            RenewOutcome::Renewed { .. }
+        ));
+        // A new window, a new allowance — while the certificate is still not
+        // due, so this is the cheap path again.
+        let next = thirty + limits::THIRTY_DAYS;
+        assert!(
+            next - NOW < 60 * DAY,
+            "the next window starts before the renewal is due"
+        );
+        assert!(matches!(
+            fixture.renew("alice", "AlIcE", 1, next),
+            RenewOutcome::Renewed { .. }
+        ));
+    }
+
+    #[test]
+    fn work_that_reaches_its_commit_late_writes_nothing() {
+        let mut fixture = Fixture::new();
+        let late = Deadline::starting(std::time::Instant::now(), std::time::Duration::ZERO);
+        let identity = SigningKey::from_bytes(&[1; 32]);
+        let verified = VerifiedClaim {
+            name: Name::from_parts("alice", "Alice").expect("name"),
+            uuid: PlayerUuid::from_root_key(&identity.verifying_key()),
+            public_key: identity.verifying_key(),
+            timestamp: NOW,
+        };
+        let ip: IpAddr = "203.0.113.1".parse().expect("ip");
+        let outcome = fixture
+            .db
+            .with(|connection| claim(connection, &fixture.keys, &verified, NOW, ip, &late))
+            .expect("claim");
+        assert!(matches!(outcome, ClaimOutcome::Late), "{outcome:?}");
+        for table in ["names", "issued", "limits", "audit", "meta"] {
+            assert_eq!(
+                rows(&fixture, table),
+                0,
+                "a late claim left a row in {table}"
+            );
+        }
+        // The retry the client makes is a first claim, not `already_named`.
+        let retry = Fixture::certificate_of(fixture.claim("alice", "Alice", 1, "203.0.113.1", NOW));
+        assert_eq!(retry.serial, 1, "the late claim spent a serial");
+
+        // A late renewal and a late release change nothing either.
+        let renewed = fixture
+            .db
+            .with(|connection| renew(connection, &fixture.keys, &verified, NOW + 61 * DAY, &late))
+            .expect("renew");
+        assert!(matches!(renewed, RenewOutcome::Late));
+        assert_eq!(rows(&fixture, "issued"), 1);
+        let released = fixture
+            .db
+            .with(|connection| {
+                release(
+                    connection,
+                    &VerifiedRelease {
+                        name: "alice".to_owned(),
+                        uuid: verified.uuid,
+                        public_key: verified.public_key,
+                    },
+                    NOW + 1,
+                    &late,
+                )
+            })
+            .expect("release");
+        assert_eq!(released, ReleaseOutcome::Late);
+        let page = fixture
+            .db
+            .with(|connection| status(connection, "alice", NOW + 2))
+            .expect("status");
+        assert!(page.uuid.is_some(), "a late release released the name");
     }
 }

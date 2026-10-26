@@ -50,8 +50,14 @@ ENV REGISTRY_BIND=0.0.0.0:8080
 VOLUME ["/data"]
 EXPOSE 8080
 
-# No HEALTHCHECK instruction: the image has no curl, and Dokploy's own HTTP
-# check asks `GET /healthz`, which is a better test than a shell one-liner.
+# The binary is its own probe (`registry healthcheck`: GET /healthz over
+# loopback, healthy only on a 200, which the service gives only when its
+# database answers), because the image has no curl and should not grow one.
+# A container that fails three checks in a row is unhealthy, and a Swarm
+# service (what Dokploy runs) replaces it; the probe's own timeouts are two
+# seconds a step, inside the five here.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/registry", "healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/registry"]
 CMD ["serve"]

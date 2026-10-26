@@ -17,8 +17,10 @@
 //! rather than guessed at (the same rule as the world database): a service that
 //! read a layout it does not know would write rows the newer build cannot read.
 //! Every migration runs in one transaction, so a crash mid-migration leaves the
-//! previous version intact.
+//! previous version intact, and every migration is written so that running it
+//! a second time changes nothing.
 
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -26,14 +28,28 @@ use std::time::Duration;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 /// The schema this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+
+/// One migration's work.
+enum Step {
+    /// A statement batch, idempotent by `IF NOT EXISTS`.
+    Sql(&'static str),
+    /// Work SQL alone cannot make idempotent (adding a column, rewriting rows),
+    /// in Rust that checks before it changes.
+    Code(fn(&Connection) -> rusqlite::Result<()>),
+}
 
 /// Every migration, oldest first, with the version it brings the database to.
 ///
 /// A migration is applied in order when the stored version is below its
 /// target. The list is append-only: changing an entry that has shipped would
 /// migrate a database that already ran it into a different shape.
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
+const MIGRATIONS: &[(i64, Step)] = &[
+    (1, Step::Sql(SCHEMA_V1)),
+    (2, Step::Sql(SCHEMA_V2)),
+    (3, Step::Sql(SCHEMA_V3)),
+    (4, Step::Code(schema_v4)),
+];
 
 /// The schema, in one statement batch.
 ///
@@ -188,6 +204,100 @@ CREATE TABLE IF NOT EXISTS revoked_holders (
 );
 ";
 
+/// Schema 4: retention (§8, review B9).
+///
+/// - `audit.ip`: the client address moves out of `why`, where claims and the
+///   mail flows wrote it as free text, into a nullable column the retention
+///   sweep clears seven days after the row. The admin views that group claims
+///   by network read it from here.
+/// - `recoveries.ended_at`: when a recovery was moved or cancelled, so its
+///   record can be deleted ninety days after it ended.
+/// - The mail quota's per-address counters are re-keyed from the raw address to
+///   its hash (`mailquota::address_scope`), so no address sits in `limits`.
+///
+/// Idempotent by construction: each column is added only when the table lacks
+/// it, an address is moved only from a `why` that still parses as one, and a
+/// counter is re-keyed only while its key still holds an `@`.
+fn schema_v4(connection: &Connection) -> rusqlite::Result<()> {
+    add_column(connection, "audit", "ip", "TEXT")?;
+    add_column(connection, "recoveries", "ended_at", "INTEGER")?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS audit_ip ON audit(when_at) WHERE ip IS NOT NULL;",
+    )?;
+
+    let rows: Vec<(i64, String, String)> = {
+        let mut statement =
+            connection.prepare("SELECT id, what, why FROM audit WHERE ip IS NULL")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, what, why) in rows {
+        let Ok(ip) = why.trim().parse::<IpAddr>() else {
+            continue;
+        };
+        // The word the current code writes for the same row.
+        let reason = if what.starts_with("claim ") {
+            "claim"
+        } else {
+            "player request"
+        };
+        connection.execute(
+            "UPDATE audit SET ip = ?1, why = ?2 WHERE id = ?3",
+            rusqlite::params![ip.to_string(), reason, id],
+        )?;
+    }
+
+    connection.execute(
+        "UPDATE recoveries SET ended_at = notice_until
+         WHERE state != 'pending' AND ended_at IS NULL",
+        [],
+    )?;
+
+    let counters: Vec<(String, i64, i64)> = {
+        let mut statement = connection.prepare(
+            "SELECT scope, window, count FROM limits
+             WHERE scope LIKE 'mail:%' AND instr(scope, '@') > 0",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (scope, window, count) in counters {
+        let address = scope.trim_start_matches("mail:");
+        connection.execute(
+            "INSERT INTO limits (scope, window, count) VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope, window) DO UPDATE SET count = count + excluded.count",
+            rusqlite::params![crate::mailquota::address_scope(address), window, count],
+        )?;
+        connection.execute(
+            "DELETE FROM limits WHERE scope = ?1 AND window = ?2",
+            rusqlite::params![scope, window],
+        )?;
+    }
+    Ok(())
+}
+
+/// Adds a column unless the table already has it.
+///
+/// `ALTER TABLE ADD COLUMN` is the one schema change SQLite cannot spell `IF
+/// NOT EXISTS`, so the check is `pragma_table_info`. The names are this
+/// module's own constants, never input.
+fn add_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    kind: &str,
+) -> rusqlite::Result<()> {
+    let present: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |row| row.get(0),
+    )?;
+    if present == 0 {
+        connection.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind};"))?;
+    }
+    Ok(())
+}
+
 /// Begins a transaction that takes SQLite's write lock **at `BEGIN`**.
 ///
 /// rusqlite's default is a deferred transaction, which reads first and asks for
@@ -334,9 +444,12 @@ fn migrate(connection: &mut Connection) -> Result<(), DbError> {
         // One transaction for the whole chain: a crash halfway through leaves
         // the version and the tables where they were, not half-migrated.
         let transaction = write_transaction(connection)?;
-        for (target, sql) in MIGRATIONS {
+        for (target, step) in MIGRATIONS {
             if version < *target {
-                transaction.execute_batch(sql)?;
+                match step {
+                    Step::Sql(sql) => transaction.execute_batch(sql)?,
+                    Step::Code(work) => work(&transaction)?,
+                }
             }
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -572,6 +685,112 @@ mod tests {
         second
             .execute("INSERT INTO meta (key, value) VALUES ('other', X'01')", [])
             .expect("free once the first commits");
+    }
+
+    /// A database exactly as a schema-3 build left it, with the rows schema 4
+    /// moves: claim and mail-flow addresses in `why`, a raw address in a mail
+    /// counter, and a cancelled recovery with no end time.
+    fn schema_three_database(path: &Path) {
+        let connection = Connection::open(path).expect("raw open");
+        connection
+            .execute_batch(&format!("{SCHEMA_V1}{SCHEMA_V2}{SCHEMA_V3}"))
+            .expect("schema 3");
+        connection
+            .pragma_update(None, "user_version", 3)
+            .expect("stamp");
+        connection
+            .execute_batch(
+                "INSERT INTO audit (who, what, when_at, why) VALUES
+                     ('aa', 'claim alice', 100, '203.0.113.5'),
+                     ('bb', 'ask to recover alice', 101, '2001:db8::1'),
+                     ('cc', 'renew alice', 102, 'renewal'),
+                     ('operator', 'operator revoke --subnet 203.0.113.0/24', 103, 'burst');
+                 INSERT INTO limits (scope, window, count) VALUES
+                     ('mail:alice@example.com', 3600, 2),
+                     ('mailnet:net:203.0.113.0/24', 3600, 2),
+                     ('ip:203.0.113.5', 0, 1);
+                 INSERT INTO recoveries
+                     (canonical, from_uuid, to_uuid, confirmed_at, notice_until, state)
+                 VALUES ('alice', X'01', X'02', 10, 20, 'cancelled'),
+                        ('bob', X'01', X'02', 10, 30, 'pending');",
+            )
+            .expect("legacy rows");
+    }
+
+    #[test]
+    fn a_schema_three_database_moves_its_addresses_out_of_the_free_text() {
+        let dir = test_dir("migrate-3-to-4");
+        let path = dir.join("registry.sqlite");
+        schema_three_database(&path);
+        let db = Db::open(&path).expect("migrate forward");
+        assert_eq!(version(&db), SCHEMA_VERSION);
+
+        let audit: Vec<(String, Option<String>)> = db
+            .with(|connection| {
+                let mut statement = connection.prepare("SELECT why, ip FROM audit ORDER BY id")?;
+                let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect()
+            })
+            .expect("audit");
+        assert_eq!(
+            audit,
+            vec![
+                ("claim".to_owned(), Some("203.0.113.5".to_owned())),
+                ("player request".to_owned(), Some("2001:db8::1".to_owned())),
+                ("renewal".to_owned(), None),
+                ("burst".to_owned(), None),
+            ]
+        );
+
+        let scopes: Vec<String> = db
+            .with(|connection| {
+                let mut statement =
+                    connection.prepare("SELECT scope FROM limits ORDER BY scope")?;
+                let rows = statement.query_map([], |row| row.get(0))?;
+                rows.collect()
+            })
+            .expect("limits");
+        assert!(
+            scopes.iter().all(|scope| !scope.contains('@')),
+            "{scopes:?}"
+        );
+        assert!(scopes.contains(&crate::mailquota::address_scope("alice@example.com")));
+        assert!(scopes.contains(&"mailnet:net:203.0.113.0/24".to_owned()));
+
+        let ended: Vec<Option<i64>> = db
+            .with(|connection| {
+                let mut statement =
+                    connection.prepare("SELECT ended_at FROM recoveries ORDER BY canonical")?;
+                let rows = statement.query_map([], |row| row.get(0))?;
+                rows.collect()
+            })
+            .expect("recoveries");
+        assert_eq!(ended, vec![Some(20), None]);
+    }
+
+    #[test]
+    fn schema_four_runs_twice_to_the_same_result() {
+        let dir = test_dir("migrate-4-twice");
+        let path = dir.join("registry.sqlite");
+        schema_three_database(&path);
+        let snapshot = |db: &Db| -> Vec<String> {
+            db.with(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT 'audit|' || id || '|' || why || '|' || COALESCE(ip, '-') FROM audit
+                     UNION ALL SELECT 'limits|' || scope || '|' || window || '|' || count FROM limits
+                     UNION ALL SELECT 'recoveries|' || canonical || '|' || COALESCE(ended_at, '-')
+                         FROM recoveries
+                     ORDER BY 1",
+                )?;
+                let rows = statement.query_map([], |row| row.get(0))?;
+                rows.collect()
+            })
+            .expect("snapshot")
+        };
+        let db = Db::open(&path).expect("migrate");
+        let once = snapshot(&db);
+        db.with(|connection| schema_v4(connection)).expect("again");
+        assert_eq!(snapshot(&db), once);
     }
 
     #[test]

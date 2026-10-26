@@ -1,22 +1,39 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The transport: one blocking HTTP server, a body cap, a request deadline, and
-//! a status line for everything that is not a handler.
+//! The transport: a listener, a bounded pool of workers, a body cap, a request
+//! deadline, and a status line for everything that is not a handler.
 //!
-//! `tiny_http` is blocking and thread-per-connection. That is the right size
-//! for this service — a handful of requests per player per ninety days — and it
-//! has no TLS of its own, deliberately: TLS is the reverse proxy's job at
-//! Dokploy, and so is timing out a slow **client**. What this module owns is the
-//! part that touches a stranger's bytes, so it is where the caps live: a request
-//! body is refused **before** it is read, a handler's work is bounded at two
-//! seconds ([`REQUEST_TIMEOUT`]), and a path this service does not serve gets a
-//! status line rather than a handler.
+//! `tiny_http` is blocking: its own threads parse each connection's request
+//! line and headers, and hand over a request whose body has not been read. It
+//! has no TLS of its own, deliberately — TLS is the reverse proxy's job at
+//! Dokploy, and so is buffering a slow client's body. What this module owns is
+//! the part that touches a stranger's bytes, so it is where the caps live: a
+//! request body is refused **before** it is read if it declares too much, a
+//! request has two seconds from the listener to its answer
+//! ([`REQUEST_TIMEOUT`]), and a path this service does not serve gets a status
+//! line rather than a handler.
+//!
+//! # One slow client is one busy worker
+//!
+//! The listener never reads a body or runs a handler. It hands each request to
+//! a bounded pool ([`crate::workers`], `REGISTRY_WORKERS` of them, as many
+//! again waiting) and answers `503 busy` itself when the pool is full, so a
+//! client trickling a body stalls one worker for at most the deadline, never
+//! every other request (review B5).
+//!
+//! # A listener that stops is a process that exits
+//!
+//! When the accept loop ends for any reason but [`ServerHandle::stop`], the
+//! handle reports it ([`ServerHandle::failure`], [`ServerHandle::wait`]) and the
+//! binary exits non-zero, so the container's supervisor restarts it rather than
+//! leaving a process that answers nothing (review B17).
 
 use std::io::{ErrorKind, Read};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -25,8 +42,10 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 use crate::api;
 use crate::clock::{Clock, SystemClock};
 use crate::config::Config;
+use crate::deadline::Deadline;
 use crate::mail::Mailer;
 use crate::service::{Service, StartError};
+use crate::workers::{self, Job};
 
 /// The largest request body the registry will read.
 ///
@@ -44,12 +63,37 @@ pub const MAX_BODY_BYTES: usize = 32 * 1024;
 // way for the client to know why.
 const _: () = assert!(MAX_BODY_BYTES >= tiamat_core::identity::registry::MAX_PROVEN_REQUEST_BYTES);
 
+/// How long a request may take, from leaving the listener to its answer,
+/// before the client is told to retry.
+///
+/// The design's two seconds. The database's own `busy_timeout` is the same
+/// number, but this bounds the *whole* request: a body that trickles in, a
+/// query that waits, a verification that is slow, a disk that has stopped
+/// answering. A client gets a status line instead of a socket that never
+/// closes — and a `504` only for work that did not, and will not, commit.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often the accept loop looks at its stop flag, and how often
+/// [`ServerHandle::wait`] looks at the listener and the interrupt.
+const POLL: Duration = Duration::from_millis(200);
+
 /// A running registry.
 pub struct ServerHandle {
     addr: SocketAddr,
     server: Arc<Server>,
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    accept: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
+    failure: Arc<OnceLock<String>>,
+}
+
+/// Why [`ServerHandle::wait`] returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exit {
+    /// The operator asked the process to stop.
+    Interrupted,
+    /// The accept loop ended on its own; the reason, for the log.
+    Failed(String),
 }
 
 impl ServerHandle {
@@ -60,10 +104,40 @@ impl ServerHandle {
         self.addr
     }
 
-    /// Stops the listener and waits for its thread.
+    /// Why the accept loop ended, if it ended without [`ServerHandle::stop`].
     ///
-    /// Returns whether the thread ended cleanly. Idempotent, and `Drop` does
-    /// the same thing, so a test that forgets cannot leak a thread.
+    /// `None` while it is serving. A listener that cannot accept (`tiny_http`'s
+    /// own accept thread exits on its first error), a pool whose workers have
+    /// all gone, or a panic in the loop all count: each leaves a process that
+    /// answers nothing, which a supervisor can only fix by restarting it.
+    #[must_use]
+    pub fn failure(&self) -> Option<String> {
+        if let Some(reason) = self.failure.get() {
+            return Some(reason.clone());
+        }
+        match &self.accept {
+            Some(thread) if thread.is_finished() && !self.stop.load(Ordering::Relaxed) => {
+                Some("the accept loop ended without a reason (a panic?)".to_owned())
+            }
+            _ => None,
+        }
+    }
+
+    /// Blocks until `interrupt` delivers (or its sender is dropped) or the
+    /// accept loop fails, and says which.
+    ///
+    /// The binary's whole `serve` loop: it stops cleanly on an interrupt and
+    /// exits non-zero on a failure, so the supervisor restarts it.
+    #[must_use]
+    pub fn wait(&self, interrupt: &Receiver<()>) -> Exit {
+        supervise(interrupt, || self.failure(), POLL)
+    }
+
+    /// Stops the listener, drains the workers, and waits for both.
+    ///
+    /// Returns whether every thread ended cleanly. Idempotent, and `Drop` does
+    /// the same thing, so a test that forgets cannot leak a thread. A request a
+    /// worker is serving is finished first, which its deadline bounds.
     pub fn stop(mut self) -> bool {
         self.shutdown()
     }
@@ -71,12 +145,18 @@ impl ServerHandle {
     fn shutdown(&mut self) -> bool {
         self.stop.store(true, Ordering::Relaxed);
         // Wake a thread parked in `recv_timeout`. The timeout alone would also
-        // do it within 200 ms; this makes stopping immediate.
+        // do it within the poll interval; this makes stopping immediate.
         self.server.unblock();
-        match self.thread.take() {
+        let mut clean = match self.accept.take() {
             Some(thread) => thread.join().is_ok(),
             None => true,
+        };
+        // The accept thread owned the queue's only sender; with it gone, each
+        // worker finishes what is queued and ends.
+        for worker in self.workers.drain(..) {
+            clean &= worker.join().is_ok();
         }
+        clean
     }
 }
 
@@ -90,7 +170,29 @@ impl std::fmt::Debug for ServerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerHandle")
             .field("addr", &self.addr)
+            .field("workers", &self.workers.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// Waits for an interrupt or a failure, looking every `poll`.
+///
+/// A dropped interrupt sender counts as an interrupt: nobody is left to ask
+/// for a stop, and waiting for ever on a channel that cannot deliver would be
+/// a process that never exits.
+fn supervise(
+    interrupt: &Receiver<()>,
+    failure: impl Fn() -> Option<String>,
+    poll: Duration,
+) -> Exit {
+    loop {
+        match interrupt.recv_timeout(poll) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return Exit::Interrupted,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if let Some(reason) = failure() {
+            return Exit::Failed(reason);
+        }
     }
 }
 
@@ -128,141 +230,111 @@ pub fn serve_with(
         return Err(StartError::NotTcp);
     };
 
+    let (jobs, workers) =
+        workers::spawn(service.config().workers.max(1), &service).map_err(StartError::Thread)?;
     let stop = Arc::new(AtomicBool::new(false));
-    let thread_server = Arc::clone(&server);
-    let thread_stop = Arc::clone(&stop);
-    let thread = std::thread::Builder::new()
-        .name("registry-http".to_owned())
-        .spawn(move || run(&thread_server, &service, &thread_stop))
-        .map_err(StartError::Thread)?;
+    let failure = Arc::new(OnceLock::new());
+    let accept = {
+        let server = Arc::clone(&server);
+        let stop = Arc::clone(&stop);
+        let failure = Arc::clone(&failure);
+        std::thread::Builder::new()
+            .name("registry-http".to_owned())
+            .spawn(move || {
+                if let Err(reason) = run(server.as_ref(), &jobs, &stop) {
+                    tracing::error!(%reason, "the registry stopped accepting connections");
+                    let _ = failure.set(reason);
+                }
+            })
+            .map_err(StartError::Thread)?
+    };
 
     Ok(ServerHandle {
         addr,
         server,
         stop,
-        thread: Some(thread),
+        accept: Some(accept),
+        workers,
+        failure,
     })
 }
 
-/// The accept loop, until the stop flag is set.
-fn run(server: &Server, service: &Arc<Service>, stop: &AtomicBool) {
+/// Where the accept loop's requests come from: the listener, or a test's.
+trait Incoming {
+    /// The next request, waiting at most `timeout`.
+    fn next_request(&self, timeout: Duration) -> std::io::Result<Option<Request>>;
+}
+
+impl Incoming for Server {
+    fn next_request(&self, timeout: Duration) -> std::io::Result<Option<Request>> {
+        self.recv_timeout(timeout)
+    }
+}
+
+/// The accept loop, until the stop flag is set or the listener fails.
+///
+/// `Ok` means it was asked to stop; `Err` carries why it could not go on.
+fn run(incoming: &impl Incoming, jobs: &SyncSender<Job>, stop: &AtomicBool) -> Result<(), String> {
     while !stop.load(Ordering::Relaxed) {
-        match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(request)) => serve_one(request, Arc::clone(service)),
+        match incoming.next_request(POLL) {
+            Ok(Some(request)) => match jobs.try_send(Job::new(request)) {
+                Ok(()) => {}
+                // Every worker busy and the queue full: say so at once rather
+                // than let the request wait out its deadline in a longer line.
+                // The answer is a few hundred bytes into an idle socket, which
+                // does not block — except for a request pipelined behind
+                // another on one connection, whose answer `tiny_http` holds
+                // until the first is answered (within its deadline). Traefik
+                // does not pipeline to its backends.
+                Err(TrySendError::Full(job)) => job.refuse(Reply::busy()),
+                Err(TrySendError::Disconnected(job)) => {
+                    job.refuse(Reply::busy());
+                    return Err("every request worker has stopped".to_owned());
+                }
+            },
             Ok(None) => {}
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
-            Err(err) => {
-                // A listener that cannot accept is not a service. Stop rather
-                // than spin: the supervisor restarts the container.
-                tracing::error!(error = %err, "the registry stopped accepting connections");
-                break;
-            }
+            // A listener that cannot accept is not a service. Stop rather than
+            // spin: the binary exits and the supervisor restarts the container.
+            Err(err) => return Err(format!("the listener failed: {err}")),
         }
     }
-}
-
-/// How long a request's work may take before the client is told to retry.
-///
-/// The design's two seconds. The database's own `busy_timeout` is the same
-/// number, but this bounds the *whole* handler: a query that waits, a
-/// verification that is slow, a machine whose disk has stopped answering. A
-/// client gets a status line instead of a socket that never closes.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The outcome of work done under a deadline.
-enum Deadline<T> {
-    /// It finished in time.
-    Met(T),
-    /// It was still running when the deadline passed; its thread continues
-    /// into a dropped channel and its result is discarded.
-    Missed,
-    /// No thread could be started for it.
-    NoThread,
-}
-
-/// Runs `work` on its own thread and waits at most `timeout` for the result.
-///
-/// The serving thread must keep owning the request — only it can answer — so
-/// the handler runs beside it and the answer is handed back through a channel.
-/// A timed-out worker is **not** killed (Rust cannot do that safely); it ends
-/// when its database call does, which is bounded by the same two seconds.
-fn within<T: Send + 'static>(
-    timeout: Duration,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Deadline<T> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("registry-request".to_owned())
-        .spawn(move || {
-            let _ = sender.send(work());
-        });
-    match spawned {
-        Ok(_) => match receiver.recv_timeout(timeout) {
-            Ok(value) => Deadline::Met(value),
-            Err(_) => Deadline::Missed,
-        },
-        Err(_) => Deadline::NoThread,
-    }
-}
-
-/// Reads the body (under its cap), dispatches under the deadline, and answers.
-fn serve_one(mut request: Request, service: Arc<Service>) {
-    let method = request.method().as_str().to_owned();
-    let url = request.url().to_owned();
-    let client = client_ip(&request, service.config().trust_forwarded_for);
-    let reply = match read_body(&mut request) {
-        Ok(body) => {
-            let worker_service = Arc::clone(&service);
-            match within(REQUEST_TIMEOUT, move || {
-                dispatch(&worker_service, &method, &url, client, &body)
-            }) {
-                Deadline::Met(reply) => reply,
-                Deadline::Missed => Reply::error(
-                    504,
-                    "timeout",
-                    "the registry took longer than two seconds to answer; try again",
-                ),
-                Deadline::NoThread => Reply::error(
-                    503,
-                    "busy",
-                    "the registry could not start a request worker; try again in a moment",
-                ),
-            }
-        }
-        Err(reply) => reply,
-    };
-    if let Err(err) = request.respond(reply.into_response()) {
-        tracing::warn!(error = %err, "a response could not be written");
-    }
+    Ok(())
 }
 
 /// The prefix of the public name page.
 const NAME_PREFIX: &str = "/v1/name/";
 
 /// Routes a request to a handler, or to the status line that says why not.
-fn dispatch(
+///
+/// `work` is the email request's proof-of-work nonce from its header
+/// ([`crate::work::WORK_HEADER`]), and `deadline` is what every handler that
+/// writes checks before it commits.
+pub(crate) fn dispatch(
     service: &Service,
     method: &str,
     url: &str,
     client: Option<IpAddr>,
+    work: Option<u64>,
     body: &[u8],
+    deadline: &Deadline,
 ) -> Reply {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     match (method, path) {
         ("GET", "/healthz") => api::health(service),
         ("GET", "/v1/keys") => api::keys(service),
         ("GET", "/v1/revocations") => api::revocations(service),
-        ("POST", "/v1/claim") => api::claim(service, body, client),
-        ("POST", "/v1/release") => api::release(service, body),
-        ("POST", "/v1/email") => api::email(service, body, client),
+        ("POST", "/v1/claim") => api::claim(service, body, client, deadline),
+        ("POST", "/v1/release") => api::release(service, body, deadline),
+        ("POST", "/v1/email") => api::email(service, body, client, work, deadline),
         // A link in a mail is a page; only its button's POST changes anything,
         // so a mail scanner that follows every link changes nothing.
         ("GET", "/v1/email/verify") => api::email_verify_page(query),
-        ("POST", "/v1/email/verify") => api::email_verify(service, query, body),
-        ("POST", "/v1/recover") => api::recover_start(service, body, client),
+        ("POST", "/v1/email/verify") => api::email_verify(service, query, body, deadline),
+        ("POST", "/v1/recover") => api::recover_start(service, body, client, deadline),
         ("GET", "/v1/recover/confirm") => api::recover_confirm_page(query),
-        ("POST", "/v1/recover/confirm") => api::recover_confirm(service, query, body),
-        ("POST", "/v1/recover/cancel") => api::recover_cancel(service, body),
+        ("POST", "/v1/recover/confirm") => api::recover_confirm(service, query, body, deadline),
+        ("POST", "/v1/recover/cancel") => api::recover_cancel(service, body, deadline),
         ("GET", path) if path.starts_with(NAME_PREFIX) => {
             api::name_page(service, &path[NAME_PREFIX.len()..])
         }
@@ -288,41 +360,63 @@ fn is_known(path: &str) -> bool {
     ) || path.starts_with(NAME_PREFIX)
 }
 
-/// Reads a request body, refusing an oversized one before reading it.
-fn read_body(request: &mut Request) -> Result<Vec<u8>, Reply> {
+/// Reads a request body under its cap and its deadline.
+///
+/// An oversized `Content-Length` is refused before anything is read; the read
+/// itself stops one byte past the cap, so a lying header cannot make the
+/// service allocate; and the deadline is checked after every chunk, so a body
+/// that trickles in is refused `408` at the deadline rather than accepted
+/// whenever it ends. (A read that blocks outright is waited out by the worker,
+/// not here: see [`crate::workers`].)
+pub(crate) fn read_body(request: &mut Request, deadline: &Deadline) -> Result<Vec<u8>, Reply> {
+    let too_large = || {
+        Reply::error(
+            413,
+            "too_large",
+            &format!("a request body may be at most {MAX_BODY_BYTES} bytes"),
+        )
+    };
     let declared = request
         .headers()
         .iter()
         .find(|header| header.field.equiv("Content-Length"))
         .and_then(|header| header.value.as_str().trim().parse::<usize>().ok());
     if declared.is_some_and(|length| length > MAX_BODY_BYTES) {
-        return Err(Reply::error(
-            413,
-            "too_large",
-            &format!("a request body may be at most {MAX_BODY_BYTES} bytes"),
-        ));
+        return Err(too_large());
     }
 
     let mut body = Vec::with_capacity(declared.unwrap_or(0).min(MAX_BODY_BYTES));
-    request
-        .as_reader()
-        .take(MAX_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|err| {
-            Reply::error(
-                400,
-                "body",
-                &format!("the request body could not be read: {err}"),
-            )
-        })?;
-    if body.len() > MAX_BODY_BYTES {
-        return Err(Reply::error(
-            413,
-            "too_large",
-            &format!("a request body may be at most {MAX_BODY_BYTES} bytes"),
-        ));
+    let mut reader = request.as_reader().take(MAX_BODY_BYTES as u64 + 1);
+    let mut chunk = [0u8; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => body.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(Reply::error(
+                    400,
+                    "body",
+                    &format!("the request body could not be read: {err}"),
+                ));
+            }
+        }
+        if body.len() > MAX_BODY_BYTES {
+            return Err(too_large());
+        }
+        if deadline.expired() || deadline.abandoned() {
+            return Err(Reply::slow_body());
+        }
     }
     Ok(body)
+}
+
+/// The email request's proof-of-work nonce, from its header, if it parses.
+///
+/// A header that is not a decimal `u64` is no work at all, and the request is
+/// refused for that with the difficulty it needs, as one with none would be.
+pub(crate) fn work_header(request: &Request) -> Option<u64> {
+    header(request, crate::work::WORK_HEADER).and_then(|value| value.trim().parse().ok())
 }
 
 /// The address to rate-limit a request against.
@@ -332,7 +426,7 @@ fn read_body(request: &mut Request) -> Result<Vec<u8>, Reply> {
 /// actually talked to the proxy; earlier entries are the client's own claim and
 /// are not believed. Off by default: believing a header on a public port is how
 /// a rate limit becomes decorative.
-fn client_ip(request: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
+pub(crate) fn client_ip(request: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
     if trust_forwarded_for
         && let Some(value) = header(request, "X-Forwarded-For")
         && let Some(last) = value
@@ -417,18 +511,81 @@ impl Reply {
     /// new number to retry without guessing. It is the one error a machine is
     /// expected to read.
     pub(crate) fn error_work(status: u16, found: u32, required: u32) -> Self {
+        Self::error_work_for(
+            status,
+            found,
+            required,
+            "this network's names are busy right now",
+        )
+    }
+
+    /// [`Reply::error_work`] with the reason the work is asked for: the email
+    /// request's refusal shares the claim's shape so one client path re-mines
+    /// both.
+    pub(crate) fn error_work_for(status: u16, found: u32, required: u32, why: &str) -> Self {
         Self::json(
             status,
             format!(
-                "{{\"error\":\"work\",\"message\":\"this network's names are busy right now: \
-                 the proof of work needs {required} leading zero bits and this request has \
-                 {found}\",\"required_bits\":{required},\"found_bits\":{found}}}"
+                "{{\"error\":\"work\",\"message\":\"{}: the proof of work needs {required} \
+                 leading zero bits and this request has {found}\",\"required_bits\":{required},\
+                 \"found_bits\":{found}}}",
+                json_escape(why)
             ),
         )
     }
 
+    /// Every worker is busy and as many requests again are waiting, or a
+    /// request waited out its deadline in that queue.
+    pub(crate) fn busy() -> Self {
+        Self::error(
+            503,
+            "busy",
+            "the registry is serving as many requests as it can; try again in a moment",
+        )
+    }
+
+    /// The request's work missed its deadline and was rolled back.
+    pub(crate) fn late() -> Self {
+        Self::error(
+            504,
+            "timeout",
+            "the registry took longer than two seconds to answer; nothing was changed, so \
+             try again",
+        )
+    }
+
+    /// The request's body did not arrive within its deadline.
+    pub(crate) fn slow_body() -> Self {
+        Self::error(
+            408,
+            "timeout",
+            "the request body did not arrive within two seconds; try again",
+        )
+    }
+
+    /// The handler ended without an answer (a bug, logged where it happened).
+    pub(crate) fn internal_failure() -> Self {
+        Self::error(
+            500,
+            "internal",
+            "the registry could not answer this request",
+        )
+    }
+
+    /// The status code, for tests.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The body as text, for tests.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
     /// Wraps it for tiny_http.
-    fn into_response(self) -> Response<std::io::Cursor<Vec<u8>>> {
+    pub(crate) fn into_response(self) -> Response<std::io::Cursor<Vec<u8>>> {
         let mut response = Response::from_data(self.body).with_status_code(StatusCode(self.status));
         if let Ok(header) =
             Header::from_bytes(b"Content-Type".as_slice(), self.content_type.as_bytes())
@@ -504,21 +661,71 @@ pub(crate) fn json_escape(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// An `Incoming` whose listener has died, as `tiny_http`'s does when its
+    /// accept thread meets an error.
+    struct Broken;
+
+    impl Incoming for Broken {
+        fn next_request(&self, _timeout: Duration) -> std::io::Result<Option<Request>> {
+            Err(std::io::Error::other("too many open files"))
+        }
+    }
+
+    /// An `Incoming` that only ever times out.
+    struct Quiet;
+
+    impl Incoming for Quiet {
+        fn next_request(&self, timeout: Duration) -> std::io::Result<Option<Request>> {
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(None)
+        }
+    }
+
     #[test]
-    fn work_under_a_deadline_finishes_or_times_out() {
-        assert!(matches!(
-            within(Duration::from_millis(500), || 7),
-            Deadline::Met(7)
-        ));
-        // The slow worker is still running when this returns; it ends on its
-        // own and its answer goes into a dropped channel.
-        assert!(matches!(
-            within(Duration::from_millis(10), || {
-                std::thread::sleep(Duration::from_millis(80));
-                7
-            }),
-            Deadline::Missed
-        ));
+    fn a_listener_that_fails_ends_the_accept_loop_with_its_reason() {
+        let (jobs, _queue) = std::sync::mpsc::sync_channel(1);
+        let stop = AtomicBool::new(false);
+        let ended = run(&Broken, &jobs, &stop).expect_err("a failed listener is not a stop");
+        assert!(ended.contains("too many open files"), "{ended}");
+    }
+
+    #[test]
+    fn a_requested_stop_ends_the_accept_loop_cleanly() {
+        let (jobs, _queue) = std::sync::mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || run(&Quiet, &jobs, &stop))
+        };
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(thread.join().expect("join"), Ok(()));
+    }
+
+    #[test]
+    fn the_supervisor_returns_on_an_interrupt_or_a_failure() {
+        let (interrupt, interrupted) = std::sync::mpsc::channel();
+        interrupt.send(()).expect("send");
+        assert_eq!(
+            supervise(&interrupted, || None, Duration::from_millis(1)),
+            Exit::Interrupted
+        );
+
+        let (_interrupt, quiet) = std::sync::mpsc::channel::<()>();
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let exit = supervise(
+            &quiet,
+            || (polls.fetch_add(1, Ordering::Relaxed) >= 3).then(|| "gone".to_owned()),
+            Duration::from_millis(1),
+        );
+        assert_eq!(exit, Exit::Failed("gone".to_owned()));
+
+        // Nobody left to send an interrupt is an interrupt, not a hang.
+        let (interrupt, orphaned) = std::sync::mpsc::channel::<()>();
+        drop(interrupt);
+        assert_eq!(
+            supervise(&orphaned, || None, Duration::from_millis(1)),
+            Exit::Interrupted
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub struct Service {
     keys: RegistryKeys,
     mailer: Arc<dyn Mailer>,
     clock: Arc<dyn Clock>,
-    /// When the limit and revocation sweep last ran, Unix seconds.
+    /// When the retention sweep last ran, Unix seconds.
     last_sweep: AtomicI64,
 }
 
@@ -50,9 +50,11 @@ impl Service {
             None => Db::in_memory()?,
         };
 
-        // The design says the service sweeps its own limit rows. It happens
-        // here, and then at most hourly from `advance`, so a service that runs
-        // for months does not keep every counter it ever wrote.
+        // The design says the service forgets what §8 says it forgets: limit
+        // rows, expired links, old addresses, released names, finished
+        // recoveries (`retention`). It happens here, and then at most hourly
+        // from `advance`, so a service that runs for months keeps what the
+        // privacy page promises and no more.
         let started = clock.now();
         sweep(&db, started)?;
 
@@ -124,7 +126,7 @@ impl Service {
     }
 
     /// Completes any recovery notice whose fourteen days are up, and once an
-    /// hour sweeps spent limit rows and revocations that protect nobody.
+    /// hour runs the retention sweep ([`crate::retention::sweep`]).
     ///
     /// Called by the handlers that read or change a name, so a notice ends
     /// even if nobody visits the site at the minute it expires.
@@ -158,13 +160,13 @@ impl Service {
     }
 }
 
-/// Deletes spent limit rows and revocations whose certificates have expired.
+/// Runs the retention sweep, and says what it removed when it removed anything.
 fn sweep(db: &Db, now: i64) -> Result<(), DbError> {
-    db.with(|connection| {
-        crate::limits::sweep(connection, now)?;
-        crate::names::prune_revocations(connection, now)?;
-        Ok(())
-    })
+    let swept = db.with(|connection| crate::retention::sweep(connection, now))?;
+    if swept != crate::retention::Swept::default() {
+        tracing::info!(?swept, "the retention sweep removed what §8 does not keep");
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for Service {
@@ -255,6 +257,9 @@ mod tests {
             trust_forwarded_for: false,
             work_bits: 4,
             reserved: Vec::new(),
+            workers: crate::config::DEFAULT_WORKERS,
+            mail_per_hour: crate::mailquota::DEFAULT_MAILS_PER_HOUR,
+            request_timeout: crate::http::REQUEST_TIMEOUT,
         }
     }
 

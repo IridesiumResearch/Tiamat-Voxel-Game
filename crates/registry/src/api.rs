@@ -8,6 +8,10 @@
 //! another. Every handler is synchronous and does O(1) database work; the
 //! service is small enough that a slow query is a bug, not a load problem to
 //! schedule around.
+//!
+//! Every handler that writes takes the request's [`Deadline`] and hands it to
+//! the commit; a write that reaches its commit late is rolled back and answered
+//! with the same `504` the worker gives a request it abandons ([`late`]).
 
 use std::net::IpAddr;
 
@@ -16,10 +20,13 @@ use tiamat_core::identity::registry::{
     RegistryError, ReleaseRequest,
 };
 
+use crate::deadline::Deadline;
 use crate::http::Reply;
+use crate::mailquota::MailLimit;
 use crate::names::{self, ClaimOutcome, ReleaseOutcome, RenewOutcome};
 use crate::recover::{
-    self, CancelOutcome, ConfirmOutcome, EmailOutcome, FlowError, MailOutcome, StartOutcome,
+    self, CancelOutcome, ConfirmOutcome, EmailOutcome, FlowError, MailFlow, MailOutcome,
+    StartOutcome, VerifyOutcome,
 };
 use crate::service::Service;
 use crate::wire::{ClaimResponse, KeysResponse};
@@ -54,7 +61,12 @@ pub(crate) fn keys(service: &Service) -> Reply {
 }
 
 /// `POST /v1/claim` — a claim (with work) or a renewal (without).
-pub(crate) fn claim(service: &Service, body: &[u8], client: Option<IpAddr>) -> Reply {
+pub(crate) fn claim(
+    service: &Service,
+    body: &[u8],
+    client: Option<IpAddr>,
+    deadline: &Deadline,
+) -> Reply {
     if let Err(error) = service.advance() {
         return internal(error);
     }
@@ -88,10 +100,9 @@ pub(crate) fn claim(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
     };
 
     if is_claim {
-        match service
-            .db()
-            .with(|connection| names::claim(connection, service.keys(), &verified, now, client))
-        {
+        match service.db().with(|connection| {
+            names::claim(connection, service.keys(), &verified, now, client, deadline)
+        }) {
             Ok(ClaimOutcome::Issued {
                 certificate,
                 notice,
@@ -111,12 +122,13 @@ pub(crate) fn claim(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
                 "the registry's operator revoked that name from this identity",
             ),
             Ok(ClaimOutcome::Limited(limit)) => Reply::error(429, "limited", limit.message()),
+            Ok(ClaimOutcome::Late) => late(),
             Err(error) => internal(error),
         }
     } else {
         match service
             .db()
-            .with(|connection| names::renew(connection, service.keys(), &verified, now))
+            .with(|connection| names::renew(connection, service.keys(), &verified, now, deadline))
         {
             Ok(RenewOutcome::Renewed {
                 certificate,
@@ -130,13 +142,15 @@ pub(crate) fn claim(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
                 "not_yours",
                 "this identity holds a different name, so it cannot renew this one",
             ),
+            Ok(RenewOutcome::Limited(limit)) => Reply::error(429, "limited", limit.message()),
+            Ok(RenewOutcome::Late) => late(),
             Err(error) => internal(error),
         }
     }
 }
 
 /// `POST /v1/release` — give a name up, with the thirty-day hold.
-pub(crate) fn release(service: &Service, body: &[u8]) -> Reply {
+pub(crate) fn release(service: &Service, body: &[u8], deadline: &Deadline) -> Reply {
     if let Err(error) = service.advance() {
         return internal(error);
     }
@@ -151,7 +165,7 @@ pub(crate) fn release(service: &Service, body: &[u8]) -> Reply {
     };
     match service
         .db()
-        .with(|connection| names::release(connection, &verified, now))
+        .with(|connection| names::release(connection, &verified, now, deadline))
     {
         Ok(ReleaseOutcome::Released) => Reply::json(
             200,
@@ -168,6 +182,7 @@ pub(crate) fn release(service: &Service, body: &[u8]) -> Reply {
             "not_yours",
             "this identity holds a different name, so it cannot release this one",
         ),
+        Ok(ReleaseOutcome::Late) => late(),
         Err(error) => internal(error),
     }
 }
@@ -226,7 +241,18 @@ pub(crate) fn name_page(service: &Service, canonical: &str) -> Reply {
 ///
 /// Answers `202` when a link is on its way and `200` when an address was
 /// removed; the address itself is not stored until the link is followed.
-pub(crate) fn email(service: &Service, body: &[u8], client: Option<IpAddr>) -> Reply {
+///
+/// An identity that holds no name pays for the mail with a proof of work in the
+/// [`crate::work::WORK_HEADER`] header (`work`), at the difficulty a claim from
+/// the same network would; without enough, the refusal is the claim's `work`
+/// error, with the bits to mine for.
+pub(crate) fn email(
+    service: &Service,
+    body: &[u8],
+    client: Option<IpAddr>,
+    work: Option<u64>,
+    deadline: &Deadline,
+) -> Reply {
     let now = service.now();
     let Some(client) = client else {
         return Reply::error(400, "address", "the client's address could not be read");
@@ -239,23 +265,42 @@ pub(crate) fn email(service: &Service, body: &[u8], client: Option<IpAddr>) -> R
         Ok(verified) => verified,
         Err(error) => return refused(&error),
     };
+    let work_bits = work.map(|nonce| crate::work::email_work_bits(&request, nonce));
     // `bind_email` takes the database itself, not a held connection: it sends
     // the mail after releasing the lock, so an SMTP round trip never stalls
     // the requests queued behind it.
     match recover::bind_email(
         service.db(),
-        service.mailer(),
-        &service.config().base_url,
+        mail_flow(service, client),
         &verified,
+        work_bits,
+        service.config().work_bits,
         now,
-        client,
+        deadline,
     ) {
         Ok(EmailOutcome::Sent) => Reply::json(202, "{\"sent\":true}".to_owned()),
         Ok(EmailOutcome::Removed) => Reply::json(200, "{\"removed\":true}".to_owned()),
         Ok(EmailOutcome::NotRoot) => not_root(),
-        Ok(EmailOutcome::Limited) => limited_mail(),
+        Ok(EmailOutcome::Work { found, required }) => Reply::error_work_for(
+            400,
+            found,
+            required,
+            "an identity that holds no name pays for a mail with a proof of work",
+        ),
+        Ok(EmailOutcome::Limited(limit)) => limited_mail(limit),
         Ok(EmailOutcome::Mail(outcome)) => mail_reply(outcome),
+        Ok(EmailOutcome::Late) => late(),
         Err(error) => flow_error(error),
+    }
+}
+
+/// The mail flows' settings for one request.
+fn mail_flow(service: &Service, client: IpAddr) -> MailFlow<'_> {
+    MailFlow {
+        mailer: service.mailer(),
+        base_url: &service.config().base_url,
+        per_hour: service.config().mail_per_hour,
+        client,
     }
 }
 
@@ -281,29 +326,42 @@ pub(crate) fn email_verify_page(query: &str) -> Reply {
 }
 
 /// `POST /v1/email/verify` — the page's button: binds the address, once.
-pub(crate) fn email_verify(service: &Service, query: &str, body: &[u8]) -> Reply {
+pub(crate) fn email_verify(
+    service: &Service,
+    query: &str,
+    body: &[u8],
+    deadline: &Deadline,
+) -> Reply {
     let now = service.now();
     let Some(token) = token_from_form(body, query) else {
         return Reply::error(400, "token", "the request carries no token");
     };
     match service
         .db()
-        .try_with(|connection| recover::verify_email(connection, token, now))
+        .try_with(|connection| recover::verify_email(connection, token, now, deadline))
     {
-        Ok(Some((_uuid, address))) => Reply::json(
+        Ok(VerifyOutcome::Bound { address, .. }) => Reply::json(
             200,
             format!(
                 "{{\"verified\":true,\"address\":\"{}\"}}",
                 crate::http::json_escape(&address)
             ),
         ),
-        Ok(None) => Reply::error(400, "token", "this link is unknown, used, or expired"),
+        Ok(VerifyOutcome::Unknown) => {
+            Reply::error(400, "token", "this link is unknown, used, or expired")
+        }
+        Ok(VerifyOutcome::Late) => late(),
         Err(error) => flow_error(error),
     }
 }
 
 /// `POST /v1/recover` — ask to move a lost name to a new identity.
-pub(crate) fn recover_start(service: &Service, body: &[u8], client: Option<IpAddr>) -> Reply {
+pub(crate) fn recover_start(
+    service: &Service,
+    body: &[u8],
+    client: Option<IpAddr>,
+    deadline: &Deadline,
+) -> Reply {
     // Finish any notice that is due first: a name whose recovery has just
     // completed must not be asked about as if it still had its old holder.
     if let Err(error) = service.advance() {
@@ -324,11 +382,10 @@ pub(crate) fn recover_start(service: &Service, body: &[u8], client: Option<IpAdd
     // As for `email`: the mail goes out after the lock is released.
     match recover::start_recovery(
         service.db(),
-        service.mailer(),
-        &service.config().base_url,
+        mail_flow(service, client),
         &verified,
         now,
-        client,
+        deadline,
     ) {
         Ok(StartOutcome::Sent) => Reply::json(202, "{\"sent\":true}".to_owned()),
         Ok(StartOutcome::NotRoot) => not_root(),
@@ -350,8 +407,9 @@ pub(crate) fn recover_start(service: &Service, body: &[u8], client: Option<IpAdd
             "pending",
             "a recovery notice is already running for that name",
         ),
-        Ok(StartOutcome::Limited) => limited_mail(),
+        Ok(StartOutcome::Limited(limit)) => limited_mail(limit),
         Ok(StartOutcome::Mail(outcome)) => mail_reply(outcome),
+        Ok(StartOutcome::Late) => late(),
         Err(error) => flow_error(error),
     }
 }
@@ -378,7 +436,12 @@ pub(crate) fn recover_confirm_page(query: &str) -> Reply {
 }
 
 /// `POST /v1/recover/confirm` — the page's button: starts the notice.
-pub(crate) fn recover_confirm(service: &Service, query: &str, body: &[u8]) -> Reply {
+pub(crate) fn recover_confirm(
+    service: &Service,
+    query: &str,
+    body: &[u8],
+    deadline: &Deadline,
+) -> Reply {
     if let Err(error) = service.advance() {
         return internal(error);
     }
@@ -388,7 +451,7 @@ pub(crate) fn recover_confirm(service: &Service, query: &str, body: &[u8]) -> Re
     };
     match service
         .db()
-        .try_with(|connection| recover::confirm_recovery(connection, token, now))
+        .try_with(|connection| recover::confirm_recovery(connection, token, now, deadline))
     {
         Ok(ConfirmOutcome::Started { notice_until }) => {
             Reply::json(200, format!("{{\"notice_until\":{notice_until}}}"))
@@ -409,12 +472,13 @@ pub(crate) fn recover_confirm(service: &Service, query: &str, body: &[u8]) -> Re
             "pending",
             "a recovery notice is already running for that name",
         ),
+        Ok(ConfirmOutcome::Late) => late(),
         Err(error) => flow_error(error),
     }
 }
 
 /// `POST /v1/recover/cancel` — the holder ends a notice in one request.
-pub(crate) fn recover_cancel(service: &Service, body: &[u8]) -> Reply {
+pub(crate) fn recover_cancel(service: &Service, body: &[u8], deadline: &Deadline) -> Reply {
     // A notice that has run its fourteen days completes before a late cancel
     // is read, rather than being undone by it.
     if let Err(error) = service.advance() {
@@ -431,7 +495,7 @@ pub(crate) fn recover_cancel(service: &Service, body: &[u8]) -> Reply {
     };
     match service
         .db()
-        .try_with(|connection| recover::cancel_recovery(connection, &verified, now))
+        .try_with(|connection| recover::cancel_recovery(connection, &verified, now, deadline))
     {
         Ok(CancelOutcome::Cancelled) => Reply::json(200, "{\"cancelled\":true}".to_owned()),
         Ok(CancelOutcome::NoRecovery) => {
@@ -442,6 +506,7 @@ pub(crate) fn recover_cancel(service: &Service, body: &[u8]) -> Reply {
             "not_yours",
             "that request is not from the identity that holds the name",
         ),
+        Ok(CancelOutcome::Late) => late(),
         Err(error) => flow_error(error),
     }
 }
@@ -547,13 +612,15 @@ fn not_root() -> Reply {
     )
 }
 
-/// The mail allowance is spent.
-fn limited_mail() -> Reply {
-    Reply::error(
-        429,
-        "limited",
-        "too many mails have been sent to this address or network this hour",
-    )
+/// A mail allowance is spent; the message says which.
+fn limited_mail(limit: MailLimit) -> Reply {
+    Reply::error(429, "limited", limit.message())
+}
+
+/// The work reached its commit after the deadline and was rolled back: the
+/// same answer the worker gives a request it abandons.
+fn late() -> Reply {
+    Reply::late()
 }
 
 /// A flow failure: the detail goes to the log, a 500 to the client.
@@ -639,4 +706,190 @@ fn internal(error: impl std::fmt::Display) -> Reply {
         "internal",
         "the registry could not answer this request",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tiamat_core::identity::Identity;
+    use tiamat_core::identity::registry::{EMAIL_VERSION, Name, Signature64};
+
+    use crate::clock::Clock;
+    use crate::config::Config;
+    use crate::mail::SinkMailer;
+
+    const NOW: i64 = 1_800_000_000;
+
+    #[derive(Debug)]
+    struct Fixed;
+
+    impl Clock for Fixed {
+        fn now(&self) -> i64 {
+            NOW
+        }
+    }
+
+    fn service() -> (Service, Arc<SinkMailer>) {
+        let mailer = Arc::new(SinkMailer::default());
+        let config = Config {
+            data_dir: None,
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            key_seed: [7; 32],
+            next_key_hash: None,
+            base_url: "https://registry.example".to_owned(),
+            mail_from: None,
+            smtp_url: None,
+            trust_forwarded_for: false,
+            work_bits: 6,
+            reserved: Vec::new(),
+            workers: 1,
+            mail_per_hour: 60,
+            request_timeout: crate::http::REQUEST_TIMEOUT,
+        };
+        let service = Service::open(config, mailer.clone(), Arc::new(Fixed)).expect("service");
+        (service, mailer)
+    }
+
+    fn client() -> Option<IpAddr> {
+        Some("203.0.113.9".parse().expect("ip"))
+    }
+
+    fn claim_body(identity: &Identity, canonical: &str) -> Vec<u8> {
+        let name = Name::from_parts(canonical, canonical).expect("name");
+        let mut request = ClaimRequest::new(identity, &name, NOW);
+        request.solve_work(6).expect("work");
+        request.sign(identity);
+        postcard::to_allocvec(&request).expect("encode")
+    }
+
+    fn email_request(identity: &Identity, address: &str) -> EmailRequest {
+        let mut request = EmailRequest {
+            version: EMAIL_VERSION,
+            uuid: *identity.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            address: Some(address.to_owned()),
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        request.sign(identity);
+        request
+    }
+
+    fn count(service: &Service, table: &str) -> i64 {
+        service
+            .db()
+            .with(|connection| {
+                connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("count")
+    }
+
+    #[test]
+    fn a_claim_past_its_deadline_is_answered_504_and_commits_nothing() {
+        let (service, _mailer) = service();
+        let alice = Identity::from_seed(&[1; 32]);
+        let body = claim_body(&alice, "alice");
+        let late = Deadline::starting(Instant::now(), Duration::ZERO);
+        let reply = claim(&service, &body, client(), &late);
+        assert_eq!(reply.status(), 504, "{}", reply.text());
+        assert!(
+            reply.text().contains("nothing was changed"),
+            "{}",
+            reply.text()
+        );
+        for table in ["names", "issued", "limits", "audit"] {
+            assert_eq!(count(&service, table), 0, "{table}");
+        }
+        // The client's retry — the same body — is the claim, not `already_named`.
+        let retry = claim(&service, &body, client(), &Deadline::none());
+        assert_eq!(retry.status(), 200, "{}", retry.text());
+    }
+
+    #[test]
+    fn an_identity_with_no_name_pays_for_its_mail_and_one_with_a_name_does_not() {
+        let (service, mailer) = service();
+        let stranger = Identity::from_seed(&[2; 32]);
+        let request = email_request(&stranger, "stranger@example.com");
+        let body = postcard::to_allocvec(&request).expect("encode");
+
+        // No work: refused with the difficulty to mine, as a claim is.
+        let reply = email(&service, &body, client(), None, &Deadline::none());
+        assert_eq!(reply.status(), 400, "{}", reply.text());
+        assert!(
+            reply.text().contains("\"error\":\"work\""),
+            "{}",
+            reply.text()
+        );
+        assert!(
+            reply.text().contains("\"required_bits\":6"),
+            "{}",
+            reply.text()
+        );
+        // Too little work: refused the same way, with what it found.
+        let weak = (0..)
+            .find(|nonce| crate::work::email_work_bits(&request, *nonce) < 6)
+            .expect("a weak nonce");
+        let reply = email(&service, &body, client(), Some(weak), &Deadline::none());
+        assert_eq!(reply.status(), 400, "{}", reply.text());
+        assert_eq!(mailer.count(), 0, "a refused request was mailed");
+        assert_eq!(count(&service, "tokens"), 0);
+
+        // Enough work: the link goes out.
+        let nonce = crate::work::solve_email_work(&request, 6).expect("work");
+        let reply = email(&service, &body, client(), Some(nonce), &Deadline::none());
+        assert_eq!(reply.status(), 202, "{}", reply.text());
+        assert_eq!(mailer.take().len(), 1);
+
+        // An identity holding a name carries nothing.
+        let holder = Identity::from_seed(&[3; 32]);
+        let reply = claim(
+            &service,
+            &claim_body(&holder, "holder"),
+            client(),
+            &Deadline::none(),
+        );
+        assert_eq!(reply.status(), 200, "{}", reply.text());
+        let body =
+            postcard::to_allocvec(&email_request(&holder, "holder@example.com")).expect("encode");
+        let reply = email(&service, &body, client(), None, &Deadline::none());
+        assert_eq!(reply.status(), 202, "{}", reply.text());
+    }
+
+    #[test]
+    fn a_mail_refusal_names_the_allowance_that_was_spent() {
+        let (service, _mailer) = service();
+        let holder = Identity::from_seed(&[4; 32]);
+        assert_eq!(
+            claim(
+                &service,
+                &claim_body(&holder, "holder"),
+                client(),
+                &Deadline::none()
+            )
+            .status(),
+            200
+        );
+        for n in 0..3 {
+            let body = postcard::to_allocvec(&email_request(&holder, &format!("h{n}@example.com")))
+                .expect("encode");
+            assert_eq!(
+                email(&service, &body, client(), None, &Deadline::none()).status(),
+                202
+            );
+        }
+        let body =
+            postcard::to_allocvec(&email_request(&holder, "h9@example.com")).expect("encode");
+        let reply = email(&service, &body, client(), None, &Deadline::none());
+        assert_eq!(reply.status(), 429, "{}", reply.text());
+        assert!(
+            reply.text().contains("three mails today"),
+            "{}",
+            reply.text()
+        );
+    }
 }

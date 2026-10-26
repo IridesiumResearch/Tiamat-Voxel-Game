@@ -39,6 +39,9 @@ pub fn config(data_dir: Option<PathBuf>) -> Config {
         // a test nobody runs.
         work_bits: 4,
         reserved: Vec::new(),
+        workers: tiamat_registry::config::DEFAULT_WORKERS,
+        mail_per_hour: tiamat_registry::DEFAULT_MAILS_PER_HOUR,
+        request_timeout: tiamat_registry::REQUEST_TIMEOUT,
     }
 }
 
@@ -83,6 +86,19 @@ pub fn request(addr: SocketAddr, method: &str, path: &str, body: &[u8]) -> (u16,
     request_with_length(addr, method, path, body.len(), body)
 }
 
+/// Sends one request with extra headers (`Name: value` lines, no line ends).
+pub fn request_with_headers(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[String],
+    body: &[u8],
+) -> (u16, Vec<u8>) {
+    let mut stream = open(addr, method, path, body.len(), headers);
+    let _ = stream.write_all(body);
+    read_response(&mut stream)
+}
+
 /// Sends one request with a `Content-Length` that may not match the body sent.
 pub fn request_with_length(
     addr: SocketAddr,
@@ -91,19 +107,41 @@ pub fn request_with_length(
     declared: usize,
     body: &[u8],
 ) -> (u16, Vec<u8>) {
+    let mut stream = open(addr, method, path, declared, &[]);
+    // The server may close the connection before the whole body is written
+    // (that is what a 413 does); a failed write is the expected outcome there.
+    let _ = stream.write_all(body);
+    read_response(&mut stream)
+}
+
+/// Connects and writes a request's head, leaving the body to the caller —
+/// which is how a test sends a body slowly, or not at all.
+pub fn open(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    declared: usize,
+    headers: &[String],
+) -> TcpStream {
     let mut stream = TcpStream::connect(addr).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
-    let head = format!(
+    let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-         Content-Length: {declared}\r\n\r\n"
+         Content-Length: {declared}\r\n"
     );
+    for header in headers {
+        head.push_str(header);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
     stream.write_all(head.as_bytes()).expect("write head");
-    // The server may close the connection before the whole body is written
-    // (that is what a 413 does); a failed write is the expected outcome there.
-    let _ = stream.write_all(body);
+    stream
+}
 
+/// Reads a whole response and splits off the status and body.
+pub fn read_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {
     let mut response = Vec::new();
     let _ = stream.read_to_end(&mut response).expect("read response");
     let split = response

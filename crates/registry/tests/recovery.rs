@@ -13,7 +13,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use common::{body_text, config, request, start_with_mail};
+use common::{body_text, config, request, request_with_headers, start_with_mail};
 use tiamat_core::identity::Identity;
 use tiamat_core::identity::keyset::add_key_payload;
 use tiamat_core::identity::registry::{
@@ -24,6 +24,7 @@ use tiamat_core::identity::registry::{
 use tiamat_registry::Clock;
 use tiamat_registry::mail::SinkMailer;
 use tiamat_registry::wire::ClaimResponse;
+use tiamat_registry::work::{WORK_HEADER, solve_email_work};
 
 const NOW: i64 = 1_800_000_000;
 const NOTICE: i64 = 14 * 24 * 60 * 60;
@@ -70,6 +71,25 @@ fn email_body(identity: &Identity, address: Option<&str>, timestamp: i64) -> Vec
     };
     request.sign(identity);
     postcard::to_allocvec(&request).expect("encode")
+}
+
+/// An email request from an identity that holds no name: the body, and the
+/// header carrying its proof of work at `bits`.
+fn paid_email(identity: &Identity, address: &str, timestamp: i64, bits: u32) -> (Vec<u8>, String) {
+    let mut request = EmailRequest {
+        version: EMAIL_VERSION,
+        uuid: *identity.uuid_as_root().as_bytes(),
+        public_key: [0; 32],
+        address: Some(address.to_owned()),
+        timestamp,
+        signature: tiamat_core::identity::registry::Signature64([0; 64]),
+    };
+    request.sign(identity);
+    let nonce = solve_email_work(&request, bits).expect("work");
+    (
+        postcard::to_allocvec(&request).expect("encode"),
+        format!("{WORK_HEADER}: {nonce}"),
+    )
 }
 
 fn recovery_body(identity: &Identity, canonical: &str, timestamp: i64) -> Vec<u8> {
@@ -468,5 +488,98 @@ fn mail_is_limited_per_address() {
     );
     assert_eq!(status, 429, "{}", body_text(&body));
     assert!(body_text(&body).contains("limited"), "{body:?}");
+    assert!(handle.stop());
+}
+
+#[test]
+fn an_identity_with_no_name_mails_only_with_a_proof_of_work() {
+    let clock = Arc::new(TestClock::new(NOW));
+    let (handle, mailer) = start_with_mail(config(None), clock);
+    let addr = handle.local_addr();
+    let fresh = player(30);
+
+    // Without work, a fresh key is refused the way a claim is, with the bits.
+    let (status, body) = request(
+        addr,
+        "POST",
+        "/v1/email",
+        &email_body(&fresh, Some("fresh@example.com"), NOW),
+    );
+    assert_eq!(status, 400, "{}", body_text(&body));
+    assert!(
+        body_text(&body).contains("\"error\":\"work\""),
+        "{}",
+        body_text(&body)
+    );
+    assert!(
+        body_text(&body).contains("\"required_bits\":4"),
+        "{}",
+        body_text(&body)
+    );
+    assert_eq!(mailer.count(), 0);
+
+    // With the header, it pays and the link goes out.
+    let (body, header) = paid_email(&fresh, "fresh@example.com", NOW, 4);
+    let (status, answer) = request_with_headers(addr, "POST", "/v1/email", &[header], &body);
+    assert_eq!(status, 202, "{}", body_text(&answer));
+    assert_eq!(mailer.take().len(), 1);
+    assert!(handle.stop());
+}
+
+#[test]
+fn an_address_s_tags_and_casing_share_one_allowance() {
+    let clock = Arc::new(TestClock::new(NOW));
+    let (handle, mailer) = start_with_mail(config(None), clock);
+    let addr = handle.local_addr();
+    // Three identities, three spellings of one mailbox.
+    for (seed, address) in [
+        (31u8, "victim+1@example.com"),
+        (32, "VICTIM+2@Example.com"),
+        (33, "victim@EXAMPLE.COM"),
+    ] {
+        let (body, header) = paid_email(&player(seed), address, NOW, 4);
+        let (status, answer) = request_with_headers(addr, "POST", "/v1/email", &[header], &body);
+        assert_eq!(status, 202, "{address}: {}", body_text(&answer));
+    }
+    let (body, header) = paid_email(&player(34), "victim+4@example.com", NOW, 4);
+    let (status, answer) = request_with_headers(addr, "POST", "/v1/email", &[header], &body);
+    assert_eq!(status, 429, "{}", body_text(&answer));
+    assert!(
+        body_text(&answer).contains("that address has been mailed three times"),
+        "{}",
+        body_text(&answer)
+    );
+    assert_eq!(mailer.take().len(), 3);
+    assert!(handle.stop());
+}
+
+#[test]
+fn the_registry_stops_mailing_at_its_hourly_ceiling() {
+    let clock = Arc::new(TestClock::new(NOW));
+    let mut settings = config(None);
+    settings.mail_per_hour = 2;
+    let (handle, mailer) = start_with_mail(settings, clock.clone());
+    let addr = handle.local_addr();
+    for seed in 40u8..42 {
+        let (body, header) = paid_email(&player(seed), &format!("p{seed}@example.com"), NOW, 4);
+        let (status, answer) = request_with_headers(addr, "POST", "/v1/email", &[header], &body);
+        assert_eq!(status, 202, "{}", body_text(&answer));
+    }
+    let (body, header) = paid_email(&player(42), "p42@example.com", NOW, 4);
+    let (status, answer) = request_with_headers(addr, "POST", "/v1/email", &[header], &body);
+    assert_eq!(status, 429, "{}", body_text(&answer));
+    assert!(
+        body_text(&answer).contains("all the mail it sends in an hour"),
+        "{}",
+        body_text(&answer)
+    );
+
+    // The next hour, the ceiling is back.
+    let later = NOW + 60 * 60;
+    clock.set(later);
+    let (body, header) = paid_email(&player(42), "p42@example.com", later, 4);
+    let (status, answer) = request_with_headers(addr, "POST", "/v1/email", &[header], &body);
+    assert_eq!(status, 202, "{}", body_text(&answer));
+    assert_eq!(mailer.take().len(), 3);
     assert!(handle.stop());
 }

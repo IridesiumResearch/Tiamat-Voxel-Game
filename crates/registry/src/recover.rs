@@ -37,6 +37,14 @@
 //! Following a link takes its token whatever the answer: a refusal commits the
 //! take too, so a link that was refused once cannot be tried again later when
 //! the state it was refused for has changed.
+//!
+//! # Who may make the registry mail
+//!
+//! Every mail is counted against the asking identity, the (folded) address,
+//! the asker's network and the registry's hourly ceiling ([`crate::mailquota`]),
+//! inside the transaction that issues its link. Binding an address from an
+//! identity that holds no name also needs a proof of work ([`crate::work`]),
+//! at the difficulty a claim from the same network would pay.
 
 use std::net::IpAddr;
 
@@ -45,22 +53,31 @@ use tiamat_core::identity::PlayerUuid;
 use tiamat_core::identity::registry::{VerifiedCancellation, VerifiedEmail, VerifiedRecovery};
 
 use crate::db::{Db, write_transaction};
-use crate::limits::{self, DAY};
+use crate::deadline::{Deadline, commit};
+use crate::limits::DAY;
 use crate::mail::{Mail, MailError, Mailer};
+use crate::mailquota::{self, MailLimit};
 use crate::names::{self, HOLD_AFTER_RELEASE, binding};
 use crate::tokens::{self, Purpose, TokenError, TokenRecord};
 
 /// How long the public notice runs: fourteen days.
 pub const NOTICE_SECONDS: i64 = 14 * DAY;
 
-/// The window mail limits use.
-pub const HOUR: i64 = 60 * 60;
-
-/// Mails to one address per hour.
-pub const MAILS_PER_ADDRESS: i64 = 3;
-
-/// Mails to one neighbourhood per hour.
-pub const MAILS_PER_SUBNET: i64 = 10;
+/// What the mail flows need from the service besides the database.
+///
+/// One value rather than four arguments, because every flow that mails takes
+/// all of them.
+#[derive(Clone, Copy)]
+pub struct MailFlow<'a> {
+    /// Where the mail goes out.
+    pub mailer: &'a dyn Mailer,
+    /// The public base URL the link is built on.
+    pub base_url: &'a str,
+    /// The registry's hourly mail ceiling (`REGISTRY_MAIL_PER_HOUR`).
+    pub per_hour: i64,
+    /// The asker's address, for the per-network allowance.
+    pub client: IpAddr,
+}
 
 /// What went wrong in a flow.
 #[derive(Debug, thiserror::Error)]
@@ -103,14 +120,23 @@ pub enum MailOutcome {
 pub enum EmailOutcome {
     /// A link is on its way to the address.
     Sent,
-    /// The bound address was removed.
+    /// The bound address was removed (or there was none to remove).
     Removed,
     /// The signing key is not the UUID's root key.
     NotRoot,
-    /// The mail allowance for this address or network is spent.
-    Limited,
+    /// The identity holds no name and the request's proof of work is short.
+    Work {
+        /// The leading zero bits the request carried (zero with no work).
+        found: u32,
+        /// The bits it needed.
+        required: u32,
+    },
+    /// A mail allowance is spent.
+    Limited(MailLimit),
     /// The mail could not be handed off.
     Mail(MailOutcome),
+    /// The request's deadline passed before the commit; nothing was written.
+    Late,
 }
 
 /// What starting a recovery did.
@@ -128,10 +154,28 @@ pub enum StartOutcome {
     AlreadyHeld,
     /// A notice is already running for this name.
     Pending,
-    /// The mail allowance is spent.
-    Limited,
+    /// A mail allowance is spent.
+    Limited(MailLimit),
     /// The mail could not be handed off.
     Mail(MailOutcome),
+    /// The request's deadline passed before the commit; nothing was written.
+    Late,
+}
+
+/// What following an address-verification link did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    /// The address is bound to the identity.
+    Bound {
+        /// The identity it belongs to.
+        uuid: PlayerUuid,
+        /// The address, as it was asked for.
+        address: String,
+    },
+    /// The link is unknown, used or expired.
+    Unknown,
+    /// The request's deadline passed before the commit; the link is unspent.
+    Late,
 }
 
 /// What confirming a recovery link did.
@@ -150,6 +194,8 @@ pub enum ConfirmOutcome {
     AlreadyHeld,
     /// A notice is already running.
     Pending,
+    /// The request's deadline passed before the commit; the link is unspent.
+    Late,
 }
 
 /// What cancelling a recovery did.
@@ -161,12 +207,21 @@ pub enum CancelOutcome {
     NoRecovery,
     /// The request is not from the current holder.
     NotYours,
+    /// The request's deadline passed before the commit; nothing was written.
+    Late,
 }
 
 /// Binds, changes or removes a recovery address.
 ///
-/// The mail is sent after the database lock is released (see the module
+/// A bind or change from an identity that **holds no name** must carry a proof
+/// of work: `work_bits` is what the request's nonce gave (`None` without one),
+/// checked against the difficulty a claim from the same network would pay. The
+/// mail is sent after the database lock is released (see the module
 /// documentation), and its token discarded under a fresh lock if it fails.
+///
+/// A removal sends nothing and needs nothing, and writes (and audits) only
+/// when there was an address to remove, so a loop of removals is a loop of
+/// no-ops rather than of audit rows.
 ///
 /// # Errors
 ///
@@ -174,11 +229,12 @@ pub enum CancelOutcome {
 /// refuses the request is an outcome.
 pub fn bind_email(
     db: &Db,
-    mailer: &dyn Mailer,
-    base_url: &str,
+    flow: MailFlow<'_>,
     verified: &VerifiedEmail,
+    work_bits: Option<u32>,
+    base_work_bits: u32,
     now: i64,
-    client: IpAddr,
+    deadline: &Deadline,
 ) -> Result<EmailOutcome, FlowError> {
     // Defence in depth: `EmailRequest::verify` already refused any key but the
     // root, and this keeps the rule true for a caller that built the value.
@@ -187,55 +243,80 @@ pub fn bind_email(
     }
 
     let Some(address) = verified.address.clone() else {
-        db.try_with(|connection| -> Result<(), FlowError> {
+        return db.try_with(|connection| -> Result<EmailOutcome, FlowError> {
             let transaction = write_transaction(connection)?;
-            transaction.execute(
+            let removed = transaction.execute(
                 "DELETE FROM emails WHERE uuid = ?1",
                 [verified.uuid.as_bytes().as_slice()],
             )?;
+            if removed == 0 {
+                return Ok(EmailOutcome::Removed);
+            }
             names::audit(
                 &transaction,
                 &verified.uuid.to_hex(),
                 "remove recovery address",
                 now,
-                &client.to_string(),
+                "player request",
+                Some(flow.client),
             )?;
-            transaction.commit()?;
-            Ok(())
-        })?;
-        return Ok(EmailOutcome::Removed);
+            if !commit(transaction, deadline)? {
+                return Ok(EmailOutcome::Late);
+            }
+            Ok(EmailOutcome::Removed)
+        });
     };
 
-    let issued = db.try_with(
-        |connection| -> Result<Option<(String, [u8; 32])>, FlowError> {
-            let transaction = write_transaction(connection)?;
-            if !take_mail_quota(&transaction, &address, client, now)? {
-                // The transaction's drop is the rollback: no counter is spent by a
-                // request that was refused.
-                return Ok(None);
+    let issued = db.try_with(|connection| -> Result<Result<_, EmailOutcome>, FlowError> {
+        let transaction = write_transaction(connection)?;
+        if !names::holds_name(&transaction, &verified.uuid, now)? {
+            let required =
+                mailquota::required_work_bits(&transaction, flow.client, now, base_work_bits)?;
+            // No nonce counts as none of the work: refused at any difficulty
+            // above zero, which is every difficulty a deployment asks for.
+            let found = work_bits.unwrap_or(0);
+            if found < required {
+                return Ok(Err(EmailOutcome::Work { found, required }));
             }
-            let issued = tokens::issue(
-                &transaction,
-                Purpose::Email,
-                &verified.uuid,
-                None,
-                Some(&address),
-                now,
-            )?;
-            names::audit(
-                &transaction,
-                &verified.uuid.to_hex(),
-                "ask to verify a recovery address",
-                now,
-                &client.to_string(),
-            )?;
-            transaction.commit()?;
-            Ok(Some(issued))
-        },
-    )?;
-    let Some((token, hash)) = issued else {
-        return Ok(EmailOutcome::Limited);
+        }
+        if let Some(limit) = mailquota::take(
+            &transaction,
+            &address,
+            &verified.uuid,
+            flow.client,
+            now,
+            flow.per_hour,
+        )? {
+            // The transaction's drop is the rollback: no counter is spent by a
+            // request that was refused.
+            return Ok(Err(EmailOutcome::Limited(limit)));
+        }
+        let issued = tokens::issue(
+            &transaction,
+            Purpose::Email,
+            &verified.uuid,
+            None,
+            Some(&address),
+            now,
+        )?;
+        names::audit(
+            &transaction,
+            &verified.uuid.to_hex(),
+            "ask to verify a recovery address",
+            now,
+            "player request",
+            Some(flow.client),
+        )?;
+        if !commit(transaction, deadline)? {
+            return Ok(Err(EmailOutcome::Late));
+        }
+        Ok(Ok(issued))
+    })?;
+    let (token, hash) = match issued {
+        Ok(issued) => issued,
+        Err(refused) => return Ok(refused),
     };
+    let base_url = flow.base_url;
 
     let mail = Mail {
         to: address,
@@ -247,7 +328,7 @@ pub fn bind_email(
              button is pressed.\n"
         ),
     };
-    match send(mailer, &mail) {
+    match send(flow.mailer, &mail) {
         MailOutcome::Sent => Ok(EmailOutcome::Sent),
         other => {
             // A link whose mail never left would sit in the table until it
@@ -267,15 +348,18 @@ pub fn verify_email(
     connection: &mut Connection,
     token_hex: &str,
     now: i64,
-) -> Result<Option<(PlayerUuid, String)>, FlowError> {
+    deadline: &Deadline,
+) -> Result<VerifyOutcome, FlowError> {
     let transaction = write_transaction(connection)?;
     let Some(record) = tokens::take(&transaction, token_hex, Purpose::Email, now)? else {
-        return Ok(None);
+        return Ok(VerifyOutcome::Unknown);
     };
     let Some(address) = record.address else {
         // Spent even though it binds nothing: see the module documentation.
-        transaction.commit()?;
-        return Ok(None);
+        if !commit(transaction, deadline)? {
+            return Ok(VerifyOutcome::Late);
+        }
+        return Ok(VerifyOutcome::Unknown);
     };
     let uuid = PlayerUuid::from_bytes(record.uuid);
     transaction.execute(
@@ -290,9 +374,12 @@ pub fn verify_email(
         "verify a recovery address",
         now,
         "link",
+        None,
     )?;
-    transaction.commit()?;
-    Ok(Some((uuid, address)))
+    if !commit(transaction, deadline)? {
+        return Ok(VerifyOutcome::Late);
+    }
+    Ok(VerifyOutcome::Bound { uuid, address })
 }
 
 /// What the database half of starting a recovery decided.
@@ -309,19 +396,20 @@ enum Started {
 
 /// Starts a recovery: mails the bound address a confirmation link.
 ///
-/// The mail is sent after the database lock is released (see the module
-/// documentation).
+/// The mail counts against the **asking** identity's daily allowance and the
+/// **holder's** address's hourly one, with the network and the registry's
+/// ceiling beside them. The mail is sent after the database lock is released
+/// (see the module documentation).
 ///
 /// # Errors
 ///
 /// [`FlowError`] when the database fails.
 pub fn start_recovery(
     db: &Db,
-    mailer: &dyn Mailer,
-    base_url: &str,
+    flow: MailFlow<'_>,
     verified: &VerifiedRecovery,
     now: i64,
-    client: IpAddr,
+    deadline: &Deadline,
 ) -> Result<StartOutcome, FlowError> {
     // Defence in depth, as in `bind_email`: `RecoveryRequest::verify` already
     // refused a key that is not the new identity's root.
@@ -346,8 +434,15 @@ pub fn start_recovery(
         if pending_notice(&transaction, &verified.name, now)?.is_some() {
             return Ok(Started::Refused(StartOutcome::Pending));
         }
-        if !take_mail_quota(&transaction, &address, client, now)? {
-            return Ok(Started::Refused(StartOutcome::Limited));
+        if let Some(limit) = mailquota::take(
+            &transaction,
+            &address,
+            &verified.new_uuid,
+            flow.client,
+            now,
+            flow.per_hour,
+        )? {
+            return Ok(Started::Refused(StartOutcome::Limited(limit)));
         }
         let (token, hash) = tokens::issue(
             &transaction,
@@ -362,9 +457,12 @@ pub fn start_recovery(
             &verified.new_uuid.to_hex(),
             &format!("ask to recover {}", verified.name),
             now,
-            &client.to_string(),
+            "player request",
+            Some(flow.client),
         )?;
-        transaction.commit()?;
+        if !commit(transaction, deadline)? {
+            return Ok(Started::Refused(StartOutcome::Late));
+        }
         Ok(Started::Mail {
             token,
             hash,
@@ -380,6 +478,7 @@ pub fn start_recovery(
         } => (token, hash, address),
     };
 
+    let base_url = flow.base_url;
     let mail = Mail {
         to: address,
         subject: "A Tiamat name recovery was requested".to_owned(),
@@ -393,7 +492,7 @@ pub fn start_recovery(
             verified.name
         ),
     };
-    match send(mailer, &mail) {
+    match send(flow.mailer, &mail) {
         MailOutcome::Sent => Ok(StartOutcome::Sent),
         other => {
             discard(db, &hash);
@@ -423,15 +522,19 @@ pub fn confirm_recovery(
     connection: &mut Connection,
     token_hex: &str,
     now: i64,
+    deadline: &Deadline,
 ) -> Result<ConfirmOutcome, FlowError> {
     let transaction = write_transaction(connection)?;
     let Some(record) = tokens::take(&transaction, token_hex, Purpose::Recovery, now)? else {
         return Ok(ConfirmOutcome::UnknownToken);
     };
     // The take is committed on every path from here, refusals included: see
-    // the module documentation.
+    // the module documentation. Past the deadline nothing is, so a link that
+    // was answered "timed out" still works.
     let outcome = confirm_taken(&transaction, record, now)?;
-    transaction.commit()?;
+    if !commit(transaction, deadline)? {
+        return Ok(ConfirmOutcome::Late);
+    }
     Ok(outcome)
 }
 
@@ -467,7 +570,8 @@ fn confirm_taken(
              to_uuid = excluded.to_uuid,
              confirmed_at = excluded.confirmed_at,
              notice_until = excluded.notice_until,
-             state = 'pending'",
+             state = 'pending',
+             ended_at = NULL",
         params![
             canonical,
             held.uuid.as_slice(),
@@ -482,6 +586,7 @@ fn confirm_taken(
         &format!("recovery notice started for {canonical}"),
         now,
         "link followed",
+        None,
     )?;
     Ok(ConfirmOutcome::Started { notice_until })
 }
@@ -499,6 +604,7 @@ pub fn cancel_recovery(
     connection: &mut Connection,
     verified: &VerifiedCancellation,
     now: i64,
+    deadline: &Deadline,
 ) -> Result<CancelOutcome, FlowError> {
     let transaction = write_transaction(connection)?;
     let row = transaction
@@ -519,8 +625,8 @@ pub fn cancel_recovery(
         return Ok(CancelOutcome::NotYours);
     }
     transaction.execute(
-        "UPDATE recoveries SET state = 'cancelled' WHERE canonical = ?1",
-        [&verified.name],
+        "UPDATE recoveries SET state = 'cancelled', ended_at = ?2 WHERE canonical = ?1",
+        params![&verified.name, now],
     )?;
     names::audit(
         &transaction,
@@ -528,8 +634,11 @@ pub fn cancel_recovery(
         &format!("recovery cancelled for {}", verified.name),
         now,
         "holder's request",
+        None,
     )?;
-    transaction.commit()?;
+    if !commit(transaction, deadline)? {
+        return Ok(CancelOutcome::Late);
+    }
     Ok(CancelOutcome::Cancelled)
 }
 
@@ -584,8 +693,8 @@ pub fn advance(connection: &mut Connection, now: i64) -> rusqlite::Result<usize>
         };
         let Some(held) = binding(&transaction, &canonical)? else {
             transaction.execute(
-                "UPDATE recoveries SET state = 'cancelled' WHERE canonical = ?1",
-                [&canonical],
+                "UPDATE recoveries SET state = 'cancelled', ended_at = ?2 WHERE canonical = ?1",
+                params![&canonical, now],
             )?;
             continue;
         };
@@ -593,8 +702,8 @@ pub fn advance(connection: &mut Connection, now: i64) -> rusqlite::Result<usize>
             // The name moved on (or was released) during the notice. The notice
             // is about a binding that no longer exists.
             transaction.execute(
-                "UPDATE recoveries SET state = 'cancelled' WHERE canonical = ?1",
-                [&canonical],
+                "UPDATE recoveries SET state = 'cancelled', ended_at = ?2 WHERE canonical = ?1",
+                params![&canonical, now],
             )?;
             continue;
         }
@@ -632,8 +741,8 @@ pub fn advance(connection: &mut Connection, now: i64) -> rusqlite::Result<usize>
         }
 
         transaction.execute(
-            "UPDATE recoveries SET state = 'moved' WHERE canonical = ?1",
-            [&canonical],
+            "UPDATE recoveries SET state = 'moved', ended_at = ?2 WHERE canonical = ?1",
+            params![&canonical, now],
         )?;
         names::audit(
             &transaction,
@@ -644,6 +753,7 @@ pub fn advance(connection: &mut Connection, now: i64) -> rusqlite::Result<usize>
             ),
             now,
             "notice ended",
+            None,
         )?;
         moved += 1;
     }
@@ -660,33 +770,6 @@ fn email_for(connection: &Connection, uuid: &[u8; 32]) -> rusqlite::Result<Optio
             |row| row.get(0),
         )
         .optional()
-}
-
-/// Spends one mail from this address's and this network's hourly allowance.
-fn take_mail_quota(
-    connection: &Connection,
-    address: &str,
-    client: IpAddr,
-    now: i64,
-) -> rusqlite::Result<bool> {
-    let window = limits::window_start(now, HOUR);
-    if !limits::take(
-        connection,
-        &format!("mail:{}", address.to_ascii_lowercase()),
-        window,
-        MAILS_PER_ADDRESS,
-    )? {
-        return Ok(false);
-    }
-    if !limits::take(
-        connection,
-        &format!("mailnet:{}", limits::subnet_scope(client)),
-        window,
-        MAILS_PER_SUBNET,
-    )? {
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 /// Hands a mail to the transport, collapsing its failure into an outcome.
@@ -706,6 +789,16 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000;
 
+    /// The flow settings every test uses: a quiet network, a generous ceiling.
+    fn flow(mailer: &dyn Mailer) -> MailFlow<'_> {
+        MailFlow {
+            mailer,
+            base_url: "https://r.example",
+            per_hour: 60,
+            client: "203.0.113.1".parse().expect("ip"),
+        }
+    }
+
     #[test]
     fn a_recovery_address_is_bound_only_by_following_the_link() {
         let db = Db::in_memory().expect("db");
@@ -720,9 +813,16 @@ mod tests {
             public_key: identity.verifying_key(),
             timestamp: NOW,
         };
-        let client: IpAddr = "203.0.113.1".parse().expect("ip");
-        let outcome =
-            bind_email(&db, &mailer, "https://r.example", &verified, NOW, client).expect("bind");
+        let outcome = bind_email(
+            &db,
+            flow(&mailer),
+            &verified,
+            None,
+            0,
+            NOW,
+            &Deadline::none(),
+        )
+        .expect("bind");
         assert_eq!(outcome, EmailOutcome::Sent);
         let mails = mailer.take();
         assert_eq!(mails.len(), 1);
@@ -749,14 +849,16 @@ mod tests {
             .expect("a token")
             .to_owned();
         let bound = db
-            .try_with(|connection| verify_email(connection, &token, NOW))
-            .expect("verify")
-            .expect("a good link");
-        assert_eq!(bound.1, "alice@example.com");
-        let reused = db
-            .try_with(|connection| verify_email(connection, &token, NOW))
+            .try_with(|connection| verify_email(connection, &token, NOW, &Deadline::none()))
             .expect("verify");
-        assert!(reused.is_none());
+        assert!(
+            matches!(&bound, VerifyOutcome::Bound { address, .. } if address == "alice@example.com"),
+            "{bound:?}"
+        );
+        let reused = db
+            .try_with(|connection| verify_email(connection, &token, NOW, &Deadline::none()))
+            .expect("verify");
+        assert_eq!(reused, VerifyOutcome::Unknown);
     }
 
     #[test]
@@ -795,15 +897,14 @@ mod tests {
         })
         .expect("seed");
 
-        let client: IpAddr = "203.0.113.1".parse().expect("ip");
         let recovery = VerifiedRecovery {
             name: "alice".to_owned(),
             new_uuid,
             public_key: new.verifying_key(),
             timestamp: NOW,
         };
-        let outcome = start_recovery(&db, &mailer, "https://r.example", &recovery, NOW, client)
-            .expect("start");
+        let outcome =
+            start_recovery(&db, flow(&mailer), &recovery, NOW, &Deadline::none()).expect("start");
         assert_eq!(outcome, StartOutcome::Sent);
         let token = mailer.take()[0]
             .body
@@ -816,7 +917,7 @@ mod tests {
             .to_owned();
 
         let confirm = db
-            .try_with(|connection| confirm_recovery(connection, &token, NOW))
+            .try_with(|connection| confirm_recovery(connection, &token, NOW, &Deadline::none()))
             .expect("confirm");
         let ConfirmOutcome::Started { notice_until } = confirm else {
             panic!("expected a notice, got {confirm:?}");
@@ -909,7 +1010,6 @@ mod tests {
             db: std::sync::Arc::clone(&db),
             held: std::sync::Mutex::new(Vec::new()),
         };
-        let client: IpAddr = "203.0.113.1".parse().expect("ip");
         let holder = seed_holder(&db);
 
         let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
@@ -920,19 +1020,12 @@ mod tests {
             timestamp: NOW,
         };
         assert_eq!(
-            bind_email(&db, &probe, "https://r.example", &email, NOW, client).expect("bind"),
+            bind_email(&db, flow(&probe), &email, None, 0, NOW, &Deadline::none()).expect("bind"),
             EmailOutcome::Sent
         );
         assert_eq!(
-            start_recovery(
-                &db,
-                &probe,
-                "https://r.example",
-                &recovery_by(2),
-                NOW,
-                client
-            )
-            .expect("start"),
+            start_recovery(&db, flow(&probe), &recovery_by(2), NOW, &Deadline::none())
+                .expect("start"),
             StartOutcome::Sent
         );
         let held = probe.held.lock().expect("probe").clone();
@@ -947,18 +1040,10 @@ mod tests {
     fn a_refused_recovery_link_is_spent_all_the_same() {
         let db = Db::in_memory().expect("db");
         let mailer = SinkMailer::default();
-        let client: IpAddr = "203.0.113.1".parse().expect("ip");
         seed_holder(&db);
         assert_eq!(
-            start_recovery(
-                &db,
-                &mailer,
-                "https://r.example",
-                &recovery_by(2),
-                NOW,
-                client
-            )
-            .expect("start"),
+            start_recovery(&db, flow(&mailer), &recovery_by(2), NOW, &Deadline::none())
+                .expect("start"),
             StartOutcome::Sent
         );
         let token = mailer.take()[0]
@@ -981,7 +1066,7 @@ mod tests {
         })
         .expect("release");
         let first = db
-            .try_with(|connection| confirm_recovery(connection, &token, NOW + 2))
+            .try_with(|connection| confirm_recovery(connection, &token, NOW + 2, &Deadline::none()))
             .expect("confirm");
         assert!(matches!(first, ConfirmOutcome::UnknownName), "{first:?}");
 
@@ -996,7 +1081,7 @@ mod tests {
         })
         .expect("reclaim");
         let second = db
-            .try_with(|connection| confirm_recovery(connection, &token, NOW + 3))
+            .try_with(|connection| confirm_recovery(connection, &token, NOW + 3, &Deadline::none()))
             .expect("confirm");
         assert!(matches!(second, ConfirmOutcome::UnknownToken), "{second:?}");
     }
@@ -1030,7 +1115,7 @@ mod tests {
         };
         // One second before the end it is still the holder's to stop.
         let running = db
-            .try_with(|connection| cancel_recovery(connection, &cancel, NOW - 1))
+            .try_with(|connection| cancel_recovery(connection, &cancel, NOW - 1, &Deadline::none()))
             .expect("cancel");
         assert_eq!(running, CancelOutcome::Cancelled);
 
@@ -1040,7 +1125,7 @@ mod tests {
         })
         .expect("reset");
         let ended = db
-            .try_with(|connection| cancel_recovery(connection, &cancel, NOW))
+            .try_with(|connection| cancel_recovery(connection, &cancel, NOW, &Deadline::none()))
             .expect("cancel");
         assert_eq!(ended, CancelOutcome::NoRecovery);
     }
@@ -1086,5 +1171,156 @@ mod tests {
             })
             .expect("revocations");
         assert_eq!(revoked, vec![2]);
+    }
+
+    #[test]
+    fn removing_an_address_that_is_not_there_writes_nothing() {
+        let db = Db::in_memory().expect("db");
+        let mailer = SinkMailer::default();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let removal = VerifiedEmail {
+            uuid: PlayerUuid::from_root_key(&identity.verifying_key()),
+            address: None,
+            public_key: identity.verifying_key(),
+            timestamp: NOW,
+        };
+        // A loop of removals is a loop of no-ops, not of audit rows.
+        for _ in 0..50 {
+            assert_eq!(
+                bind_email(
+                    &db,
+                    flow(&mailer),
+                    &removal,
+                    None,
+                    0,
+                    NOW,
+                    &Deadline::none()
+                )
+                .expect("remove"),
+                EmailOutcome::Removed
+            );
+        }
+        let audited: i64 = db
+            .with(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
+            })
+            .expect("count");
+        assert_eq!(audited, 0);
+    }
+
+    #[test]
+    fn a_recovery_counts_against_its_asker_and_the_holder_s_address() {
+        let db = Db::in_memory().expect("db");
+        let mailer = SinkMailer::default();
+        seed_holder(&db);
+        // Three strangers, three mails: the holder's address is spent for the
+        // hour, whoever asks next.
+        for seed in 2..5 {
+            assert_eq!(
+                start_recovery(
+                    &db,
+                    flow(&mailer),
+                    &recovery_by(seed),
+                    NOW,
+                    &Deadline::none()
+                )
+                .expect("start"),
+                StartOutcome::Sent
+            );
+        }
+        assert_eq!(
+            start_recovery(&db, flow(&mailer), &recovery_by(9), NOW, &Deadline::none())
+                .expect("start"),
+            StartOutcome::Limited(MailLimit::Address)
+        );
+        // An hour on the address may be mailed again, but a stranger who has
+        // asked three times today may not ask again.
+        let later = NOW + crate::limits::HOUR;
+        for _ in 0..2 {
+            assert_eq!(
+                start_recovery(
+                    &db,
+                    flow(&mailer),
+                    &recovery_by(2),
+                    later,
+                    &Deadline::none()
+                )
+                .expect("start"),
+                StartOutcome::Sent
+            );
+        }
+        assert_eq!(
+            start_recovery(
+                &db,
+                flow(&mailer),
+                &recovery_by(2),
+                later,
+                &Deadline::none()
+            )
+            .expect("start"),
+            StartOutcome::Limited(MailLimit::Identity)
+        );
+    }
+
+    #[test]
+    fn a_late_confirmation_leaves_its_link_unspent() {
+        let db = Db::in_memory().expect("db");
+        let mailer = SinkMailer::default();
+        seed_holder(&db);
+        assert_eq!(
+            start_recovery(&db, flow(&mailer), &recovery_by(2), NOW, &Deadline::none())
+                .expect("start"),
+            StartOutcome::Sent
+        );
+        let token = mailer.take()[0]
+            .body
+            .split("t=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("a token")
+            .to_owned();
+        let late = Deadline::starting(std::time::Instant::now(), std::time::Duration::ZERO);
+        let first = db
+            .try_with(|connection| confirm_recovery(connection, &token, NOW, &late))
+            .expect("confirm");
+        assert!(matches!(first, ConfirmOutcome::Late), "{first:?}");
+        // The client was told "timed out, try again", and trying again works.
+        let second = db
+            .try_with(|connection| confirm_recovery(connection, &token, NOW, &Deadline::none()))
+            .expect("confirm");
+        assert!(
+            matches!(second, ConfirmOutcome::Started { .. }),
+            "{second:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_recovery_records_when_it_ended() {
+        let db = Db::in_memory().expect("db");
+        let holder = seed_holder(&db);
+        let newcomer = recovery_by(2).new_uuid;
+        db.with(|connection| {
+            connection.execute(
+                "INSERT INTO recoveries
+                     (canonical, from_uuid, to_uuid, confirmed_at, notice_until, state)
+                 VALUES ('alice', ?1, ?2, ?3, ?4, 'pending')",
+                params![
+                    holder.as_bytes().as_slice(),
+                    newcomer.as_bytes().as_slice(),
+                    NOW - NOTICE_SECONDS,
+                    NOW
+                ],
+            )?;
+            Ok(())
+        })
+        .expect("notice");
+        db.with(|connection| advance(connection, NOW + 5))
+            .expect("advance");
+        let ended: Option<i64> = db
+            .with(|connection| {
+                connection.query_row("SELECT ended_at FROM recoveries", [], |row| row.get(0))
+            })
+            .expect("ended");
+        assert_eq!(ended, Some(NOW + 5));
     }
 }

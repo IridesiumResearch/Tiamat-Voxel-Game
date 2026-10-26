@@ -7,12 +7,15 @@
 //! passes a secret to a container, and the registry's key **is** a secret. The
 //! names are the design's (§7): `REGISTRY_DATA`, `REGISTRY_KEY`,
 //! `REGISTRY_NEXT_KEY_HASH`, `REGISTRY_SMTP_URL`, `REGISTRY_MAIL_FROM`,
-//! `REGISTRY_BASE_URL`. Two more are ours: `REGISTRY_BIND` (the port inside the
-//! container) and `REGISTRY_TRUST_PROXY` (whether to believe
-//! `X-Forwarded-For`).
+//! `REGISTRY_BASE_URL`. The rest are ours: `REGISTRY_BIND` (the port inside the
+//! container), `REGISTRY_TRUST_PROXY` (whether to believe `X-Forwarded-For`),
+//! `REGISTRY_WORK_BITS`, `REGISTRY_RESERVED`, `REGISTRY_WORKERS` (how many
+//! requests are served at once) and `REGISTRY_MAIL_PER_HOUR` (the registry's
+//! hourly mail ceiling).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tiamat_core::identity::registry::{DEFAULT_WORK_BITS, MAX_WORK_BITS};
 
@@ -61,7 +64,38 @@ pub struct Config {
     /// deployment that runs the mods, and an engine test exists to keep those
     /// names out of `crates/`. See [`MAX_RESERVED_NAMES`].
     pub reserved: Vec<String>,
+
+    /// How many requests are served at once ([`DEFAULT_WORKERS`]).
+    ///
+    /// Each worker owns one request from its body to its answer, so a client
+    /// that trickles a body holds one worker, not the service; when every
+    /// worker is busy and as many requests again are waiting, the listener
+    /// answers `503 busy` itself.
+    pub workers: usize,
+
+    /// The most mail the registry sends in an hour, across every flow that
+    /// sends any ([`crate::DEFAULT_MAILS_PER_HOUR`]).
+    pub mail_per_hour: i64,
+
+    /// How long a request may take, from leaving the listener to its answer,
+    /// before the client is told to retry. The design's two seconds
+    /// ([`crate::REQUEST_TIMEOUT`]); not read from the environment, and a
+    /// field only so the deadline's tests need not wait two seconds.
+    pub request_timeout: Duration,
 }
+
+/// How many requests are served at once by default.
+///
+/// The work is a few milliseconds of SQLite behind one connection, so more
+/// workers than this only queue on the database lock; eight is enough that a
+/// handful of slow clients do not starve everyone else.
+pub const DEFAULT_WORKERS: usize = 8;
+
+/// The most workers the environment may ask for.
+///
+/// Each is a thread with a request in hand; a misconfigured variable should not
+/// be able to ask for ten thousand.
+pub const MAX_WORKERS: usize = 256;
 
 impl Config {
     /// Reads the configuration from the process environment.
@@ -93,16 +127,7 @@ impl Config {
                 name: "REGISTRY_DATA",
             })?;
 
-        let bind = match lookup("REGISTRY_BIND").filter(|value| !value.is_empty()) {
-            None => "0.0.0.0:8080".parse().map_err(|_| ConfigError::Invalid {
-                name: "REGISTRY_BIND",
-                why: "the built-in default is not an address".to_owned(),
-            })?,
-            Some(value) => value.parse().map_err(|_| ConfigError::Invalid {
-                name: "REGISTRY_BIND",
-                why: format!("`{value}` is not an address like 0.0.0.0:8080"),
-            })?,
-        };
+        let bind = Self::bind_from_lookup(&lookup)?;
 
         let base_url = lookup("REGISTRY_BASE_URL")
             .filter(|value| !value.is_empty())
@@ -186,6 +211,14 @@ impl Config {
             }
         };
 
+        let workers = read_count(&lookup, "REGISTRY_WORKERS", DEFAULT_WORKERS, MAX_WORKERS)?;
+        let mail_per_hour = read_count(
+            &lookup,
+            "REGISTRY_MAIL_PER_HOUR",
+            crate::mailquota::DEFAULT_MAILS_PER_HOUR as usize,
+            MAX_MAIL_PER_HOUR,
+        )?;
+
         Ok(Self {
             data_dir: Some(data_dir),
             bind,
@@ -197,8 +230,61 @@ impl Config {
             trust_forwarded_for,
             work_bits,
             reserved,
+            workers,
+            // Bounded by `MAX_MAIL_PER_HOUR`, so the conversion cannot fail.
+            mail_per_hour: i64::try_from(mail_per_hour).unwrap_or(i64::MAX),
+            request_timeout: crate::http::REQUEST_TIMEOUT,
         })
     }
+
+    /// The listening address alone, from `REGISTRY_BIND` (default
+    /// `0.0.0.0:8080`).
+    ///
+    /// Separate from [`Config::from_lookup`] because the health check needs
+    /// only this: a probe that demanded the signing key in its environment
+    /// would be one more process holding a secret it never uses.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] when the variable is not a socket address.
+    pub fn bind_from_lookup(
+        lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<SocketAddr, ConfigError> {
+        match lookup("REGISTRY_BIND").filter(|value| !value.is_empty()) {
+            None => Ok(SocketAddr::from(([0, 0, 0, 0], 8080))),
+            Some(value) => value.parse().map_err(|_| ConfigError::Invalid {
+                name: "REGISTRY_BIND",
+                why: format!("`{value}` is not an address like 0.0.0.0:8080"),
+            }),
+        }
+    }
+}
+
+/// The highest `REGISTRY_MAIL_PER_HOUR` accepted: far above anything a
+/// transactional provider would let one sender do, and a bound on a typo.
+pub const MAX_MAIL_PER_HOUR: usize = 10_000;
+
+/// A whole number from the environment in `1..=max`, or `default` when unset.
+fn read_count(
+    lookup: &impl Fn(&str) -> Option<String>,
+    name: &'static str,
+    default: usize,
+    max: usize,
+) -> Result<usize, ConfigError> {
+    let Some(value) = lookup(name).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    let count: usize = value.trim().parse().map_err(|_| ConfigError::Invalid {
+        name,
+        why: format!("`{value}` is not a whole number"),
+    })?;
+    if count == 0 || count > max {
+        return Err(ConfigError::Invalid {
+            name,
+            why: format!("it must be between 1 and {max}"),
+        });
+    }
+    Ok(count)
 }
 
 /// The most names a host may reserve through the environment.
@@ -240,6 +326,9 @@ impl std::fmt::Debug for Config {
             .field("trust_forwarded_for", &self.trust_forwarded_for)
             .field("work_bits", &self.work_bits)
             .field("reserved", &self.reserved.len())
+            .field("workers", &self.workers)
+            .field("mail_per_hour", &self.mail_per_hour)
+            .field("request_timeout", &self.request_timeout)
             .finish()
     }
 }
@@ -311,6 +400,51 @@ mod tests {
         // Nothing is reserved unless the host says so: content names are the
         // deployment's, never the engine's.
         assert!(config.reserved.is_empty());
+        assert_eq!(config.workers, DEFAULT_WORKERS);
+        assert_eq!(
+            config.mail_per_hour,
+            crate::mailquota::DEFAULT_MAILS_PER_HOUR
+        );
+        assert_eq!(config.request_timeout, crate::http::REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn the_worker_count_and_the_mail_ceiling_are_whole_numbers_in_range() {
+        let mut pairs = minimal();
+        pairs.push(("REGISTRY_WORKERS", "3"));
+        pairs.push(("REGISTRY_MAIL_PER_HOUR", "12"));
+        let config = Config::from_lookup(env(&pairs)).expect("counts");
+        assert_eq!(config.workers, 3);
+        assert_eq!(config.mail_per_hour, 12);
+
+        for (name, value) in [
+            ("REGISTRY_WORKERS", "0"),
+            ("REGISTRY_WORKERS", "100000"),
+            ("REGISTRY_WORKERS", "eight"),
+            ("REGISTRY_MAIL_PER_HOUR", "0"),
+            ("REGISTRY_MAIL_PER_HOUR", "-5"),
+        ] {
+            let mut pairs = minimal();
+            pairs.push((name, value));
+            assert!(
+                matches!(
+                    Config::from_lookup(env(&pairs)),
+                    Err(ConfigError::Invalid { name: found, .. }) if found == name
+                ),
+                "{name}={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bind_is_readable_without_the_secrets() {
+        // The health check reads only this; nothing else need be set.
+        let bind = Config::bind_from_lookup(&env(&[])).expect("default");
+        assert_eq!(bind, "0.0.0.0:8080".parse().expect("addr"));
+        let bind =
+            Config::bind_from_lookup(&env(&[("REGISTRY_BIND", "127.0.0.1:9")])).expect("set");
+        assert_eq!(bind, "127.0.0.1:9".parse().expect("addr"));
+        assert!(Config::bind_from_lookup(&env(&[("REGISTRY_BIND", "nope")])).is_err());
     }
 
     #[test]

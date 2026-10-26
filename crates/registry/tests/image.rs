@@ -7,15 +7,30 @@
 //! deployment are pinned here, where a change that breaks one fails the suite
 //! rather than a production redeploy.
 
-/// The Dockerfile's instructions, comments and blank lines dropped.
+/// The Dockerfile's instructions, comments and blank lines dropped, and a
+/// line ending in `\` joined to the next, as Docker reads them.
 fn instructions() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile");
     let text = std::fs::read_to_string(&path).expect("the registry's Dockerfile");
-    text.lines()
+    let mut instructions = Vec::new();
+    let mut pending = String::new();
+    for line in text
+        .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
-        .collect()
+    {
+        match line.strip_suffix('\\') {
+            Some(start) => {
+                pending.push_str(start.trim_end());
+                pending.push(' ');
+            }
+            None => {
+                pending.push_str(line);
+                instructions.push(std::mem::take(&mut pending));
+            }
+        }
+    }
+    instructions
 }
 
 /// The index of the last instruction starting with `keyword`.
@@ -42,4 +57,28 @@ fn the_service_does_not_run_as_root() {
         .iter()
         .any(|line| line.contains("useradd") && line.contains("--uid 10001"));
     assert!(creates, "the registry user is created with UID 10001");
+}
+
+#[test]
+fn the_image_checks_its_own_health() {
+    let instructions = instructions();
+    let check = last(&instructions, "HEALTHCHECK").expect("a HEALTHCHECK instruction");
+    let runtime = last(&instructions, "FROM").expect("a runtime stage");
+    assert!(runtime < check, "the health check is in the runtime stage");
+    let words: Vec<&str> = instructions[check].split_whitespace().collect();
+    // The schedule the operations guide documents.
+    for option in [
+        "--interval=30s",
+        "--timeout=5s",
+        "--start-period=10s",
+        "--retries=3",
+    ] {
+        assert!(words.contains(&option), "{option} in {words:?}");
+    }
+    // The binary's own probe: the image has no curl.
+    assert!(
+        instructions[check].contains("CMD [\"/usr/local/bin/registry\", \"healthcheck\"]"),
+        "{}",
+        instructions[check]
+    );
 }

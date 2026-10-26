@@ -181,24 +181,24 @@ impl Admin {
 
     /// Groups the window's claims by network, biggest first.
     ///
+    /// The network comes from the audit row's `ip`, which the retention sweep
+    /// clears seven days after the claim (§8): a claim older than that is
+    /// counted under `unknown`, because the registry no longer knows where it
+    /// came from.
+    ///
     /// # Errors
     ///
     /// [`AdminError::Db`] when the audit table cannot be read.
     pub fn claims_by_subnet(&self, since: i64) -> Result<Vec<SubnetClaims>, AdminError> {
-        let rows: Vec<String> = self.db.with(|connection| {
+        let rows: Vec<Option<String>> = self.db.with(|connection| {
             let mut statement = connection
-                .prepare("SELECT why FROM audit WHERE what LIKE 'claim %' AND when_at >= ?1")?;
+                .prepare("SELECT ip FROM audit WHERE what LIKE 'claim %' AND when_at >= ?1")?;
             let rows = statement.query_map([since], |row| row.get(0))?;
             rows.collect()
         })?;
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for why in rows {
-            let scope = why
-                .trim()
-                .parse::<IpAddr>()
-                .map(limits::subnet_scope)
-                .unwrap_or_else(|_| "unknown".to_owned());
-            *counts.entry(scope).or_default() += 1;
+        for ip in rows {
+            *counts.entry(subnet_of(ip.as_deref())).or_default() += 1;
         }
         let mut counts: Vec<SubnetClaims> = counts
             .into_iter()
@@ -251,7 +251,9 @@ impl Admin {
 
     /// Revokes every name claimed from a network in a window.
     ///
-    /// The burst remedy from §7: one line undoes a squatter's morning. Each
+    /// The burst remedy from §7: one line undoes a squatter's morning. It
+    /// reaches as far back as claims still carry their address, which is the
+    /// seven days §8 keeps one for. Each
     /// name is released with the ordinary thirty-day hold, its certificates
     /// that can still verify go on the revocation list, the identity is barred
     /// from claiming that name back (`revoked_holders`), and the reason goes
@@ -276,21 +278,16 @@ impl Admin {
         let now = self.now;
         let revoked = self.db.with(|connection| {
             let transaction = write_transaction(connection)?;
-            let rows: Vec<(String, String)> = {
+            let rows: Vec<(String, Option<String>)> = {
                 let mut statement = transaction.prepare(
-                    "SELECT who, why FROM audit WHERE what LIKE 'claim %' AND when_at >= ?1",
+                    "SELECT who, ip FROM audit WHERE what LIKE 'claim %' AND when_at >= ?1",
                 )?;
                 let rows = statement.query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let mut identities: Vec<[u8; 32]> = Vec::new();
-            for (who, why) in rows {
-                let scope = why
-                    .trim()
-                    .parse::<IpAddr>()
-                    .map(limits::subnet_scope)
-                    .unwrap_or_else(|_| "unknown".to_owned());
-                if scope != wanted {
+            for (who, ip) in rows {
+                if subnet_of(ip.as_deref()) != wanted {
                     continue;
                 }
                 if let Some(uuid) = hex::decode::<32>(&who)
@@ -505,6 +502,13 @@ impl std::fmt::Debug for Admin {
     }
 }
 
+/// The `net:` scope of an audit row's address, or `unknown` when it has none
+/// (cleared by the retention sweep) or it does not parse.
+fn subnet_of(ip: Option<&str>) -> String {
+    ip.and_then(|ip| ip.trim().parse::<IpAddr>().ok())
+        .map_or_else(|| "unknown".to_owned(), limits::subnet_scope)
+}
+
 /// Parses a window like `48h` or `30m` into Unix seconds before now.
 ///
 /// # Errors
@@ -584,8 +588,8 @@ mod tests {
                     ],
                 )?;
                 connection.execute(
-                    "INSERT INTO audit (who, what, when_at, why)
-                     VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO audit (who, what, when_at, why, ip)
+                     VALUES (?1, ?2, ?3, 'claim', ?4)",
                     params![uuid.to_hex(), format!("claim {canonical}"), NOW - 100, ip],
                 )?;
                 Ok(())
@@ -713,7 +717,14 @@ mod tests {
         let outcome = admin
             .db
             .with(|connection| {
-                crate::names::claim(connection, &admin.keys, &verified, NOW + 10, ip)
+                crate::names::claim(
+                    connection,
+                    &admin.keys,
+                    &verified,
+                    NOW + 10,
+                    ip,
+                    &crate::deadline::Deadline::none(),
+                )
             })
             .expect("claim");
         assert!(
@@ -739,6 +750,43 @@ mod tests {
             admin.revoke_subnet("192.0.2.0/24", NOW - 3600, "typo"),
             Err(AdminError::NoMatchingClaims { .. })
         ));
+    }
+
+    #[test]
+    fn a_claim_whose_address_has_expired_is_grouped_as_unknown_and_not_revoked() {
+        let admin = admin();
+        hold_name(&admin, "alice", 1, "203.0.113.5");
+        hold_name(&admin, "bobby", 2, "203.0.113.9");
+        // A week on, the retention sweep has cleared Bobby's address (here by
+        // hand, as the sweep would).
+        admin
+            .db
+            .with(|connection| {
+                connection.execute("UPDATE audit SET ip = NULL WHERE what = 'claim bobby'", [])?;
+                Ok(())
+            })
+            .expect("expire");
+        let groups = admin.claims_by_subnet(NOW - 3600).expect("groups");
+        assert_eq!(
+            groups,
+            vec![
+                SubnetClaims {
+                    subnet: "net:203.0.113.0/24".to_owned(),
+                    claims: 1
+                },
+                SubnetClaims {
+                    subnet: "unknown".to_owned(),
+                    claims: 1
+                },
+            ]
+        );
+        let revoked = admin
+            .revoke_subnet("203.0.113.0/24", NOW - 3600, "burst")
+            .expect("revoke");
+        assert_eq!(
+            revoked.names, 1,
+            "only the claim that still has its address"
+        );
     }
 
     #[test]

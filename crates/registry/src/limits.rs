@@ -28,6 +28,9 @@ use rusqlite::{Connection, OptionalExtension};
 
 use tiamat_core::identity::registry::MAX_WORK_BITS;
 
+/// An hour, in seconds: the window the mail allowances use.
+pub const HOUR: i64 = 60 * 60;
+
 /// A day, in seconds.
 pub const DAY: i64 = 24 * 60 * 60;
 
@@ -62,6 +65,15 @@ pub const CLAIMS_PER_IDENTITY: i64 = 1;
 /// Renames (a release, and the claim that follows it) per identity per thirty
 /// days.
 pub const RENAMES_PER_IDENTITY: i64 = 3;
+
+/// Casing changes per identity per thirty days, outside a renewal that mints.
+///
+/// A renewal that is not yet due answers the current certificate in the casing
+/// asked for, and records the change in the audit table. Without a cap, a client
+/// looping on renew with alternating casings would write an audit row per
+/// request for ever — the one table §8 keeps indefinitely. Three, like renames:
+/// a casing is the holder's to change, not to churn.
+pub const DISPLAY_CHANGES_PER_IDENTITY: i64 = 3;
 
 /// The extra proof-of-work bits a subnet pays once it is busy.
 pub const BUSY_SUBNET_BITS: u32 = 4;
@@ -117,6 +129,12 @@ pub fn claim_scope(uuid_hex: &str) -> String {
 #[must_use]
 pub fn rename_scope(uuid_hex: &str) -> String {
     format!("rename:{uuid_hex}")
+}
+
+/// One identity's allowance of casing changes.
+#[must_use]
+pub fn display_scope(uuid_hex: &str) -> String {
+    format!("display:{uuid_hex}")
 }
 
 /// Takes one unit from a window, or reports that there is none left.
@@ -205,9 +223,10 @@ pub fn required_work_bits(
 /// Deletes limit rows whose window **ended** more than [`LIMIT_RETENTION`] ago.
 ///
 /// The window's end is its start plus the length of its scope's window, known
-/// from the scope's prefix — the scopes are this crate's own strings: `ip:` and
-/// `net:` count by the day, `mail:` and `mailnet:` (in `recover`) by the hour,
-/// and the claim and rename allowances by thirty days. So a thirty-day
+/// from the scope's prefix — the scopes are this crate's own strings: `ip:`,
+/// `net:` and `mailid:` (in `mailquota`) count by the day; `mail:`, `mailnet:`
+/// and `mailall:` by the hour; and the claim, rename and casing allowances by
+/// thirty days. So a thirty-day
 /// allowance lives as long as it counts, and a day's address count is gone a
 /// week after its day. An unknown prefix is given the **longest** window: a
 /// sweep that keeps a row too long costs a few bytes, and one that deletes a
@@ -221,16 +240,11 @@ pub fn sweep(connection: &Connection, now: i64) -> rusqlite::Result<usize> {
     // loop; the `ELSE` is the unknown-prefix default.
     connection.execute(
         "DELETE FROM limits WHERE window + CASE
-             WHEN scope LIKE 'ip:%' OR scope LIKE 'net:%' THEN ?2
-             WHEN scope LIKE 'mail:%' OR scope LIKE 'mailnet:%' THEN ?3
+             WHEN scope LIKE 'ip:%' OR scope LIKE 'net:%' OR scope LIKE 'mailid:%' THEN ?2
+             WHEN scope LIKE 'mail:%' OR scope LIKE 'mailnet:%' OR scope LIKE 'mailall:%' THEN ?3
              ELSE ?4
          END < ?1",
-        rusqlite::params![
-            now - LIMIT_RETENTION,
-            DAY,
-            crate::recover::HOUR,
-            THIRTY_DAYS
-        ],
+        rusqlite::params![now - LIMIT_RETENTION, DAY, HOUR, THIRTY_DAYS],
     )
 }
 
@@ -349,15 +363,28 @@ mod tests {
         // The hour windows go a week after their hour, and a scope this sweep
         // does not know is kept as long as the longest window.
         db.with(|connection| {
-            let hour = window_start(NOW, crate::recover::HOUR);
-            take(connection, "mailnet:net:203.0.113.0/24", hour, 10)?;
+            let hour = window_start(NOW, HOUR);
+            for scope in ["mailnet:net:203.0.113.0/24", "mailall:", "mail:abcd"] {
+                take(connection, scope, hour, 10)?;
+            }
             take(connection, "something-new:x", hour, 10)?;
-            sweep(
-                connection,
-                hour + crate::recover::HOUR + LIMIT_RETENTION + 1,
-            )?;
-            assert_eq!(used(connection, "mailnet:net:203.0.113.0/24", hour)?, 0);
+            sweep(connection, hour + HOUR + LIMIT_RETENTION + 1)?;
+            for scope in ["mailnet:net:203.0.113.0/24", "mailall:", "mail:abcd"] {
+                assert_eq!(used(connection, scope, hour)?, 0, "{scope}");
+            }
             assert_eq!(used(connection, "something-new:x", hour)?, 1);
+            Ok(())
+        })
+        .expect("sweep");
+        // An identity's daily mail count is a day's window: kept through its
+        // day and the week after, not swept as an hour.
+        db.with(|connection| {
+            let day = window_start(NOW, DAY);
+            take(connection, "mailid:abcd", day, 3)?;
+            sweep(connection, day + HOUR + LIMIT_RETENTION + 1)?;
+            assert_eq!(used(connection, "mailid:abcd", day)?, 1);
+            sweep(connection, day + DAY + LIMIT_RETENTION + 1)?;
+            assert_eq!(used(connection, "mailid:abcd", day)?, 0);
             Ok(())
         })
         .expect("sweep");

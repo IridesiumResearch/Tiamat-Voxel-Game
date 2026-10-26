@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Iridesium
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The registry binary: `serve`, and the operator's `admin` commands.
+//! The registry binary: `serve`, `healthcheck`, and the operator's `admin`
+//! commands.
 //!
 //! The binary is deliberately thin. `serve` reads the environment and hands it
-//! to the library; `admin` runs on the operator's own machine, with the keys on
-//! disk and no network, because that is where a registry key is generated and
-//! where a rotation is signed.
+//! to the library, and exits non-zero if the listener stops on its own so the
+//! container's supervisor restarts it; `healthcheck` is the image's
+//! `HEALTHCHECK` probe; `admin` runs on the operator's own machine, with the
+//! keys on disk and no network, because that is where a registry key is
+//! generated and where a rotation is signed.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -17,7 +20,7 @@ use clap::{Parser, Subcommand};
 use tiamat_registry::hex;
 use tiamat_registry::keys;
 use tiamat_registry::mail::{SmtpMailer, Unavailable};
-use tiamat_registry::{Config, Mailer, admin, serve};
+use tiamat_registry::{Config, Exit, Mailer, admin, healthcheck, serve};
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -32,11 +35,16 @@ struct Cli {
     command: Command,
 }
 
-/// The two things this binary does.
+/// The things this binary does.
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Serve the registry over HTTP.
     Serve,
+    /// Ask the local service's `GET /healthz`; exit 0 when it answers 200.
+    ///
+    /// The image's `HEALTHCHECK`. Reads only `REGISTRY_BIND` (a `0.0.0.0`
+    /// bind is probed on loopback), so it needs none of the secrets.
+    Healthcheck,
     /// Operator commands, run on the machine that holds the keys.
     Admin {
         /// Which operator command.
@@ -77,7 +85,8 @@ enum AdminCommand {
         /// The network, as it is written in the claim log: `203.0.113.0/24`.
         #[arg(long, value_name = "subnet")]
         subnet: String,
-        /// How far back to look: `48h`, `30d`.
+        /// How far back to look: `48h`, `7d`. A claim keeps its address for
+        /// seven days (§8), so nothing older can be matched to a network.
         #[arg(long, value_name = "window", default_value = "48h")]
         since: String,
         /// Why, in the operator's words. Required.
@@ -175,6 +184,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Serve => serve_command(),
+        Command::Healthcheck => healthcheck_command(),
         Command::Admin { command } => admin_command(command),
     }
 }
@@ -197,24 +207,44 @@ fn serve_command() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(Unavailable)
         }
     };
+    let interrupt = interrupt_channel()?;
     let handle = serve(config, mailer)?;
     tracing::info!(addr = %handle.local_addr(), "the registry is listening");
 
-    wait_for_interrupt()?;
-    handle.stop();
-    tracing::info!("the registry stopped");
-    Ok(())
+    match handle.wait(&interrupt) {
+        Exit::Interrupted => {
+            handle.stop();
+            tracing::info!("the registry stopped");
+            Ok(())
+        }
+        // A process whose listener has stopped answers nothing; exiting
+        // non-zero is what gets it restarted, where waiting for a Ctrl-C that
+        // never comes would leave it dead behind a green container.
+        Exit::Failed(reason) => {
+            tracing::error!(%reason, "the registry's listener stopped; exiting so it is restarted");
+            drop(handle);
+            Err(format!("the listener stopped: {reason}").into())
+        }
+    }
 }
 
-/// Blocks until Ctrl-C.
-fn wait_for_interrupt() -> Result<(), Box<dyn std::error::Error>> {
+/// A channel that receives once per Ctrl-C (or `SIGTERM`, which is how a
+/// container is asked to stop).
+fn interrupt_channel() -> Result<std::sync::mpsc::Receiver<()>, Box<dyn std::error::Error>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     ctrlc::set_handler(move || {
         // The receiver may already be gone during shutdown; that is not an
         // error worth reporting from a signal handler.
         let _ = sender.send(());
     })?;
-    receiver.recv()?;
+    Ok(receiver)
+}
+
+/// Probes the local service: success on `200` from `GET /healthz`.
+fn healthcheck_command() -> Result<(), Box<dyn std::error::Error>> {
+    let bind = Config::bind_from_lookup(&|name| std::env::var(name).ok())?;
+    healthcheck::check(healthcheck::target(bind), healthcheck::PROBE_TIMEOUT)?;
+    println!("healthy");
     Ok(())
 }
 
