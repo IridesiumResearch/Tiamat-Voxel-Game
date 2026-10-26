@@ -6616,12 +6616,61 @@ impl ServerHandle {
                                     .filter(|(there, _)| *there == domain)
                                     .map(|(_, centre)| *centre)
                                     .collect();
-                                for pos in world.resident_positions(&domain) {
-                                    if near.iter().any(|centre| {
-                                        tiamat_core::interest::contains(*centre, keep, pos)
-                                    }) {
-                                        continue;
+                                // **Players bucketed by a cell the size of the keep
+                                // radius.** Testing every resident chunk against
+                                // every player was O(chunks × players), and at
+                                // fifty spread players the resident set grows with
+                                // the players too. A chunk can only be kept by a
+                                // player in its own cell or an adjacent one, so a
+                                // walk of the resident set makes at most 27 map
+                                // probes and tests only the few players there.
+                                let size = i32::from(keep.horizontal.max(keep.vertical).max(1));
+                                let cell = |pos: tiamat_core::ChunkPos| {
+                                    (
+                                        pos.x.div_euclid(size),
+                                        pos.y.div_euclid(size),
+                                        pos.z.div_euclid(size),
+                                    )
+                                };
+                                let mut buckets: std::collections::HashMap<
+                                    (i32, i32, i32),
+                                    Vec<tiamat_core::ChunkPos>,
+                                > = std::collections::HashMap::new();
+                                for centre in &near {
+                                    buckets.entry(cell(*centre)).or_default().push(*centre);
+                                }
+                                let mut candidates: Vec<tiamat_core::ChunkPos> = Vec::new();
+                                for pos in world.resident_positions_unsorted(&domain) {
+                                    let (cx, cy, cz) = cell(pos);
+                                    let mut kept = false;
+                                    'search: for dx in -1..=1 {
+                                        for dy in -1..=1 {
+                                            for dz in -1..=1 {
+                                                let Some(players) =
+                                                    buckets.get(&(cx + dx, cy + dy, cz + dz))
+                                                else {
+                                                    continue;
+                                                };
+                                                for centre in players {
+                                                    if tiamat_core::interest::contains(
+                                                        *centre, keep, pos,
+                                                    ) {
+                                                        kept = true;
+                                                        break 'search;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
+                                    if !kept {
+                                        candidates.push(pos);
+                                    }
+                                }
+                                // The queue's order is observable (it decides
+                                // which chunks leave memory on which tick), so
+                                // sort after the hash-bucket walk.
+                                candidates.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z));
+                                for pos in candidates {
                                     unload_queue.push_back((domain.clone(), pos));
                                 }
                             }

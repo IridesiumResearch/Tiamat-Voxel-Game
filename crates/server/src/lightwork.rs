@@ -97,15 +97,52 @@ impl Events {
     }
 
     /// Turns the tick's events into one batch per space, with a snapshot of
-    /// each, and clears them.
+    /// the chunks each event can read, and clears them.
+    ///
+    /// **The neighbourhood, not the space.** A relight reads its own chunk, its
+    /// six face neighbours and (for the roof pass) the chunk below; an edit's
+    /// light cannot cross more than one chunk because the light radius is
+    /// smaller than a chunk. Snapshotting all resident chunks for one edit was
+    /// 0.2–0.3 ms at 5.8k and ~10 ms at 100k, every tick anyone moved; this is
+    /// at most 27 chunks per edit and 36 per arrival (the extra layer is the
+    /// roof pass's chunk below), deduplicated.
     pub fn into_batches(self, tick: u64, world: &crate::world::World) -> Vec<Batch> {
         self.by_domain
             .into_iter()
-            .map(|(domain, events)| Batch {
-                tick,
-                terrain: world.snapshot(&domain),
-                domain,
-                events,
+            .map(|(domain, events)| {
+                let mut positions = BTreeSet::new();
+                for event in &events {
+                    let (at, lowest) = match *event {
+                        Event::Arrived(pos) => (pos, -2),
+                        Event::Edited(pos) => (pos.chunk(), -1),
+                        Event::Forget(pos) => (pos, 0),
+                    };
+                    // A forget needs no blocks: the layer is dropped by the
+                    // event itself. Everything else gets the 3×3 face ring; an
+                    // arrival also gets the chunk BELOW (the roof pass centres
+                    // there) and therefore one layer below that, since the
+                    // roof pass reads its own face ring.
+                    if matches!(event, Event::Forget(_)) {
+                        continue;
+                    }
+                    for dx in -1..=1 {
+                        for dy in lowest..=1 {
+                            for dz in -1..=1 {
+                                positions.insert(ChunkPos::new(
+                                    at.x.saturating_add(dx),
+                                    at.y.saturating_add(dy),
+                                    at.z.saturating_add(dz),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Batch {
+                    tick,
+                    terrain: world.snapshot_of(&domain, &positions),
+                    domain,
+                    events,
+                }
             })
             .collect()
     }

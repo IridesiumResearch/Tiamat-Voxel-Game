@@ -33,7 +33,7 @@
 //! it, and it is what charter rule 6 means by "only modified **or generated**
 //! chunks persist".
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1018,6 +1018,20 @@ impl World {
         out
     }
 
+    /// Every resident chunk's position, in no particular order.
+    ///
+    /// For a caller that filters the whole set through its own ordered
+    /// structure before anything observable happens — the unload sweep sorts
+    /// the candidates it keeps. The sorted variant above is for the random
+    /// tick, which samples a prefix and therefore needs the order.
+    #[must_use]
+    pub fn resident_positions_unsorted(&self, domain: &str) -> Vec<ChunkPos> {
+        self.domains
+            .get(domain)
+            .map(|space| space.cache.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// What one block is made of, without loading anything.
     ///
     /// `None` where the chunk is not resident, or the block is air or mixed —
@@ -1053,6 +1067,34 @@ impl World {
                 .map(|space| space.cache.clone())
                 .unwrap_or_default(),
         )
+    }
+
+    /// A snapshot of only the positions a batch can read.
+    ///
+    /// **The full map was the tick's cost, not the light thread's.** A relight
+    /// reads its own chunk, its six face neighbours for border seeds, and the
+    /// chunk below for the roof case; an edit can reach at most one chunk in
+    /// each direction because the light radius is smaller than a chunk. The
+    /// light worker asks for that neighbourhood and this clones only what is
+    /// present, so a tick with one edit no longer copies 5,000 `Arc`s.
+    ///
+    /// A position the world does not hold is skipped, exactly as it is absent
+    /// from the full snapshot: the light flood treats it as unloaded terrain.
+    #[must_use]
+    pub fn snapshot_of(
+        &self,
+        domain: &str,
+        positions: &BTreeSet<ChunkPos>,
+    ) -> Arc<HashMap<ChunkPos, Arc<Chunk>>> {
+        let mut map = HashMap::with_capacity(positions.len());
+        if let Some(space) = self.domains.get(domain) {
+            for pos in positions {
+                if let Some(chunk) = space.cache.get(pos) {
+                    map.insert(*pos, Arc::clone(chunk));
+                }
+            }
+        }
+        Arc::new(map)
     }
 
     /// Puts a chunk back on the arrival list.
@@ -1554,6 +1596,14 @@ impl World {
     ) -> Result<MaterialId, WorldError> {
         // Sub-node zero, which for a uniform block is the whole block. A caller
         // that needs the full contents asks for the chunk.
+        // A resident chunk is read without `chunk`'s `&mut`: the light thread's
+        // snapshot shares the `Arc`, and `chunk` would `make_mut` a whole copy
+        // just to answer one cell.
+        if let Some(chunk) = self.resident(domain, pos.chunk()) {
+            return Ok(chunk
+                .get_block(pos)
+                .map_or(MaterialId::AIR, |view| view.subnode(0)));
+        }
         Ok(self
             .chunk(domain, pos.chunk(), source)?
             .get_block(pos)
@@ -1577,6 +1627,13 @@ impl World {
         pos: BlockPos,
         source: &mut dyn ChunkSource,
     ) -> Result<Cells, WorldError> {
+        // The same resident short-circuit as `block_material`: a read must not
+        // copy-on-write a chunk just because a light snapshot shares it.
+        if let Some(chunk) = self.resident(domain, pos.chunk()) {
+            return Ok(chunk.get_block(pos).map_or(EMPTY_CELLS, |view| {
+                std::array::from_fn(|index| view.subnode(index))
+            }));
+        }
         Ok(self
             .chunk(domain, pos.chunk(), source)?
             .get_block(pos)
@@ -1596,6 +1653,9 @@ impl World {
         pos: SubNodePos,
         source: &mut dyn ChunkSource,
     ) -> Result<MaterialId, WorldError> {
+        if let Some(chunk) = self.resident(domain, pos.chunk()) {
+            return Ok(chunk.get_subnode(pos).unwrap_or(MaterialId::AIR));
+        }
         Ok(self
             .chunk(domain, pos.chunk(), source)?
             .get_subnode(pos)
