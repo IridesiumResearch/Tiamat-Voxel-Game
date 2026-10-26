@@ -2843,12 +2843,27 @@ impl ServerHandle {
             std::thread::Builder::new()
                 .name("network".to_owned())
                 .spawn(move || {
-                    // Thirty seconds is a backstop for a simulation thread that
-                    // panicked before saying anything; a world open is orders of
-                    // magnitude quicker than that.
-                    match world_ready.recv_timeout(std::time::Duration::from_secs(30)) {
+                    // No timeout: a simulation thread that panics drops its
+                    // sender and ends this wait at once, and a world that takes
+                    // long to open (a big migration on a slow disk) is still
+                    // the world this server is for. Either failure is said out
+                    // loud — a server that binds a port and then never accepts
+                    // looks healthy from outside.
+                    match world_ready.recv() {
                         Ok(true) => {}
-                        _ => return,
+                        Ok(false) => {
+                            tracing::error!(
+                                "the world did not open; nothing will accept connections"
+                            );
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "the simulation thread ended before the world opened; \
+                                 nothing will accept connections"
+                            );
+                            return;
+                        }
                     }
                     runtime.block_on(transport::accept_loop(endpoint, shared));
                     // Dropping the runtime here, on this thread, rather than

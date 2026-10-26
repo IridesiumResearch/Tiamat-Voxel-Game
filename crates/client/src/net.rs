@@ -1120,7 +1120,6 @@ async fn session(
             protocol_version: PROTOCOL_VERSION,
             public_key: *identity.public_key().as_bytes(),
             display_name,
-            name_certificate: None,
         })
         .await
     {
@@ -1331,6 +1330,9 @@ async fn session(
                 if let Err(err) = send
                     .write(&ClientMessage::AuthResponse {
                         signature: WireSignature(signature.to_bytes()),
+                        // The client claims no name yet (accounts N4 brings the
+                        // certificate store and its renewal).
+                        name_certificate: None,
                     })
                     .await
                 {
@@ -2453,7 +2455,9 @@ fn describe(reason: &DisconnectReason) -> String {
             format!("`{name}` is already claimed on this server by someone else's identity")
         }
         DisconnectReason::NameRequired => {
-            "this server requires a name registered with the registry; claim one from the account screen".to_owned()
+            "this server only admits names registered at tiamatengine.com, and this client has no \
+             certificate for one"
+                .to_owned()
         }
         DisconnectReason::NotAllowlisted => {
             "this server has an allowlist and your identity is not on it".to_owned()

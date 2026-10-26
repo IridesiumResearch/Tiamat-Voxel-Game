@@ -120,7 +120,6 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [7u8; 32],
             display_name: "Alice".to_owned(),
-            name_certificate: None,
         }
     }
 

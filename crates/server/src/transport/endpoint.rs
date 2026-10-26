@@ -3673,6 +3673,15 @@ impl Shared {
             .is_ok_and(|certified| certified.contains(uuid))
     }
 
+    /// Drops the certified mark from a player whose name the registry binding
+    /// moved off (design §5): the variant they wear now is this server's, not
+    /// a certificate's. Nothing to do for a player who was never marked.
+    pub fn uncertify(&self, uuid: &PlayerUuid) {
+        if let Ok(mut certified) = self.certified.lock() {
+            certified.remove(uuid);
+        }
+    }
+
     /// Renames a live player after the registry binding moved their name.
     ///
     /// Design §5: a certified holder takes the name, the uncertified holder is
@@ -4274,6 +4283,10 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
         // and the line for that player's own connection to deliver.
         if let Some(displaced) = session.take_displacement() {
             shared.rename_player(displaced.player, displaced.name);
+            // The variant is this server's, whatever the displaced player's own
+            // certificate said: a stale one after a rename at the registry must
+            // not leave two players marked certified for one name.
+            shared.uncertify(&displaced.player);
             // Only a player who is here can be told now. One who is not gets
             // the variant at their next join, where the join hook and the
             // notice already name it; queueing a line for nobody would keep an
@@ -5374,6 +5387,11 @@ mod tests {
             );
             assert_eq!(shared.take_rename(&uuid).as_deref(), Some("Alice 2"));
             assert_eq!(shared.take_rename(&uuid), None, "taken once");
+            // The variant is the server's, so the mark goes with the name —
+            // even for a holder whose own (stale) certificate had marked them.
+            shared.uncertify(&uuid);
+            assert!(!shared.is_certified(&uuid));
+            shared.uncertify(&uuid);
         }
         assert!(
             !shared.is_certified(&uuid),

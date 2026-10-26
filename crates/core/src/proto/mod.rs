@@ -98,15 +98,19 @@ pub const PROTOCOL_VERSION: u32 = 94;
 // (`game.set_slot_grain`); and `DialogEvent::Dropped { click }`, appended — a
 // click outside every open screen while the cursor held a stack, which the
 // server takes off the cursor and reports to the screen's owner.
-// v94 (accounts, a name the registry issued): `ClientMessage::Hello` carries
-// `name_certificate`, appended — the postcard certificate the registry issued
-// this identity, or `None` — at most `MAX_NAME_CERTIFICATE_BYTES`. It is
-// unverified when it arrives; the session checks it after the challenge, against
-// the server's pinned registry keys and its `registry` policy (design §5), and
-// a valid one binds the certified name (`NamePolicy`, `WhyRenamed`). Refused on
-// decode when the bytes are over the cap. **A field on an existing shape**, so
-// the version check is what keeps a v93 peer from reading it as the start of
-// the challenge.
+// v94 (accounts, a name the registry issued): `ClientMessage::AuthResponse`
+// carries `name_certificate`, appended — the postcard certificate the registry
+// issued this identity, or `None` — at most `MAX_NAME_CERTIFICATE_BYTES`. It is
+// unverified when it arrives; the session checks it once the challenge answer it
+// rides with has proved the identity, against the server's pinned registry keys
+// and its `registry` policy (design §5), and a valid one binds the certified
+// name (`NamePolicy`, `WhyRenamed`). Refused on decode when the bytes are over
+// the cap. **Not on `Hello`, deliberately.** `Hello` is the version gate: it is
+// decoded whole before any version is compared, so a field added to it turns a
+// v93 peer's greeting into a malformed-message disconnect, in both directions,
+// instead of the `VersionMismatch` that tells a player to update. The challenge
+// answer only ever travels between peers that already agreed on a version, so a
+// field appended to it is safe. `Hello`'s shape never changes; a test pins it.
 // v93 (Life 23, a player's own skin): `ServerMessage::HelloAck` carries
 // `custom_skins`, appended — whether this host takes a skin from a client —
 // and `ClientMessage::Skin { body, bytes }` is appended: a PNG the player
@@ -1190,14 +1194,6 @@ pub enum ClientMessage {
         public_key: [u8; 32],
         /// The display name it wants.
         display_name: String,
-        /// The registry's certificate for this identity, in postcard form, or
-        /// `None`.
-        ///
-        /// **Optional and unverified here.** It is checked after the challenge,
-        /// when the UUID is proven: the server's `registry` policy and its
-        /// pinned keys decide what it is worth (design §5). Refused on decode
-        /// when it is over [`MAX_NAME_CERTIFICATE_BYTES`].
-        name_certificate: Option<Vec<u8>>,
     },
     /// Response to [`ServerMessage::AuthChallenge`].
     ///
@@ -1206,6 +1202,16 @@ pub enum ClientMessage {
     AuthResponse {
         /// Signature over the challenge payload.
         signature: WireSignature,
+        /// The registry's certificate for this identity, in postcard form, or
+        /// `None` (protocol 94).
+        ///
+        /// **Optional and unverified here.** It rides with the proof of the key
+        /// so the session can check it the moment the UUID is proven: the
+        /// server's `registry` policy and its pinned keys decide what it is
+        /// worth (design §5). Refused on decode when it is over
+        /// [`MAX_NAME_CERTIFICATE_BYTES`]. Here and not on `Hello` because
+        /// `Hello` is the version gate — the v94 note at the top of this file.
+        name_certificate: Option<Vec<u8>>,
     },
     /// Asks for content the client does not have cached.
     ContentRequest {
@@ -3222,11 +3228,7 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
                 check_len("skin_body", body.len(), MAX_ID_BYTES)?;
             }
         }
-        ClientMessage::Hello {
-            display_name,
-            name_certificate,
-            ..
-        } => {
+        ClientMessage::Hello { display_name, .. } => {
             check_len("display_name", display_name.len(), MAX_NAME_BYTES)?;
             if display_name.is_empty() {
                 return Err(ProtocolError::FieldTooLarge {
@@ -3235,6 +3237,12 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
                     limit: MAX_NAME_BYTES,
                 });
             }
+        }
+        ClientMessage::AuthResponse {
+            name_certificate, ..
+        } => {
+            // A blob the client chose, capped here before the session keeps a
+            // byte of it (charter rule 14).
             if let Some(certificate) = name_certificate {
                 check_len(
                     "name_certificate",
@@ -3273,8 +3281,7 @@ pub fn validate_client_message(message: &ClientMessage) -> Result<(), ProtocolEr
             check_cells("place_cells", cells)?;
         }
 
-        ClientMessage::AuthResponse { .. }
-        | ClientMessage::JoinWorld
+        ClientMessage::JoinWorld
         | ClientMessage::AddKey { .. }
         | ClientMessage::RotateKey { .. }
         | ClientMessage::StartDig { .. }
@@ -4244,7 +4251,6 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [1u8; 32],
             display_name: "Bob".to_owned(),
-            name_certificate: None,
         }
     }
 
@@ -4374,7 +4380,6 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [0u8; 32],
             display_name: "x".repeat(MAX_NAME_BYTES + 1),
-            name_certificate: None,
         };
         assert!(matches!(
             validate_client_message(&message),
@@ -4391,9 +4396,49 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             public_key: [0u8; 32],
             display_name: String::new(),
-            name_certificate: None,
         };
         assert!(validate_client_message(&message).is_err());
+    }
+
+    #[test]
+    fn an_oversized_name_certificate_is_rejected() {
+        let signature = WireSignature([0u8; 64]);
+        let over = ClientMessage::AuthResponse {
+            signature,
+            name_certificate: Some(vec![0u8; MAX_NAME_CERTIFICATE_BYTES + 1]),
+        };
+        assert!(matches!(
+            validate_client_message(&over),
+            Err(ProtocolError::FieldTooLarge {
+                field: "name_certificate",
+                ..
+            })
+        ));
+        let at_cap = ClientMessage::AuthResponse {
+            signature,
+            name_certificate: Some(vec![9u8; MAX_NAME_CERTIFICATE_BYTES]),
+        };
+        assert!(validate_client_message(&at_cap).is_ok());
+        let bytes = encode(&at_cap).expect("encode");
+        let decoded: ClientMessage = decode(&bytes).expect("decode");
+        assert_eq!(decoded, at_cap);
+    }
+
+    #[test]
+    fn a_hello_keeps_the_shape_every_peer_ever_shipped_can_read() {
+        // `Hello` is decoded before the versions are compared, so it is the
+        // one message that must decode on a peer of ANY version: a field added
+        // to it would make a mismatched pair fail with "malformed" instead of
+        // the version message that tells a player to update. Pinned byte for
+        // byte: the variant tag, the version as a varint, the raw key, and the
+        // name with its length — nothing after.
+        let bytes = encode(&hello()).expect("encode");
+        let version = encode(&PROTOCOL_VERSION).expect("encode");
+        assert_eq!(bytes[0], 0, "Hello is the first variant");
+        assert_eq!(&bytes[1..=version.len()], &version[..]);
+        let key = 1 + version.len();
+        assert_eq!(&bytes[key..key + 32], &[1u8; 32]);
+        assert_eq!(&bytes[key + 32..], &[3, b'B', b'o', b'b']);
     }
 
     #[test]
@@ -4622,11 +4667,16 @@ mod tests {
                     protocol_version: 0,
                     public_key: [0u8; 32],
                     display_name: String::new(),
-                    name_certificate: None,
                 },
                 0,
             ),
-            (ClientMessage::AuthResponse { signature }, 1),
+            (
+                ClientMessage::AuthResponse {
+                    signature,
+                    name_certificate: None,
+                },
+                1,
+            ),
             (ClientMessage::ContentRequest { hashes: Vec::new() }, 2),
             (ClientMessage::JoinWorld, 3),
             (
@@ -5926,14 +5976,17 @@ mod tests {
         // declared length is a claim. The newtype makes the size structural.
         let message = ClientMessage::AuthResponse {
             signature: WireSignature([7u8; 64]),
+            name_certificate: None,
         };
         let bytes = encode(&message).expect("encode");
         let decoded: ClientMessage = decode(&bytes).expect("decode");
         assert_eq!(decoded, message);
 
-        // A short signature must not decode.
+        // A short signature must not decode. The last byte on the wire is the
+        // certificate's `None` tag, so the byte taken out is the one before it:
+        // the signature's own last byte.
         let mut truncated = bytes.clone();
-        truncated.truncate(bytes.len() - 1);
+        truncated.remove(bytes.len() - 2);
         assert!(decode::<ClientMessage>(&truncated).is_err());
     }
 

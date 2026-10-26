@@ -331,6 +331,7 @@ fn a_replayed_signature_is_rejected() {
         first
             .send(&ClientMessage::AuthResponse {
                 signature: captured,
+                name_certificate: None,
             })
             .await
             .expect("send");
@@ -345,6 +346,7 @@ fn a_replayed_signature_is_rejected() {
         second
             .send(&ClientMessage::AuthResponse {
                 signature: captured,
+                name_certificate: None,
             })
             .await
             .expect("send");
@@ -412,7 +414,6 @@ fn a_version_mismatch_is_refused_cleanly() {
             protocol_version: PROTOCOL_VERSION + 99,
             public_key: *identity.public_key().as_bytes(),
             display_name: "Alice".to_owned(),
-            name_certificate: None,
         })
         .await
         .expect("send");

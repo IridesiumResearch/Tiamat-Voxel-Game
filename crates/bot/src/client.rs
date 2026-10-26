@@ -485,31 +485,10 @@ impl Bot {
     ///
     /// [`BotError::Refused`] if the server rejected the hello.
     pub async fn hello(&mut self, display_name: &str) -> Result<[u8; 32], BotError> {
-        self.hello_with_certificate(display_name, None).await
-    }
-
-    /// Sends `Hello` carrying a name certificate, and returns the challenge
-    /// nonce.
-    ///
-    /// The certificate is the registry's signed statement that this identity
-    /// holds a name (`docs/accounts-design.md` §2); a server with a pinned
-    /// registry key checks it offline, and one with no pin treats the join as
-    /// uncertified. `None` is the ordinary join a bot made before certificates
-    /// existed.
-    ///
-    /// # Errors
-    ///
-    /// [`BotError::Refused`] if the server rejected the hello.
-    pub async fn hello_with_certificate(
-        &mut self,
-        display_name: &str,
-        certificate: Option<&[u8]>,
-    ) -> Result<[u8; 32], BotError> {
         self.send(&ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             public_key: *self.identity.public_key().as_bytes(),
             display_name: display_name.to_owned(),
-            name_certificate: certificate.map(<[u8]>::to_vec),
         })
         .await?;
 
@@ -540,11 +519,33 @@ impl Bot {
         nonce: &[u8; 32],
         fingerprint: &[u8],
     ) -> Result<(), BotError> {
+        self.authenticate_full(nonce, fingerprint, None).await
+    }
+
+    /// Signs a challenge and sends the response, with a name certificate
+    /// riding on it (protocol 94).
+    ///
+    /// The certificate is the registry's signed statement that this identity
+    /// holds a name (`docs/accounts-design.md` §2); a server with a pinned
+    /// registry key checks it offline once this answer has proved the key, and
+    /// one with no pin treats the join as uncertified. `None` is the ordinary
+    /// join a bot made before certificates existed.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::Frame`] if the write fails.
+    pub async fn authenticate_full(
+        &mut self,
+        nonce: &[u8; 32],
+        fingerprint: &[u8],
+        certificate: Option<&[u8]>,
+    ) -> Result<(), BotError> {
         let signature =
             self.identity
                 .sign(&challenge_payload(nonce, fingerprint, PROTOCOL_VERSION));
         self.send(&ClientMessage::AuthResponse {
             signature: WireSignature(signature.to_bytes()),
+            name_certificate: certificate.map(<[u8]>::to_vec),
         })
         .await
     }
@@ -610,10 +611,10 @@ impl Bot {
         certificate: Option<&[u8]>,
         skins: &[(Option<String>, Vec<u8>)],
     ) -> Result<(), BotError> {
-        let nonce = self
-            .hello_with_certificate(display_name, certificate)
+        let nonce = self.hello(display_name).await?;
+        let fingerprint = self.cert_fingerprint;
+        self.authenticate_full(&nonce, &fingerprint, certificate)
             .await?;
-        self.authenticate(&nonce).await?;
         self.recv_until(|m| matches!(m, ServerMessage::ModManifest { .. }))
             .await?;
         for (body, bytes) in skins {

@@ -186,8 +186,14 @@ walks away.
 
 ## 5. The server
 
-`Hello` gains an optional `name_certificate: Option<Vec<u8>>` (protocol 94;
-bounded at 256 bytes, refused above). The session's join
+The challenge answer (`ClientMessage::AuthResponse`) gains an optional
+`name_certificate: Option<Vec<u8>>` (protocol 94; bounded at 256 bytes,
+refused above). It rides with the proof of the key, which is the moment the
+session can check it. **Not on `Hello`:** `Hello` is the version gate, decoded
+before the versions are compared, so a field added to it would turn a
+mismatched pair's greeting into a malformed-message disconnect, in both
+directions, instead of the version message that tells a player to update;
+`Hello`'s shape never changes, and a protocol test pins it. The session's join
 (`core::session::JoinContext`) gains one input, the verified certificate's
 name, and one rule:
 
@@ -374,7 +380,8 @@ the player asked for.
 ## 10. Building it, and 0.5.0
 
 **Engine (the agent):** the certificate type, its codec, verification and
-fuzz target in `core::identity::registry`; the `Hello` field and protocol 94;
+fuzz target in `core::identity::registry`; the `AuthResponse` field and
+protocol 94;
 the session rule and the new `WhyRenamed`; the `registry` server policy and
 the RCON refusal; the client's store, renewal, pinned key, the proof of
 work, and the screen with the email and recovery forms; the API addition

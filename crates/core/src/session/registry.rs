@@ -301,7 +301,9 @@ impl IdentityRegistry {
     /// # Errors
     ///
     /// [`RegistryError::NameTaken`] if every variant up to `most` is held and
-    /// the displaced holder could not be moved.
+    /// the displaced holder could not be moved — in which case nothing has
+    /// changed: the holder keeps the name and the certified identity is bound
+    /// to nothing new.
     pub fn bind_certified(
         &mut self,
         display: &str,
@@ -317,6 +319,15 @@ impl IdentityRegistry {
             .iter()
             .find(|(name, holder)| **holder != uuid && name.eq_ignore_ascii_case(canonical))
             .map(|(name, holder)| (name.clone(), *holder));
+        // **Nothing moves until everything can.** The displaced holder's
+        // variant is chosen before a single release, so a server with every
+        // variant taken refuses the certified join and leaves the holder as
+        // they were — not nameless beside a bound certified name on a join
+        // that is refused all the same.
+        let variant = match &worn {
+            Some((name, _)) => Some(self.free_variant(name, most)?),
+            None => None,
+        };
         if let Some((name, _)) = &worn {
             self.release_name(name);
         }
@@ -326,9 +337,12 @@ impl IdentityRegistry {
             self.release_name(&previous);
         }
         self.bind_name(display, uuid)?;
-        let displaced = match worn {
-            Some((name, holder)) => Some((holder, self.bind_variant(&name, holder, most)?)),
-            None => None,
+        let displaced = match (worn, variant) {
+            (Some((_, holder)), Some(variant)) => {
+                self.bind_name(&variant, holder)?;
+                Some((holder, variant))
+            }
+            _ => None,
         };
         Ok(CertifiedBinding {
             name: display.to_owned(),
@@ -336,26 +350,22 @@ impl IdentityRegistry {
         })
     }
 
-    /// Binds `<name> 2`, `<name> 3`, … to `uuid`, answering which.
+    /// The first free `<name> 2`, `<name> 3`, … up to `most`, chosen without
+    /// binding it.
     ///
     /// **Variants only**, unlike [`Self::bind_name_or_next`], which tries the
     /// name itself first: a displaced holder must not get the name back that a
-    /// certificate just took.
-    fn bind_variant(
-        &mut self,
-        name: &str,
-        uuid: PlayerUuid,
-        most: usize,
-    ) -> Result<String, RegistryError> {
+    /// certificate just took. Chosen before anything is released so that a
+    /// refusal leaves the registry untouched; a variant free now is still free
+    /// after the releases that follow.
+    fn free_variant(&self, name: &str, most: usize) -> Result<String, RegistryError> {
         for n in 2..=most {
             let variant = format!("{name} {n}");
             if variant.len() > crate::proto::MAX_NAME_BYTES {
                 break;
             }
-            match self.bind_name(&variant, uuid) {
-                Ok(()) => return Ok(variant),
-                Err(RegistryError::NameTaken { .. }) => {}
-                Err(err) => return Err(err),
+            if !self.names.contains_key(&variant) {
+                return Ok(variant);
             }
         }
         Err(RegistryError::NameTaken {
@@ -781,5 +791,39 @@ mod tests {
         assert_eq!(bound.name, "Alice");
         assert_eq!(registry.name_holder("Alicia"), None);
         assert_eq!(registry.name_of(&alice.uuid_as_root()), Some("Alice"));
+    }
+
+    #[test]
+    fn a_certified_join_with_no_variant_free_changes_nothing() {
+        // Every variant up to `most` is held, so the holder cannot be moved.
+        // The join is refused — and the refusal must be the only effect: the
+        // holder keeps the name, and the certified identity is bound to nothing,
+        // rather than the holder left nameless beside a name whose owner was
+        // turned away.
+        let alice = identity();
+        let bob = identity();
+        let carol = identity();
+        let dave = identity();
+        let mut registry = IdentityRegistry::default();
+        registry
+            .bind_name("alice", bob.uuid_as_root())
+            .expect("bob");
+        registry
+            .bind_name("alice 2", carol.uuid_as_root())
+            .expect("carol");
+        registry
+            .bind_name("alice 3", dave.uuid_as_root())
+            .expect("dave");
+
+        let refused = registry.bind_certified("Alice", "alice", alice.uuid_as_root(), 3);
+        assert!(
+            matches!(refused, Err(RegistryError::NameTaken { .. })),
+            "got {refused:?}"
+        );
+        assert_eq!(registry.name_of(&bob.uuid_as_root()), Some("alice"));
+        assert_eq!(registry.name_holder("Alice"), None);
+        assert_eq!(registry.name_of(&alice.uuid_as_root()), None);
+        assert_eq!(registry.name_of(&carol.uuid_as_root()), Some("alice 2"));
+        assert_eq!(registry.name_of(&dave.uuid_as_root()), Some("alice 3"));
     }
 }
