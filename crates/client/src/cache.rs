@@ -25,7 +25,10 @@
 //! Re-hashing costs a few microseconds against a disk read that costs
 //! milliseconds. There is no version of this worth optimising away.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tiamat_core::proto::ContentHash;
 
@@ -64,9 +67,25 @@ pub enum CacheError {
 }
 
 /// A directory of content-addressed files.
+///
+/// **Verified once, remembered after.** Reading an item re-hashes it against
+/// its name, and that is the security gate for anything the disk holds: a
+/// file that does not match is discarded, never served. The gate is passed
+/// once per item per run; after that `contains` and `missing` answer from a
+/// memo of the hashes already verified rather than reading and hashing the
+/// file again, which is what turned a 128 MB mod pack into 256–384 MB of
+/// reads before a join could proceed. `get` still reads the file, because the
+/// caller wants its bytes — but only once per use, not once more per question
+/// asked about it. The memo is shared between clones, since the cache is
+/// cloned into the network task and the one that opened it.
 #[derive(Debug, Clone)]
 pub struct ContentCache {
     root: PathBuf,
+    /// Hashes whose file was read and matched its name since the cache was
+    /// opened. Cleared for an item the moment a read finds it wrong.
+    verified: Arc<Mutex<HashSet<ContentHash>>>,
+    /// Files read from disk, so a test can prove the memo is consulted.
+    reads: Arc<AtomicUsize>,
 }
 
 impl ContentCache {
@@ -82,6 +101,8 @@ impl ContentCache {
         })?;
         Ok(Self {
             root: root.to_path_buf(),
+            verified: Arc::new(Mutex::new(HashSet::new())),
+            reads: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -113,11 +134,14 @@ impl ContentCache {
         let metadata = std::fs::metadata(&path).ok()?;
         if metadata.len() > MAX_ITEM_BYTES {
             let _ = std::fs::remove_file(&path);
+            self.forget(hash);
             return None;
         }
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let bytes = std::fs::read(&path).ok()?;
 
         if tiamat_core::content::hash_bytes(&bytes) == *hash {
+            self.remember(hash);
             Some(bytes)
         } else {
             // Something wrote into the cache that was not this client storing a
@@ -128,14 +152,48 @@ impl ContentCache {
                 "a cached asset does not match its own hash and has been discarded"
             );
             let _ = std::fs::remove_file(&path);
+            self.forget(hash);
             None
         }
     }
 
     /// Whether an item is present and intact.
+    ///
+    /// An item verified earlier this run is answered from the memo and a
+    /// `stat` — the file must still be there — rather than read and hashed
+    /// again. One that is not is read once through [`Self::get`], which
+    /// remembers it.
     #[must_use]
     pub fn contains(&self, hash: &ContentHash) -> bool {
+        if self.verified().contains(hash) {
+            if std::fs::metadata(self.path_of(hash)).is_ok() {
+                return true;
+            }
+            self.forget(hash);
+            return false;
+        }
         self.get(hash).is_some()
+    }
+
+    /// Files read from disk since the cache was opened.
+    #[cfg(test)]
+    pub(crate) fn disk_reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    fn verified(&self) -> MutexGuard<'_, HashSet<ContentHash>> {
+        // The set holds nothing a panic could leave half-written.
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn remember(&self, hash: &ContentHash) {
+        self.verified().insert(*hash);
+    }
+
+    fn forget(&self, hash: &ContentHash) {
+        self.verified().remove(hash);
     }
 
     /// Stores an item, refusing bytes that do not match the hash.
@@ -173,6 +231,8 @@ impl ContentCache {
                 source,
             }
         })?;
+        // Just hashed and just written: as verified as a read would find it.
+        self.remember(hash);
         Ok(())
     }
 
@@ -293,6 +353,79 @@ mod tests {
 
         let missing = cache.missing(&[held_hash, wanted_hash, wanted_hash, held_hash]);
         assert_eq!(missing, vec![wanted_hash]);
+    }
+
+    #[test]
+    fn a_verified_item_is_not_read_and_hashed_again_for_every_question() {
+        let cache = cache("memo");
+        let bytes = b"a texture".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        cache.put(&hash, &bytes).expect("put");
+        assert_eq!(cache.disk_reads(), 0, "a put verifies what it writes");
+
+        assert!(cache.contains(&hash));
+        assert!(cache.missing(&[hash, hash]).is_empty());
+        assert_eq!(cache.disk_reads(), 0, "answered from the memo");
+
+        assert_eq!(
+            cache.get(&hash),
+            Some(bytes),
+            "the bytes are wanted: one read"
+        );
+        assert_eq!(cache.disk_reads(), 1);
+        assert!(cache.contains(&hash));
+        assert!(cache.missing(&[hash]).is_empty());
+        assert_eq!(
+            cache.disk_reads(),
+            1,
+            "and no more for the questions after it"
+        );
+    }
+
+    #[test]
+    fn a_cold_cache_passes_the_gate_once_and_remembers() {
+        // A fresh run over the same directory: the first question reads and
+        // hashes the file (the security gate), every later one does not.
+        let dir = scratch("cold");
+        let bytes = b"from a previous run".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        ContentCache::open(&dir)
+            .expect("cache")
+            .put(&hash, &bytes)
+            .expect("put");
+
+        let cache = ContentCache::open(&dir).expect("reopen");
+        assert!(cache.contains(&hash));
+        assert_eq!(cache.disk_reads(), 1, "the gate, once");
+        assert!(cache.contains(&hash));
+        assert!(cache.missing(&[hash]).is_empty());
+        assert_eq!(cache.disk_reads(), 1);
+        assert_eq!(cache.get(&hash), Some(bytes));
+        assert_eq!(cache.disk_reads(), 2, "a read for the bytes themselves");
+    }
+
+    #[test]
+    fn the_memo_does_not_outlive_a_tampered_or_deleted_file() {
+        let cache = cache("memo-tamper");
+        let bytes = b"intact".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        cache.put(&hash, &bytes).expect("put");
+        assert!(cache.contains(&hash));
+
+        // Tampered after it was verified: the next read finds it, discards it,
+        // and the memo forgets it — nothing is served on an old verdict.
+        std::fs::write(cache.path_of(&hash), b"not intact").expect("tamper");
+        assert_eq!(cache.get(&hash), None);
+        assert!(!cache.contains(&hash));
+        assert!(!cache.path_of(&hash).exists(), "discarded");
+
+        // Deleted after it was verified: `contains` still checks the file is
+        // there, so the join asks for it rather than assuming it.
+        cache.put(&hash, &bytes).expect("put again");
+        assert!(cache.contains(&hash));
+        std::fs::remove_file(cache.path_of(&hash)).expect("delete");
+        assert!(!cache.contains(&hash));
+        assert_eq!(cache.missing(&[hash]), vec![hash]);
     }
 
     #[test]

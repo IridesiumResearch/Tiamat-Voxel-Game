@@ -1376,7 +1376,17 @@ async fn session(
                         pending.complete.insert(*hash, bytes);
                     }
                 }
-                let missing = cache.missing(&wanted);
+                // What is missing is what that loop did not find; asking the
+                // cache again would be a second question about every file.
+                // Sorted and deduplicated as `ContentCache::missing` answers,
+                // so the request is a property of what is missing.
+                let mut missing: Vec<ContentHash> = wanted
+                    .iter()
+                    .filter(|hash| !pending.complete.contains_key(*hash))
+                    .copied()
+                    .collect();
+                missing.sort_unstable();
+                missing.dedup();
                 pending.outstanding = missing.len();
 
                 if missing.is_empty() {
