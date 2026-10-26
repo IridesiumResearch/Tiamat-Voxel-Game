@@ -309,6 +309,18 @@ pub struct Shared {
 
     /// Display names of everyone currently in world, for `status`.
     pub online: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, String>>,
+    /// Which connection's slot owns each identity's roster entry right now.
+    ///
+    /// A player who reconnects quickly — a crash, a network blip, a test's
+    /// rejoin — can have the new connection's slot claimed before the old
+    /// connection's task has unwound. Without this the old slot's release
+    /// would strip the roster entry, the certified mark and the simulated body
+    /// out from under the new session, leaving a ghost: joined, but in no
+    /// roster, with no body, hearing nothing. Each slot takes a generation
+    /// number at claim and releases only what it still owns.
+    pub slot_owners: std::sync::Mutex<std::collections::BTreeMap<PlayerUuid, u64>>,
+    /// The last slot generation handed out; see [`Self::slot_owners`].
+    pub slot_generation: std::sync::atomic::AtomicU64,
 
     /// Everyone in world whose name a registry certificate issued (design §5).
     ///
@@ -3803,11 +3815,21 @@ impl Shared {
 struct PlayerSlot<'a> {
     shared: &'a Shared,
     uuid: PlayerUuid,
+    /// This slot's claim, so a late release cannot undo a newer one's — see
+    /// [`Shared::slot_owners`].
+    generation: u64,
 }
 
 impl<'a> PlayerSlot<'a> {
     fn claim(shared: &'a Shared, uuid: PlayerUuid, name: String, certified: bool) -> Self {
         shared.players.fetch_add(1, Ordering::AcqRel);
+        let generation = shared
+            .slot_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        if let Ok(mut owners) = shared.slot_owners.lock() {
+            owners.insert(uuid, generation);
+        }
         if let Ok(mut online) = shared.online.lock() {
             online.insert(uuid, name);
         }
@@ -3819,13 +3841,37 @@ impl<'a> PlayerSlot<'a> {
         // one every time a handler returned early — and the simulation would go
         // on stepping a body whose player left.
         shared.add_player(uuid, shared.spawn);
-        Self { shared, uuid }
+        Self {
+            shared,
+            uuid,
+            generation,
+        }
     }
 }
 
 impl Drop for PlayerSlot<'_> {
     fn drop(&mut self) {
         self.shared.players.fetch_sub(1, Ordering::AcqRel);
+        // **Only what this slot still owns.** If the same identity has claimed
+        // a newer slot meanwhile — a quick reconnect whose old task is only
+        // now unwinding — the roster entry, the mark, the queued rename and
+        // the body are that connection's, and taking them away would leave
+        // it a ghost. The count was this slot's own and comes down regardless.
+        let still_mine = self.shared.slot_owners.lock().is_ok_and(|mut owners| {
+            match owners.get(&self.uuid) {
+                Some(owner) if *owner == self.generation => {
+                    owners.remove(&self.uuid);
+                    true
+                }
+                Some(_) => false,
+                // No record at all: a lock was poisoned at claim time. Release
+                // everything rather than leak a ghost the other way.
+                None => true,
+            }
+        });
+        if !still_mine {
+            return;
+        }
         // The roster and the count are released together, by the same guard.
         // Two separate cleanups would eventually disagree, and `status` would
         // list players who left.
@@ -5198,6 +5244,8 @@ mod tests {
             rainbows: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             kicks: tokio::sync::broadcast::channel(4).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            slot_owners: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            slot_generation: std::sync::atomic::AtomicU64::new(0),
             certified: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             registry_rotation_warned: std::sync::atomic::AtomicBool::new(false),
             renames: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -5457,6 +5505,63 @@ mod tests {
             ..seen
         };
         assert!(!shared.note_registry_rotation(&other, 3_000));
+    }
+
+    #[test]
+    fn a_quick_reconnect_is_not_undone_by_the_old_connections_late_release() {
+        // The same identity joins again before its previous connection's task
+        // has unwound (a crash, a blip, a test's rejoin). The old slot's
+        // release must not take the new session's roster entry, mark, queued
+        // rename or body with it — that was a ghost in the making, and a bot
+        // suite saw it on a slow runner as a rejoin the server never spoke to.
+        let shared = shared();
+        let (uuid, name) = player(7);
+        let old = PlayerSlot::claim(&shared, uuid, name.clone(), false);
+        let new = PlayerSlot::claim(&shared, uuid, "Alice".to_owned(), true);
+        shared.rename_player(uuid, "Alice 2".to_owned());
+        assert_eq!(shared.players.load(Ordering::Acquire), 2);
+
+        drop(old);
+        assert_eq!(
+            shared.players.load(Ordering::Acquire),
+            1,
+            "the count was its own"
+        );
+        assert!(
+            shared.is_online(&uuid),
+            "the roster entry is the new slot's"
+        );
+        assert!(shared.is_certified(&uuid), "and so is the mark");
+        assert_eq!(
+            shared.take_rename(&uuid).as_deref(),
+            Some("Alice 2"),
+            "and the queued rename"
+        );
+        assert!(
+            shared
+                .bodies
+                .lock()
+                .is_ok_and(|bodies| bodies.contains_key(&uuid)),
+            "and the simulated body"
+        );
+
+        drop(new);
+        assert_eq!(shared.players.load(Ordering::Acquire), 0);
+        assert!(!shared.is_online(&uuid));
+        assert!(!shared.is_certified(&uuid));
+        assert!(
+            shared
+                .bodies
+                .lock()
+                .is_ok_and(|bodies| !bodies.contains_key(&uuid)),
+            "the owner's release takes the body"
+        );
+        assert!(
+            shared
+                .slot_owners
+                .lock()
+                .is_ok_and(|owners| owners.is_empty())
+        );
     }
 
     #[test]

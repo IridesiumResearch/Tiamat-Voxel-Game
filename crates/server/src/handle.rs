@@ -2758,6 +2758,8 @@ impl ServerHandle {
             view_distance: settings.view_distance,
             kicks: tokio::sync::broadcast::channel(64).0,
             online: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            slot_owners: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            slot_generation: std::sync::atomic::AtomicU64::new(0),
             certified: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             registry_rotation_warned: std::sync::atomic::AtomicBool::new(false),
             renames: std::sync::Mutex::new(std::collections::BTreeMap::new()),
