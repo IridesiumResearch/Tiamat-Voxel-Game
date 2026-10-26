@@ -201,6 +201,32 @@ gate. Line numbers below are from the branch as reviewed and will have moved.
 8. **Health check (B17): yes.** A `registry healthcheck` subcommand behind a
    `HEALTHCHECK`, and the process exits when its accept loop breaks.
 
+### Landed on the decisions, 2026-10-26 (evening)
+
+- **2 (A4)** and **4 (C8)**: 9bed2489 — rotation records on the challenge
+  answer, applied to a copy of the pin; the certified mark persisted with the
+  binding and RCON refused on it offline. Residual, by design: a client may
+  omit the records and is then checked against the pin alone until the
+  operator updates; a stolen retiring key can sign a second record to the
+  same committed successor with another next hash, which vouches for
+  nothing but, if an operator pinned its hash unchecked, would block the
+  genuine next rotation — the ops page says to confirm against `/v1/keys`.
+- **3 (A7), 5 (B5/B11), 6 (B9), 7 (B13), 8 (B17)**: 4e770adf. Two choices
+  made there for the owner to confirm: casing changes outside a minting
+  renewal are capped at three per identity per thirty days (they wrote an
+  audit row each with no limit); `admin claims` and `revoke --subnet` reach
+  back seven days, as far as the address is kept. Two left for the next
+  batch: the email proof of work travels in a `Tiamat-Work` header because
+  its field belongs in core's `EmailRequest`; and recovery mail to a holder's
+  address is three an hour with no daily cap, so fresh identities could mail
+  a holder seventy-two times a day. For N7: the Dokploy health-check JSON in
+  the ops page comes from Docker's `HealthConfig` and was not run against an
+  installed Dokploy; no Docker here, so the image itself was not built.
+- Also f4a39311: the macOS red on 13eede23 was a real server race — a quick
+  reconnect of the same identity was stripped by the old connection's late
+  slot release. Slots now carry a generation and release only what they own.
+- **1 (A3)** is in progress as its own batch, with the two items above.
+
 ## Open, for the implementer
 
 - **Platform.** The crate had never been built on Linux or macOS: `let

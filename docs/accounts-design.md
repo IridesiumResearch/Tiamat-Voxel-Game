@@ -98,8 +98,7 @@ year-long certificate.
   3–18 characters from `a–z`, `0–9` and `_`, starting with a letter. The
   player's **display casing** (`Iridesium`, `IRIDESIUM`) is theirs to pick at
   claim time and travels in the certificate beside the canonical form; two
-  players cannot hold `alice` and `Alice`. This is the smallest rule that
-  rules out every confusable; a Unicode profile (PRECIS, with confusable
+  players cannot hold `alice` and `Alice`. This rules out every confusable that differs only in case; the few left inside `a–z0–9_` (`l`, `1`, `I`; `0`, `O`) are folded only against the reserved list, by the owner's decision that lookalikes between players are allowed. A Unicode profile (PRECIS, with confusable
   folding) is the documented way to widen it in a later version without
   breaking uniqueness, since any wider name would fold to a canonical form
   this rule never issued. Eighteen fits the protocol's 32-byte name limit
@@ -108,8 +107,7 @@ year-long certificate.
   `moderator`, `support` are the engine's own list; every default mod's id and
   the operator's short list are **the registry's**, seeded from
   `REGISTRY_RESERVED` into its table at startup — the engine must not carry a
-  mod's name, and an engine test enforces it. Reserved names are refused with
-  the reason.
+  mod's name, and an engine test enforces it. Reserved names, and their lookalikes under a fold of `l`, `1`, `I` to `i` and `0` to `o`, are refused with the reason; a name held before it or its lookalike was reserved keeps renewing.
 - **One name per identity.** A rename is a release and a claim; the released
   name is held for the same UUID for 30 days so a slip is undone. Renames are
   limited to three in any 30 days per identity.
@@ -300,7 +298,7 @@ still verify the certificate (§5).
 ## 7. The service
 
 `crates/registry`: a headless binary like the server, GPL-3.0-only, no GUI,
-no engine simulation, with subcommands `serve` and `admin`. It speaks plain
+no engine simulation, with subcommands `serve`, `healthcheck` (the image's `HEALTHCHECK`: `GET /healthz` on loopback) and `admin`. It speaks plain
 HTTP inside its container; TLS is Dokploy's Traefik, as it is for the update
 host. Storage is SQLite through `rusqlite` (already in the tree; the WAL
 policy of `persist::checkpoint` applies), signing is `ed25519-dalek` (in the
@@ -323,22 +321,18 @@ fashion.
 **Tables:** `names` (canonical, display, uuid, claimed, renewed, released,
 hold_until, renewals), `emails` (uuid, address, verified_at), `tokens`
 (hash, purpose, uuid, expires), `recoveries` (canonical, from_uuid, to_uuid,
-confirmed_at, notice_until, state), `reserved`, `revocations` (serial, when,
+confirmed_at, notice_until, state, ended_at), `reserved`, `revocations` (serial, when,
 reason), `issued` (serial, registry_key, uuid, canonical, issued),
 `revoked_holders` (canonical, uuid, revoked_at — an operator's revocation,
-which bars that identity from the name), `audit` (who, what, when, why),
-`limits` (ip, subnet or uuid, window, count; a row is deleted by the service
-itself seven days after its window ends).
+which bars that identity from the name), `audit` (who, what, when, why, ip — the client address, cleared seven days after the row),
+`limits` (scope — an address, a `/24` or `/48`, an identity, or the BLAKE3 of a folded mail address — window, count; a row is deleted by the service itself seven days after its window ends).
 
 **Limits, set for the bulk squatter** (the designer, §11.8): two claims a
 day per IP address and six per `/24`; one claim and three renames per
 identity in any 30 days; a proof of work on every claim — BLAKE3 over the
 claim with a nonce, leading zero bits set by the service and raised while a
 subnet's claim rate is high, so a burst from one place pays more for each
-name; a 32 KiB body cap, a 2 s request timeout, and refusal of any request
-whose timestamp is more than five minutes from the service's clock
-(replay). Mail is limited to three messages an hour per address and ten per
-`/24`. Beside the limits, the operator's view: `admin claims --since 48h`
+name; a 32 KiB body cap; a bounded pool of workers (`REGISTRY_WORKERS`, 8) that answers `503` when it and its queue are full; a 2 s deadline per request from the listener to the answer, body included, past which work that has not committed is rolled back and answered `504` (committed work is answered with its result, however late); refusal of any request whose timestamp is more than five minutes from the service's clock (replay); and at most three casing changes per identity in any 30 days outside a renewal that mints. Mail is limited to three messages a day per identity, three an hour per address (lower-cased, `+tag` removed, keyed by its hash), ten an hour per `/24`, and `REGISTRY_MAIL_PER_HOUR` (60) an hour in all; an email request from an identity that holds no name carries a proof of work of the claim's shape and difficulty. Beside the limits, the operator's view: `admin claims --since 48h`
 groups young claims by subnet, and `admin revoke --subnet 203.0.113.0/24
 --since 48h --reason "…"` undoes a burst in one line, every name of it to
 the audit table.
@@ -361,7 +355,7 @@ made, and the service publishes the rotation record signed by the old key.
 2. In Dokploy, a new Application with provider *Docker image*, that image;
    a volume mounted at `/data` for the database, the daily backups and the
    logs; the domain `registry.tiamatengine.com` with HTTPS, which Traefik
-   certifies; the health check `GET /healthz`; environment: `REGISTRY_DATA`,
+   certifies; the image's own `HEALTHCHECK` (`registry healthcheck`), so none is configured; Traefik's buffering middleware (`maxRequestBodyBytes=32768`) on the router; environment: `REGISTRY_DATA`,
    `REGISTRY_KEY` (secret), `REGISTRY_NEXT_KEY_HASH`, `REGISTRY_SMTP_URL`
    (secret, `smtps://user:pass@host`), `REGISTRY_MAIL_FROM`, `REGISTRY_BASE_URL`.
 3. DNS: an `A` record for `registry` to the Dokploy host.
@@ -391,13 +385,15 @@ deletion on request is a release and the removal of the email.
 
 | datum | sent to | kept | why |
 |---|---|---|---|
-| canonical and display name, UUID | the registry, then every server joined | while bound; released rows kept 30 days then deleted | the binding |
+| canonical and display name, UUID | the registry, then every server joined | while bound; a released or lapsed name's row kept 30 days after its 30-day hold ends, then deleted | the binding |
 | public key, signature, timestamp, the proof of work | the registry | not kept past verification | proof of possession |
-| IP address, and its `/24` | the registry | seven days | rate limiting |
-| recovery email address | the registry | while bound; removed on request or with the identity's last name | recovery only |
-| verification and recovery tokens | the registry | hashed; a day | the links in the mail |
+| IP address, and its `/24` | the registry | seven days (the daily backups keep up to fourteen more) | rate limiting |
+| recovery email address | the registry | while bound; removed on request, or with the identity's last name, or 30 days after it was verified for an identity that never held one | recovery only |
+| verification and recovery tokens | the registry | hashed, with the pending address; deleted at expiry, a day | the links in the mail |
 | recovery records | the registry | ninety days after they end | the operator's record of a disputed name |
-| audit rows | the registry | indefinitely | the operator's record of revocations and renames |
+| audit rows | the registry | indefinitely, without the client address after seven days | the operator's record of claims, renames, revocations and mail requests |
+| certificate serials issued (serial, key, UUID, name) | the registry | while the certificate can verify (90 days and the skew) | revocation |
+| rate-limit counters (address, `/24`, identity, hashed mail address) | the registry | a week after their window | rate limiting |
 
 Nothing else. The registry never learns which servers a player joins, and
 never writes to a bound address except to verify it or to confirm a recovery
