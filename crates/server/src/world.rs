@@ -1024,6 +1024,11 @@ impl World {
     /// structure before anything observable happens — the unload sweep sorts
     /// the candidates it keeps. The sorted variant above is for the random
     /// tick, which samples a prefix and therefore needs the order.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the order is deliberately unordered; the unload sweep sorts its candidates, and \
+                  this is the one caller"
+    )]
     #[must_use]
     pub fn resident_positions_unsorted(&self, domain: &str) -> Vec<ChunkPos> {
         self.domains
