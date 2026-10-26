@@ -87,6 +87,29 @@ pub struct Streamer {
     /// already held, and starting over each time would spend the whole scan
     /// re-testing the same held entries. Wraps, so everything gets a turn.
     horizon_cursor: usize,
+    /// The detail interest set, in `chunks_around`'s streaming order.
+    ///
+    /// **Cached across passes.** The per-pass cost measured in the memo below
+    /// was dominated by rebuilding and sorting this list; the set only changes
+    /// when the centre or the view moves, which is a chunk boundary at walking
+    /// pace, not a 20 Hz event. `order_for` is the `(centre, view)` it was
+    /// built for.
+    order: Vec<ChunkPos>,
+    /// The `(centre, view)` [`Self::order`] was built for.
+    order_for: Option<(ChunkPos, ViewDistance)>,
+    /// Whether the last full scan found nothing left to ask for.
+    ///
+    /// Only true when a scan actually reached the end of [`Self::order`] with
+    /// an empty `needed` list; a pass that filled its budget is not complete.
+    /// Any state change that can make a position requestable sets
+    /// [`Self::rescan`].
+    complete: bool,
+    /// Something changed which could have made a position requestable.
+    rescan: bool,
+    /// How many times the cached order has been built, for the test that says
+    /// a pass does not re-sort it. Test-only: no production caller reads it.
+    #[cfg(test)]
+    order_builds: usize,
     /// Where the next pass looks first for what the detail has released.
     ///
     /// The first position the last pass found gated — held back by the
@@ -203,6 +226,12 @@ impl Streamer {
             summaries: BTreeMap::new(),
             horizon_order: Vec::new(),
             horizon_cursor: 0,
+            order: Vec::new(),
+            order_for: None,
+            complete: false,
+            rescan: true,
+            #[cfg(test)]
+            order_builds: 0,
             gate: None,
             frontier: None,
             sealed: BTreeSet::new(),
@@ -245,6 +274,7 @@ impl Streamer {
         self.domain = domain.to_owned();
         self.centre = centre;
         self.shadowed.clear();
+        self.invalidate_scan();
         self.reorder_horizon();
         // Abandoned rather than awaited. A reply carrying a chunk of the domain
         // this connection has just left would be decoded into the new one at
@@ -275,7 +305,38 @@ impl Streamer {
     /// Whether every chunk in range has been sent.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.in_flight.is_empty() && self.nothing_needed()
+        if !self.in_flight.is_empty() {
+            return false;
+        }
+        if self.complete && !self.rescan {
+            return true;
+        }
+        self.nothing_needed()
+    }
+
+    /// Makes sure [`Self::order`] is the set for the current centre and view.
+    ///
+    /// Lazy rather than eager: `recentre` runs on every chunk crossing and a
+    /// pass is the only thing that needs the order, so building it here keeps
+    /// the one caller that pays for it.
+    fn ensure_order(&mut self) {
+        if self.order_for == Some((self.centre, self.view)) {
+            return;
+        }
+        self.order = interest::chunks_around(self.centre, self.view);
+        self.order_for = Some((self.centre, self.view));
+        self.complete = false;
+        self.rescan = true;
+        #[cfg(test)]
+        {
+            self.order_builds += 1;
+        }
+    }
+
+    /// Something changed which could make a position requestable again.
+    fn invalidate_scan(&mut self) {
+        self.complete = false;
+        self.rescan = true;
     }
 
     /// The radius this client is being streamed at.
@@ -300,6 +361,7 @@ impl Streamer {
         }
         self.view = view;
         self.shadowed.clear();
+        self.invalidate_scan();
         self.horizon = horizon_for(view);
         self.rings = Rings::new(u32::from(view.horizontal), Rings::MARGIN);
         self.reorder_horizon();
@@ -319,6 +381,7 @@ impl Streamer {
         }
         self.centre = centre;
         self.shadowed.clear();
+        self.invalidate_scan();
         self.reorder_horizon();
         // Requests for chunks that just left range are abandoned. Keeping them
         // would deliver a chunk the client was told to unload, and hold budget
@@ -361,6 +424,7 @@ impl Streamer {
         }
         if !departed.is_empty() {
             self.shadowed.clear();
+            self.invalidate_scan();
         }
         departed.sort_unstable();
         departed.dedup();
@@ -384,17 +448,27 @@ impl Streamer {
         // world fills in from the player outward, continuously, at whatever
         // rate the in-flight budget allows. Sealing only REMOVES positions from
         // that order — see `is_shadowed` — it never makes one wait for another.
-        // The first version of this walked a flood from the centre that could
-        // only expand through chunks already delivered, and that made the
-        // frontier advance one chunk per round trip: a player watched rings
-        // arrive one at a time, seven chunks out, and reported exactly that.
         //
+        // The order is cached (`Self::order`); this pass only walks it. The
+        // first version rebuilt and sorted the whole set here every 50 ms for
+        // every connection, which the memo below measures at 0.44 ms a pass at
+        // the default view — most of a core at fifty players, idle or not.
+        self.ensure_order();
+        if self.complete && !self.rescan {
+            self.frontier = None;
+            return Vec::new();
+        }
+
         // `scan_limit` is at least one even when `limit` is zero, so the loop
         // below still finds the nearest still-needed position to set the
         // frontier from — it is cleared back to empty afterwards.
         let scan_limit = limit.max(1);
         let mut needed = Vec::with_capacity(scan_limit.min(64));
-        for pos in interest::chunks_around(self.centre, self.view) {
+        // Whether the walk reached the end of the order, rather than filling
+        // the budget. Only a full walk may conclude that nothing is left.
+        let mut exhausted = true;
+        for index in 0..self.order.len() {
+            let pos = self.order[index];
             if self.sent.contains(&pos) || self.in_flight.contains(&pos) {
                 continue;
             }
@@ -407,6 +481,7 @@ impl Streamer {
             }
             needed.push(pos);
             if needed.len() == scan_limit {
+                exhausted = false;
                 break;
             }
         }
@@ -416,6 +491,14 @@ impl Streamer {
         self.frontier = needed
             .first()
             .map(|pos| interest::stream_distance(self.centre, *pos));
+        if exhausted && needed.is_empty() {
+            self.complete = true;
+        } else {
+            // A returned position is not "sent" until the caller requests it;
+            // the next pass must scan again either way.
+            self.complete = false;
+        }
+        self.rescan = false;
         if limit == 0 {
             needed.clear();
         }
@@ -423,15 +506,24 @@ impl Streamer {
     }
 
     /// Whether nothing in range is left to ask for, without touching the memo.
+    ///
+    /// Uses the cached order when it exists. This is only called by
+    /// [`Self::is_complete`] (and tests), so a first call before any pass may
+    /// still pay for the ordering; the per-tick path never does.
     fn nothing_needed(&self) -> bool {
-        !interest::chunks_around(self.centre, self.view)
-            .into_iter()
-            .any(|pos| {
-                !self.sent.contains(&pos)
-                    && !self.in_flight.contains(&pos)
-                    && !self.shadowed.contains(&pos)
-                    && !self.is_shadowed(pos)
-            })
+        let unsent = |pos: &ChunkPos| {
+            !self.sent.contains(pos)
+                && !self.in_flight.contains(pos)
+                && !self.shadowed.contains(pos)
+                && !self.is_shadowed(*pos)
+        };
+        if self.order_for == Some((self.centre, self.view)) {
+            !self.order.iter().any(unsent)
+        } else {
+            !interest::chunks_around(self.centre, self.view)
+                .into_iter()
+                .any(|pos| unsent(&pos))
+        }
     }
 
     /// Whether `pos` lies behind sealed rock with no open way in, so far as is
@@ -551,6 +643,7 @@ impl Streamer {
     /// hole, so whatever is behind it is what they will see next.
     pub fn unseal(&mut self, pos: ChunkPos) {
         if self.sealed.remove(&pos) {
+            self.invalidate_scan();
             self.lift_shadows(pos);
         }
     }
@@ -568,6 +661,7 @@ impl Streamer {
     fn lift_shadows(&mut self, opened: ChunkPos) {
         let centre = self.centre;
         let between = |a: i32, b: i32, c: i32| (a.min(c)..=a.max(c)).contains(&b);
+        let before = self.shadowed.len();
         self.shadowed.retain(|pos| {
             let touching =
                 (pos.x - opened.x).abs() + (pos.y - opened.y).abs() + (pos.z - opened.z).abs() == 1;
@@ -576,6 +670,10 @@ impl Streamer {
                 && between(pos.z, opened.z, centre.z);
             !(touching || on_the_way)
         });
+        if self.shadowed.len() != before {
+            // A shadow lifted is a position that may need asking for again.
+            self.invalidate_scan();
+        }
     }
 
     /// How many held chunks are sealed.
@@ -625,6 +723,7 @@ impl Streamer {
     pub fn forget(&mut self, pos: ChunkPos) {
         self.sent.remove(&pos);
         self.sealed.remove(&pos);
+        self.invalidate_scan();
     }
 
     /// Records that a request came back, whether or not it produced a chunk.
@@ -638,6 +737,8 @@ impl Streamer {
         // No chunk reached the client, so nothing to write the edits behind:
         // the next request's answer carries them.
         self.held_edits.remove(&pos);
+        // The request is retryable, and a completed pass must not skip it.
+        self.invalidate_scan();
     }
 
     /// Records that a chunk reached the client.
@@ -889,6 +990,12 @@ impl Streamer {
         self.in_flight.remove(&pos);
         self.sent.remove(&pos);
         self.summaries.insert(pos, level);
+        // A summary is normally outside the detail radius, but if a recentre
+        // raced the delivery the position is now an unsent detail chunk again.
+        // The cached completion must not hide it.
+        if interest::contains(self.centre, self.view, pos) {
+            self.invalidate_scan();
+        }
     }
 
     /// Forgets a summary, so the next pass sends it again.
@@ -1400,6 +1507,58 @@ mod tests {
         deliver_all(&mut streamer);
         assert!(streamer.is_complete());
         assert!(streamer.next_needed(usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn the_interest_order_is_built_once_until_the_centre_or_view_moves() {
+        // The per-pass cost this exists to remove was the ordering, not the
+        // walk. A pass after the first must reuse it; a move or a resize is
+        // the only thing that rebuilds it.
+        let mut streamer = streamer();
+        assert_eq!(streamer.next_needed(1).len(), 1);
+        assert_eq!(streamer.order_builds, 1);
+        assert_eq!(streamer.next_needed(1).len(), 1);
+        assert_eq!(streamer.order_builds, 1, "a pass reordered the interest set");
+
+        streamer.recentre(ChunkPos::new(1, 0, 0));
+        let _ = streamer.next_needed(1);
+        assert_eq!(streamer.order_builds, 2, "a move did not reorder");
+
+        streamer.resize(ViewDistance::DEFAULT);
+        let _ = streamer.next_needed(1);
+        assert_eq!(streamer.order_builds, 3, "a resize did not reorder");
+    }
+
+    #[test]
+    fn a_completed_streamer_reopens_when_a_chunk_is_forgotten() {
+        // `complete` is a cache of a scan, not a fact about the world. A
+        // resend request must invalidate it or the chunk is never asked for
+        // again.
+        let mut streamer = streamer();
+        deliver_all(&mut streamer);
+        assert!(streamer.is_complete());
+
+        streamer.forget(ORIGIN);
+        assert!(!streamer.is_complete());
+        assert!(
+            streamer.next_needed(usize::MAX).contains(&ORIGIN),
+            "a forgotten chunk did not become requestable again"
+        );
+    }
+
+    #[test]
+    fn a_failed_request_is_asked_for_again() {
+        // A request that came back empty is cleared rather than delivered. It
+        // is still a position the client does not hold, so the next pass must
+        // ask again.
+        let mut streamer = streamer();
+        let first = streamer.next_needed(1)[0];
+        streamer.requested(first);
+        streamer.completed(first);
+        assert!(
+            streamer.next_needed(usize::MAX).contains(&first),
+            "a failed request was not retried"
+        );
     }
 
     #[test]
