@@ -77,13 +77,15 @@ NameCertificate (postcard, then signed; ≤ 256 bytes on the wire)
   server that never calls home can rely on.
 - **Verified offline.** The engine ships the registry's current public key
   and, as the update manifest does for the release key (`distribution.md`
-  §2), the BLAKE3 hash of the *next* one. A rotation is a signed record the
-  registry publishes and the client fetches with its renewal; a server
-  accepts the new key only if it matches the hash it already had. A server
-  built before a rotation still verifies certificates signed by the key it
-  knows until they expire, which is the 90 days it takes for every client to renew
-under the new key. A server that has accepted the rotation honours the
-retired key only for a certificate issued before the rotation and expiring
+  §2), the BLAKE3 hash of the *next* one. A rotation is a signed record the registry publishes and the client fetches
+with its renewal and carries on every challenge answer (§5); a server accepts
+the new key only if it matches the hash it already had. It applies the records
+per join, to a copy of the key it pins, and never moves the pin itself: that
+is the operator's, who is told once when a join proves the registry has moved
+past it. A server built before a rotation still verifies certificates signed
+by the key it knows until they expire, which is the 90 days it takes for every
+client to renew under the new key. Once a join's records retire a key, that
+key is honoured only for a certificate issued before the rotation and expiring
 no more than 90 days after it, so a stolen retired key cannot back-date a
 year-long certificate.
 - **Hostile input, as everything from a client is** (charter rule 14):
@@ -196,8 +198,10 @@ walks away.
 
 The challenge answer (`ClientMessage::AuthResponse`) gains an optional
 `name_certificate: Option<Vec<u8>>` (protocol 94; bounded at 256 bytes,
-refused above). It rides with the proof of the key, which is the moment the
-session can check it. **Not on `Hello`:** `Hello` is the version gate, decoded
+refused above) and, after it, `registry_rotations: Vec<Vec<u8>>`: the
+registry's rotation records the client holds, oldest first, at most four of at
+most 512 bytes each, refused above. Both ride with the proof of the key, which
+is the moment the session can check them. **Not on `Hello`:** `Hello` is the version gate, decoded
 before the versions are compared, so a field added to it would turn a
 mismatched pair's greeting into a malformed-message disconnect, in both
 directions, instead of the version message that tells a player to update;
@@ -230,12 +234,33 @@ name, and one rule:
   without a key is refused as a trust set with nothing to rotate from.
   The successor is only checked for shape: nothing can prove it belongs to
   the current key until a rotation record arrives, which is what
-  pre-commitment means.
-- **RCON `rename`** on a certified player is refused with the reason; the
-  registry owns that name. `rebind` is unchanged.
-- **Verification** is a pure function in core: the certificate's bytes, the
-  joining UUID, the clock, the known registry keys and the revocation list
-  (if the server has one) in; the name or a reason out. The `AuthProvider`
+  pre-commitment means. A record arrives with a player. The session applies
+  the carried records to a copy of the pin (`RegistryTrust::advanced_by`):
+  they must form one contiguous chain that reaches the pinned key; records
+  older than the pin are passed over and trusted for nothing; from the pin
+  on, each must be signed by the key it retires, name the committed
+  successor, and not be stamped in the future. A chain that does not hold
+  leaves the join uncertified under `honour` and refused under `require`,
+  and the certificate is verified against the chain's end only. The first
+  join in a process that proves a rotation past the pin logs a warning
+  naming the new `registry_key` and `registry_next_key_hash`, and when
+  pinning them costs nobody their name: ninety days after the last handover.
+  The operator confirms both against `GET /v1/keys` before pinning: a stolen
+  retiring key could sign a second record to the same committed successor
+  with a different next hash, which cannot vouch for any key but could, if
+  pinned, block the genuine next rotation.
+- **RCON `rename`** on a certified name is refused with the reason, whether
+  its holder is here or not: the registry owns that name, and a rename would
+  be undone at their next join and would displace whoever had taken it
+  meanwhile. The mark is kept with the binding and persisted. A certified
+  join sets it; it is cleared when the binding moves (displacement, release,
+  rename) or when the identity next joins uncertified. Under `off`, or with
+  no key pinned, no certificate would bring the name back, so the mark does
+  not refuse. `game.player_certified` still answers for this join. `rebind`
+  is unchanged.
+- **Verification** is a pure function in core: the certificate's bytes, the joining UUID, the clock, the known registry
+  keys (the pin, advanced through the carried rotation records) and the
+  revocation list (if the server has one) in; the name or a reason out. The `AuthProvider`
   trait is untouched: this is not authentication, and the trait stays the
   door for a community identity service that *is*.
 - **Mods** see the name as today. One addition to the API (1.x, additive):
@@ -243,6 +268,11 @@ name, and one rule:
   mod may show a mark or refuse the uncertified on a server that chose to.
 
 ## 6. The client
+
+The client keeps the registry's rotation records beside its certificate
+(fetched with each renewal from `GET /v1/keys`) and sends its most recent
+four on every challenge answer, so a server pinned before a rotation can
+still verify the certificate (§5).
 
 - **The identity screen** (where the recovery phrase lives) gains the
   account: the name held, its expiry, *Claim a name* / *Rename* / *Release*,
