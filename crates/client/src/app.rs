@@ -5354,6 +5354,8 @@ impl App {
             return 0;
         }
         let started = std::time::Instant::now();
+        // One allocation for the whole batch rather than one per summary.
+        let fluids = self.store.fluid_material_ids();
         let mut built = 0;
         for (index, pos) in due.iter().enumerate() {
             if let Some(summary) = self.store.summary(*pos) {
@@ -5375,7 +5377,6 @@ impl App {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
                     self.horizon.beyond.insert(*pos);
                 } else {
-                    let fluids = self.store.fluid_material_ids();
                     let width = summary.width() as usize;
                     let over = ChunkPos::new(pos.x, pos.y + 1, pos.z);
                     let above_summary = self.store.summary(over);
@@ -7155,6 +7156,16 @@ impl App {
     /// Faults come back here and become warnings, which is the only place the
     /// player sees them.
     pub fn run_hud_scripts(&mut self) {
+        // A server with no pushed HUD is the ordinary case. Building the whole
+        // state — carried stacks, the looking-at raycast, the HUD values map —
+        // only to find the VM has no scripts was a per-frame cost for nothing.
+        if self
+            .hud_vm
+            .as_ref()
+            .is_none_or(|vm| vm.loaded().next().is_none())
+        {
+            return;
+        }
         let Some(state) = self.hud_state() else {
             return;
         };
