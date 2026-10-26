@@ -106,10 +106,10 @@ part of 0.5.0 without them.
 | L23.1 The mod's player models with skins (`register_player_model`, `set_player_model`, `set_player_skin`), drawn by everyone and in third person — **landed 2026-10-14** (protocol 92: `EntityDef.skin`, `EntityLooked`, `PlayerLook`; the client keeps a pass per look) | engine | medium |
 | L23.1b A player's own skin, offered by the client at join and passed on by a host who allows it (`allow_custom_skins`, off by default) — **landed 2026-10-14** (protocol 93: `HelloAck.custom_skins`, `ClientMessage::Skin`; the server reads the PNG header and never decodes, `event.skin` on join, `game.custom_skins_allowed()`) | engine | medium |
 | N1 Names that stick: `sticky_names` in server.toml — a player wears the first name they joined this server with whatever their client asks for, is told so on joining, and only RCON `rename` changes it (the designer, 2026-10-14: players should stop changing names; the smaller of two answers, the other being a name registry at tiamatengine.com behind `AuthProvider`, held for the milestone after 0.5.0 and to be raised again before 1.0.0) — **landed 2026-10-15** (`session::JoinContext::sticky_names`; off by default, and off on a client's embedded host, which has no admin port to rename from; no protocol change) | engine | small |
-| N2 The name certificate in core: the type, its codec, offline verification against the pinned registry key and its pre-committed successor, the revocation list, and a `cargo fuzz` target for the parser (`core::identity::registry`; `docs/accounts-design.md` §2) | engine | medium |
-| N3 Protocol 94: `Hello` carries the certificate; the session binds a certified name over an uncertified one with a new `WhyRenamed`; `registry = honour|require|off` in server.toml; RCON `rename` refused on a certified player; `event.certified` and `game.player_certified` for mods (design §5) | engine | medium |
+| N2 The name certificate in core: the type, its codec, offline verification against the pinned registry key and its pre-committed successor, the revocation list, and a `cargo fuzz` target for the parser (`core::identity::registry`; `docs/accounts-design.md` §2) — **landed 2026-10-26** (the implementer's 2ef4f24e and 4ea897df, reviewed and fixed in 5615d3e3: every player request proves its key is the identity's own, a retired registry key vouches for ninety days at most, the fuzz target verifies what it decodes; two design gaps stay open as decisions 1 and 2 of `docs/accounts-review-2026-10-26.md`) | engine | medium |
+| N3 Protocol 94: the challenge answer carries the certificate (not `Hello`, which is the version gate and never changes shape); the session binds a certified name over an uncertified one with a new `WhyRenamed`; `registry = honour|require|off` in server.toml; RCON `rename` refused on a certified player; `event.certified` and `game.player_certified` for mods (design §5) — **landed 2026-10-26** (the implementer's bc991894, e7e969ad, 773ff61f, reviewed and fixed in 9b9731fa: the field moved off `Hello`, a refused certified join changes nothing, a holder displaced on the way in, the certified mark follows the name; RCON on an *offline* certified player is decision 4 of the review record) | engine | medium |
 | N4 The client: the certificate stored beside the identity, silent renewal, the proof of work, the pinned URL and key with a test override, and the identity screen's claim, rename, release, recovery email and recover-a-name forms (design §6) | engine | medium |
-| N5 `crates/registry`: `serve` and `admin`, SQLite with forward migrations, the limits and the rising proof of work, mail over SMTP with a sink for tests, the Dockerfile and the image job in the release workflow, `docs/registry-ops.md` for Dokploy (design §7) | engine | large |
+| N5 `crates/registry`: `serve` and `admin`, SQLite with forward migrations, the limits and the rising proof of work, mail over SMTP with a sink for tests, the Dockerfile and the image job in the release workflow, `docs/registry-ops.md` for Dokploy (design §7) — **code landed 2026-10-26**, not closed (the implementer's 47e0c8e3…1cb0eaf6, reviewed: two critical authorisation gaps and twenty-one more findings, the critical and high ones fixed in 5615d3e3 and 2738a165 — the service had never been built on Linux; what remains before a deployment is decisions 5–8 of `docs/accounts-review-2026-10-26.md` (concurrency shape, retention, mail abuse, health check) and the implementer's backlog there) | engine | large |
 | N6 Bot tests against an in-process registry: claim and join certified, impostor renamed, forged refused, expired uncertified, rotation only against its commitment, `require` refusing, a recovery confirmed and one cancelled (design §10) | engine | medium |
 | N7 The host: the DNS record, the Dokploy application from the published image with its volume, domain and variables, the registry key and its successor made offline and the hash recorded, an SMTP provider with SPF and DKIM, the terms and privacy pages, the report address — in the order `docs/registry-ops.md` gives | designer | an afternoon or two, days elapsed |
 
@@ -157,6 +157,23 @@ next nightly is the proof. An optimisation survey (read-only, 2026-10-16)
 ranked what remains: the WAL auto-checkpoint on the tick, the unload sweep,
 the light handover snapshot, the per-beat interest rebuild, and on the
 client the map re-probes and draws per chunk; none started.
+
+## Where it stands, 2026-10-26
+
+The accounts hand-back: `feat/accounts` carried N2, N3 and N5 from the
+implementer (seventeen commits, 2026-10-23 to 26). Three independent reads
+found a critical gap in the service — anyone could release anyone's name or
+cancel their recovery, because two request verifiers never tied the signing
+key to the UUID — plus a protocol regression (the certificate had been added
+to `Hello`, the version gate, which broke the mismatch message between 0.4.x
+and 0.5.0 in both directions), a registry crate that did not compile outside
+Windows, and some thirty findings in the service's abuse limits, recovery
+flow and operations. The critical and high ones were fixed on the branch
+before it was gated and merged; `docs/accounts-review-2026-10-26.md` holds the
+record, eight decisions for the owner and the implementer's backlog. N2 and
+N3 close; N5's code is on main but the row stays open until the decisions are
+made; N4 and N6 are untouched. `zstd` moved to 0.14 for four advisories that
+also had main's policy job red. E3's streak restarts with this push.
 
 ## Where it stands, 2026-10-16
 
