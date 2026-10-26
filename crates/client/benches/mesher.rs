@@ -35,7 +35,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use client::mesher::{self, Absent, Neighbours, NoFluid, NoGlass};
+use client::mesher::{self, Absent, Neighbours, NoFluid, NoGlass, Sight};
 use client::shade::Uniform;
 use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
@@ -115,7 +115,88 @@ fn chiselled() -> Chunk {
     chunk
 }
 
+/// Glass, foliage, sprites, models and flickers all registered, as a world with
+/// the default mods has them.
+///
+/// **This is the path the game runs.** With `NoGlass` the mesher skips every
+/// classification pass; with a populated `Sight` it has to look at every cell
+/// for every kind whether the chunk holds one or not, and that cost is what
+/// this measures — over chunks that hold none of them, and over one that does.
+fn populated() -> Sight {
+    Sight {
+        glass: [GLASS.0].into_iter().collect(),
+        foliage: [LEAVES.0].into_iter().collect(),
+        sprites: [GRASS.0, FLOWER.0].into_iter().collect(),
+        crosses: [FLOWER.0].into_iter().collect(),
+        models: [LANTERN.0].into_iter().collect(),
+        flickers: [TORCH.0].into_iter().collect(),
+    }
+}
+
+const GLASS: MaterialId = MaterialId(7);
+const LEAVES: MaterialId = MaterialId(8);
+const GRASS: MaterialId = MaterialId(9);
+const FLOWER: MaterialId = MaterialId(10);
+const LANTERN: MaterialId = MaterialId(11);
+const TORCH: MaterialId = MaterialId(12);
+
+/// Terrain with one of everything on it: a pane of glass, a canopy of leaves,
+/// a meadow of sprites, a lantern and a torch.
+fn mixed() -> Chunk {
+    let mut chunk = terrain();
+    for x in 2..6 {
+        chunk
+            .set_block(BlockPos::new(x, 8, 2), BlockValue::Uniform(GLASS))
+            .expect("in chunk");
+    }
+    for x in 8..14 {
+        for z in 8..14 {
+            chunk
+                .set_block(BlockPos::new(x, 11, z), BlockValue::Uniform(LEAVES))
+                .expect("in chunk");
+        }
+    }
+    for x in 0..16 {
+        for z in 0..8 {
+            let plant = if (x + z) % 3 == 0 { FLOWER } else { GRASS };
+            chunk
+                .set_subnode(BlockPos::new(x, 8, z).subnode(1, 0, 1), plant)
+                .expect("in chunk");
+        }
+    }
+    chunk
+        .set_block(BlockPos::new(10, 8, 3), BlockValue::Uniform(LANTERN))
+        .expect("in chunk");
+    chunk
+        .set_block(BlockPos::new(12, 8, 3), BlockValue::Uniform(TORCH))
+        .expect("in chunk");
+    chunk
+}
+
 fn meshing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mesh_chunk_sight");
+    let sight = populated();
+    for (name, chunk) in [
+        ("terrain", terrain()),
+        ("chiselled", chiselled()),
+        ("mixed", mixed()),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let neighbours = Neighbours::none();
+                std::hint::black_box(mesher::mesh_chunk(
+                    std::hint::black_box(&chunk),
+                    &neighbours,
+                    Absent::Air,
+                    &DAY,
+                    &NoFluid,
+                    &sight,
+                ))
+            });
+        });
+    }
+    group.finish();
+
     let mut group = c.benchmark_group("mesh_chunk");
     for (name, chunk) in [
         ("air", air()),
