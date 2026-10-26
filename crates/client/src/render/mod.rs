@@ -1153,6 +1153,8 @@ pub struct Renderer {
     quad_indices: QuadIndices,
     instances: wgpu::Buffer,
     instance_capacity: usize,
+    /// CPU-side instance list, reused every frame instead of reallocated.
+    instance_scratch: Vec<Instance>,
     depth: wgpu::TextureView,
     depth_size: (u32, u32),
     mode: RenderMode,
@@ -1423,6 +1425,7 @@ impl Renderer {
             selection_capacity: SELECTION_CAPACITY,
             instances,
             instance_capacity: 64,
+            instance_scratch: Vec::new(),
             depth_size: (width, height),
             mode,
             // Classic until told otherwise: a client with no config gets the
@@ -3011,13 +3014,27 @@ impl Renderer {
 #[derive(Debug, Default)]
 struct Culled {
     /// Chunks the world pass draws, with their instance index.
+    ///
+    /// Kept in streaming order for the blended glass and fluid passes; the
+    /// opaque world pass uses [`Self::opaque`], which is the same set sorted
+    /// near-to-far so early-Z rejects what is behind something already drawn.
     visible: Vec<(ChunkPos, u32)>,
-    /// Chunks the cascades draw, with their instance index.
+    /// The visible chunks, sorted near-to-far for the opaque world pass.
+    ///
+    /// **Not `visible` itself**: glass and fluid composite in whatever order
+    /// they are drawn, and changing that from the historical streaming order
+    /// would change their look. This list is for the opaque pass only.
+    opaque: Vec<(ChunkPos, u32)>,
+    /// Chunks each cascade draws, with their instance index.
     ///
     /// Tested against each cascade's own matrix — the same `Frustum` the camera
     /// uses, against the light's box rather than the eye's — so anything that
     /// can cast into the shadow map is in it whether or not it is on screen.
-    casters: Vec<(ChunkPos, u32)>,
+    ///
+    /// **Per cascade, not one union.** A chunk in the far cascade cannot reach
+    /// the first two maps, and drawing it into all three was most of the
+    /// shadow pass's vertex work.
+    casters: [Vec<(ChunkPos, u32)>; shadow::CASCADES],
     /// The visible chunks near enough for their sprites to be drawn.
     sprites: Vec<(ChunkPos, u32)>,
     /// The visible chunks near enough for their cutout foliage to be drawn
@@ -3053,6 +3070,22 @@ impl Culled {
                 .iter()
                 .any(|cascade| cascade.intersects_box(min, max))
     }
+}
+
+/// Sorts a draw list nearest-first, with a coordinate tie-break.
+///
+/// Presentation only: the order of two chunks at the same distance does not
+/// affect the picture, but a stable tie-break keeps a frame-to-frame flicker
+/// out of a debug trace.
+fn sort_near_to_far(camera: &Camera, list: &mut [(ChunkPos, u32)]) {
+    list.sort_by(|(a, _), (b, _)| {
+        let da = camera.position.chunk_offset(*a).length_squared();
+        let db = camera.position.chunk_offset(*b).length_squared();
+        da.total_cmp(&db)
+            .then(a.x.cmp(&b.x))
+            .then(a.y.cmp(&b.y))
+            .then(a.z.cmp(&b.z))
+    });
 }
 
 /// How far, in blocks from the camera to a chunk's centre, sprites (grass,
@@ -3103,14 +3136,34 @@ impl Renderer {
             .unwrap_or_default();
 
         let mut culled = Culled::default();
-        let mut instances = Vec::with_capacity(self.chunks.len());
+        // Take the scratch list out and put it back at the end: a fresh
+        // `Vec::with_capacity(self.chunks.len())` every frame was a ~200 KB
+        // heap block for a default view, before one instance was written.
+        let mut instances = std::mem::take(&mut self.instance_scratch);
+        instances.clear();
+        if instances.capacity() < self.chunks.len() {
+            instances.reserve(self.chunks.len() - instances.capacity());
+        }
+        // A chunk whose centre is outside this radius cannot intersect any
+        // cascade, so the three frustum tests below cannot be true for it.
+        // The half-diagonal covers a chunk whose centre is just outside while
+        // a corner is inside.
+        let half_diagonal = tiamat_core::CHUNK_BLOCKS as f32 * 0.866_025_4;
+        let shadow_reach = shadow::CASTER_REACH + half_diagonal;
         for (pos, mesh) in &self.chunks {
             let offset = camera.position.chunk_offset(*pos);
             let seen = frustum.contains_chunk(offset);
-            let casts = cascades
-                .iter()
-                .any(|cascade| cascade.contains_chunk(offset));
-            if !seen && !casts {
+            let mut casts = [false; shadow::CASCADES];
+            if !cascades.is_empty() {
+                let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
+                if centre.length_squared() <= shadow_reach * shadow_reach {
+                    for (index, cascade) in cascades.iter().enumerate() {
+                        casts[index] = cascade.contains_chunk(offset);
+                    }
+                }
+            }
+            let casts_any = casts.iter().any(|cast| *cast);
+            if !seen && !casts_any {
                 continue;
             }
             // **One instance array, two index lists.** Both passes read the
@@ -3125,6 +3178,7 @@ impl Renderer {
             let instance = instances.len() as u32;
             if seen {
                 culled.visible.push((*pos, instance));
+                culled.opaque.push((*pos, instance));
                 let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
                 let distance2 = centre.length_squared();
                 if distance2 < SPRITE_DRAW_BLOCKS * SPRITE_DRAW_BLOCKS {
@@ -3136,8 +3190,10 @@ impl Renderer {
                     culled.cutout_far.push((*pos, instance));
                 }
             }
-            if casts {
-                culled.casters.push((*pos, instance));
+            for (index, cast) in casts.iter().enumerate() {
+                if *cast {
+                    culled.casters[index].push((*pos, instance));
+                }
             }
             let side = tiamat_core::CHUNK_BLOCKS as i32;
             // **Cached per column, not looked up per frame.** A corner is the
@@ -3167,7 +3223,15 @@ impl Renderer {
             });
         }
         self.drawn = culled.visible.len();
-        self.cast = culled.casters.len();
+        self.cast = culled.casters.iter().map(Vec::len).sum::<usize>();
+
+        // Opaque draws go near-to-far so the depth test can reject what is
+        // behind something already drawn. The blended lists keep their
+        // historical order — see `Culled::opaque`.
+        sort_near_to_far(camera, &mut culled.opaque);
+        sort_near_to_far(camera, &mut culled.sprites);
+        sort_near_to_far(camera, &mut culled.cutout);
+        sort_near_to_far(camera, &mut culled.cutout_far);
 
         // The body rides at the end of the same array, so drawing it is one
         // more instance index rather than a second buffer and a second binding.
@@ -3197,6 +3261,9 @@ impl Renderer {
         culled.body = instances.len().saturating_sub(1) as u32;
         culled.frustum = Some(frustum);
         culled.cascades = cascades;
+        // Back into the renderer for the next frame; the GPU copy above is the
+        // only thing this frame needs.
+        self.instance_scratch = instances;
 
         culled
     }
@@ -3664,7 +3731,10 @@ impl Renderer {
         // there is no second `render` call to get the load op wrong in.
         shadows.render(encoder, |pass, cascade| {
             self.bind_chunk_buffers(pass);
-            for (pos, instance) in &culled.casters {
+            // This cascade's own list. The union used to be drawn into every
+            // cascade, so a chunk 150 blocks away was submitted to a map that
+            // covers 13 — three times the caster work for one shadow.
+            for (pos, instance) in &culled.casters[cascade] {
                 let Some(mesh) = self.chunks.get(pos) else {
                     continue;
                 };
@@ -3850,7 +3920,7 @@ impl Renderer {
             }
             self.bind_chunk_buffers(&mut pass);
 
-            for (pos, instance) in &culled.visible {
+            for (pos, instance) in &culled.opaque {
                 let Some(mesh) = self.chunks.get(pos) else {
                     continue;
                 };
