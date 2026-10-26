@@ -93,8 +93,23 @@ pub const MAX_CERTIFICATE_BYTES: usize = 256;
 /// Largest registry rotation record read at all, in bytes.
 pub const MAX_ROTATION_BYTES: usize = 512;
 
-/// Largest claim or release request read at all, in bytes.
+/// Largest player request read at all, in bytes, before any key-set proof.
+///
+/// An 18-character claim with every field at its limit is under two hundred
+/// bytes; this is the cap for a request that cannot carry a proof (an email or
+/// a recovery request) and the base of [`MAX_PROVEN_REQUEST_BYTES`] for one
+/// that can.
 pub const MAX_REQUEST_BYTES: usize = 512;
+
+/// Largest request read at all when it may carry a [`KeySetProof`], in bytes.
+///
+/// A claim, a release and a recovery cancellation can be signed by a second
+/// device, and then carry the chain of authorisations from the root: up to
+/// [`MAX_KEY_SET_PROOF_BYTES`] on top of the request itself. Capping them at
+/// [`MAX_REQUEST_BYTES`] alone would refuse a proof of two committed links
+/// while [`MAX_KEY_SET_LINKS`] promises eight, so the cap is the sum. The
+/// service's HTTP body cap (32 KiB) is far above it.
+pub const MAX_PROVEN_REQUEST_BYTES: usize = MAX_REQUEST_BYTES + MAX_KEY_SET_PROOF_BYTES;
 
 /// Largest revocation list read at all, in bytes.
 pub const MAX_REVOCATION_BYTES: usize = 256 * 1024;
@@ -798,13 +813,19 @@ impl RegistryTrust {
     /// — but a typo is refused here rather than silently trusting the wrong
     /// chain.
     ///
+    /// The key is checked as every network key is ([`public_key_from_bytes`]):
+    /// a small-order point decompresses, but no certificate can ever verify
+    /// under it (`verify_strict` refuses weak keys), so pinning one would pass
+    /// the startup check and then refuse every name. Better to refuse it here.
+    ///
     /// # Errors
     ///
     /// [`RegistryError::BadPublicKey`] for a current key that is not 64 hex
-    /// characters naming a valid point, or a successor hash that is not 64.
+    /// characters naming a valid, non-small-order point, or a successor hash
+    /// that is not 64 hex characters.
     pub fn from_hex(current: &str, next_key_hash: Option<&str>) -> Result<Self, RegistryError> {
         let key = decode_hex_32(current).ok_or(RegistryError::BadPublicKey)?;
-        let current = VerifyingKey::from_bytes(&key).map_err(|_| RegistryError::BadPublicKey)?;
+        let current = public_key_from_bytes(&key).map_err(|_| RegistryError::BadPublicKey)?;
         let next = match next_key_hash.map(str::trim).filter(|hash| !hash.is_empty()) {
             None => None,
             Some(hash) => Some(decode_hex_32(hash).ok_or(RegistryError::BadPublicKey)?),
@@ -883,25 +904,44 @@ impl RegistryTrust {
         Ok(())
     }
 
-    /// The key that may sign a record issued at `issued`, if this build trusts
-    /// it: the current key, or a retired key for a record issued before it was
-    /// retired.
-    fn signer_for(&self, key: &[u8; 32], issued: i64) -> Option<VerifyingKey> {
+    /// The key that may sign a record valid from `issued` to `valid_until`, if
+    /// this build trusts it: the current key, or a retired key for a record
+    /// issued before it was retired **and** ending no later than an honest
+    /// certificate issued at that moment would.
+    ///
+    /// The second bound is what makes a stolen retired key worth little. The
+    /// parser allows a lifetime of up to [`MAX_CERTIFICATE_LIFETIME_SECONDS`],
+    /// so without it a thief could back-date a certificate to the second before
+    /// the rotation and have it honoured for a year; with it, the most a retired
+    /// key can vouch for ends [`CERTIFICATE_LIFETIME_SECONDS`] after it retired,
+    /// which is exactly the window the design gives clients to renew.
+    fn signer_for(&self, key: &[u8; 32], issued: i64, valid_until: i64) -> Option<VerifyingKey> {
         let key = public_key_from_bytes(key).ok()?;
         if key == self.current {
             return Some(key);
         }
         self.retired
             .iter()
-            .find(|entry| entry.key == key && issued < entry.retired_at)
+            .find(|entry| {
+                entry.key == key
+                    && issued < entry.retired_at
+                    && valid_until
+                        <= entry
+                            .retired_at
+                            .saturating_add(CERTIFICATE_LIFETIME_SECONDS)
+            })
             .map(|entry| entry.key)
     }
 }
 
 /// Thirty-two bytes from 64 hex characters, or `None`.
+///
+/// Every character is checked first because `u8::from_str_radix` accepts a
+/// leading `+`: `"+f"` would otherwise decode, and a pinned value that is not
+/// the hex it looks like is the typo this parser exists to catch.
 fn decode_hex_32(text: &str) -> Option<[u8; 32]> {
     let text = text.trim();
-    if text.len() != 64 {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; 32];
@@ -939,7 +979,11 @@ pub fn verify_certificate(
     if certificate.uuid != *joining.as_bytes() {
         return Err(RegistryError::WrongIdentity);
     }
-    let Some(signer) = trust.signer_for(&certificate.registry_key, certificate.issued) else {
+    let Some(signer) = trust.signer_for(
+        &certificate.registry_key,
+        certificate.issued,
+        certificate.expires,
+    ) else {
         return Err(RegistryError::UntrustedRegistryKey);
     };
     if certificate.issued > now.saturating_add(CLOCK_SKEW_SECONDS) {
@@ -1109,13 +1153,16 @@ impl RevocationList {
 
     /// Checks that a trusted registry key signed this list.
     ///
+    /// A list has no expiry, so a retired key is held to its issue time alone:
+    /// it vouches for a list issued before it was retired.
+    ///
     /// # Errors
     ///
     /// [`RegistryError::UntrustedRegistryKey`] when the signing key is not one
     /// this build trusts for a list issued then, and
     /// [`RegistryError::SignatureInvalid`] when the signature does not verify.
     pub fn verify(&self, trust: &RegistryTrust) -> Result<(), RegistryError> {
-        let Some(signer) = trust.signer_for(&self.registry_key, self.issued) else {
+        let Some(signer) = trust.signer_for(&self.registry_key, self.issued, self.issued) else {
             return Err(RegistryError::UntrustedRegistryKey);
         };
         verify_signature(&signer, &self.signing_payload(), &self.signature)
@@ -1281,6 +1328,41 @@ pub fn verify_key_set_proof(
     Ok(())
 }
 
+/// Shows that `public_key` signed `payload` **and** that it is `uuid`'s own key.
+///
+/// Every player request goes through this, so a `Verified*` value always means
+/// the same thing: the key that signed it is either the identity's root (whose
+/// `BLAKE3` *is* the UUID) or a key `key_set` reaches from that root. A
+/// signature alone proves only that *someone* signed; without the second half,
+/// anyone could sign a request naming somebody else's UUID — read off the
+/// public name page — and have it treated as theirs.
+///
+/// Requests that cannot carry a proof pass `None`, which makes the root the
+/// only key accepted.
+///
+/// # Errors
+///
+/// [`RegistryError::BadPublicKey`] for a key that is not one,
+/// [`RegistryError::SignatureInvalid`] when the signature does not verify,
+/// anything [`verify_key_set_proof`] returns when a proof is carried, and
+/// [`RegistryError::RootKeyRequired`] when none is and the key is not the root.
+fn verify_holder(
+    uuid: &PlayerUuid,
+    public_key: &[u8; 32],
+    payload: &[u8],
+    signature: &Signature64,
+    key_set: Option<&KeySetProof>,
+) -> Result<VerifyingKey, RegistryError> {
+    let key = public_key_from_bytes(public_key).map_err(|_| RegistryError::BadPublicKey)?;
+    verify_signature(&key, payload, signature)?;
+    match key_set {
+        Some(proof) => verify_key_set_proof(proof, uuid, &key)?,
+        None if PlayerUuid::from_root_key(&key) == *uuid => {}
+        None => return Err(RegistryError::RootKeyRequired),
+    }
+    Ok(key)
+}
+
 /// A claim, or a renewal of one, signed by the player's own identity.
 ///
 /// `work` is what distinguishes them: a **claim** carries a proof-of-work
@@ -1330,6 +1412,9 @@ impl ClaimRequest {
     ///
     /// The request starts without work, which makes it renewal-shaped; a claim
     /// is this plus [`ClaimRequest::solve_work`] and [`ClaimRequest::sign`].
+    ///
+    /// This is the **root key's** constructor: the UUID is the one `identity`
+    /// is the root of. A second device uses [`ClaimRequest::for_device`].
     #[must_use]
     pub fn new(identity: &Identity, name: &Name, timestamp: i64) -> Self {
         Self {
@@ -1345,6 +1430,29 @@ impl ClaimRequest {
         }
     }
 
+    /// Builds a request for an **added device** to claim or renew `name` for
+    /// the identity `uuid`, carrying the proof that reaches it from the root.
+    ///
+    /// A separate constructor because the UUID is not the device's own: it is
+    /// the root's, and it must be in place before [`ClaimRequest::solve_work`],
+    /// since the work hashes the signed payload that names it. Filling the
+    /// device's own hash and patching it afterwards is the mistake this exists
+    /// to prevent.
+    #[must_use]
+    pub fn for_device(
+        device: &Identity,
+        uuid: &PlayerUuid,
+        key_set: KeySetProof,
+        name: &Name,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            uuid: *uuid.as_bytes(),
+            key_set: Some(key_set),
+            ..Self::new(device, name, timestamp)
+        }
+    }
+
     /// Reads a request under its cap.
     ///
     /// # Errors
@@ -1352,7 +1460,7 @@ impl ClaimRequest {
     /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], the
     /// name rules from [`Name::from_parts`], and the proof's own shape rules.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
-        let request: Self = decode("claim request", bytes, MAX_REQUEST_BYTES)?;
+        let request: Self = decode("claim request", bytes, MAX_PROVEN_REQUEST_BYTES)?;
         if request.version != CLAIM_VERSION {
             return Err(RegistryError::Version {
                 what: "claim request",
@@ -1444,8 +1552,9 @@ impl ClaimRequest {
     ///
     /// The name rules plus [`RegistryError::NameReserved`],
     /// [`RegistryError::StaleRequest`], [`RegistryError::MissingWork`],
-    /// [`RegistryError::InsufficientWork`], [`RegistryError::BadPublicKey`], or
-    /// [`RegistryError::SignatureInvalid`].
+    /// [`RegistryError::InsufficientWork`], [`RegistryError::BadPublicKey`],
+    /// [`RegistryError::SignatureInvalid`], [`RegistryError::RootKeyRequired`],
+    /// or a key-set proof's refusal.
     pub fn verify_claim(
         &self,
         now: i64,
@@ -1481,7 +1590,8 @@ impl ClaimRequest {
     /// # Errors
     ///
     /// The name rules, [`RegistryError::StaleRequest`],
-    /// [`RegistryError::BadPublicKey`], or [`RegistryError::SignatureInvalid`].
+    /// [`RegistryError::BadPublicKey`], [`RegistryError::SignatureInvalid`],
+    /// [`RegistryError::RootKeyRequired`], or a key-set proof's refusal.
     pub fn verify_renewal(&self, now: i64) -> Result<VerifiedClaim, RegistryError> {
         let name = Name::from_parts(&self.name, &self.display)?;
         self.check_clock(now)?;
@@ -1497,16 +1607,13 @@ impl ClaimRequest {
     /// The signing key, parsed; the signature checked; and the key shown to be
     /// the identity's own — the root, or a key a proof reaches from it.
     fn verified_key(&self) -> Result<VerifyingKey, RegistryError> {
-        let key =
-            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
-        verify_signature(&key, &self.signing_payload(), &self.signature)?;
-        let uuid = PlayerUuid::from_bytes(self.uuid);
-        match &self.key_set {
-            Some(proof) => verify_key_set_proof(proof, &uuid, &key)?,
-            None if PlayerUuid::from_root_key(&key) == uuid => {}
-            None => return Err(RegistryError::RootKeyRequired),
-        }
-        Ok(key)
+        verify_holder(
+            &PlayerUuid::from_bytes(self.uuid),
+            &self.public_key,
+            &self.signing_payload(),
+            &self.signature,
+            self.key_set.as_ref(),
+        )
     }
 
     /// Refuses a timestamp outside the skew, in either direction.
@@ -1531,6 +1638,11 @@ pub struct VerifiedRelease {
     /// The identity that held it.
     pub uuid: PlayerUuid,
     /// The key that signed the request.
+    ///
+    /// **Already shown to be the identity's own**, as a claim's is: the root,
+    /// or a key a [`KeySetProof`] reaches from it. A release is the one request
+    /// that takes something away from its subject, so this is what stops a
+    /// stranger releasing a name by naming its holder's UUID.
     pub public_key: VerifyingKey,
 }
 
@@ -1553,10 +1665,16 @@ pub struct ReleaseRequest {
     pub timestamp: i64,
     /// The player key's signature over [`Self::signing_payload`].
     pub signature: Signature64,
+    /// A chain from the identity's root key to `public_key`, when that key was
+    /// added later (a second device). `None` means the key is the root.
+    ///
+    /// Outside the signature and after it on the wire, for the reasons
+    /// [`ClaimRequest::key_set`] gives.
+    pub key_set: Option<KeySetProof>,
 }
 
 impl ReleaseRequest {
-    /// Builds a release by `identity` of `canonical`.
+    /// Builds a release by `identity`, as its root key, of `canonical`.
     ///
     /// The name is not checked here — [`ReleaseRequest::from_bytes`] and
     /// [`ReleaseRequest::verify`] check it, and a constructor that refused one
@@ -1570,6 +1688,24 @@ impl ReleaseRequest {
             public_key: identity.public_key().to_bytes(),
             timestamp,
             signature: Signature64([0; 64]),
+            key_set: None,
+        }
+    }
+
+    /// Builds a release by an **added device** of `uuid`'s name, carrying the
+    /// proof that reaches the device from the root.
+    #[must_use]
+    pub fn for_device(
+        device: &Identity,
+        uuid: &PlayerUuid,
+        key_set: KeySetProof,
+        canonical: &str,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            uuid: *uuid.as_bytes(),
+            key_set: Some(key_set),
+            ..Self::new(device, canonical, timestamp)
         }
     }
 
@@ -1577,10 +1713,11 @@ impl ReleaseRequest {
     ///
     /// # Errors
     ///
-    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
-    /// the canonical-name rules from [`check_canonical`].
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`],
+    /// the canonical-name rules from [`check_canonical`], and the proof's own
+    /// shape rules.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
-        let request: Self = decode("release request", bytes, MAX_REQUEST_BYTES)?;
+        let request: Self = decode("release request", bytes, MAX_PROVEN_REQUEST_BYTES)?;
         if request.version != RELEASE_VERSION {
             return Err(RegistryError::Version {
                 what: "release request",
@@ -1589,6 +1726,9 @@ impl ReleaseRequest {
             });
         }
         check_canonical(&request.name)?;
+        if let Some(proof) = &request.key_set {
+            proof.check()?;
+        }
         Ok(request)
     }
 
@@ -1611,18 +1751,24 @@ impl ReleaseRequest {
         self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
     }
 
-    /// Verifies the release.
+    /// Verifies the release: the clock, the signature, and that the signing
+    /// key is the named identity's own.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
-    /// [`RegistryError::SignatureInvalid`].
+    /// The canonical-name rules, [`RegistryError::StaleRequest`],
+    /// [`RegistryError::BadPublicKey`], [`RegistryError::SignatureInvalid`],
+    /// [`RegistryError::RootKeyRequired`], or a key-set proof's refusal.
     pub fn verify(&self, now: i64) -> Result<VerifiedRelease, RegistryError> {
         check_canonical(&self.name)?;
         check_timestamp(self.timestamp, now)?;
-        let key =
-            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
-        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        let key = verify_holder(
+            &PlayerUuid::from_bytes(self.uuid),
+            &self.public_key,
+            &self.signing_payload(),
+            &self.signature,
+            self.key_set.as_ref(),
+        )?;
         Ok(VerifiedRelease {
             name: self.name.clone(),
             uuid: PlayerUuid::from_bytes(self.uuid),
@@ -1754,16 +1900,18 @@ impl EmailRequest {
         self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
     }
 
-    /// Verifies the signature and the clock.
+    /// Verifies the signature, the clock, and that the signing key is the
+    /// UUID's **root** key.
     ///
-    /// Whether the key belongs to the UUID is the service's question, as it is
-    /// for a claim.
+    /// An email request carries no key-set proof (design §4), so only the root
+    /// is accepted. The address is the door a recovery goes through; a stranger
+    /// who could bind one to somebody else's UUID would own that door.
     ///
     /// # Errors
     ///
     /// [`RegistryError::Version`], [`RegistryError::EmailAddress`],
-    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
-    /// [`RegistryError::SignatureInvalid`].
+    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`],
+    /// [`RegistryError::SignatureInvalid`] or [`RegistryError::RootKeyRequired`].
     pub fn verify(&self, now: i64) -> Result<VerifiedEmail, RegistryError> {
         if self.version != EMAIL_VERSION {
             return Err(RegistryError::Version {
@@ -1776,9 +1924,13 @@ impl EmailRequest {
             check_email_address(address)?;
         }
         check_timestamp(self.timestamp, now)?;
-        let key =
-            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
-        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        let key = verify_holder(
+            &PlayerUuid::from_bytes(self.uuid),
+            &self.public_key,
+            &self.signing_payload(),
+            &self.signature,
+            None,
+        )?;
         Ok(VerifiedEmail {
             uuid: PlayerUuid::from_bytes(self.uuid),
             address: self.address.clone(),
@@ -1795,7 +1947,7 @@ pub struct VerifiedEmail {
     pub uuid: PlayerUuid,
     /// The address to bind, or `None` to remove the bound one.
     pub address: Option<String>,
-    /// The key that signed the request.
+    /// The key that signed the request: already shown to be the UUID's root.
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
@@ -1862,13 +2014,19 @@ impl RecoveryRequest {
         self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
     }
 
-    /// Verifies the signature and the clock.
+    /// Verifies the signature, the clock, and that the signing key is the
+    /// **root** of `new_uuid`.
+    ///
+    /// The new identity is a fresh one — the player has lost everything else —
+    /// so its root is the only key it has, and no proof is carried. Holding the
+    /// line here means the identity a name would move to is one whose key
+    /// actually asked for it.
     ///
     /// # Errors
     ///
     /// [`RegistryError::Version`], the canonical-name rules,
-    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
-    /// [`RegistryError::SignatureInvalid`].
+    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`],
+    /// [`RegistryError::SignatureInvalid`] or [`RegistryError::RootKeyRequired`].
     pub fn verify(&self, now: i64) -> Result<VerifiedRecovery, RegistryError> {
         if self.version != RECOVERY_VERSION {
             return Err(RegistryError::Version {
@@ -1879,9 +2037,13 @@ impl RecoveryRequest {
         }
         check_canonical(&self.name)?;
         check_timestamp(self.timestamp, now)?;
-        let key =
-            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
-        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        let key = verify_holder(
+            &PlayerUuid::from_bytes(self.new_uuid),
+            &self.public_key,
+            &self.signing_payload(),
+            &self.signature,
+            None,
+        )?;
         Ok(VerifiedRecovery {
             name: self.name.clone(),
             new_uuid: PlayerUuid::from_bytes(self.new_uuid),
@@ -1898,7 +2060,7 @@ pub struct VerifiedRecovery {
     pub name: String,
     /// The identity it would move to.
     pub new_uuid: PlayerUuid,
-    /// The new identity's key.
+    /// The new identity's key: already shown to be `new_uuid`'s root.
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
@@ -1922,17 +2084,57 @@ pub struct CancelRecoveryRequest {
     pub timestamp: i64,
     /// The holder's signature over [`Self::signing_payload`].
     pub signature: Signature64,
+    /// A chain from the holder's root key to `public_key`, when that key was
+    /// added later. `None` means the key is the root.
+    ///
+    /// The design's "the current key can cancel" (§4): a holder who plays on a
+    /// second device must be able to veto a stolen mailbox from it, without the
+    /// root key in reach. Outside the signature and after it on the wire, for
+    /// the reasons [`ClaimRequest::key_set`] gives.
+    pub key_set: Option<KeySetProof>,
 }
 
 impl CancelRecoveryRequest {
+    /// Builds a cancellation by `identity`, as its root key, of `canonical`'s
+    /// recovery.
+    #[must_use]
+    pub fn new(identity: &Identity, canonical: &str, timestamp: i64) -> Self {
+        Self {
+            version: CANCEL_VERSION,
+            name: canonical.to_owned(),
+            uuid: *identity.uuid_as_root().as_bytes(),
+            public_key: identity.public_key().to_bytes(),
+            timestamp,
+            signature: Signature64([0; 64]),
+            key_set: None,
+        }
+    }
+
+    /// Builds a cancellation by an **added device** of the identity `uuid`,
+    /// carrying the proof that reaches the device from the root.
+    #[must_use]
+    pub fn for_device(
+        device: &Identity,
+        uuid: &PlayerUuid,
+        key_set: KeySetProof,
+        canonical: &str,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            uuid: *uuid.as_bytes(),
+            key_set: Some(key_set),
+            ..Self::new(device, canonical, timestamp)
+        }
+    }
+
     /// Reads a request under the cap.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
-    /// the canonical-name rules.
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`],
+    /// the canonical-name rules, and the proof's own shape rules.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
-        let request: Self = decode("recovery cancellation", bytes, MAX_REQUEST_BYTES)?;
+        let request: Self = decode("recovery cancellation", bytes, MAX_PROVEN_REQUEST_BYTES)?;
         if request.version != CANCEL_VERSION {
             return Err(RegistryError::Version {
                 what: "recovery cancellation",
@@ -1941,6 +2143,9 @@ impl CancelRecoveryRequest {
             });
         }
         check_canonical(&request.name)?;
+        if let Some(proof) = &request.key_set {
+            proof.check()?;
+        }
         Ok(request)
     }
 
@@ -1963,13 +2168,19 @@ impl CancelRecoveryRequest {
         self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
     }
 
-    /// Verifies the signature and the clock.
+    /// Verifies the signature, the clock, and that the signing key is the
+    /// named holder's own — the root, or a key a proof reaches from it.
+    ///
+    /// Without the last check, anyone could cancel anyone's recovery by naming
+    /// the holder's UUID, which turns the veto into a way to keep a lost name
+    /// lost.
     ///
     /// # Errors
     ///
     /// [`RegistryError::Version`], the canonical-name rules,
-    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`] or
-    /// [`RegistryError::SignatureInvalid`].
+    /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`],
+    /// [`RegistryError::SignatureInvalid`], [`RegistryError::RootKeyRequired`],
+    /// or a key-set proof's refusal.
     pub fn verify(&self, now: i64) -> Result<VerifiedCancellation, RegistryError> {
         if self.version != CANCEL_VERSION {
             return Err(RegistryError::Version {
@@ -1980,9 +2191,13 @@ impl CancelRecoveryRequest {
         }
         check_canonical(&self.name)?;
         check_timestamp(self.timestamp, now)?;
-        let key =
-            public_key_from_bytes(&self.public_key).map_err(|_| RegistryError::BadPublicKey)?;
-        verify_signature(&key, &self.signing_payload(), &self.signature)?;
+        let key = verify_holder(
+            &PlayerUuid::from_bytes(self.uuid),
+            &self.public_key,
+            &self.signing_payload(),
+            &self.signature,
+            self.key_set.as_ref(),
+        )?;
         Ok(VerifiedCancellation {
             name: self.name.clone(),
             uuid: PlayerUuid::from_bytes(self.uuid),
@@ -1999,7 +2214,8 @@ pub struct VerifiedCancellation {
     pub name: String,
     /// The identity that holds it.
     pub uuid: PlayerUuid,
-    /// The holder's key.
+    /// The holder's key: already shown to be `uuid`'s own, the root or a key a
+    /// [`KeySetProof`] reaches from it.
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
@@ -2676,14 +2892,8 @@ mod tests {
         forged.new_uuid = *holder.uuid_as_root().as_bytes();
         assert_eq!(forged.verify(NOW), Err(RegistryError::SignatureInvalid));
 
-        let mut cancel = CancelRecoveryRequest {
-            version: CANCEL_VERSION,
-            name: "alice".to_owned(),
-            uuid: *holder.uuid_as_root().as_bytes(),
-            public_key: [0; 32],
-            timestamp: NOW,
-            signature: Signature64([0; 64]),
-        };
+        let mut cancel = CancelRecoveryRequest::new(&holder, "alice", NOW);
+        assert_eq!(cancel.version, CANCEL_VERSION);
         cancel.sign(&holder);
         let parsed =
             CancelRecoveryRequest::from_bytes(&postcard::to_allocvec(&cancel).expect("encode"))
@@ -2800,14 +3010,21 @@ mod tests {
         let uuid = root.uuid_as_root();
         let name = Name::from_parts("alice", "Alice").expect("name");
 
-        let mut claim = ClaimRequest::new(&device, &name, NOW);
-        // The UUID is the root's; the constructor fills in the device's own.
-        claim.uuid = *uuid.as_bytes();
-        claim.key_set = Some(proof_for(&root, &[&device], &uuid));
-        claim.work = Some(0);
+        // The UUID is the root's, not the device's: `for_device` puts it in
+        // place before the work is mined over the payload that names it.
+        let mut claim = ClaimRequest::for_device(
+            &device,
+            &uuid,
+            proof_for(&root, &[&device], &uuid),
+            &name,
+            NOW,
+        );
+        assert_eq!(claim.uuid, *uuid.as_bytes());
+        assert_eq!(claim.public_key, device.public_key().to_bytes());
+        claim.solve_work(4).expect("mine");
         claim.sign(&device);
         let verified = claim
-            .verify_claim(NOW, 0)
+            .verify_claim(NOW, 4)
             .expect("a device with the chain from its root");
         assert_eq!(verified.uuid, uuid);
         assert_eq!(verified.public_key, device.public_key());
@@ -2846,5 +3063,547 @@ mod tests {
         let successor = text.clone();
         let trust = RegistryTrust::from_hex(&text, Some(&successor)).expect("a successor hash");
         assert_eq!(trust.current(), &key.verifying_key());
+    }
+
+    /// 64 hex characters of `bytes`.
+    fn hex64(bytes: &[u8; 32]) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::with_capacity(64);
+        for byte in bytes {
+            let _ = write!(text, "{byte:02x}");
+        }
+        text
+    }
+
+    /// The encoding of the identity point: a valid curve point of small order,
+    /// which decompresses and can never verify a strict signature.
+    const SMALL_ORDER_KEY: [u8; 32] = {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes
+    };
+
+    #[test]
+    fn a_pinned_key_must_be_a_usable_key_in_plain_hex() {
+        // A small-order point passes `VerifyingKey::from_bytes`, then fails
+        // every certificate; it is refused at the pin instead.
+        assert!(VerifyingKey::from_bytes(&SMALL_ORDER_KEY).is_ok());
+        assert_eq!(
+            RegistryTrust::from_hex(&hex64(&SMALL_ORDER_KEY), None).err(),
+            Some(RegistryError::BadPublicKey)
+        );
+
+        // `u8::from_str_radix` takes a leading `+`; the pin does not.
+        let plus = "+1".repeat(32);
+        assert_eq!(plus.len(), 64);
+        assert_eq!(decode_hex_32(&plus), None);
+        let good = hex64(
+            &SigningKey::from_bytes(&[0x77; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        assert_eq!(
+            RegistryTrust::from_hex(&good, Some(&plus)).err(),
+            Some(RegistryError::BadPublicKey)
+        );
+        let mut signed_key = good.clone();
+        signed_key.replace_range(0..1, "+");
+        assert!(RegistryTrust::from_hex(&signed_key, None).is_err());
+        // Upper-case hex is still hex.
+        assert!(RegistryTrust::from_hex(&good.to_ascii_uppercase(), None).is_ok());
+    }
+
+    #[test]
+    fn a_retired_key_vouches_no_longer_than_an_honest_lifetime() {
+        let first = registry_key(1);
+        let second = registry_key(2);
+        let alice = player(1);
+        let mut trust = RegistryTrust::new(
+            first.verifying_key(),
+            Some(commit_to(&second.verifying_key())),
+        );
+        trust
+            .accept_rotation(&rotation(&first, &second, None, NOW))
+            .expect("rotate");
+
+        // A thief holding the retired key back-dates a certificate to the
+        // second before the rotation and gives it the longest lifetime the
+        // parser allows. It parses; it must not verify.
+        let mut stolen = certificate(&first, &alice, "alice", "Alice", NOW - 1, 1);
+        stolen.expires = stolen.issued + MAX_CERTIFICATE_LIFETIME_SECONDS;
+        stolen.sign(&first);
+        let wire = bytes(&stolen);
+        NameCertificate::from_bytes(&wire).expect("a lifetime the parser allows");
+        assert_eq!(
+            verify_certificate(&wire, &alice.uuid_as_root(), NOW + 1, &trust, None),
+            Err(RegistryError::UntrustedRegistryKey)
+        );
+
+        // Ending exactly one honest lifetime after the rotation is the bound.
+        let mut edge = certificate(&first, &alice, "alice", "Alice", NOW - 1, 2);
+        edge.expires = NOW + CERTIFICATE_LIFETIME_SECONDS;
+        edge.sign(&first);
+        assert!(
+            verify_certificate(&bytes(&edge), &alice.uuid_as_root(), NOW + 1, &trust, None).is_ok()
+        );
+        edge.expires += 1;
+        edge.sign(&first);
+        assert_eq!(
+            verify_certificate(&bytes(&edge), &alice.uuid_as_root(), NOW + 1, &trust, None),
+            Err(RegistryError::UntrustedRegistryKey)
+        );
+
+        // The current key is not held to that bound: it is the key in service.
+        let mut current = certificate(&second, &alice, "alice", "Alice", NOW + 10, 3);
+        current.expires = current.issued + MAX_CERTIFICATE_LIFETIME_SECONDS;
+        current.sign(&second);
+        assert!(
+            verify_certificate(
+                &bytes(&current),
+                &alice.uuid_as_root(),
+                NOW + 10,
+                &trust,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_certificate_tampered_after_signing_is_refused() {
+        let registry = registry_key(7);
+        let alice = player(1);
+        let good = certificate(&registry, &alice, "alice", "Alice", NOW, 1);
+        let uuid = alice.uuid_as_root();
+        let trust = trust(&registry);
+        assert!(verify_certificate(&bytes(&good), &uuid, NOW, &trust, None).is_ok());
+
+        let mut display = good.clone();
+        display.display = "ALICE".to_owned();
+        let mut expires = good.clone();
+        expires.expires -= 1;
+        let mut serial = good.clone();
+        serial.serial += 1;
+        for (what, tampered) in [
+            ("display", display),
+            ("expires", expires),
+            ("serial", serial),
+        ] {
+            assert_eq!(
+                verify_certificate(&bytes(&tampered), &uuid, NOW, &trust, None),
+                Err(RegistryError::SignatureInvalid),
+                "{what}"
+            );
+        }
+
+        // A UUID swapped for the presenter's own: the identity check passes
+        // (it names the joining player), the signature does not.
+        let mallory = player(2);
+        let mut moved = good;
+        moved.uuid = *mallory.uuid_as_root().as_bytes();
+        assert_eq!(
+            verify_certificate(&bytes(&moved), &mallory.uuid_as_root(), NOW, &trust, None),
+            Err(RegistryError::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn a_truncated_certificate_is_refused_at_every_length() {
+        let wire = bytes(&certificate(
+            &registry_key(7),
+            &player(1),
+            "alice",
+            "Alice",
+            NOW,
+            1,
+        ));
+        for length in 0..wire.len() {
+            assert!(
+                matches!(
+                    NameCertificate::from_bytes(&wire[..length]),
+                    Err(RegistryError::Malformed { .. })
+                ),
+                "a {length}-byte prefix of a {}-byte certificate",
+                wire.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_rotation_record_tampered_after_signing_is_refused() {
+        let first = registry_key(1);
+        let second = registry_key(2);
+        let third = registry_key(3);
+        let fresh = || {
+            RegistryTrust::new(
+                first.verifying_key(),
+                Some(commit_to(&second.verifying_key())),
+            )
+        };
+        let good = rotation(&first, &second, None, NOW);
+
+        let mut forged = good.clone();
+        forged.signature.0[0] ^= 0b0000_0001;
+        let mut next = good.clone();
+        next.next_key_hash = Some(commit_to(&third.verifying_key()));
+        let mut moved = good.clone();
+        moved.rotated_at -= 1;
+        for (what, tampered) in [("signature", forged), ("next", next), ("rotated_at", moved)] {
+            let mut trust = fresh();
+            assert_eq!(
+                trust.accept_rotation(&tampered),
+                Err(RegistryError::SignatureInvalid),
+                "{what}"
+            );
+            // A refused record leaves the trust exactly where it was.
+            assert_eq!(trust.current(), &first.verifying_key(), "{what}");
+            assert!(trust.retired().is_empty(), "{what}");
+        }
+        fresh()
+            .accept_rotation(&good)
+            .expect("the untampered record");
+    }
+
+    #[test]
+    fn a_revocation_list_tampered_after_signing_is_refused() {
+        let registry = registry_key(7);
+        let mut list = RevocationList {
+            version: REVOCATION_VERSION,
+            registry_key: [0; 32],
+            issued: NOW,
+            entries: vec![Revocation {
+                registry_key: registry.verifying_key().to_bytes(),
+                serial: 1,
+            }],
+            signature: Signature64([0; 64]),
+        };
+        list.sign(&registry);
+        list.verify(&trust(&registry)).expect("as signed");
+
+        let mut serial = list.clone();
+        serial.entries[0].serial = 2;
+        let mut key = list.clone();
+        key.entries[0].registry_key = registry_key(8).verifying_key().to_bytes();
+        let mut added = list.clone();
+        added.entries.push(Revocation {
+            registry_key: registry.verifying_key().to_bytes(),
+            serial: 3,
+        });
+        let mut emptied = list.clone();
+        emptied.entries.clear();
+        for (what, tampered) in [
+            ("serial", serial),
+            ("key", key),
+            ("added", added),
+            ("emptied", emptied),
+        ] {
+            assert_eq!(
+                tampered.verify(&trust(&registry)),
+                Err(RegistryError::SignatureInvalid),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_claim_signed_by_a_key_other_than_its_own_is_refused() {
+        let alice = player(1);
+        let mallory = player(2);
+        let mut claim = claim(&alice, 4);
+        // Alice's key on the request, Mallory's signature over it.
+        claim.signature = Signature64(mallory.sign(&claim.signing_payload()).to_bytes());
+        assert_eq!(
+            claim.verify_claim(NOW, 4),
+            Err(RegistryError::SignatureInvalid)
+        );
+        claim.work = None;
+        claim.signature = Signature64(mallory.sign(&claim.signing_payload()).to_bytes());
+        assert_eq!(
+            claim.verify_renewal(NOW),
+            Err(RegistryError::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn a_key_set_link_that_is_not_a_key_is_refused() {
+        let root = player(1);
+        let device = player(2);
+        let uuid = root.uuid_as_root();
+        let proof = proof_for(&root, &[&device], &uuid);
+
+        let mut key = proof.clone();
+        key.chain[0].key = SMALL_ORDER_KEY;
+        let mut added_by = proof.clone();
+        added_by.chain[0].added_by = SMALL_ORDER_KEY;
+        let mut not_a_point = proof.clone();
+        // Not the encoding of any curve point: found rather than hard-coded,
+        // so the test states its premise instead of trusting a magic constant.
+        let Some(off_curve) = (2..=u8::MAX)
+            .map(|first| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = first;
+                bytes
+            })
+            .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
+        else {
+            panic!("some small y has no point on the curve");
+        };
+        not_a_point.chain[0].key = off_curve;
+        for (what, broken) in [
+            ("key", key),
+            ("added_by", added_by),
+            ("not a point", not_a_point),
+        ] {
+            assert_eq!(
+                verify_key_set_proof(&broken, &uuid, &device.public_key()),
+                Err(RegistryError::BadPublicKey),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn links_signed_for_another_identity_do_not_transfer() {
+        // The root really did authorise the device — but for a different UUID.
+        // The links sign the UUID they were made for, so the proof does not
+        // move to the root's own identity.
+        let root = player(1);
+        let device = player(2);
+        let uuid = root.uuid_as_root();
+        let elsewhere = player(9).uuid_as_root();
+        let proof = proof_for(&root, &[&device], &elsewhere);
+        assert_eq!(proof.root, root.public_key().to_bytes());
+        assert_eq!(
+            verify_key_set_proof(&proof, &uuid, &device.public_key()),
+            Err(RegistryError::SignatureInvalid)
+        );
+    }
+
+    /// A proof that `root` added `devices` in order, each link committing to a
+    /// successor: the largest a link can be on the wire.
+    fn committed_proof_for(
+        root: &Identity,
+        devices: &[Identity],
+        uuid: &PlayerUuid,
+    ) -> KeySetProof {
+        let mut chain = Vec::new();
+        let mut parent = root;
+        for (index, device) in devices.iter().enumerate() {
+            let next = commit_to(&player(200 + index as u8).public_key());
+            let payload =
+                crate::identity::keyset::add_key_payload(uuid, &device.public_key(), Some(&next));
+            chain.push(KeyAuthorisation {
+                key: device.public_key().to_bytes(),
+                next_key_hash: Some(next),
+                added_by: parent.public_key().to_bytes(),
+                signature: Signature64(parent.sign(&payload).to_bytes()),
+            });
+            parent = device;
+        }
+        KeySetProof {
+            version: KEY_SET_PROOF_VERSION,
+            root: root.public_key().to_bytes(),
+            chain,
+        }
+    }
+
+    #[test]
+    fn the_longest_proof_fits_every_request_that_carries_one() {
+        let root = player(1);
+        let devices: Vec<Identity> = (0..MAX_KEY_SET_LINKS as u8)
+            .map(|index| player(100 + index))
+            .collect();
+        let Some(last) = devices.last() else {
+            panic!("MAX_KEY_SET_LINKS is at least one");
+        };
+        let uuid = root.uuid_as_root();
+        let proof = committed_proof_for(&root, &devices, &uuid);
+        verify_key_set_proof(&proof, &uuid, &last.public_key()).expect("the chain verifies");
+        let proof_bytes = postcard::to_allocvec(&proof).expect("encode").len();
+        assert!(
+            proof_bytes <= MAX_KEY_SET_PROOF_BYTES,
+            "{proof_bytes} bytes"
+        );
+
+        // A claim with every field at its limit: an 18-character name, the
+        // widest varints a timestamp and a nonce can take, and the longest
+        // proof. The clock is the timestamp's own, so verification runs whole.
+        let at = i64::MAX;
+        let name = Name::from_parts("abcdefghijklmnopqr", "ABCDEFGHIJKLMNOPQR").expect("name");
+        let mut claim = ClaimRequest::for_device(last, &uuid, proof.clone(), &name, at);
+        claim.work = Some(u64::MAX);
+        claim.sign(last);
+        let wire = postcard::to_allocvec(&claim).expect("encode");
+        assert!(
+            wire.len() > MAX_REQUEST_BYTES,
+            "this test should exercise the proof's allowance: {} bytes",
+            wire.len()
+        );
+        assert!(
+            wire.len() <= MAX_PROVEN_REQUEST_BYTES,
+            "{} bytes",
+            wire.len()
+        );
+        let parsed = ClaimRequest::from_bytes(&wire).expect("a claim under its cap");
+        assert_eq!(parsed, claim);
+        let verified = parsed.verify_claim(at, 0).expect("verify");
+        assert_eq!(verified.uuid, uuid);
+        assert_eq!(verified.public_key, last.public_key());
+
+        let mut release =
+            ReleaseRequest::for_device(last, &uuid, proof.clone(), "abcdefghijklmnopqr", at);
+        release.sign(last);
+        let wire = postcard::to_allocvec(&release).expect("encode");
+        assert!(
+            wire.len() <= MAX_PROVEN_REQUEST_BYTES,
+            "{} bytes",
+            wire.len()
+        );
+        ReleaseRequest::from_bytes(&wire)
+            .expect("a release under its cap")
+            .verify(at)
+            .expect("verify");
+
+        let mut cancel =
+            CancelRecoveryRequest::for_device(last, &uuid, proof, "abcdefghijklmnopqr", at);
+        cancel.sign(last);
+        let wire = postcard::to_allocvec(&cancel).expect("encode");
+        assert!(
+            wire.len() <= MAX_PROVEN_REQUEST_BYTES,
+            "{} bytes",
+            wire.len()
+        );
+        CancelRecoveryRequest::from_bytes(&wire)
+            .expect("a cancellation under its cap")
+            .verify(at)
+            .expect("verify");
+
+        // And the cap is still a cap.
+        assert!(matches!(
+            ClaimRequest::from_bytes(&vec![0u8; MAX_PROVEN_REQUEST_BYTES + 1]),
+            Err(RegistryError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn a_stranger_cannot_release_someone_elses_name() {
+        let alice = player(1);
+        let mallory = player(2);
+        // Alice's UUID is public: the name page shows it.
+        let mut release = ReleaseRequest::new(&mallory, "alice", NOW);
+        release.uuid = *alice.uuid_as_root().as_bytes();
+        release.sign(&mallory);
+        let wire = postcard::to_allocvec(&release).expect("encode");
+        let parsed = ReleaseRequest::from_bytes(&wire).expect("it parses: it is well formed");
+        assert_eq!(parsed.verify(NOW), Err(RegistryError::RootKeyRequired));
+
+        // Nor with a genuine proof for Mallory's own identity attached.
+        let mallory_device = player(3);
+        let mut proved = ReleaseRequest::for_device(
+            &mallory_device,
+            &alice.uuid_as_root(),
+            proof_for(&mallory, &[&mallory_device], &mallory.uuid_as_root()),
+            "alice",
+            NOW,
+        );
+        proved.sign(&mallory_device);
+        assert_eq!(proved.verify(NOW), Err(RegistryError::ProofNotThisIdentity));
+    }
+
+    #[test]
+    fn a_second_device_releases_with_its_proof() {
+        let root = player(1);
+        let device = player(2);
+        let uuid = root.uuid_as_root();
+        let mut release = ReleaseRequest::for_device(
+            &device,
+            &uuid,
+            proof_for(&root, &[&device], &uuid),
+            "alice",
+            NOW,
+        );
+        release.sign(&device);
+        let wire = postcard::to_allocvec(&release).expect("encode");
+        let verified = ReleaseRequest::from_bytes(&wire)
+            .expect("parse")
+            .verify(NOW)
+            .expect("a device with the chain from its root");
+        assert_eq!(verified.uuid, uuid);
+        assert_eq!(verified.public_key, device.public_key());
+
+        // Without the proof the device is a stranger.
+        let mut bare = release;
+        bare.key_set = None;
+        bare.sign(&device);
+        assert_eq!(bare.verify(NOW), Err(RegistryError::RootKeyRequired));
+    }
+
+    #[test]
+    fn a_stranger_cannot_cancel_someone_elses_recovery() {
+        let holder = player(1);
+        let mallory = player(2);
+        let mut cancel = CancelRecoveryRequest::new(&mallory, "alice", NOW);
+        cancel.uuid = *holder.uuid_as_root().as_bytes();
+        cancel.sign(&mallory);
+        let wire = postcard::to_allocvec(&cancel).expect("encode");
+        let parsed = CancelRecoveryRequest::from_bytes(&wire).expect("well formed");
+        assert_eq!(parsed.verify(NOW), Err(RegistryError::RootKeyRequired));
+
+        // The holder's second device may veto, with its proof.
+        let device = player(3);
+        let uuid = holder.uuid_as_root();
+        let mut veto = CancelRecoveryRequest::for_device(
+            &device,
+            &uuid,
+            proof_for(&holder, &[&device], &uuid),
+            "alice",
+            NOW,
+        );
+        veto.sign(&device);
+        let verified =
+            CancelRecoveryRequest::from_bytes(&postcard::to_allocvec(&veto).expect("encode"))
+                .expect("parse")
+                .verify(NOW)
+                .expect("the holder's own device");
+        assert_eq!(verified.uuid, uuid);
+        assert_eq!(verified.public_key, device.public_key());
+    }
+
+    #[test]
+    fn a_stranger_cannot_bind_an_address_to_someone_elses_identity() {
+        let alice = player(1);
+        let mallory = player(2);
+        let mut request = EmailRequest {
+            version: EMAIL_VERSION,
+            uuid: *alice.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            address: Some("mallory@example.com".to_owned()),
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        request.sign(&mallory);
+        let parsed = EmailRequest::from_bytes(&postcard::to_allocvec(&request).expect("encode"))
+            .expect("well formed");
+        assert_eq!(parsed.verify(NOW), Err(RegistryError::RootKeyRequired));
+    }
+
+    #[test]
+    fn a_recovery_must_be_signed_by_the_new_identitys_root() {
+        let mallory = player(2);
+        let bystander = player(3);
+        // Mallory asks for a name to move to somebody else's identity.
+        let mut recovery = RecoveryRequest {
+            version: RECOVERY_VERSION,
+            name: "alice".to_owned(),
+            new_uuid: *bystander.uuid_as_root().as_bytes(),
+            public_key: [0; 32],
+            timestamp: NOW,
+            signature: Signature64([0; 64]),
+        };
+        recovery.sign(&mallory);
+        let parsed =
+            RecoveryRequest::from_bytes(&postcard::to_allocvec(&recovery).expect("encode"))
+                .expect("well formed");
+        assert_eq!(parsed.verify(NOW), Err(RegistryError::RootKeyRequired));
     }
 }
