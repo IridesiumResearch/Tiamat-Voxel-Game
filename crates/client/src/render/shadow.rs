@@ -66,7 +66,16 @@ pub const RANGE: f32 = 160.0;
 /// Without it, a wall just off the top of the screen stops shadowing the ground
 /// in front of the player — the caster is outside the light's view even though
 /// its shadow is not.
-const CASTER_MARGIN: f32 = 64.0;
+pub const CASTER_MARGIN: f32 = 64.0;
+
+/// The furthest a chunk centre can be from the camera and still cast into a
+/// cascade.
+///
+/// Used by the culler to skip the three cascade frustum tests for everything
+/// outside the lights' reach. The half-diagonal of a chunk is added at the call
+/// site, since a chunk whose centre is just outside the box can still have a
+/// corner inside it.
+pub const CASTER_REACH: f32 = RANGE + CASTER_MARGIN;
 
 /// A depth bias, in units of the depth buffer's resolution.
 ///

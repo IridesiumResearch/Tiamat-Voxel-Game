@@ -5354,6 +5354,8 @@ impl App {
             return 0;
         }
         let started = std::time::Instant::now();
+        // One allocation for the whole batch rather than one per summary.
+        let fluids = self.store.fluid_material_ids();
         let mut built = 0;
         for (index, pos) in due.iter().enumerate() {
             if let Some(summary) = self.store.summary(*pos) {
@@ -5375,7 +5377,6 @@ impl App {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
                     self.horizon.beyond.insert(*pos);
                 } else {
-                    let fluids = self.store.fluid_material_ids();
                     let width = summary.width() as usize;
                     let over = ChunkPos::new(pos.x, pos.y + 1, pos.z);
                     let above_summary = self.store.summary(over);
@@ -6223,6 +6224,13 @@ impl App {
         /// makes it look like light arriving from more than one direction,
         /// which is what an ambient shadow is.
         const RADIUS: f32 = 0.8;
+        /// Past this distance from the camera a blob is not built.
+        ///
+        /// **The probe is the cost, not the quad.** Every body asks 25 columns
+        /// and walks up to 13 cells each, and a body behind the player or a
+        /// hill was doing it for a disc nobody can see. Sixty-four blocks is
+        /// well past the distance at which a 0.8-block disc is a pixel.
+        const DRAW_BLOCKS: f32 = 64.0;
 
         let Some(predictor) = self.predictor.as_ref() else {
             self.renderer.set_blobs(&[]);
@@ -6242,6 +6250,22 @@ impl App {
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
+            // The shadow is a ground decal; past the draw distance it is
+            // smaller than a pixel, and probing for it is wasted work.
+            let world = [
+                f64::from(pose.chunk.x) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[0]) / f64::from(cells),
+                f64::from(pose.chunk.y) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[1]) / f64::from(cells),
+                f64::from(pose.chunk.z) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[2]) / f64::from(cells),
+            ];
+            let offset = self.camera.position.offset_to(world);
+            if offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]
+                > DRAW_BLOCKS * DRAW_BLOCKS
+            {
+                continue;
+            }
             // Into the predictor's chunk frame, which is what `Voxels` indexes.
             let span = tiamat_core::CHUNK_SUBNODES as i32;
             let shift = |axis: usize, chunk: i32| {
@@ -7155,6 +7179,16 @@ impl App {
     /// Faults come back here and become warnings, which is the only place the
     /// player sees them.
     pub fn run_hud_scripts(&mut self) {
+        // A server with no pushed HUD is the ordinary case. Building the whole
+        // state — carried stacks, the looking-at raycast, the HUD values map —
+        // only to find the VM has no scripts was a per-frame cost for nothing.
+        if self
+            .hud_vm
+            .as_ref()
+            .is_none_or(|vm| vm.loaded().next().is_none())
+        {
+            return;
+        }
         let Some(state) = self.hud_state() else {
             return;
         };

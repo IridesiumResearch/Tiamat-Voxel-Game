@@ -290,29 +290,55 @@ fn load_domain_fluid(
     domain: &str,
     arrived: &[tiamat_core::ChunkPos],
 ) {
-    let Ok(mut ponds) = fluidics.write() else {
-        return;
+    // **Read the rows before taking the write lock.** This used to hold
+    // `fluidics.write()` across one SQLite read per arrival, so the light
+    // thread's per-event `read()` — and every tick-side write — waited on the
+    // disk. Nothing in the read needs `&mut Ponds`.
+    let wanted: Vec<tiamat_core::ChunkPos> = {
+        let Ok(ponds) = fluidics.read() else {
+            return;
+        };
+        arrived
+            .iter()
+            .copied()
+            .filter(|pos| {
+                // Already read: the lighting defers what it cannot relight by
+                // putting the chunk back on the arrival list, so chunks arrive
+                // twice. Loading again would replace the live layer with the
+                // last thing written.
+                ponds.get(domain).is_none_or(|fluid| !fluid.knows(*pos))
+            })
+            .collect()
     };
-    let fluid = ponds.of(domain);
-    // What the terrain is, for the body test every load makes (Contract §4.5).
-    let terrain = world.solid(domain);
-    for pos in arrived {
-        // Already read: the lighting defers what it cannot relight by putting
-        // the chunk back on the arrival list, so chunks arrive twice. Loading
-        // again would replace the live layer with the last thing written.
-        if fluid.knows(*pos) {
-            continue;
-        }
-        match world.load_fluid(domain, *pos) {
+    let mut loaded: Vec<(tiamat_core::ChunkPos, tiamat_core::fluid::FluidLayer)> =
+        Vec::with_capacity(wanted.len());
+    for pos in wanted {
+        match world.load_fluid(domain, pos) {
             // Recorded as read either way — a chunk with no row is dry, which
             // is an answer.
-            Ok(layer) => fluid.chunk_loaded(*pos, layer.unwrap_or_default(), &terrain),
+            Ok(layer) => loaded.push((pos, layer.unwrap_or_default())),
             Err(err) => {
                 // Left unread so the next arrival retries. Treating a failed
                 // read as "dry" would quietly delete a pond.
                 error!(?pos, "could not load the fluid for a chunk: {err}");
             }
         }
+    }
+    if loaded.is_empty() {
+        return;
+    }
+    let Ok(mut ponds) = fluidics.write() else {
+        return;
+    };
+    let fluid = ponds.of(domain);
+    // What the terrain is, for the body test every load makes (Contract §4.5).
+    let terrain = world.solid(domain);
+    for (pos, layer) in loaded {
+        // A duplicate arrival may have been loaded above; the first one wins.
+        if fluid.knows(pos) {
+            continue;
+        }
+        fluid.chunk_loaded(pos, layer, &terrain);
     }
 }
 
@@ -1380,6 +1406,21 @@ const SAVE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 /// this gets through them over several ticks rather than all at once, which
 /// changes how often a given block comes up and stops nothing.
 const MAX_RANDOM_TICK_CHUNKS: usize = 512;
+
+/// Where a tick's random-tick window starts in the sorted resident list.
+///
+/// A fixed prefix samples the same chunks for ever; a tick-derived offset gives
+/// every chunk a turn while remaining a property of the tick number, so two
+/// servers replaying the same inputs sample the same chunks.
+fn random_tick_start(tick: u64, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    usize::try_from(
+        tick.wrapping_mul(MAX_RANDOM_TICK_CHUNKS as u64) % count as u64,
+    )
+    .unwrap_or(0)
+}
 
 /// How often the time of day goes out, in ticks.
 ///
@@ -3627,13 +3668,21 @@ impl ServerHandle {
                         // neither is held across the other, which is what the
                         // punch loop below does for the same pair.
                         {
-                            let mobs: Vec<(tiamat_core::ent::EntityId, Occupant)> = population
-                                .read()
-                                .expect("entity lock")
-                                .crowd()
-                                .collect();
-                            let mut occupants: Vec<Occupant> = Vec::new();
-                            let mut people: Vec<PlayerUuid> = Vec::new();
+                            // **One crowd per domain, not one crowd for the
+                            // server.** Positions are identical between
+                            // spaces, so a player in a ship was being shoved
+                            // by overworld mobs standing at the same
+                            // coordinates — the same defect replication
+                            // fixed with `shares_space`. Grouping also keeps
+                            // the all-pairs pass inside a space.
+                            #[derive(Default)]
+                            struct Group {
+                                occupants: Vec<Occupant>,
+                                people: Vec<PlayerUuid>,
+                                mobs: Vec<tiamat_core::ent::EntityId>,
+                            }
+                            let mut groups: std::collections::BTreeMap<String, Group> =
+                                std::collections::BTreeMap::new();
                             if let Ok(bodies) = shared.bodies.lock() {
                                 for (uuid, player) in bodies.iter() {
                                     // **A rider is carried, not crowded**
@@ -3645,8 +3694,9 @@ impl ServerHandle {
                                     if player.riding.is_some() {
                                         continue;
                                     }
-                                    people.push(*uuid);
-                                    occupants.push(Occupant {
+                                    let group = groups.entry(player.domain.clone()).or_default();
+                                    group.people.push(*uuid);
+                                    group.occupants.push(Occupant {
                                         origin: player.origin,
                                         position: player.body.position,
                                         height: tiamat_core::phys::PLAYER_HEIGHT,
@@ -3655,21 +3705,45 @@ impl ServerHandle {
                                     });
                                 }
                             }
-                            occupants.extend(mobs.iter().map(|(_, occupant)| *occupant));
-                            let pushes = tiamat_core::phys::separate(&occupants);
-                            let (for_people, for_mobs) = pushes.split_at(people.len());
+                            {
+                                let entities = population.read().expect("entity lock");
+                                for (id, occupant) in entities.crowd() {
+                                    let group = groups
+                                        .entry(entities.domain_of(id).to_owned())
+                                        .or_default();
+                                    group.mobs.push(id);
+                                    group.occupants.push(occupant);
+                                }
+                            }
+
+                            let mut player_pushes: Vec<(PlayerUuid, [f32; 3])> = Vec::new();
+                            let mut mob_pushes: Vec<(tiamat_core::ent::EntityId, [f32; 3])> =
+                                Vec::new();
+                            for (_, group) in groups {
+                                let pushes = tiamat_core::phys::separate(&group.occupants);
+                                let (for_people, for_mobs) = pushes.split_at(group.people.len());
+                                player_pushes.extend(
+                                    group.people.iter().copied().zip(for_people.iter().copied()),
+                                );
+                                mob_pushes.extend(
+                                    group.mobs.iter().copied().zip(for_mobs.iter().copied()),
+                                );
+                            }
 
                             if let Ok(mut bodies) = shared.bodies.lock() {
-                                for (uuid, push) in people.iter().zip(for_people) {
+                                for (uuid, push) in &player_pushes {
                                     if let Some(player) = bodies.get_mut(uuid) {
                                         player.body.velocity[0] += push[0];
                                         player.body.velocity[2] += push[2];
                                     }
                                 }
                             }
-                            if for_mobs.iter().any(|push| push[0] != 0.0 || push[2] != 0.0) {
+                            if mob_pushes
+                                .iter()
+                                .any(|(_, push)| push[0] != 0.0 || push[2] != 0.0)
+                            {
                                 let mut mobs_out = population.write().expect("entity lock");
-                                for ((id, _), push) in mobs.iter().zip(for_mobs) {
+                                for (id, push) in &mob_pushes {
                                     mobs_out.nudge(*id, *push);
                                 }
                             }
@@ -5364,12 +5438,21 @@ impl ServerHandle {
                             Vec::new();
                         if !random_tick_materials.is_empty() {
                             let seed = world.seed();
-                            let mut budget = MAX_RANDOM_TICK_CHUNKS;
-                            for chunk in world.resident_positions(tiamat_core::domain::OVERWORLD) {
-                                if budget == 0 {
-                                    break;
-                                }
-                                budget -= 1;
+                            // **A rotating window, not the first 512 for ever.**
+                            // The positions are sorted, so taking a prefix meant
+                            // a world with more than `MAX_RANDOM_TICK_CHUNKS`
+                            // resident chunks gave every tick to the same
+                            // low-coordinate corner and none to the rest — the
+                            // opposite of what the budget's comment promises.
+                            // Starting at a tick-derived offset gives every chunk
+                            // its turn and keeps the sampled set deterministic.
+                            let chunks =
+                                world.resident_positions(tiamat_core::domain::OVERWORLD);
+                            let count = chunks.len();
+                            let take = count.min(MAX_RANDOM_TICK_CHUNKS);
+                            let start = random_tick_start(tick, count);
+                            for offset in 0..take {
+                                let chunk = chunks[(start + offset) % count];
                                 for pos in tiamat_core::tick::random::cells(seed, chunk, tick) {
                                     let Some(material) = world.material_at(tiamat_core::domain::OVERWORLD, pos) else {
                                         continue;
@@ -6616,12 +6699,61 @@ impl ServerHandle {
                                     .filter(|(there, _)| *there == domain)
                                     .map(|(_, centre)| *centre)
                                     .collect();
-                                for pos in world.resident_positions(&domain) {
-                                    if near.iter().any(|centre| {
-                                        tiamat_core::interest::contains(*centre, keep, pos)
-                                    }) {
-                                        continue;
+                                // **Players bucketed by a cell the size of the keep
+                                // radius.** Testing every resident chunk against
+                                // every player was O(chunks × players), and at
+                                // fifty spread players the resident set grows with
+                                // the players too. A chunk can only be kept by a
+                                // player in its own cell or an adjacent one, so a
+                                // walk of the resident set makes at most 27 map
+                                // probes and tests only the few players there.
+                                let size = i32::from(keep.horizontal.max(keep.vertical).max(1));
+                                let cell = |pos: tiamat_core::ChunkPos| {
+                                    (
+                                        pos.x.div_euclid(size),
+                                        pos.y.div_euclid(size),
+                                        pos.z.div_euclid(size),
+                                    )
+                                };
+                                let mut buckets: std::collections::HashMap<
+                                    (i32, i32, i32),
+                                    Vec<tiamat_core::ChunkPos>,
+                                > = std::collections::HashMap::new();
+                                for centre in &near {
+                                    buckets.entry(cell(*centre)).or_default().push(*centre);
+                                }
+                                let mut candidates: Vec<tiamat_core::ChunkPos> = Vec::new();
+                                for pos in world.resident_positions_unsorted(&domain) {
+                                    let (cx, cy, cz) = cell(pos);
+                                    let mut kept = false;
+                                    'search: for dx in -1..=1 {
+                                        for dy in -1..=1 {
+                                            for dz in -1..=1 {
+                                                let Some(players) =
+                                                    buckets.get(&(cx + dx, cy + dy, cz + dz))
+                                                else {
+                                                    continue;
+                                                };
+                                                for centre in players {
+                                                    if tiamat_core::interest::contains(
+                                                        *centre, keep, pos,
+                                                    ) {
+                                                        kept = true;
+                                                        break 'search;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
+                                    if !kept {
+                                        candidates.push(pos);
+                                    }
+                                }
+                                // The queue's order is observable (it decides
+                                // which chunks leave memory on which tick), so
+                                // sort after the hash-bucket walk.
+                                candidates.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z));
+                                for pos in candidates {
                                     unload_queue.push_back((domain.clone(), pos));
                                 }
                             }
@@ -7995,5 +8127,25 @@ mod default_tool_tests {
             default_tool_among([("x:y", false)].into_iter(), &reference),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod random_tick_tests {
+    use super::random_tick_start;
+
+    #[test]
+    fn the_window_advances_and_wraps() {
+        // 5,000 resident chunks: one tick's 512 must not be the next tick's
+        // 512, and after the list is wrapped through it starts over.
+        let count = 5_000;
+        let first = random_tick_start(0, count);
+        let second = random_tick_start(1, count);
+        assert_ne!(first, second, "the same 512 chunks were sampled twice");
+        assert!(first < count && second < count);
+        // 4,096 is exactly eight windows; the ninth tick starts over.
+        let wrap_count = 4_096;
+        assert_eq!(random_tick_start(8, wrap_count), 0);
+        assert_eq!(random_tick_start(0, 0), 0, "an empty world divided by zero");
     }
 }

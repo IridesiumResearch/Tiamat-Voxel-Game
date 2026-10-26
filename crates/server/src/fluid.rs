@@ -40,6 +40,7 @@
 //! blocks and carries the rest. The carry is what makes that safe — work is
 //! deferred, never dropped, so a spring field finishes late rather than wrong.
 
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 
 use tiamat_core::coords::{BlockPos, ChunkPos};
@@ -714,6 +715,7 @@ impl Fluidics {
             absorbency,
             passable: &self.passable,
             washes_away: &self.washes_away,
+            memo: Cell::new(None),
         };
         // **One look each, and none for a block already at rest.** `wake`
         // rather than `touch`: a halo of five mostly empty neighbours per block
@@ -811,6 +813,7 @@ impl Fluidics {
             absorbency: &self.absorbency,
             passable: &self.passable,
             washes_away: &self.washes_away,
+            memo: Cell::new(None),
         };
         changes.extend(solver.tick(&mut view, &self.tunings, VISITS_PER_TICK, seed, fluid_tick));
         self.solver = solver;
@@ -891,6 +894,26 @@ struct Wet<'a> {
     absorbency: &'a Absorbency,
     passable: &'a [u16],
     washes_away: &'a [u16],
+    /// The last chunk looked up, and it.
+    ///
+    /// The solver visits a block and then its neighbours, so a run of lookups
+    /// is almost always in one or two chunks. `Lit` measured the same memo at
+    /// 1.98 → 1.44 ms; the fluid path had none.
+    memo: Cell<Option<(ChunkPos, &'a tiamat_core::Chunk)>>,
+}
+
+impl<'a> Wet<'a> {
+    /// The chunk a position is in, if resident.
+    fn chunk(&self, pos: ChunkPos) -> Option<&'a tiamat_core::Chunk> {
+        if let Some((at, chunk)) = self.memo.get()
+            && at == pos
+        {
+            return Some(chunk);
+        }
+        let chunk = self.terrain.resident(pos)?;
+        self.memo.set(Some((pos, chunk)));
+        Some(chunk)
+    }
 }
 
 impl Neighbourhood for Wet<'_> {
@@ -905,7 +928,7 @@ impl Neighbourhood for Wet<'_> {
     /// it spread, inside the tick. `None` is that case, and the solver treats it
     /// as floor.
     fn occupancy(&self, pos: BlockPos) -> Option<u32> {
-        let chunk = self.terrain.resident(pos.chunk())?;
+        let chunk = self.chunk(pos.chunk())?;
         let block = chunk.get_block_local(pos.local());
         if self.passable.is_empty() {
             return Some(block.filled_cells());
@@ -924,7 +947,7 @@ impl Neighbourhood for Wet<'_> {
         if self.absorbency.is_empty() {
             return 0;
         }
-        let Some(chunk) = self.terrain.resident(pos.chunk()) else {
+        let Some(chunk) = self.chunk(pos.chunk()) else {
             return 0;
         };
         self.absorbency
@@ -942,7 +965,7 @@ impl Neighbourhood for Wet<'_> {
         if self.washes_away.is_empty() {
             return false;
         }
-        let Some(chunk) = self.terrain.resident(pos.chunk()) else {
+        let Some(chunk) = self.chunk(pos.chunk()) else {
             return false;
         };
         let block = chunk.get_block_local(pos.local());

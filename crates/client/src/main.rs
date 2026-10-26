@@ -1919,13 +1919,14 @@ fn draw_entering(ctx: &egui::Context, domain: &str) {
 /// care of the width. Points rather than physical pixels, because egui works in
 /// points and DPI is its problem, not the script's.
 fn draw_hud_scripts(app: &mut App, ctx: &egui::Context, icons: client::icons::Icons<'_>) {
-    app.run_hud_scripts();
-
     // **Off means off, crosshair included** — but never chat, which is drawn
     // elsewhere and is not the HUD's to hide (see `core::hud::Builtin`).
+    // Checked before running the scripts: a hidden HUD must not build a state
+    // or run an immediate-mode script nobody can see.
     if !app.hud_visible() {
         return;
     }
+    app.run_hud_scripts();
 
     // `content_rect`, not `viewport_rect`: a HUD anchored to the bottom edge
     // must not sit under an OS status bar or a display notch. A crosshair in

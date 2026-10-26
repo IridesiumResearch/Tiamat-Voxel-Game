@@ -101,12 +101,30 @@ where
     T: serde::Serialize,
 {
     let body = tiamat_core::proto::encode(message)?;
-    // `encode` already enforces the cap, so this cast cannot truncate.
+    write_encoded(stream, &body).await
+}
+
+/// Writes an already-encoded body with the length prefix.
+///
+/// A broadcast is encoded once and the same bytes go to every connection; this
+/// is the write half of that, so fifty clients do not run fifty serialisers
+/// over the same `ServerMessage`.
+///
+/// # Errors
+///
+/// [`FrameError`] if the length cannot be framed or the write fails.
+pub async fn write_encoded<W>(stream: &mut W, body: &[u8]) -> Result<(), FrameError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // `encode` already enforces the cap, so this cast cannot truncate. A body
+    // from anywhere else still has to be under the cap, and the u32 conversion
+    // is the check.
     let prefix = u32::try_from(body.len()).map_err(|_| FrameError::Oversized {
         declared: body.len(),
     })?;
     stream.write_all(&prefix.to_be_bytes()).await?;
-    stream.write_all(&body).await?;
+    stream.write_all(body).await?;
     Ok(())
 }
 
