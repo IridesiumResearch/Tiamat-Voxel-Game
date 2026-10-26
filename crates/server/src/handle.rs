@@ -3627,13 +3627,21 @@ impl ServerHandle {
                         // neither is held across the other, which is what the
                         // punch loop below does for the same pair.
                         {
-                            let mobs: Vec<(tiamat_core::ent::EntityId, Occupant)> = population
-                                .read()
-                                .expect("entity lock")
-                                .crowd()
-                                .collect();
-                            let mut occupants: Vec<Occupant> = Vec::new();
-                            let mut people: Vec<PlayerUuid> = Vec::new();
+                            // **One crowd per domain, not one crowd for the
+                            // server.** Positions are identical between
+                            // spaces, so a player in a ship was being shoved
+                            // by overworld mobs standing at the same
+                            // coordinates — the same defect replication
+                            // fixed with `shares_space`. Grouping also keeps
+                            // the all-pairs pass inside a space.
+                            #[derive(Default)]
+                            struct Group {
+                                occupants: Vec<Occupant>,
+                                people: Vec<PlayerUuid>,
+                                mobs: Vec<tiamat_core::ent::EntityId>,
+                            }
+                            let mut groups: std::collections::BTreeMap<String, Group> =
+                                std::collections::BTreeMap::new();
                             if let Ok(bodies) = shared.bodies.lock() {
                                 for (uuid, player) in bodies.iter() {
                                     // **A rider is carried, not crowded**
@@ -3645,8 +3653,9 @@ impl ServerHandle {
                                     if player.riding.is_some() {
                                         continue;
                                     }
-                                    people.push(*uuid);
-                                    occupants.push(Occupant {
+                                    let group = groups.entry(player.domain.clone()).or_default();
+                                    group.people.push(*uuid);
+                                    group.occupants.push(Occupant {
                                         origin: player.origin,
                                         position: player.body.position,
                                         height: tiamat_core::phys::PLAYER_HEIGHT,
@@ -3655,21 +3664,45 @@ impl ServerHandle {
                                     });
                                 }
                             }
-                            occupants.extend(mobs.iter().map(|(_, occupant)| *occupant));
-                            let pushes = tiamat_core::phys::separate(&occupants);
-                            let (for_people, for_mobs) = pushes.split_at(people.len());
+                            {
+                                let entities = population.read().expect("entity lock");
+                                for (id, occupant) in entities.crowd() {
+                                    let group = groups
+                                        .entry(entities.domain_of(id).to_owned())
+                                        .or_default();
+                                    group.mobs.push(id);
+                                    group.occupants.push(occupant);
+                                }
+                            }
+
+                            let mut player_pushes: Vec<(PlayerUuid, [f32; 3])> = Vec::new();
+                            let mut mob_pushes: Vec<(tiamat_core::ent::EntityId, [f32; 3])> =
+                                Vec::new();
+                            for (_, group) in groups {
+                                let pushes = tiamat_core::phys::separate(&group.occupants);
+                                let (for_people, for_mobs) = pushes.split_at(group.people.len());
+                                player_pushes.extend(
+                                    group.people.iter().copied().zip(for_people.iter().copied()),
+                                );
+                                mob_pushes.extend(
+                                    group.mobs.iter().copied().zip(for_mobs.iter().copied()),
+                                );
+                            }
 
                             if let Ok(mut bodies) = shared.bodies.lock() {
-                                for (uuid, push) in people.iter().zip(for_people) {
+                                for (uuid, push) in &player_pushes {
                                     if let Some(player) = bodies.get_mut(uuid) {
                                         player.body.velocity[0] += push[0];
                                         player.body.velocity[2] += push[2];
                                     }
                                 }
                             }
-                            if for_mobs.iter().any(|push| push[0] != 0.0 || push[2] != 0.0) {
+                            if mob_pushes
+                                .iter()
+                                .any(|(_, push)| push[0] != 0.0 || push[2] != 0.0)
+                            {
                                 let mut mobs_out = population.write().expect("entity lock");
-                                for ((id, _), push) in mobs.iter().zip(for_mobs) {
+                                for (id, push) in &mob_pushes {
                                     mobs_out.nudge(*id, *push);
                                 }
                             }
