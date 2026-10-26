@@ -1336,10 +1336,7 @@ mod tests {
 
         // The light worker does not take the whole space: it takes the event's
         // 3×3×3 neighbourhood. The same blocks must give the same light.
-        let close = world.snapshot_of(
-            tiamat_core::domain::OVERWORLD,
-            &neighbourhood(pos),
-        );
+        let close = world.snapshot_of(tiamat_core::domain::OVERWORLD, &neighbourhood(pos));
         let mut through_close = lighting();
         through_close.chunk_loaded_in(Snapshot(&close), pos, &Dry);
         same(
@@ -1374,10 +1371,7 @@ mod tests {
         assert_eq!(through_snapshot.at(lamp).red(), 0, "the lamp is out");
         same(&through_world, &through_snapshot, "an edit");
 
-        let close = world.snapshot_of(
-            tiamat_core::domain::OVERWORLD,
-            &neighbourhood(lamp.chunk()),
-        );
+        let close = world.snapshot_of(tiamat_core::domain::OVERWORLD, &neighbourhood(lamp.chunk()));
         through_close.edited_in(Snapshot(&close), lamp, &Dry);
         assert_eq!(
             through_close.at(lamp).red(),

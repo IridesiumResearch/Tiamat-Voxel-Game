@@ -1521,7 +1521,10 @@ mod tests {
         assert_eq!(streamer.next_needed(1).len(), 1);
         assert_eq!(streamer.order_builds, 1);
         assert_eq!(streamer.next_needed(1).len(), 1);
-        assert_eq!(streamer.order_builds, 1, "a pass reordered the interest set");
+        assert_eq!(
+            streamer.order_builds, 1,
+            "a pass reordered the interest set"
+        );
 
         streamer.recentre(ChunkPos::new(1, 0, 0));
         let _ = streamer.next_needed(1);

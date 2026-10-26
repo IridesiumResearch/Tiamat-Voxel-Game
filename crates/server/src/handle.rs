@@ -1416,10 +1416,7 @@ fn random_tick_start(tick: u64, count: usize) -> usize {
     if count == 0 {
         return 0;
     }
-    usize::try_from(
-        tick.wrapping_mul(MAX_RANDOM_TICK_CHUNKS as u64) % count as u64,
-    )
-    .unwrap_or(0)
+    usize::try_from(tick.wrapping_mul(MAX_RANDOM_TICK_CHUNKS as u64) % count as u64).unwrap_or(0)
 }
 
 /// How often the time of day goes out, in ticks.

@@ -102,9 +102,8 @@ pub fn separate(occupants: &[Occupant]) -> Vec<[f32; 3]> {
     // walk is more pair candidates than the plain loop, and if any body is
     // wider than a chunk the nine-cell neighbourhood is not enough; both fall
     // back to the all-pairs loop, and the result is the same either way.
-    let use_grid = occupants.len() > 64
-        && max_width <= CHUNK_SUBNODES as f32
-        && bucket_is_sparse(occupants);
+    let use_grid =
+        occupants.len() > 64 && max_width <= CHUNK_SUBNODES as f32 && bucket_is_sparse(occupants);
 
     if use_grid {
         use std::collections::BTreeMap;
