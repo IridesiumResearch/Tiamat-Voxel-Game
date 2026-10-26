@@ -154,7 +154,10 @@ pub struct Streamer {
     /// default view working it all out again costs **1.43 ms** per pass, and a
     /// pass runs every tick for every connection with something in flight;
     /// kept, a whole join's 345 passes cost 152 ms of streamer time, 0.44 ms a
-    /// pass, most of it the interest set's own ordering. Measured by
+    /// pass, most of it the interest set's own ordering. **Caching the order
+    /// (`Self::order`) took the same 345 passes to 33 ms (0.095 ms a pass); a
+    /// forced pass with the memo kept is 132 µs against 1.06 ms with it
+    /// cleared.** The remaining pass is the walk, not a sort. Measured by
     /// `tests::measure_a_pass_at_the_default_view`, release. See
     /// [`Self::is_shadowed`].
     shadowed: BTreeSet<ChunkPos>,
@@ -2175,19 +2178,25 @@ mod tests {
             join.elapsed()
         );
         let passes = 100u32;
+        // Force a real scan: after `stream_all` the streamer is complete and
+        // `next_needed` would return in nanoseconds without walking anything.
         let cold = std::time::Instant::now();
         for _ in 0..passes {
             streamer.shadowed.clear();
+            streamer.complete = false;
+            streamer.rescan = true;
             streamer.next_needed(8);
         }
         let cold = cold.elapsed() / passes;
         let warm = std::time::Instant::now();
         for _ in 0..passes {
+            streamer.complete = false;
+            streamer.rescan = true;
             streamer.next_needed(8);
         }
         let warm = warm.elapsed() / passes;
         println!(
-            "a pass with the memo cleared: {cold:?}; with it kept: {warm:?}; {} of {} sent",
+            "a forced pass with the memo cleared: {cold:?}; with it kept: {warm:?}; {} of {} sent",
             streamer.sent.len(),
             interest::chunks_around(centre, ViewDistance::DEFAULT).len()
         );
