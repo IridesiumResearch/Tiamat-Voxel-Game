@@ -1063,7 +1063,15 @@ impl Pending {
     /// Every `ContentRequest` goes through here, so the set that gates
     /// [`accept_slice`] cannot drift from what was actually sent.
     fn request(&mut self, hashes: Vec<ContentHash>) -> ClientMessage {
-        self.requested.extend(hashes.iter().copied());
+        for hash in &hashes {
+            // Asking again starts the item over. Whatever part of an earlier
+            // delivery is still held — a slice that failed its bound, say —
+            // would make the server's fresh first slice look out of order,
+            // and the server now does send again when asked (its send cap
+            // allows three).
+            self.partial.remove(hash);
+            self.requested.insert(*hash);
+        }
         ClientMessage::ContentRequest { hashes }
     }
 }
@@ -2805,6 +2813,28 @@ mod tests {
         )
         .expect("accepted once asked for");
         assert!(done);
+    }
+
+    #[test]
+    fn asking_again_for_an_item_starts_it_over() {
+        let cache = cache("ask-again");
+        let bytes: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        let first = zstd::encode_all(&bytes[..100], 3).expect("compress");
+        let second = zstd::encode_all(&bytes[100..], 3).expect("compress");
+
+        let mut pending = pending_for(hash);
+        assert!(!accept_slice(&mut pending, &cache, hash, 0, 200, &first).expect("first half"));
+        assert_eq!(pending.partial[&hash].len(), 100, "half an item is held");
+
+        // The client asks again (a later slice failed, say): the held half is
+        // dropped, so the server's fresh first slice is in order, and the
+        // item completes from the start.
+        let _ = pending.request(vec![hash]);
+        assert!(!pending.partial.contains_key(&hash));
+        assert!(!accept_slice(&mut pending, &cache, hash, 0, 200, &first).expect("again"));
+        assert!(accept_slice(&mut pending, &cache, hash, 100, 200, &second).expect("done"));
+        assert!(cache.contains(&hash));
     }
 
     #[test]
