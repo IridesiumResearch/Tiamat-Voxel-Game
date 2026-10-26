@@ -183,6 +183,17 @@ pub struct ChunkStore {
     /// made off the frame thread whether the chunk it was made from is still
     /// the chunk (milestone 0.5.0, P2; see `meshwork`).
     generation: BTreeMap<ChunkPos, u64>,
+    /// The highest generation any pruned entry ever held; a position marked
+    /// afresh starts counting from here, never from zero.
+    ///
+    /// **Why pruning `generation` needs this.** The entry for a removed
+    /// chunk can be dropped because its in-flight job is rejected anyway
+    /// (`store.get` is `None` when the result lands). But the chunk can come
+    /// back before that result lands: a counter restarted at zero would reach
+    /// the stale job's number again, and old content would be accepted as the
+    /// new chunk's mesh. Starting from the floor makes a re-created counter
+    /// exceed every number it could have handed out before it was pruned.
+    generation_floor: u64,
     /// Summaries whose mesh needs rebuilding.
     ///
     /// Its own set rather than `dirty`, because the two are rebuilt by
@@ -785,6 +796,15 @@ impl ChunkStore {
         // And the fluid, for the same reason: the map holds what there is
         // milk in, and a pond walked away from was staying in it for ever.
         self.fluid.remove(&pos);
+        // **The generation entry goes too, which is safe** because a mesh job
+        // for this chunk is rejected without it: `remesh` drops a result whose
+        // chunk `get` no longer finds, and if the chunk returns, `mark` starts
+        // its counter above `generation_floor`, which is at least the number
+        // of every job submitted before now. Keeping an entry per position
+        // ever visited would grow for the whole session.
+        if let Some(gone) = self.generation.remove(&pos) {
+            self.generation_floor = self.generation_floor.max(gone);
+        }
         self.dirty.remove(&pos);
         if held {
             self.mark_neighbours(pos);
@@ -804,6 +824,17 @@ impl ChunkStore {
         self.light.clear();
         self.summaries.clear();
         self.stale.clear();
+        // The old space's fluid would otherwise survive at the same
+        // coordinates: `has_fluid` stays true and `fluid_at` answers another
+        // world's milk. Tints are that world's biomes, for the same reason.
+        self.fluid.clear();
+        self.tints.clear();
+        // Generations are pruned, but the floor keeps what they reached, so a
+        // job still in flight from the old space cannot match a new chunk.
+        if let Some(highest) = self.generation.values().copied().max() {
+            self.generation_floor = self.generation_floor.max(highest);
+        }
+        self.generation.clear();
     }
 
     /// Applies a server edit to the local copy.
@@ -931,7 +962,7 @@ impl ChunkStore {
     fn mark(&mut self, pos: ChunkPos) {
         // Every reason to remesh is a new generation, so a mesh in flight
         // for the old one is known to be stale when it lands.
-        *self.generation.entry(pos).or_insert(0) += 1;
+        *self.generation.entry(pos).or_insert(self.generation_floor) += 1;
         if self.urgent_marks {
             self.urgent.insert(pos);
         } else {
@@ -1003,17 +1034,24 @@ impl ChunkStore {
         // Ties broken by position so the order is a property of the data
         // rather than of the allocator — the same reason the simulation avoids
         // `HashMap`, even though nothing here is part of the hash gate.
-        candidates.sort_by_key(|pos| {
+        let key = |pos: &ChunkPos| {
             (
                 tiamat_core::interest::squared_distance(centre, *pos),
                 pos.x,
                 pos.y,
                 pos.z,
             )
-        });
-
-        let overflow = candidates.split_off(candidates.len().min(budget));
-        self.dirty.extend(overflow);
+        };
+        // Select the nearest `budget` in O(n), then order only those. The key
+        // is unique per position, so the selected set and its order are what
+        // a full sort would give; the tail goes back unordered, since the
+        // set orders it anyway.
+        if candidates.len() > budget {
+            candidates.select_nth_unstable_by_key(budget, key);
+            let overflow = candidates.split_off(budget);
+            self.dirty.extend(overflow);
+        }
+        candidates.sort_unstable_by_key(key);
 
         let count = urgent.len();
         let mut positions = urgent;
@@ -1577,6 +1615,88 @@ mod tests {
                 && taken.positions.contains(&ChunkPos::new(4, 0, 0)),
             "expected the two nearest chunks, got {taken:?}"
         );
+    }
+
+    #[test]
+    fn a_large_dirty_set_yields_the_nearest_sixteen_in_full_sort_order() {
+        let mut store = ChunkStore::new();
+        for x in 0..10 {
+            for y in 0..6 {
+                for z in 0..10 {
+                    store.insert(chunk_at(x - 4, y - 3, z - 5));
+                }
+            }
+        }
+        let centre = ChunkPos::new(1, 0, -1);
+        let mut expected: Vec<ChunkPos> = store.positions().collect();
+        expected.sort_by_key(|p| {
+            (
+                tiamat_core::interest::squared_distance(centre, *p),
+                p.x,
+                p.y,
+                p.z,
+            )
+        });
+        let total = expected.len();
+        assert!(total >= 500);
+
+        let taken = store.take_dirty(centre, 16);
+        assert_eq!(taken.positions, expected[..16]);
+        assert_eq!(store.dirty_len(), total - 16);
+        let next = store.take_dirty(centre, 16);
+        assert_eq!(next.positions, expected[16..32]);
+    }
+
+    #[test]
+    fn clear_forgets_fluid_tints_and_generations() {
+        use tiamat_core::coords::LocalBlock;
+        use tiamat_core::fluid::{Fluid, FluidId, FluidLayer};
+
+        let mut store = ChunkStore::new();
+        let pos = ChunkPos::new(3, 0, 3);
+        store.insert(chunk_at(3, 0, 3));
+        let mut layer = FluidLayer::empty();
+        layer.set(
+            LocalBlock::new(1, 1, 1),
+            Fluid::new(FluidId(1), tiamat_core::fluid::MAX_VOLUME),
+        );
+        store.set_fluid(pos, layer);
+        store.set_tint(pos, [1, 2, 3]);
+        assert!(store.has_fluid());
+        assert_ne!(store.generation(pos), 0);
+
+        store.clear();
+        assert!(!store.has_fluid());
+        assert!(!store.chunk_has_fluid(pos));
+        assert!(store.fluid_at(BlockPos::new(48 + 1, 1, 48 + 1)).is_empty());
+        assert_ne!(store.tint(3, 3), [1, 2, 3]);
+        assert_eq!(store.generation(pos), 0);
+        assert!(store.generation.is_empty());
+    }
+
+    #[test]
+    fn remove_drops_the_generation_and_a_stale_job_is_still_rejected() {
+        let mut store = ChunkStore::new();
+        let pos = ChunkPos::new(0, 0, 0);
+        store.insert(chunk_at(0, 0, 0));
+        let job_generation = store.generation(pos);
+
+        // Rejected while the chunk is gone: `get` finds nothing.
+        assert!(store.remove(pos));
+        assert!(!store.generation.contains_key(&pos));
+        assert!(store.get(pos).is_none());
+
+        // And rejected when it comes back before the job lands: the counter
+        // restarted above the old one, never at a value the job holds.
+        store.insert(chunk_at(0, 0, 0));
+        assert_ne!(store.generation(pos), job_generation);
+        assert!(store.generation(pos) > job_generation);
+
+        // Same across a clear.
+        let before_clear = store.generation(pos);
+        store.clear();
+        store.insert(chunk_at(0, 0, 0));
+        assert!(store.generation(pos) > before_clear);
     }
 
     #[test]
