@@ -36,7 +36,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use client::mesher::{self, Absent, Neighbours, NoFluid, NoGlass, Sight};
-use client::shade::Uniform;
+use client::shade::{BlockLight, Uniform};
 use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
 /// Full daylight everywhere, so the bench measures geometry rather than light.
@@ -63,6 +63,56 @@ impl client::shade::BlockLight for Dappled {
         // every single face becomes its own quad.
         let step = u8::try_from((x.abs() / 2 + y.abs() / 2 + z.abs() / 2) % 4).unwrap_or(0);
         tiamat_core::light::Light::new(tiamat_core::light::MAX_LEVEL - step, 0, 0, 0)
+    }
+}
+
+/// Light that costs what the client's lookup costs.
+///
+/// `Uniform` and `Dappled` answer from a register, which hides the cost the
+/// mesher actually pays: in the game every `at` goes through
+/// `MeshInput::at` — which neighbour slot, which local block, an `Option`
+/// chain, an index into that chunk's light. This fixture does the same work
+/// over a 3×3×3 set of stored chunks holding `Dappled`'s values, so a change
+/// in how many times a corner is sampled shows up at its true weight.
+struct Stored {
+    layers: Vec<Option<Vec<tiamat_core::light::Light>>>,
+}
+
+impl Stored {
+    fn new() -> Self {
+        let layers = (0..27)
+            .map(|slot| {
+                let (sx, sy, sz) = (slot % 3 - 1, slot / 3 % 3 - 1, slot / 9 - 1);
+                let mut layer = Vec::with_capacity(16 * 16 * 16);
+                for z in 0..16 {
+                    for y in 0..16 {
+                        for x in 0..16 {
+                            layer.push(Dappled.at(sx * 16 + x, sy * 16 + y, sz * 16 + z));
+                        }
+                    }
+                }
+                Some(layer)
+            })
+            .collect();
+        Self { layers }
+    }
+}
+
+impl client::shade::BlockLight for Stored {
+    fn at(&self, x: i32, y: i32, z: i32) -> tiamat_core::light::Light {
+        let slot_of = |value: i32| value.div_euclid(16) + 1;
+        let (sx, sy, sz) = (slot_of(x), slot_of(y), slot_of(z));
+        if !(0..3).contains(&sx) || !(0..3).contains(&sy) || !(0..3).contains(&sz) {
+            return tiamat_core::light::Light::DARK;
+        }
+        let slot = (sx + sy * 3 + sz * 9) as usize;
+        let local = |value: i32| value.rem_euclid(16) as usize;
+        self.layers
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map_or(tiamat_core::light::Light::DARK, |layer| {
+                layer[local(x) + local(y) * 16 + local(z) * 256]
+            })
     }
 }
 
@@ -174,6 +224,29 @@ fn mixed() -> Chunk {
 }
 
 fn meshing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mesh_chunk_stored");
+    let stored = Stored::new();
+    for (name, chunk) in [
+        ("uniform", uniform()),
+        ("terrain", terrain()),
+        ("chiselled", chiselled()),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let neighbours = Neighbours::none();
+                std::hint::black_box(mesher::mesh_chunk(
+                    std::hint::black_box(&chunk),
+                    &neighbours,
+                    Absent::Air,
+                    &stored,
+                    &NoFluid,
+                    &NoGlass,
+                ))
+            });
+        });
+    }
+    group.finish();
+
     let mut group = c.benchmark_group("mesh_chunk_sight");
     let sight = populated();
     for (name, chunk) in [

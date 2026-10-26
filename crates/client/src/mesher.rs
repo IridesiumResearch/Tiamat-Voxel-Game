@@ -41,7 +41,10 @@
 
 // `face_shade` here is the mode 1 directional constant below; the light
 // sampler comes in under a name that says which one it is.
-use crate::shade::{BlockLight, Shade, face_shade as sample_corner_light};
+use crate::shade::{
+    BlockLight, CornerLightCache, Shade, face_shade as sample_corner_light,
+    face_shade_cached as sample_corner_light_cached,
+};
 use tiamat_core::block::{BlockView, subnode_index};
 use tiamat_core::chunk::Chunk;
 use tiamat_core::coords::LocalBlock;
@@ -2086,6 +2089,10 @@ struct Scratch {
     /// One slice's worth of corner light, reused across every slice and
     /// direction. Entries for cells with no face are never read.
     shades: Vec<Shade>,
+    /// The corner light per lattice point of the slice being shaded, shared
+    /// by the four cells that meet at each point and by the slice's four
+    /// planes. See [`CornerLightCache`].
+    corners: CornerLightCache,
     /// The fluid surface's merge keys, which only the fluid pass fills and only
     /// a chunk with fluid in it allocates.
     keys: Vec<u32>,
@@ -2109,6 +2116,7 @@ impl Scratch {
                 Vec::new()
             },
             shades: vec![Shade::default(); N * N],
+            corners: CornerLightCache::new(),
             keys: if wet { vec![0u32; N * N] } else { Vec::new() },
             fluid: Vec::new(),
             mesh: Mesh::default(),
@@ -2328,11 +2336,15 @@ fn merge_slice(
     (axis, positive, w): (usize, bool, usize),
     scratch: &mut Scratch,
 ) {
+    // One slice, one layer of air in front of it: the four planes below share
+    // every corner they meet at.
+    scratch.corners.next_slice();
     shade_and_merge(
         grid,
         light,
         &mut scratch.plane[w * N..(w + 1) * N],
         &mut scratch.shades,
+        &mut scratch.corners,
         None,
         (axis, positive, w),
         &mut scratch.mesh.quads,
@@ -2344,6 +2356,7 @@ fn merge_slice(
             light,
             &mut scratch.glass_plane[w * N..(w + 1) * N],
             &mut scratch.shades,
+            &mut scratch.corners,
             None,
             (axis, positive, w),
             &mut scratch.mesh.glass_quads,
@@ -2356,6 +2369,7 @@ fn merge_slice(
             light,
             &mut scratch.cutout_plane[w * N..(w + 1) * N],
             &mut scratch.shades,
+            &mut scratch.corners,
             None,
             (axis, positive, w),
             &mut scratch.mesh.cutout_quads,
@@ -2370,6 +2384,7 @@ fn merge_slice(
         light,
         &mut scratch.wet_plane[w * N..(w + 1) * N],
         &mut scratch.shades,
+        &mut scratch.corners,
         Some(&mut scratch.keys),
         (axis, positive, w),
         &mut scratch.fluid,
@@ -2572,11 +2587,18 @@ fn lit_billboards(grid: &SubNodeGrid, light: &impl BlockLight) -> Vec<Billboard>
 /// against — measured at 2.3× the mesh time on realistic content, which is most
 /// of the way to the Task 02b gate for no reason. The fluid's merge keys ride
 /// the same pass for the same reason, and only the fluid pass asks for them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one slice's shading needs the grid, the light, the plane, the two scratch \
+              buffers it fills, the fluid's keys, which face it is, and where the quads go; \
+              every one is a distinct input"
+)]
 fn shade_and_merge(
     grid: &SubNodeGrid,
     light: &impl BlockLight,
     slice: &mut [u64],
     shades: &mut [Shade],
+    corners: &mut CornerLightCache,
     keys: Option<&mut [u32]>,
     (axis, positive, w): (usize, bool, usize),
     out: &mut Vec<Quad>,
@@ -2588,7 +2610,17 @@ fn shade_and_merge(
             let v = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let (cx, cy, cz) = SubNodeGrid::cell(axis, u, v, w);
-            shades[u * N + v] = shade_at(light, grid, axis, positive, cx, cy, cz);
+            // The corner light comes from the slice's cache — each lattice
+            // point sampled once however many faces meet at it — and the
+            // occlusion is computed per corner as before. See `CornerLightCache`.
+            shades[u * N + v] = sample_corner_light_cached(
+                light,
+                grid,
+                axis,
+                positive,
+                (cx as i32, cy as i32, cz as i32),
+                corners,
+            );
             if let Some(keys) = keys.as_deref_mut() {
                 keys[u * N + v] = grid.surface_key(cx, cy, cz);
             }
@@ -4716,6 +4748,58 @@ mod tests {
                 material: 12
             }]
         );
+    }
+
+    #[test]
+    fn a_stepped_job_under_varying_light_matches_a_one_shot_mesh_corner_for_corner() {
+        // The corner cache lives in the scratch state and is stamped per
+        // slice, so a job spread over frames must shade exactly as one call
+        // does — under light that differs from block to block, where a stale
+        // entry from an earlier slice would show as a changed corner.
+        struct Dappled;
+        impl BlockLight for Dappled {
+            fn at(&self, x: i32, y: i32, z: i32) -> tiamat_core::light::Light {
+                let step = u8::try_from((x.abs() / 2 + y.abs() / 2 + z.abs() / 2) % 4).unwrap_or(0);
+                tiamat_core::light::Light::new(tiamat_core::light::MAX_LEVEL - step, 0, 0, 0)
+            }
+        }
+        let mut world = empty();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..6 {
+                    world
+                        .set_block(BlockPos::new(x, y, z), BlockValue::Uniform(MaterialId(2)))
+                        .expect("in chunk");
+                }
+            }
+        }
+        world
+            .set_block(BlockPos::new(7, 5, 7), BlockValue::Uniform(MaterialId::AIR))
+            .expect("in chunk");
+        let one_shot = mesh_chunk(
+            &world,
+            &Neighbours::open(),
+            Absent::Air,
+            &Dappled,
+            &NoFluid,
+            &NoGlass,
+        );
+        assert!(
+            one_shot
+                .quads
+                .iter()
+                .any(|quad| quad.shade.light[0] != quad.shade.light[2]),
+            "the light must vary across a quad for this to test anything"
+        );
+        let mut job = MeshJob::start(&world, &Neighbours::open(), Absent::Air, &NoFluid, &NoGlass)
+            .expect("not empty air");
+        let mut steps = 0;
+        while !job.step(&Dappled) {
+            steps += 1;
+            assert!(steps < 10_000, "the job did not terminate");
+        }
+        let stepped = job.finish(&Dappled);
+        assert_eq!(stepped.quads, one_shot.quads, "stepping changed a corner");
     }
 
     #[test]

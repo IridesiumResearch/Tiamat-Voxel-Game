@@ -69,6 +69,17 @@ use tiamat_core::light::{CHANNELS, Light};
 pub trait BlockLight {
     /// The light at a chunk-local block.
     fn at(&self, x: i32, y: i32, z: i32) -> Light;
+
+    /// Whether every block reads the same level, so a sample costs nothing.
+    ///
+    /// The mesher's corner cache ([`CornerLightCache`]) earns its keep by
+    /// sampling each lattice point once instead of four times; against a
+    /// light that answers from a constant, the cache's own bookkeeping is the
+    /// larger cost, and the mesher skips it. Defaults to `false`, which is
+    /// the right answer for any light that looks something up.
+    fn constant(&self) -> bool {
+        false
+    }
 }
 
 /// A light level everywhere.
@@ -79,6 +90,10 @@ pub trait BlockLight {
 pub struct Uniform(pub Light);
 
 impl BlockLight for Uniform {
+    fn constant(&self) -> bool {
+        true
+    }
+
     fn at(&self, _x: i32, _y: i32, _z: i32) -> Light {
         self.0
     }
@@ -204,6 +219,138 @@ pub fn face_shade(
     // points around the cell face this corner sits on.
     for (index, (du, dv)) in [(0, 0), (1, 0), (1, 1), (0, 1)].into_iter().enumerate() {
         let (level, fine) = corner_light(light, outside, u_axis, v_axis, du, dv);
+        shade.light[index] = level;
+        shade.fine[index] = fine;
+        shade.occlusion[index] = corner_occlusion(occupancy, outside, u_axis, v_axis, du, dv) as u8;
+    }
+    shade
+}
+
+/// Lattice points along one axis of a slice: one more than the cells.
+const LATTICE: usize = tiamat_core::CHUNK_SUBNODES as usize + 1;
+
+/// Corner light remembered per lattice point of the slice being shaded.
+///
+/// **What is shared and what is not.** The bilinear sample at a corner depends
+/// only on the lattice point it sits on and the layer of air in front of the
+/// slice, so the four cells meeting at a point all want the same value — and
+/// `face_shade` computed it four times, for 9,216 corner samples on a full
+/// 48×48 slice that has 2,401 lattice points. Occlusion is not shared: the
+/// three cells a corner looks at are the ones on its own cell's side of the
+/// point, so the four cells meeting there each see a different three, and it
+/// is computed per corner as before (it is three bit tests, not four light
+/// lookups and a weighting).
+///
+/// **Stamped, not zeroed.** Every slice would otherwise clear 2,401 entries
+/// before shading a handful of faces; instead each entry carries the stamp of
+/// the slice that wrote it, [`Self::next_slice`] advances the stamp, and an
+/// entry from an earlier slice is simply not current. The four planes of one
+/// slice — solid, glass, cutout, fluid — share the stamp, because they share
+/// the air in front of them.
+#[derive(Debug, Clone)]
+pub struct CornerLightCache {
+    stamp: u32,
+    stamps: Vec<u32>,
+    /// The level in the low sixteen bits and the quarter-level remainder
+    /// above them: one word per point, one read per hit.
+    values: Vec<u32>,
+}
+
+impl Default for CornerLightCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CornerLightCache {
+    /// A cache with nothing current in it.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            stamp: 0,
+            stamps: vec![0; LATTICE * LATTICE],
+            values: vec![0; LATTICE * LATTICE],
+        }
+    }
+
+    /// Starts a new slice: nothing remembered so far is current any more.
+    ///
+    /// Call it once per `(axis, positive, w)`, before the first plane of that
+    /// slice is shaded. A slice is the unit because the layer of air the
+    /// corners are sampled in changes with it.
+    pub fn next_slice(&mut self) {
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            // Four billion slices later: every old stamp would read as
+            // current, so clear them once rather than let that happen.
+            self.stamps.fill(0);
+            self.stamp = 1;
+        }
+    }
+
+    /// The corner light at a lattice point, computed once per slice.
+    ///
+    /// `base` is the face's cell along the two spanning axes; the corner's
+    /// lattice point is `base + (du, dv)`.
+    fn corner_light(
+        &mut self,
+        light: &impl BlockLight,
+        outside: (i32, i32, i32),
+        (u_axis, v_axis): (usize, usize),
+        (base_u, base_v): (i32, i32),
+        (du, dv): (i32, i32),
+    ) -> (Light, u8) {
+        let (lu, lv) = (base_u + du, base_v + dv);
+        // One comparison for both bounds: a negative coordinate wraps high.
+        let index = (lu as usize)
+            .wrapping_mul(LATTICE)
+            .wrapping_add(lv as usize);
+        if (lu as usize) >= LATTICE || (lv as usize) >= LATTICE {
+            // A corner off the chunk's lattice — a face outside it, which the
+            // mesher never asks for — is computed and not remembered.
+            return corner_light(light, outside, u_axis, v_axis, du, dv);
+        }
+        if let (Some(stamp), Some(value)) = (self.stamps.get(index), self.values.get(index))
+            && *stamp == self.stamp
+        {
+            return (Light(*value as u16), (*value >> 16) as u8);
+        }
+        let (level, fine) = corner_light(light, outside, u_axis, v_axis, du, dv);
+        if let (Some(stamp), Some(value)) = (self.stamps.get_mut(index), self.values.get_mut(index))
+        {
+            *stamp = self.stamp;
+            *value = u32::from(level.0) | (u32::from(fine) << 16);
+        }
+        (level, fine)
+    }
+}
+
+/// [`face_shade`], with the corner light taken from `cache` where the slice
+/// has already computed it.
+///
+/// Identical to `face_shade` in what it returns; the cache changes only how
+/// often the light field is sampled. The caller advances the cache with
+/// [`CornerLightCache::next_slice`] whenever the slice changes. A light that
+/// says it is [`BlockLight::constant`] is sampled directly: its samples cost
+/// nothing and the cache would.
+#[must_use]
+pub fn face_shade_cached(
+    light: &impl BlockLight,
+    occupancy: &impl CellOccupancy,
+    axis: usize,
+    positive: bool,
+    cell: (i32, i32, i32),
+    cache: &mut CornerLightCache,
+) -> Shade {
+    if light.constant() {
+        return face_shade(light, occupancy, axis, positive, cell);
+    }
+    let (u_axis, v_axis) = plane_axes(axis);
+    let outside = step(cell, axis, if positive { 1 } else { -1 });
+    let base = (axis_of(outside, u_axis), axis_of(outside, v_axis));
+    let mut shade = Shade::default();
+    for (index, (du, dv)) in [(0, 0), (1, 0), (1, 1), (0, 1)].into_iter().enumerate() {
+        let (level, fine) = cache.corner_light(light, outside, (u_axis, v_axis), base, (du, dv));
         shade.light[index] = level;
         shade.fine[index] = fine;
         shade.occlusion[index] = corner_occlusion(occupancy, outside, u_axis, v_axis, du, dv) as u8;
@@ -409,6 +556,69 @@ mod tests {
     impl BlockLight for Sparse {
         fn at(&self, x: i32, y: i32, z: i32) -> Light {
             self.0.get(&(x, y, z)).copied().unwrap_or(Light::DARK)
+        }
+    }
+
+    /// A light that counts how often it is asked.
+    struct Counted<'a>(&'a Sparse, std::cell::Cell<usize>);
+
+    impl BlockLight for Counted<'_> {
+        fn at(&self, x: i32, y: i32, z: i32) -> Light {
+            self.1.set(self.1.get() + 1);
+            self.0.at(x, y, z)
+        }
+    }
+
+    /// Occupancy that differs from cell to cell, so occlusion is exercised
+    /// beside the light.
+    struct Checker;
+
+    impl CellOccupancy for Checker {
+        fn solid(&self, x: i32, y: i32, z: i32) -> bool {
+            (x + 2 * y + 3 * z).rem_euclid(5) == 0
+        }
+    }
+
+    #[test]
+    fn the_corner_cache_gives_every_face_the_shade_it_had_and_samples_each_point_once() {
+        // Light that differs from block to block, so a stale or misplaced
+        // cache entry would change a corner.
+        let mut light = BTreeMap::new();
+        for x in -1_i32..17 {
+            for y in -1_i32..17 {
+                for z in -1_i32..17 {
+                    let level = (x * 7 + y * 3 + z * 5).rem_euclid(i32::from(MAX_LEVEL) + 1) as u8;
+                    light.insert((x, y, z), Light::new(level, level / 2, 0, 0));
+                }
+            }
+        }
+        let sparse = Sparse(light);
+
+        let cells = LATTICE - 1;
+        let mut cache = CornerLightCache::new();
+        for (axis, positive, w) in [(1, true, 7), (0, false, 20), (2, true, 0), (1, true, 8)] {
+            cache.next_slice();
+            let counted = Counted(&sparse, std::cell::Cell::new(0));
+            let (u_axis, v_axis) = plane_axes(axis);
+            for u in 0..cells {
+                for v in 0..cells {
+                    let mut cell = (0, 0, 0);
+                    set_axis(&mut cell, axis, w);
+                    set_axis(&mut cell, u_axis, u as i32);
+                    set_axis(&mut cell, v_axis, v as i32);
+                    let cached =
+                        face_shade_cached(&counted, &Checker, axis, positive, cell, &mut cache);
+                    let plain = face_shade(&sparse, &Checker, axis, positive, cell);
+                    assert_eq!(cached, plain, "face {axis}/{positive}/{w} at {u},{v}");
+                }
+            }
+            // Four samples per lattice point, once each — not four per corner
+            // of every cell.
+            assert_eq!(
+                counted.1.get(),
+                LATTICE * LATTICE * 4,
+                "slice {axis}/{positive}/{w}"
+            );
         }
     }
 
