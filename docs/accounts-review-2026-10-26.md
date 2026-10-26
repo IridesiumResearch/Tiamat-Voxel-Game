@@ -165,6 +165,42 @@ gate. Line numbers below are from the branch as reviewed and will have moved.
    Ctrl-C and nothing restarts it. Proposed: a `registry healthcheck`
    subcommand used by a `HEALTHCHECK`, and exit when the loop breaks.
 
+### Decided, 2026-10-26 (the owner)
+
+1. **Rotation at the registry (A3): the most secure shape.** A rotation link
+   in the key-set proof, checked like `KeySet::rotate_key` checks a rotation
+   (the retiring key's signature, the successor matching the commitment);
+   the service remembers, per identity, every key a presented rotation
+   retired and refuses anything signed by or chained through one, the
+   root-by-hash shortcut included; the memory is persisted.
+2. **Rotation reaching servers (A4): yes, with the security tested.** The
+   challenge answer carries the registry's rotation records (bounded); the
+   session applies them to a copy of its pinned trust before verifying the
+   certificate, refuses a chain that does not start at the pin, keeps the
+   retired key's ninety-day bound, and warns the operator once that
+   `server.toml` has a newer key and hash to pin.
+3. **Confusables (A7): no rule between players — "people will have their
+   fun" — but no security hole.** The fold applies to the reserved list
+   only, so a lookalike of `iridesium` or of a mod's id is refused.
+4. **RCON on an offline certified player (C8): what is best for play.** The
+   rename is refused offline as it is online, because an allowed one would
+   be undone at that player's next join and would displace whoever took the
+   name meanwhile; the certified mark is kept with the binding, and the
+   refusal says so.
+5. **The service's concurrency (B5, B11): best practice.** A bounded worker
+   pool, the body read inside the worker under the deadline, 503 when the
+   pool is full, handlers that roll back past the deadline, Traefik's
+   buffering in the ops page.
+6. **Retention (B9): secure, double-checked and stress-tested.** The sweep
+   §8 promises, addresses hashed in quota keys, IPs in their own audit
+   column cleared after seven days — with tests that drive the limits and
+   the sweeps at volume.
+7. **Mail abuse (B13): as proposed.** A held name or a proof of work on
+   email requests, a global hourly cap, a per-identity cap, `+tag` folded in
+   the quota key.
+8. **Health check (B17): yes.** A `registry healthcheck` subcommand behind a
+   `HEALTHCHECK`, and the process exits when its accept loop breaks.
+
 ## Open, for the implementer
 
 - **Platform.** The crate had never been built on Linux or macOS: `let
