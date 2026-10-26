@@ -6224,6 +6224,13 @@ impl App {
         /// makes it look like light arriving from more than one direction,
         /// which is what an ambient shadow is.
         const RADIUS: f32 = 0.8;
+        /// Past this distance from the camera a blob is not built.
+        ///
+        /// **The probe is the cost, not the quad.** Every body asks 25 columns
+        /// and walks up to 13 cells each, and a body behind the player or a
+        /// hill was doing it for a disc nobody can see. Sixty-four blocks is
+        /// well past the distance at which a 0.8-block disc is a pixel.
+        const DRAW_BLOCKS: f32 = 64.0;
 
         let Some(predictor) = self.predictor.as_ref() else {
             self.renderer.set_blobs(&[]);
@@ -6243,6 +6250,22 @@ impl App {
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
+            // The shadow is a ground decal; past the draw distance it is
+            // smaller than a pixel, and probing for it is wasted work.
+            let world = [
+                f64::from(pose.chunk.x) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[0]) / f64::from(cells),
+                f64::from(pose.chunk.y) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[1]) / f64::from(cells),
+                f64::from(pose.chunk.z) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[2]) / f64::from(cells),
+            ];
+            let offset = self.camera.position.offset_to(world);
+            if offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]
+                > DRAW_BLOCKS * DRAW_BLOCKS
+            {
+                continue;
+            }
             // Into the predictor's chunk frame, which is what `Voxels` indexes.
             let span = tiamat_core::CHUNK_SUBNODES as i32;
             let shift = |axis: usize, chunk: i32| {
