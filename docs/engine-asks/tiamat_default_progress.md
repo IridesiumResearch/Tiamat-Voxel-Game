@@ -41,6 +41,14 @@ nightly CI now runs the fen soak over the pinned mods and keeps its tick
 table as an artefact, so a cost that grows with the world is seen the night
 it lands.
 
+**Answered by the mod, 2026-10-14.** A4: `api/` re-vendored at mod API 1.0
+(Progress 345f20e); nothing it calls is deprecated. A3: `.github/workflows/conform.yml`
+is the workflow above, on every push and nightly (Progress 3c7952d). The mod
+is `0.2.0` (Progress 720233e), all pushed on 2026-10-15 with the stubs at
+engine be810657 (Progress 1ce3cc1). Since then (2026-10-22) Progress answers
+Structures' ST-P1 (Progress 15451a7), which asks nothing of the engine;
+`bundle.toml`'s pin can move to 15451a7 when the engine is ready.
+
 ## 4. A bot that can play a station: LANDED 2026-09-28 (engine ff0bbda)
 
 **Seen.** The mod's brief has its pacing measured by a bot playing
