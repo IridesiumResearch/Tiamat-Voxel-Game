@@ -2075,6 +2075,21 @@ impl Renderer {
     /// the bind group because the texture view it referenced is gone.
     pub fn set_atlas(&mut self, atlas: &Atlas) {
         let (views, grid, side) = upload_atlas(&self.gpu, atlas);
+        self.install_atlas(views, grid, side);
+    }
+
+    /// Replaces the atlas with mips already computed off the frame thread.
+    ///
+    /// [`AtlasBuild`](crate::atlaswork::AtlasBuild) computes exactly these
+    /// levels; letting [`Self::set_atlas`] recompute them here would put the
+    /// expensive half back on the frame.
+    pub fn set_atlas_with_mips(&mut self, atlas: &Atlas, mips: &[crate::texture::Image]) {
+        let (views, grid, side) = upload_atlas_mips(&self.gpu, atlas, mips);
+        self.install_atlas(views, grid, side);
+    }
+
+    /// The half both atlas installs share: the bind group and the hands.
+    fn install_atlas(&mut self, views: AtlasViews, grid: u32, side: u32) {
         self.atlas_grid = grid;
         self.atlas_side = side;
         self.bind_group = make_bind_group(
@@ -5739,14 +5754,22 @@ struct AtlasViews {
 const INTERFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
-    let levels = atlas.mips();
+    upload_atlas_mips(gpu, atlas, &atlas.mips())
+}
+
+/// Uploads an atlas and the mip chain already computed for it.
+fn upload_atlas_mips(
+    gpu: &Gpu,
+    atlas: &Atlas,
+    levels: &[crate::texture::Image],
+) -> (AtlasViews, u32, u32) {
     // Declared up front or the second view is refused: a texture may only be
     // viewed in the formats it was created to allow.
     let interface_format = gpu.view_formats.then_some(INTERFACE_FORMAT);
     let texture = atlas_texture(
         gpu,
         atlas.side(),
-        &levels,
+        levels,
         COLOUR_FORMAT,
         interface_format.as_slice(),
     );
@@ -5764,7 +5787,7 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
         // for everybody on GL. The atlas costs its memory twice there and
         // nowhere else; a slot and the wall built from it still show one
         // image, uploaded from one `Atlas`.
-        atlas_texture(gpu, atlas.side(), &levels, INTERFACE_FORMAT, &[]).create_view(
+        atlas_texture(gpu, atlas.side(), levels, INTERFACE_FORMAT, &[]).create_view(
             &wgpu::TextureViewDescriptor {
                 label: Some("atlas-interface"),
                 ..Default::default()
