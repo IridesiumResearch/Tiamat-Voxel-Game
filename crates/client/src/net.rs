@@ -46,7 +46,8 @@ use tiamat_core::{BlockPos, Chunk, ChunkPos};
 use tokio::sync::mpsc;
 
 use crate::cache::ContentCache;
-use crate::texture::{Image, decode_or_missing};
+use crate::decoded::DecodedCache;
+use crate::texture::Image;
 use crate::trust::{TrustStore, to_hex};
 
 /// The ALPN the server requires. Must match `server::transport::endpoint`.
@@ -1375,6 +1376,11 @@ async fn session(
     // only case in production — it is a direct write.
     let mut send = tiamat_server::transport::Link::new(send);
 
+    // What earlier joins decoded, so this one need not (perf audit N4). The
+    // bytes are still read and verified from the content cache as before;
+    // the decode is what this spares.
+    let decoded = DecodedCache::shared();
+
     // The sound table, kept so an arriving content chunk can be matched to the
     // sound that wanted it.
     let mut awaited_sounds: Vec<tiamat_core::proto::SoundDef> = Vec::new();
@@ -1556,7 +1562,7 @@ async fn session(
             // A command was handled, or a timer fired. Either may have made the
             // materials complete.
             if !pending.joined && !pending.table.is_empty() && pending.outstanding == 0 {
-                emit_materials(&mut pending, &events);
+                emit_materials(&mut pending, &decoded, &events);
                 // The skin first, so the join hook sees it (Life ask 23).
                 if custom_skins
                     && let Some(bytes) = skin_offer.clone()
@@ -1593,7 +1599,7 @@ async fn session(
                     if !awaited_pictures.contains(hash) {
                         awaited_pictures.push(*hash);
                     }
-                    offer_picture(*hash, &cache, &events);
+                    offer_picture(*hash, &cache, &decoded, &events);
                 }
                 let missing = cache.missing(&wanted);
                 if !missing.is_empty()
@@ -1665,7 +1671,7 @@ async fn session(
                 pending.outstanding = missing.len();
 
                 if missing.is_empty() {
-                    emit_materials(&mut pending, &events);
+                    emit_materials(&mut pending, &decoded, &events);
                     // The skin first, so the join hook sees it (Life ask 23).
                     if custom_skins
                         && let Some(bytes) = skin_offer.clone()
@@ -1743,11 +1749,11 @@ async fn session(
                         // same reason: this is the first instant the bytes are
                         // certainly in the cache.
                         if awaited_pictures.contains(&hash) {
-                            offer_picture(hash, &cache, &events);
+                            offer_picture(hash, &cache, &decoded, &events);
                         }
 
                         if awaited_skins.contains(&hash) {
-                            offer_skin(hash, &cache, &events);
+                            offer_skin(hash, &cache, &decoded, &events);
                         }
 
                         // And a font, `filter` for the third time and the third
@@ -1764,12 +1770,12 @@ async fn session(
                         // would draw one of their entities and leave the other
                         // invisible.
                         for model in awaited_models.iter().filter(|m| m.file == Some(hash)) {
-                            offer_model(model, &cache, &events);
+                            offer_model(model, &cache, &decoded, &events);
                         }
                         // And a model's skin, `filter` for the same reason —
                         // two models wearing one image share its hash.
                         for model in awaited_models.iter().filter(|m| m.texture == Some(hash)) {
-                            offer_model_texture(model, &cache, &events);
+                            offer_model_texture(model, &cache, &decoded, &events);
                         }
                     }
                     Ok(false) => {}
@@ -1780,7 +1786,7 @@ async fn session(
                 }
 
                 if !pending.joined && pending.outstanding == 0 && !pending.table.is_empty() {
-                    emit_materials(&mut pending, &events);
+                    emit_materials(&mut pending, &decoded, &events);
                     // The skin first, so the join hook sees it (Life ask 23).
                     if custom_skins
                         && let Some(bytes) = skin_offer.clone()
@@ -1904,6 +1910,7 @@ async fn session(
                     &wanted,
                     &mut awaited_skins,
                     &cache,
+                    &decoded,
                     &events,
                     &mut send,
                     &say,
@@ -1920,6 +1927,7 @@ async fn session(
                     &wanted,
                     &mut awaited_skins,
                     &cache,
+                    &decoded,
                     &events,
                     &mut send,
                     &say,
@@ -1935,6 +1943,7 @@ async fn session(
                     &wanted,
                     &mut awaited_skins,
                     &cache,
+                    &decoded,
                     &events,
                     &mut send,
                     &say,
@@ -2162,8 +2171,8 @@ async fn session(
                     .collect();
                 let missing = cache.missing(&wanted);
                 for model in &models {
-                    offer_model(model, &cache, &events);
-                    offer_model_texture(model, &cache, &events);
+                    offer_model(model, &cache, &decoded, &events);
+                    offer_model_texture(model, &cache, &decoded, &events);
                 }
                 awaited_models = models;
                 if !missing.is_empty()
@@ -2207,7 +2216,7 @@ async fn session(
                     if !awaited_pictures.contains(hash) {
                         awaited_pictures.push(*hash);
                     }
-                    offer_picture(*hash, &cache, &events);
+                    offer_picture(*hash, &cache, &decoded, &events);
                 }
                 let missing = cache.missing(&wanted);
                 if !missing.is_empty()
@@ -2555,6 +2564,7 @@ fn offer_font(
 fn offer_model(
     model: &tiamat_core::proto::ModelDef,
     cache: &ContentCache,
+    decoded: &Arc<DecodedCache>,
     events: &mpsc::UnboundedSender<Event>,
 ) {
     let Some(hash) = model.file else {
@@ -2568,15 +2578,17 @@ fn offer_model(
     let mod_id = model.mod_id.clone();
     let scale = model.scale;
     let events = events.clone();
+    let decoded = Arc::clone(decoded);
     // A real worker: parsing geometry is milliseconds, and this task is the
-    // network pump.
+    // network pump. Through the decoded cache, so a model this process
+    // loaded on an earlier join is not parsed again (perf audit N4).
     tokio::task::spawn_blocking(move || {
-        match tiamat_core::model::load_isolated(&bytes, &tiamat_core::model::Limits::default()) {
+        match decoded.model_or_load(&hash, &bytes, &tiamat_core::model::Limits::default()) {
             Ok(model) => {
                 let _ = events.send(Event::Model {
                     id,
                     scale,
-                    model: Box::new(model),
+                    model: Box::new(Arc::unwrap_or_clone(model)),
                 });
             }
             Err(err) => {
@@ -2605,21 +2617,26 @@ fn offer_model(
 fn offer_picture(
     hash: tiamat_core::proto::ContentHash,
     cache: &ContentCache,
+    decoded: &Arc<DecodedCache>,
     events: &mpsc::UnboundedSender<Event>,
 ) {
     let Some(bytes) = cache.get(&hash) else {
         return;
     };
     let events = events.clone();
+    let decoded = Arc::clone(decoded);
     tokio::task::spawn_blocking(move || {
-        let (image, failure) = decode_or_missing(&bytes);
+        let (image, failure) = decoded.image_or_decode(&hash, &bytes);
         if let Some(err) = failure {
             let _ = events.send(Event::Warning(format!(
                 "a dialog's picture could not be decoded and will not be drawn: {err}"
             )));
             return;
         }
-        let _ = events.send(Event::Picture { hash, image });
+        let _ = events.send(Event::Picture {
+            hash,
+            image: Arc::unwrap_or_clone(image),
+        });
     });
 }
 
@@ -2632,10 +2649,15 @@ fn offer_picture(
 /// nobody painted rather than like a bug in the world.
 /// Asks the server for the skins among `wanted` that the cache lacks, and
 /// decodes the ones it holds, the first time each is named (Life ask 23).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session's hands, passed through to the one place skins are asked for"
+)]
 async fn want_skins(
     wanted: &[tiamat_core::proto::ContentHash],
     awaited: &mut Vec<tiamat_core::proto::ContentHash>,
     cache: &ContentCache,
+    decoded: &Arc<DecodedCache>,
     events: &mpsc::UnboundedSender<Event>,
     send: &mut tiamat_server::transport::Link,
     say: &impl Fn(String),
@@ -2651,7 +2673,7 @@ async fn want_skins(
     }
     for hash in &fresh {
         awaited.push(*hash);
-        offer_skin(*hash, cache, events);
+        offer_skin(*hash, cache, decoded, events);
     }
     let missing = cache.missing(&fresh);
     if !missing.is_empty()
@@ -2665,14 +2687,16 @@ async fn want_skins(
 fn offer_skin(
     hash: tiamat_core::proto::ContentHash,
     cache: &ContentCache,
+    decoded: &Arc<DecodedCache>,
     events: &mpsc::UnboundedSender<Event>,
 ) {
     let Some(bytes) = cache.get(&hash) else {
         return;
     };
     let events = events.clone();
+    let decoded = Arc::clone(decoded);
     tokio::task::spawn_blocking(move || {
-        let (image, failure) = decode_or_missing(&bytes);
+        let (image, failure) = decoded.image_or_decode(&hash, &bytes);
         if let Some(err) = failure {
             let _ = events.send(Event::Warning(format!(
                 "a player's skin could not be decoded; the model's own texture is drawn \
@@ -2680,13 +2704,17 @@ fn offer_skin(
             )));
             return;
         }
-        let _ = events.send(Event::Skin { hash, image });
+        let _ = events.send(Event::Skin {
+            hash,
+            image: Arc::unwrap_or_clone(image),
+        });
     });
 }
 
 fn offer_model_texture(
     model: &tiamat_core::proto::ModelDef,
     cache: &ContentCache,
+    decoded: &Arc<DecodedCache>,
     events: &mpsc::UnboundedSender<Event>,
 ) {
     let Some(hash) = model.texture else {
@@ -2698,10 +2726,11 @@ fn offer_model_texture(
     let id = model.id.clone();
     let mod_id = model.mod_id.clone();
     let events = events.clone();
+    let decoded = Arc::clone(decoded);
     // A worker, like every other decode of a server's bytes: charter rule 14
     // wants the panic isolated and the network pump left alone.
     tokio::task::spawn_blocking(move || {
-        let (image, failure) = decode_or_missing(&bytes);
+        let (image, failure) = decoded.image_or_decode(&hash, &bytes);
         if let Some(err) = failure {
             let _ = events.send(Event::Warning(format!(
                 "`{mod_id}`'s model `{id}` has a texture that would not decode; it will be drawn \
@@ -2709,7 +2738,10 @@ fn offer_model_texture(
             )));
             return;
         }
-        let _ = events.send(Event::ModelTexture { id, image });
+        let _ = events.send(Event::ModelTexture {
+            id,
+            image: Arc::unwrap_or_clone(image),
+        });
     });
 }
 
@@ -2745,7 +2777,11 @@ fn decode_when_ready(
     });
 }
 
-fn emit_materials(pending: &mut Pending, events: &mpsc::UnboundedSender<Event>) {
+fn emit_materials(
+    pending: &mut Pending,
+    decoded: &DecodedCache,
+    events: &mpsc::UnboundedSender<Event>,
+) {
     let mut images = BTreeMap::new();
     for entry in &pending.table {
         let Some(hash) = entry.texture else { continue };
@@ -2754,15 +2790,16 @@ fn emit_materials(pending: &mut Pending, events: &mpsc::UnboundedSender<Event>) 
         };
         // Panic-isolated, limits applied before decode. A poisoned texture
         // disables that texture with a reason, never the client (charter
-        // rule 14).
-        let (image, failure) = decode_or_missing(bytes);
+        // rule 14). Through the decoded cache, so a rejoin that fetched and
+        // verified the same bytes decodes none of them (perf audit N4).
+        let (image, failure) = decoded.image_or_decode(&hash, bytes);
         if let Some(err) = failure {
             let _ = events.send(Event::Warning(format!(
                 "`{}` has an unusable texture and will draw as a magenta checker: {err}",
                 entry.name
             )));
         }
-        images.insert(entry.id, image);
+        images.insert(entry.id, Arc::unwrap_or_clone(image));
     }
 
     let _ = events.send(Event::Materials {
@@ -3352,7 +3389,8 @@ mod tests {
             ..Pending::default()
         };
         pending.complete.insert(hash, garbage);
-        emit_materials(&mut pending, &events);
+        let decoded = DecodedCache::new(1 << 20);
+        emit_materials(&mut pending, &decoded, &events);
 
         let mut warned = false;
         let mut drew = false;
@@ -3388,13 +3426,54 @@ mod tests {
             table: table(&[(0, "engine:air", None)]),
             ..Pending::default()
         };
-        emit_materials(&mut pending, &events);
+        let decoded = DecodedCache::new(1 << 20);
+        emit_materials(&mut pending, &decoded, &events);
 
         let Some(Event::Materials { images, table }) = received.try_recv().ok() else {
             panic!("expected a materials event");
         };
         assert!(images.is_empty());
         assert_eq!(table.len(), 1, "but the table itself still names it");
+    }
+
+    #[test]
+    fn a_second_join_does_not_decode_the_textures_the_first_one_did() {
+        // Perf audit N4: the same table, the same verified bytes, a new
+        // session — the first join decodes, the second is handed the first's
+        // images, and both events carry the same pixels.
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../game/core_blocks/textures/white.png"),
+        )
+        .expect("the reference white texture");
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        let decoded = DecodedCache::new(1 << 20);
+        let (events, mut received) = mpsc::unbounded_channel();
+        for _ in 0..2 {
+            let mut pending = Pending {
+                table: table(&[(2, "core:white", Some(hash))]),
+                ..Pending::default()
+            };
+            pending.complete.insert(hash, bytes.clone());
+            emit_materials(&mut pending, &decoded, &events);
+        }
+        assert_eq!(decoded.decodes(), 1, "decoded once, served twice");
+
+        let mut joins = Vec::new();
+        while let Ok(event) = received.try_recv() {
+            match event {
+                Event::Materials { images, .. } => joins.push(images),
+                Event::Warning(text) => panic!("the reference texture decodes: {text}"),
+                _ => {}
+            }
+        }
+        assert_eq!(joins.len(), 2);
+        assert_eq!(joins[0], joins[1]);
+        assert_ne!(
+            joins[1].get(&2),
+            Some(&Image::missing()),
+            "served from the cache, not as the placeholder"
+        );
     }
 
     #[test]
