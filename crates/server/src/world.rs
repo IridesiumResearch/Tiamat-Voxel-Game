@@ -1188,7 +1188,7 @@ impl World {
                 // streamer has the workers do this and hands the result to
                 // `adopt_generated`, which is the same thing from here.
                 let (generated, fluid) = source.generate_with_fluid(domain, pos, seed);
-                Self::adopt_into(db, sql, space, domain, pos, generated, &fluid);
+                Self::adopt_into(db, sql, space, domain, pos, generated, &fluid, true);
             }
         }
         Ok(Arc::make_mut(
@@ -1219,7 +1219,7 @@ impl World {
         pos: ChunkPos,
         chunk: Chunk,
         fluid: &tiamat_core::fluid::FluidLayer,
-    ) -> Result<(), WorldError> {
+    ) -> Result<Option<tiamat_core::fluid::FluidLayer>, WorldError> {
         if self.sparse.contains(domain) {
             return Err(WorldError::NoVoxels {
                 domain: domain.to_owned(),
@@ -1230,10 +1230,16 @@ impl World {
         } = self;
         let space = Self::space_of(domains, domain);
         if space.cache.contains_key(&pos) {
-            return Ok(());
+            // The live chunk wins over the worker's older copy; its fluid is
+            // already in the store and must not be replaced by this one.
+            return Ok(None);
         }
-        Self::adopt_into(db, sql, space, domain, pos, chunk, fluid);
-        Ok(())
+        Self::adopt_into(db, sql, space, domain, pos, chunk, fluid, false);
+        // **The fluid goes back to the caller rather than to the database.**
+        // `Fluidics` owns the live layer and the dirty queue; the handle puts
+        // it there before the chunk is served, so the client's layer travels
+        // with the chunk and no row is written and read back on the tick.
+        Ok((!fluid.is_empty()).then(|| fluid.clone()))
     }
 
     /// The one place a freshly generated chunk enters the world.
@@ -1245,6 +1251,7 @@ impl World {
         pos: ChunkPos,
         chunk: Chunk,
         fluid: &tiamat_core::fluid::FluidLayer,
+        store_fluid: bool,
     ) {
         // Mark it dirty so it is written — see the module docs on why a
         // generated chunk is stored rather than regenerated later.
@@ -1260,7 +1267,8 @@ impl World {
         //
         // Empty layers are skipped: almost every chunk has one, and a row
         // saying "no fluid" is a row to read back for nothing.
-        if !fluid.is_empty()
+        if store_fluid
+            && !fluid.is_empty()
             && let Err(err) = crate::sqlclock::Log::time(sql, "store generated fluid", || {
                 db.save_chunk_fluid_in(domain, pos, fluid)
             })
@@ -2514,6 +2522,37 @@ mod tests {
                 Err(WorldError::NoSuchLevel { .. })
             ));
         }
+    }
+
+    #[test]
+    fn a_generated_chunks_fluid_is_handed_to_the_caller_and_not_written() {
+        use tiamat_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
+
+        let (mut world, _) = world("generated-fluid-handoff");
+        let pos = ChunkPos::new(2, 0, 2);
+        let mut layer = FluidLayer::empty();
+        layer.set(
+            tiamat_core::coords::LocalBlock::new(3, 4, 5),
+            Fluid::new(FluidId(1), MAX_VOLUME),
+        );
+
+        let returned = world
+            .adopt_generated(
+                tiamat_core::domain::OVERWORLD,
+                pos,
+                Chunk::new(pos, MaterialId::AIR),
+                &layer,
+            )
+            .expect("adopt");
+        assert_eq!(returned, Some(layer), "the live layer was not handed back");
+        assert!(
+            world
+                .db()
+                .load_chunk_fluid_in(tiamat_core::domain::OVERWORLD, pos)
+                .expect("read")
+                .is_none(),
+            "the generated layer was written and read back instead of handed over"
+        );
     }
 
     #[test]

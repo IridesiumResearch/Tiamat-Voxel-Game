@@ -960,10 +960,23 @@ fn serve_chunk_requests(
             // The chunk itself was asked for, so it becomes part of the world —
             // resident, dirty, arrived — exactly as one generated here would.
             let at = std::time::Instant::now();
-            if let Err(err) =
-                world.adopt_generated(&done.job.domain, done.job.pos, done.chunk, &done.fluid)
-            {
-                debug!(pos = ?done.job.pos, "could not adopt a generated chunk: {err}");
+            match world.adopt_generated(&done.job.domain, done.job.pos, done.chunk, &done.fluid) {
+                Ok(Some(layer)) => {
+                    // **Straight into the live store, not through a row.** The
+                    // generator's sea is what the simulation and this tick's
+                    // client both need; writing it and reading it back was a
+                    // database round trip per generated water chunk.
+                    if let Ok(mut ponds) = fluidics.write() {
+                        let solid = world.solid(&done.job.domain);
+                        let store = ponds.of(&done.job.domain);
+                        store.chunk_loaded(done.job.pos, layer, &solid);
+                        store.mark_dirty(done.job.pos);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    debug!(pos = ?done.job.pos, "could not adopt a generated chunk: {err}");
+                }
             }
             report.generating += at.elapsed();
         }
