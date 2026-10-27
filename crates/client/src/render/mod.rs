@@ -2479,14 +2479,16 @@ impl Renderer {
         // list is four vertices a quad, drawn through a prefix of the shared
         // pattern, so the one thing to see to is that the pattern is long
         // enough for the largest of them.
-        let vertices = mesh.to_buffers();
-        let glass_vertices = (!mesh.has_no_glass()).then(|| mesh.glass_buffers());
-        let cutout_vertices = (!mesh.has_no_cutout()).then(|| mesh.cutout_buffers());
+        // Borrowed when the worker already expanded this mesh: no per-chunk
+        // copy on the frame thread (perf audit C5).
+        let vertices = mesh.opaque_vertices();
+        let glass_vertices = (!mesh.has_no_glass()).then(|| mesh.glass_vertices());
+        let cutout_vertices = (!mesh.has_no_cutout()).then(|| mesh.cutout_vertices());
         let longest = [
             vertices.len(),
             mesh.fluid_vertices.len(),
-            glass_vertices.as_ref().map_or(0, Vec::len),
-            cutout_vertices.as_ref().map_or(0, Vec::len),
+            glass_vertices.as_ref().map_or(0, |glass| glass.len()),
+            cutout_vertices.as_ref().map_or(0, |cutout| cutout.len()),
         ]
         .into_iter()
         .max()
@@ -2501,7 +2503,7 @@ impl Renderer {
             buffer
         };
 
-        let vertex_buffer = upload(&mut self.pool, bytemuck::cast_slice(&vertices));
+        let vertex_buffer = upload(&mut self.pool, bytemuck::cast_slice(vertices.as_ref()));
 
         // The fluid half, when there is one. Its own buffer from the same
         // pool: a chunk with no milk in it allocates nothing here and the
@@ -2517,14 +2519,14 @@ impl Renderer {
         // `Option` says so rather than a zero-length buffer the draw loop would
         // skip every frame.
         let glass = glass_vertices.map(|glass| GlassMesh {
-            vertices: upload(&mut self.pool, bytemuck::cast_slice(&glass)),
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(glass.as_ref())),
             index_count: index_count_of(glass.len()),
         });
 
         // And the foliage, on the same pattern again. Its buffer is the
         // world's own vertex, like glass — only the pipeline differs.
         let cutout = cutout_vertices.map(|cutout| GlassMesh {
-            vertices: upload(&mut self.pool, bytemuck::cast_slice(&cutout)),
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(cutout.as_ref())),
             index_count: index_count_of(cutout.len()),
         });
 
