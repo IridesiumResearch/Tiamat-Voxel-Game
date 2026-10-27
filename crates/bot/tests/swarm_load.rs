@@ -30,6 +30,11 @@
 //! which is the performance target's player count), and `SWARM_OUT` names a
 //! directory to write the tick table into as `table.txt`, so a nightly keeps
 //! it as an artefact.
+//!
+//! `SWARM_VIEW=default` runs the same soak at the default view distance
+//! instead of `MINIMUM`. **The default is the one that matters for the 50-player
+//! target**: it streams roughly 7,225 chunk positions per player rather than
+//! 27, and the nightly's `MINIMUM` number is not the production shape.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -84,6 +89,11 @@ fn reference_mods() -> PathBuf {
 fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
     let bots: u32 = knob("SWARM_BOTS", 20);
     let seconds: u64 = knob("SWARM_SECONDS", 60);
+    let view = match std::env::var("SWARM_VIEW").as_deref() {
+        Ok("default") => ViewDistance::DEFAULT,
+        Ok("minimum") | Err(_) => ViewDistance::MINIMUM,
+        Ok(other) => panic!("SWARM_VIEW must be `minimum` or `default`, got {other:?}"),
+    };
 
     let dir = std::env::temp_dir().join("tiamat-swarm-load");
     let _ = std::fs::remove_dir_all(&dir);
@@ -101,7 +111,7 @@ fn twenty_bots_for_sixty_seconds_leave_the_server_healthy() {
         registry_trust: None,
         allowlist: Allowlist::open(),
         operators: Vec::new(),
-        view_distance: ViewDistance::MINIMUM,
+        view_distance: view,
         // The reference mods, because the swarm DIGS rather than writing blocks
         // into the world. Charter rule 1 leaves the engine with no tools of its
         // own, so a modless server is one where every bot fails at its first
