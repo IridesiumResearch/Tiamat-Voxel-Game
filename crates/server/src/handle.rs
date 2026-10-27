@@ -2746,6 +2746,7 @@ impl ServerHandle {
             skies,
             domains: std::sync::OnceLock::new(),
             content: content_index,
+            slices: crate::content::SliceCache::shared(),
             allowlist: std::sync::RwLock::new(settings.allowlist.clone()),
             // **Parsed once, here, and anything unreadable is refused loudly.**
             // A typo in an operator list is a player who silently does not get

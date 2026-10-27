@@ -469,6 +469,17 @@ pub struct Shared {
     /// hash — the one thing content addressing exists to make impossible.
     pub content: tiamat_core::content::ContentIndex,
 
+    /// The compressed-slice cache every connection shares.
+    ///
+    /// **Owned by the server, not by the process.** `Transfers::new()` takes the
+    /// process-wide cache, which is the same object only while some connection
+    /// happens to hold it; a server that closes every connection can otherwise
+    /// leave a cache behind for the next server in the same process (an
+    /// embedded world, a test). Holding the `Arc` here ties its lifetime to the
+    /// world the bytes were compressed for, and lets a test pass a counting
+    /// cache without touching a global.
+    pub slices: Arc<crate::content::SliceCache>,
+
     /// Where every player's body is, and what they have asked to do next.
     ///
     /// Written by the simulation thread and read by the connection tasks, the
@@ -4075,7 +4086,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
     // which stalls does not come back to a pile of instantly-ready ticks.
     let mut beat = tokio::time::interval(tiamat_core::tick::TICK_DURATION);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut transfers = crate::content::Transfers::new();
+    let mut transfers = crate::content::Transfers::with_cache(shared.slices.clone());
     // Skins offered before the join, applied the moment the body exists.
     let mut offered: Vec<(Option<String>, Vec<u8>)> = Vec::new();
     // Chunk deliveries the simulation has answered, waiting to be written.
@@ -5230,6 +5241,7 @@ mod tests {
             name_policy: tiamat_core::session::NamePolicy::Off,
             registry_trust: None,
             uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
+            slices: crate::content::SliceCache::shared(),
             theme: None,
             cloud_layer: None,
             hud_scripts: Vec::new(),
