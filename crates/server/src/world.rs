@@ -1243,6 +1243,11 @@ impl World {
     }
 
     /// The one place a freshly generated chunk enters the world.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the world's own pieces threaded through the one adoption path, so the two \
+                  generators cannot drift"
+    )]
     fn adopt_into(
         db: &WorldDb,
         sql: &std::cell::RefCell<crate::sqlclock::Log>,
