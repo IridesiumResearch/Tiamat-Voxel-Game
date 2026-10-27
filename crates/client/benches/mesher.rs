@@ -35,7 +35,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use client::mesher::{self, Absent, Neighbours, NoFluid, NoGlass, Sight};
+use client::mesher::{self, Absent, Neighbours, NoFluid, NoGlass, PackedVertex, Sight};
 use client::shade::{BlockLight, Uniform};
 use tiamat_core::{BlockPos, BlockValue, Chunk, ChunkPos, MaterialId};
 
@@ -223,6 +223,32 @@ fn mixed() -> Chunk {
     chunk
 }
 
+/// What `Renderer::set_chunk` asks of a mesh: the three owned vertex lists.
+fn frame_buffers(
+    mesh: &mesher::Mesh,
+) -> (
+    Vec<PackedVertex>,
+    Option<Vec<PackedVertex>>,
+    Option<Vec<PackedVertex>>,
+) {
+    (
+        mesh.to_buffers(),
+        (!mesh.has_no_glass()).then(|| mesh.glass_buffers()),
+        (!mesh.has_no_cutout()).then(|| mesh.cutout_buffers()),
+    )
+}
+
+/// What it asks once it reads the worker's expansion: the slices it uploads,
+/// measured by the bytes it would write.
+fn frame_borrowed(mesh: &mesher::Mesh) -> usize {
+    let opaque = mesh.opaque_vertices();
+    let glass = mesh.glass_vertices();
+    let cutout = mesh.cutout_vertices();
+    bytemuck::cast_slice::<PackedVertex, u8>(&opaque).len()
+        + bytemuck::cast_slice::<PackedVertex, u8>(&glass).len()
+        + bytemuck::cast_slice::<PackedVertex, u8>(&cutout).len()
+}
+
 fn meshing(c: &mut Criterion) {
     let mut group = c.benchmark_group("mesh_chunk_stored");
     let stored = Stored::new();
@@ -266,6 +292,42 @@ fn meshing(c: &mut Criterion) {
                     &sight,
                 ))
             });
+        });
+    }
+    group.finish();
+
+    // **What the frame thread pays per finished mesh** (perf audit C5).
+    // `lazy` is the path before Round 2: `Renderer::set_chunk` expanding every
+    // quad on the frame. `copied` is that same call over a mesh the worker
+    // expanded — one copy. `borrowed` is `Mesh::opaque_vertices` and its
+    // siblings, the accessors the renderer moves to, which hand the worker's
+    // slices over as they are. Under dappled light, so the quads are split
+    // the way a lit world splits them.
+    let mut group = c.benchmark_group("frame_upload");
+    let sight = populated();
+    for (name, chunk) in [
+        ("terrain", terrain()),
+        ("chiselled", chiselled()),
+        ("mixed", mixed()),
+    ] {
+        let expanded = mesher::mesh_chunk(
+            &chunk,
+            &Neighbours::none(),
+            Absent::Air,
+            &Dappled,
+            &NoFluid,
+            &sight,
+        );
+        let mut lazy = expanded.clone();
+        lazy.expanded = None;
+        group.bench_function(format!("lazy/{name}"), |b| {
+            b.iter(|| frame_buffers(std::hint::black_box(&lazy)));
+        });
+        group.bench_function(format!("copied/{name}"), |b| {
+            b.iter(|| frame_buffers(std::hint::black_box(&expanded)));
+        });
+        group.bench_function(format!("borrowed/{name}"), |b| {
+            b.iter(|| frame_borrowed(std::hint::black_box(&expanded)));
         });
     }
     group.finish();

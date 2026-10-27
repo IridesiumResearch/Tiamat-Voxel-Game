@@ -16,6 +16,11 @@
 //! few dozen pointer clones, and the upload, which is a tenth of a
 //! millisecond.
 //!
+//! The quads are expanded to vertices on the worker too: `MeshJob::finish`
+//! fills `Mesh::expanded` wherever it runs, so what crosses back to the frame
+//! thread is ready to upload rather than a list to expand there (perf audit
+//! C5).
+//!
 //! # What stays on the frame thread
 //!
 //! **An edit's chunks.** A chunk drawn without the neighbour whose face its
@@ -332,6 +337,10 @@ mod tests {
         assert_eq!(done.pos, ChunkPos::new(0, 0, 0));
         assert_eq!(done.generation, store.generation(done.pos));
         assert!(!done.mesh.quads.is_empty(), "a floor meshed to nothing");
+        assert!(
+            done.mesh.is_expanded(),
+            "the worker expands the vertices; the frame thread only uploads"
+        );
         assert_eq!(pool.backlog(), 0);
     }
 
