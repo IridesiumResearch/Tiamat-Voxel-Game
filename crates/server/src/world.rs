@@ -638,6 +638,15 @@ struct Space {
 /// wrong one with nothing to notice it. Criterion A3 is that a player sees
 /// nothing of a domain they are not in, and the cheapest way to hold that is to
 /// make the compiler ask the question at every call.
+/// One summary chain, each level as the client receives it.
+type SummaryChain = Vec<(u8, Vec<u8>)>;
+
+/// A deferred chain and where it belongs.
+type PendingSummary = (String, ChunkPos, SummaryChain);
+
+/// A chain borrowed for the batch writer.
+type SummaryBatch<'a> = (&'a str, ChunkPos, &'a [(u8, Vec<u8>)]);
+
 pub struct World {
     db: WorldDb,
     /// The seed every generator is handed. Fixed for the world's lifetime.
@@ -681,6 +690,15 @@ pub struct World {
     /// The thread folding the write-ahead log back, off the tick; `None` for
     /// an in-memory world. See `tiamat_core::persist::checkpoint`.
     checkpointer: Option<tiamat_core::persist::checkpoint::Checkpointer>,
+    /// Summary chains a worker answered that have not been written yet.
+    ///
+    /// The horizon can finish several chains in one tick; writing each through
+    /// its own transaction pays the WAL commit several times for what is one
+    /// batch of rows. They are flushed together at the end of
+    /// [`serve_chunk_requests`](crate::handle::serve_chunk_requests), after a
+    /// final dirtiness check — an edit that landed between the worker and the
+    /// flush makes the chain stale.
+    pending_summaries: Vec<PendingSummary>,
 }
 
 impl World {
@@ -714,6 +732,7 @@ impl World {
             fluids: tiamat_core::fluid::Fluids::new(),
             sql: std::cell::RefCell::new(crate::sqlclock::Log::default()),
             checkpointer,
+            pending_summaries: Vec::new(),
         })
     }
 
@@ -1440,6 +1459,74 @@ impl World {
         Ok(wanted)
     }
 
+    /// Keeps a worker's summary chain but writes it with the rest of the tick.
+    ///
+    /// Same rule as [`Self::adopt_summaries`] — a dirty chunk is not stored —
+    /// but no transaction per chain. The caller that answers the worker's
+    /// request already has the bytes it needs, so the disk write can wait for
+    /// [`Self::flush_summaries`] at the end of the service pass.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::NoSuchLevel`] if the chain has no entry at `level`.
+    pub fn adopt_summaries_deferred(
+        &mut self,
+        domain: &str,
+        level: u8,
+        pos: ChunkPos,
+        chain: &[(u8, Vec<u8>)],
+    ) -> Result<Vec<u8>, WorldError> {
+        self.computed += 1;
+        let wanted = chain
+            .iter()
+            .find(|(at, _)| *at == level)
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or(WorldError::NoSuchLevel { level })?;
+        if !self.is_dirty(domain, pos) {
+            self.pending_summaries
+                .push((domain.to_owned(), pos, chain.to_vec()));
+        }
+        Ok(wanted)
+    }
+
+    /// Writes the deferred summary chains in one transaction.
+    ///
+    /// Re-checks dirtiness at the flush: a chunk edited after its worker
+    /// answered has a chain that no longer describes it, and the row would be
+    /// deleted by that chunk's next save anyway. Returns how many chains were
+    /// written. A database error puts them back for the next flush rather than
+    /// dropping work a worker already did.
+    ///
+    /// # Errors
+    ///
+    /// A database error storing the batch.
+    pub fn flush_summaries(&mut self) -> Result<usize, WorldError> {
+        if self.pending_summaries.is_empty() {
+            return Ok(0);
+        }
+        let pending = std::mem::take(&mut self.pending_summaries);
+        let mut ready = Vec::with_capacity(pending.len());
+        for (domain, pos, chain) in pending {
+            if !self.is_dirty(&domain, pos) {
+                ready.push((domain, pos, chain));
+            }
+        }
+        if ready.is_empty() {
+            return Ok(0);
+        }
+        let refs: Vec<SummaryBatch<'_>> = ready
+            .iter()
+            .map(|(domain, pos, chain)| (domain.as_str(), *pos, chain.as_slice()))
+            .collect();
+        match self.timed("save summaries", |db| db.save_summaries_batch(refs)) {
+            Ok(written) => Ok(written),
+            Err(err) => {
+                self.pending_summaries = ready;
+                Err(err)
+            }
+        }
+    }
+
     /// Whether a chunk has edits the database has not seen.
     fn is_dirty(&self, domain: &str, pos: ChunkPos) -> bool {
         self.domains
@@ -2023,6 +2110,10 @@ impl World {
     /// keeping it would mean a destroyed ship still had terrain.
     pub fn forget_domain(&mut self, domain: &str) -> Result<(), WorldError> {
         self.domains.remove(domain);
+        // A worker's chain for the domain must not outlive the rows it
+        // describes; the domain is being removed from the file.
+        self.pending_summaries
+            .retain(|(pending, _, _)| pending != domain);
         self.timed("remove domain", |db| db.remove_domain(domain))
     }
 
@@ -2032,6 +2123,9 @@ impl World {
     ///
     /// [`WorldError`] if the final write fails.
     pub fn close(mut self) -> Result<(), WorldError> {
+        // Before the save: a chunk that is dirty now must not have its pending
+        // summary written after the save has made it clean.
+        self.flush_summaries()?;
         self.save_dirty()?;
         if let Some(checkpointer) = self.checkpointer.take() {
             checkpointer.stop();

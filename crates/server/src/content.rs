@@ -207,6 +207,12 @@ impl Transfers {
         index: &ContentIndex,
         uploads: &ContentIndex,
     ) -> usize {
+        // **Past the quota there is nothing left to accept.** Queuing an item
+        // here only to clear it on the next pass left the connection's beat
+        // arm awake every 50 ms for a transfer that could never happen.
+        if self.over_quota() {
+            return 0;
+        }
         let mut accepted = 0;
         for hash in hashes {
             if self.queued.contains(hash)
@@ -243,6 +249,13 @@ impl Transfers {
                 // quota has almost certainly finished anyway, and dropping a
                 // connection over a byte count would punish a legitimately
                 // large mod pack the same as an attack.
+                //
+                // **And drop what is left.** Nothing queued can ever be sent
+                // now; keeping it made the endpoint's beat condition true for
+                // ever, waking the connection every 50 ms to produce nothing.
+                self.queue.clear();
+                self.queued.clear();
+                self.slice = 0;
                 break;
             }
             let Some(hash) = self.queue.front().copied() else {
@@ -290,6 +303,13 @@ impl Transfers {
             }
         }
 
+        // A slice sent on this pass may have crossed the quota with items still
+        // queued; clear those too, for the reason in the loop above.
+        if self.over_quota() {
+            self.queue.clear();
+            self.queued.clear();
+            self.slice = 0;
+        }
         out
     }
 
@@ -854,6 +874,37 @@ mod tests {
             "one slice fitted the quota, and nothing else was sent"
         );
         assert!(transfers.over_quota());
+        assert_eq!(
+            transfers.queued(),
+            0,
+            "nothing is left to wake the connection's beat for"
+        );
+    }
+
+    #[test]
+    fn a_request_past_the_quota_is_not_even_queued() {
+        let (index, hash, _) = index_with("quota-request", SLICE_BYTES);
+        let mut transfers = Transfers::new();
+        transfers.sent_bytes = QUOTA_BYTES;
+        assert_eq!(
+            transfers.request(&[hash], &index, &ContentIndex::new()),
+            0,
+            "a request past the quota is refused rather than queued"
+        );
+        assert_eq!(transfers.queued(), 0);
+        assert!(wire(&mut transfers, &index).is_empty());
+    }
+
+    #[test]
+    fn crossing_the_quota_mid_pass_drops_the_rest_of_the_queue() {
+        let (index, hash, _) = index_with("quota-mid-pass", SLICE_BYTES * 4);
+        let mut transfers = Transfers::new();
+        transfers.sent_bytes = QUOTA_BYTES - 1;
+        transfers.request(&[hash], &index, &ContentIndex::new());
+        let slices = transfers.next_slices(&index, &ContentIndex::new());
+        assert_eq!(slices.len(), 1, "one slice crossed the quota");
+        assert!(transfers.over_quota());
+        assert_eq!(transfers.queued(), 0, "the remainder was abandoned");
     }
 
     #[test]
@@ -937,9 +988,11 @@ mod tests {
         assert_eq!(transfers.sent_bytes(), 4096);
 
         // Force the quota to its limit and confirm sending stops, even for an
-        // item the client may ask for again.
+        // item the client may ask for again. The request is refused rather
+        // than queued: there is no later pass in which it could be served, and
+        // a queued entry would keep the connection's beat arm awake for ever.
         transfers.sent_bytes = QUOTA_BYTES;
-        assert_eq!(transfers.request(&[hash], &index, &ContentIndex::new()), 1);
+        assert_eq!(transfers.request(&[hash], &index, &ContentIndex::new()), 0);
         assert!(transfers.over_quota());
         assert!(
             transfers

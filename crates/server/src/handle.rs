@@ -971,7 +971,7 @@ fn serve_chunk_requests(
             if let Some(level) = request.level {
                 let at = std::time::Instant::now();
                 let summary = world
-                    .adopt_summaries(&request.domain, level, request.pos, &done.summaries)
+                    .adopt_summaries_deferred(&request.domain, level, request.pos, &done.summaries)
                     .map_err(|err| {
                         debug!(pos = ?request.pos, level, "could not summarise: {err}");
                     })
@@ -1127,6 +1127,11 @@ fn serve_chunk_requests(
             &mut report,
         );
         report.chunks += 1;
+    }
+    // **One transaction for the tick's worker summaries.** The horizon can
+    // finish several chains in this pass; each used to commit on its own.
+    if let Err(err) = world.flush_summaries() {
+        error!("could not store the tick's summaries: {err}");
     }
     report.waiting = parked.waiting() + parked.ready.len();
     report
@@ -2746,6 +2751,7 @@ impl ServerHandle {
             skies,
             domains: std::sync::OnceLock::new(),
             content: content_index,
+            slices: crate::content::SliceCache::shared(),
             allowlist: std::sync::RwLock::new(settings.allowlist.clone()),
             // **Parsed once, here, and anything unreadable is refused loudly.**
             // A typo in an operator list is a player who silently does not get
