@@ -41,6 +41,8 @@
 
 // `face_shade` here is the mode 1 directional constant below; the light
 // sampler comes in under a name that says which one it is.
+use std::borrow::Cow;
+
 use crate::shade::{
     BlockLight, CornerLightCache, Shade, face_shade as sample_corner_light,
     face_shade_cached as sample_corner_light_cached,
@@ -1365,6 +1367,31 @@ pub struct Mesh {
     /// chunk's own from the light it was meshed against, which the mesher
     /// cannot see — see `ChunkStore::open_sky`.
     pub open_sky: OpenSky,
+    /// The three quad lists expanded to vertices, when the mesher did it.
+    ///
+    /// [`MeshJob::finish`] and [`mesh`] fill this where they run — on a mesh
+    /// worker, for every streaming chunk — so the frame thread's upload is a
+    /// copy of these rather than an expansion of the quads (perf audit C5).
+    /// `None` is a mesh nobody expanded, [`mesh_summary`]'s say, and the
+    /// accessors expand it on demand exactly as they always did.
+    ///
+    /// Read through [`Mesh::opaque_vertices`] and its siblings rather than
+    /// directly: they notice a quad list that changed after this was filled
+    /// and expand afresh rather than serve what no longer matches.
+    pub expanded: Option<Expanded>,
+}
+
+/// A mesh's quad lists expanded to the vertices a renderer uploads: four a
+/// quad, in [`quad_corner_order`], drawn through the shared index pattern of
+/// [`quad_indices`]. See [`Mesh::expanded`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Expanded {
+    /// [`Mesh::quads`] expanded.
+    pub opaque: Vec<PackedVertex>,
+    /// [`Mesh::glass_quads`] expanded.
+    pub glass: Vec<PackedVertex>,
+    /// [`Mesh::cutout_quads`] expanded.
+    pub cutout: Vec<PackedVertex>,
 }
 
 /// One block of a chunk that is drawn as a model rather than as cells.
@@ -1549,7 +1576,7 @@ impl Mesh {
     /// plausible one.
     #[must_use]
     pub fn to_buffers(&self) -> Vec<PackedVertex> {
-        Self::buffers_of(&self.quads)
+        self.opaque_vertices().into_owned()
     }
 
     /// The same, for the transparent quads.
@@ -1559,17 +1586,95 @@ impl Mesh {
     /// vectors to allocate and throw away.
     #[must_use]
     pub fn glass_buffers(&self) -> Vec<PackedVertex> {
-        Self::buffers_of(&self.glass_quads)
+        self.glass_vertices().into_owned()
     }
 
     /// The same, for the alpha-tested faces of foliage.
     #[must_use]
     pub fn cutout_buffers(&self) -> Vec<PackedVertex> {
-        Self::buffers_of(&self.cutout_quads)
+        self.cutout_vertices().into_owned()
     }
 
-    /// Expands any list of quads. Shared by both of the above, so the opaque
-    /// and transparent halves cannot wind differently.
+    /// The opaque vertices: borrowed from [`Mesh::expanded`] when the mesher
+    /// filled it, expanded here when it did not.
+    ///
+    /// **The renderer's upload should read this**, not [`Mesh::to_buffers`].
+    /// A mesh a worker expanded is uploaded straight from the slice, and the
+    /// frame thread neither expands nor copies (perf audit C5); `to_buffers`
+    /// is the same bytes with one copy, kept for the callers that own them.
+    ///
+    /// Bit-identical either way — one function, `buffers_of`, makes both —
+    /// and an expansion its quad list has outgrown is not served: a list that
+    /// changed since is expanded afresh.
+    #[must_use]
+    pub fn opaque_vertices(&self) -> Cow<'_, [PackedVertex]> {
+        Self::vertices_of(
+            &self.quads,
+            self.expanded.as_ref().map(|e| e.opaque.as_slice()),
+        )
+    }
+
+    /// The same, for the transparent quads.
+    #[must_use]
+    pub fn glass_vertices(&self) -> Cow<'_, [PackedVertex]> {
+        Self::vertices_of(
+            &self.glass_quads,
+            self.expanded.as_ref().map(|e| e.glass.as_slice()),
+        )
+    }
+
+    /// The same, for the alpha-tested faces of foliage.
+    #[must_use]
+    pub fn cutout_vertices(&self) -> Cow<'_, [PackedVertex]> {
+        Self::vertices_of(
+            &self.cutout_quads,
+            self.expanded.as_ref().map(|e| e.cutout.as_slice()),
+        )
+    }
+
+    /// Serves an expansion that still matches its quads, and makes one when
+    /// it does not.
+    ///
+    /// Four vertices a quad is the one thing an expansion and its list agree
+    /// on by construction, so a count that differs is a list edited since —
+    /// a quad pushed by a test, say — and stale vertices must not reach the
+    /// card. The check is a length compare, which costs nothing.
+    fn vertices_of<'a>(
+        quads: &[Quad],
+        expanded: Option<&'a [PackedVertex]>,
+    ) -> Cow<'a, [PackedVertex]> {
+        match expanded {
+            Some(vertices) if vertices.len() == quads.len() * 4 => Cow::Borrowed(vertices),
+            _ => Cow::Owned(Self::buffers_of(quads)),
+        }
+    }
+
+    /// Expands the three quad lists into [`Mesh::expanded`].
+    ///
+    /// Called by [`MeshJob::finish`] and [`mesh`] on whichever thread meshed,
+    /// which for a streaming chunk is a worker. Idempotent, and the thing to
+    /// call again after a quad list is changed by hand.
+    pub fn expand(&mut self) {
+        self.expanded = Some(Expanded {
+            opaque: Self::buffers_of(&self.quads),
+            glass: Self::buffers_of(&self.glass_quads),
+            cutout: Self::buffers_of(&self.cutout_quads),
+        });
+    }
+
+    /// Whether [`Mesh::expanded`] is filled and matches every quad list.
+    #[must_use]
+    pub fn is_expanded(&self) -> bool {
+        self.expanded.as_ref().is_some_and(|e| {
+            e.opaque.len() == self.quads.len() * 4
+                && e.glass.len() == self.glass_quads.len() * 4
+                && e.cutout.len() == self.cutout_quads.len() * 4
+        })
+    }
+
+    /// Expands any list of quads. Shared by every path above, so the opaque
+    /// and transparent halves cannot wind differently — and so the worker's
+    /// expansion is the frame thread's, bit for bit.
     fn buffers_of(quads: &[Quad]) -> Vec<PackedVertex> {
         let mut vertices = Vec::with_capacity(quads.len() * 4);
 
@@ -2532,6 +2637,11 @@ impl MeshJob {
         mesh.billboards = lit_billboards(&grid, light);
         mesh.models = grid.models;
         mesh.flickers = grid.flickers;
+        // Expanded here, on the worker that meshed, so the frame thread's
+        // upload is a copy and not this (perf audit C5). The urgent chunks
+        // an edit touched are finished on the frame thread, where this is
+        // the same work in a different place.
+        mesh.expand();
         mesh
     }
 }
@@ -2549,6 +2659,7 @@ pub fn mesh(grid: &SubNodeGrid, light: &impl BlockLight) -> Mesh {
     mesh.billboards = lit_billboards(grid, light);
     mesh.models.clone_from(&grid.models);
     mesh.flickers.clone_from(&grid.flickers);
+    mesh.expand();
     mesh
 }
 
@@ -4695,8 +4806,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_populated_sight_meshes_one_of_each_kind() {
+    /// A pane, a canopy, two plants, a lantern and a torch on a bare chunk,
+    /// and a sight that knows each: one of every kind the mesher sorts into
+    /// its own list.
+    fn one_of_each() -> (Chunk, Sight) {
         let sight = Sight {
             glass: [7].into(),
             foliage: [8].into(),
@@ -4719,6 +4832,12 @@ mod tests {
                 .set_subnode(BlockPos::new(x, 2, 2).subnode(1, 0, 1), MaterialId(plant))
                 .expect("in chunk");
         }
+        (world, sight)
+    }
+
+    #[test]
+    fn a_populated_sight_meshes_one_of_each_kind() {
+        let (world, sight) = one_of_each();
         let mesh = mesh_chunk(
             &world,
             &Neighbours::open(),
@@ -4748,6 +4867,92 @@ mod tests {
                 material: 12
             }]
         );
+    }
+
+    #[test]
+    fn a_finished_mesh_carries_the_vertices_the_frame_thread_used_to_expand() {
+        // Perf audit C5: the expansion moved to the worker, and the renderer
+        // must be handed the bytes it used to make for itself — through the
+        // same function, so the check is that what it is handed IS what
+        // expanding the quads gives, list by list.
+        let (world, sight) = one_of_each();
+        let mesh = mesh_chunk(
+            &world,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &NoFluid,
+            &sight,
+        );
+        assert!(mesh.is_expanded(), "finished here, so expanded here");
+        assert!(
+            !mesh.glass_quads.is_empty() && !mesh.cutout_quads.is_empty(),
+            "every list in play"
+        );
+
+        let mut lazy = mesh.clone();
+        lazy.expanded = None;
+        assert!(
+            matches!(mesh.opaque_vertices(), Cow::Borrowed(_)),
+            "the worker's, as they are"
+        );
+        assert!(
+            matches!(lazy.opaque_vertices(), Cow::Owned(_)),
+            "expanded on demand, as before"
+        );
+        assert_eq!(mesh.to_buffers(), lazy.to_buffers());
+        assert_eq!(mesh.glass_buffers(), lazy.glass_buffers());
+        assert_eq!(mesh.cutout_buffers(), lazy.cutout_buffers());
+        assert_eq!(mesh.opaque_vertices().len(), mesh.vertex_count());
+        assert_eq!(mesh.glass_vertices().len(), mesh.glass_quads.len() * 4);
+        assert_eq!(mesh.cutout_vertices().len(), mesh.cutout_quads.len() * 4);
+    }
+
+    #[test]
+    fn a_stepped_job_expands_as_a_one_shot_mesh_does() {
+        let (world, sight) = one_of_each();
+        let one_shot = mesh_chunk(
+            &world,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &NoFluid,
+            &sight,
+        );
+        let mut job = MeshJob::start(&world, &Neighbours::open(), Absent::Air, &NoFluid, &sight)
+            .expect("not air");
+        while !job.step(&DAY) {}
+        let stepped = job.finish(&DAY);
+        assert!(stepped.is_expanded());
+        assert_eq!(stepped.expanded, one_shot.expanded);
+    }
+
+    #[test]
+    fn an_expansion_a_quad_list_has_outgrown_is_not_served() {
+        let (world, sight) = one_of_each();
+        let mut mesh = mesh_chunk(
+            &world,
+            &Neighbours::open(),
+            Absent::Air,
+            &DAY,
+            &NoFluid,
+            &sight,
+        );
+        let first = mesh.quads[0];
+        mesh.quads.push(first);
+        assert!(!mesh.is_expanded());
+        assert!(
+            matches!(mesh.opaque_vertices(), Cow::Owned(_)),
+            "expanded afresh"
+        );
+        assert_eq!(mesh.opaque_vertices().len(), mesh.vertex_count());
+        assert!(
+            matches!(mesh.glass_vertices(), Cow::Borrowed(_)),
+            "the list that did not change still is"
+        );
+        mesh.expand();
+        assert!(mesh.is_expanded());
+        assert!(matches!(mesh.opaque_vertices(), Cow::Borrowed(_)));
     }
 
     #[test]

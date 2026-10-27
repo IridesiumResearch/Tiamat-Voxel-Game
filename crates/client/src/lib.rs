@@ -36,12 +36,14 @@
 )]
 
 pub mod app;
+pub mod atlaswork;
 pub mod audio;
 pub mod cache;
 pub mod camera;
 pub mod chat;
 pub mod config;
 pub mod cut;
+pub mod decoded;
 pub mod dialog;
 pub mod discovery;
 pub mod entities;
