@@ -36,6 +36,7 @@
 )]
 
 pub mod app;
+pub mod atlaswork;
 pub mod audio;
 pub mod cache;
 pub mod camera;

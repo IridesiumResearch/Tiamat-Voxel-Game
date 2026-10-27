@@ -27,7 +27,11 @@
 //! "this server has a broken texture". Magenta checks have meant "missing
 //! texture" since Quake.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
+
+use tiamat_core::MaterialId;
+use tiamat_core::proto::MaterialDef;
 
 /// Largest texture edge accepted, in pixels.
 ///
@@ -468,6 +472,47 @@ impl Atlas {
     /// than invisible.
     #[must_use]
     pub fn build(textures: &[Option<Image>]) -> Self {
+        let borrowed: Vec<Option<&Image>> = textures.iter().map(Option::as_ref).collect();
+        Self::build_from(&borrowed)
+    }
+
+    /// Builds the atlas for a material table from the textures that arrived:
+    /// the slot IS the material id, which is what lets the shader turn a
+    /// vertex's material into tile coordinates with arithmetic rather than a
+    /// lookup. Ids the server sent no texture for become the magenta
+    /// chequer; air, which the mesher culls before a quad exists, gets no
+    /// tile at all.
+    ///
+    /// Foliage, sprites and items are marked alpha-tested here — a leaf
+    /// through `cut_out`, an item through the prop pass's own cutout — so
+    /// their mips keep the artist's coverage (see [`Atlas::mips`]) rather
+    /// than thinning to speckle with distance.
+    ///
+    /// What `App::build_atlas` does, here so a worker can do it
+    /// (`crate::atlaswork`, perf audit A1), and over borrowed images so a
+    /// table's textures are not cloned to be read once.
+    #[must_use]
+    pub fn for_table(table: &[MaterialDef], images: &BTreeMap<u16, Image>) -> Self {
+        let highest = table.iter().map(|entry| entry.id).max().unwrap_or(0);
+        let mut slots: Vec<Option<&Image>> = vec![None; usize::from(highest) + 1];
+        for entry in table {
+            if entry.id == MaterialId::AIR.0 {
+                continue;
+            }
+            slots[usize::from(entry.id)] = images.get(&entry.id);
+        }
+        let mut atlas = Self::build_from(&slots);
+        for entry in table {
+            if entry.cutout || entry.billboard || !entry.placeable {
+                atlas.mark_alpha_tested(entry.id);
+            }
+        }
+        atlas
+    }
+
+    /// [`Atlas::build`] over borrowed textures.
+    #[must_use]
+    pub fn build_from(textures: &[Option<&Image>]) -> Self {
         // Square grid, big enough for everything. Rounded up to a power of two
         // so the shader's coordinate maths is shifts rather than divisions.
         let count = textures.len().max(1) as u32;
@@ -484,7 +529,7 @@ impl Atlas {
         let mut filled = 0;
         for (index, texture) in textures.iter().enumerate() {
             let slot = u32::try_from(index).unwrap_or(0);
-            let tile = texture.as_ref().map_or_else(Image::missing, Image::to_tile);
+            let tile = texture.map_or_else(Image::missing, Image::to_tile);
             filled += usize::from(texture.is_some());
             opaque.push(opacity_mask(&tile));
             blit_padded(&mut image, &tile, slot % grid, slot / grid);
@@ -1143,6 +1188,55 @@ mod tests {
             writer.write_image_data(&data).expect("data");
         }
         out
+    }
+
+    fn material(id: u16, textured: bool, cutout: bool, placeable: bool) -> MaterialDef {
+        MaterialDef {
+            id,
+            name: format!("test:{id}"),
+            texture: textured.then_some([u8::try_from(id).expect("a small id"); 32]),
+            step_sound: None,
+            placeable,
+            transparent: false,
+            cutout,
+            passable: false,
+            sway: false,
+            billboard: false,
+            billboard_cross: false,
+            friction: 1.0,
+            tint: None,
+            whole: false,
+            model: None,
+            flicker: None,
+        }
+    }
+
+    #[test]
+    fn the_table_builder_packs_exactly_what_the_app_packed() {
+        // `App::build_atlas` is the path the game ran; this is the same work
+        // somewhere a worker can run it, and until the app is wired to call
+        // it the two must agree tile for tile and mip for mip.
+        let table = vec![
+            material(0, false, false, true),
+            material(1, true, false, true),
+            material(2, true, false, true),
+            material(3, true, true, true),
+            material(4, true, false, false),
+        ];
+        let mut images = BTreeMap::new();
+        images.insert(1, Image::solid(16, 16, [200, 30, 30, 255]));
+        images.insert(3, Image::tinted_with_border([30, 200, 30]));
+        images.insert(4, Image::white_with_border());
+        let here = Atlas::for_table(&table, &images);
+        let app = crate::app::build_atlas(&table, &images);
+        assert_eq!(here.image, app.image);
+        assert_eq!(here.mips(), app.mips());
+        assert_eq!(here.tiles_only(), app.tiles_only());
+        assert_eq!(here.filled(), app.filled());
+        assert_eq!(here.filled(), 3);
+        for id in 0..5 {
+            assert_eq!(here.slot_of(id), app.slot_of(id));
+        }
     }
 
     #[test]
