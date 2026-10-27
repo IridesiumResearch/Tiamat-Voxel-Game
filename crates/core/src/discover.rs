@@ -34,13 +34,15 @@ pub const PORT: u16 = 47812;
 ///
 /// Frequent enough that a client that has just opened the screen fills in
 /// within a moment, and rare enough that fifty of them are nothing.
-pub const INTERVAL_MS: u64 = 1_000;
+pub const INTERVAL_MS: u64 = 250;
 
 /// How long a beacon is worth showing after it was last heard.
 ///
-/// Three intervals: one missed datagram is ordinary on a busy network and
-/// should not make a world flicker out of the list.
-pub const STALE_MS: u64 = 3_500;
+/// **Six intervals.** At the old one-second beat three intervals was a
+/// reasonable guard against one missed datagram; at the 250 ms beat it would
+/// make a world flicker out of the list on one busy Wi-Fi moment, so the
+/// window stays generous (1.5 s) rather than shrinking with the interval.
+pub const STALE_MS: u64 = 1_500;
 
 /// The largest datagram worth reading.
 ///
