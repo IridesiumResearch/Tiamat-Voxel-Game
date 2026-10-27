@@ -66,7 +66,24 @@ const CONTENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20)
 /// has hung. Ten seconds is far longer than any handshake that is going to
 /// succeed and short enough that "it is not there" arrives while the player is
 /// still looking at the screen.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// **The whole of it is paid when nothing is listening.** An ICMP "port
+/// unreachable" is not authenticated, QUIC does not act on one, and quinn
+/// keeps retrying its Initial until the deadline — so a dead address costs
+/// the full timeout, whatever the network says sooner. That is why the
+/// deadline is a parameter of [`Connecting::start`] and a LAN join passes
+/// the shorter [`LAN_CONNECT_TIMEOUT`].
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a LAN join waits for a handshake.
+///
+/// A host on the segment that is there answers an Initial in a millisecond
+/// or two, and one that has gone is still listed for
+/// [`tiamat_core::discover::STALE_MS`] after its last beacon — the entry a
+/// player clicks (perf audit N1). Three seconds is long enough for a host
+/// whose machine is busy and short enough that "it is gone" arrives before
+/// the player wonders whether the click took.
+pub const LAN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Anything that stops a connection being established.
 #[derive(Debug, thiserror::Error)]
@@ -822,36 +839,20 @@ impl Connection {
         pinning: Pinning<'_>,
         impairment: tiamat_server::transport::Impairment,
     ) -> Result<Self, NetError> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("tiamat-client-net")
-            .build()
-            .map_err(NetError::Thread)?;
-
-        let (event_tx, events) = mpsc::unbounded_channel();
-        let (commands, command_rx) = mpsc::unbounded_channel();
-
-        // Connect on the runtime and wait for it, so a bad address or a changed
+        // Started and waited for here, so a bad address or a changed
         // fingerprint is an error from `open` rather than a `Disconnected`
-        // event a caller might not be listening for yet.
-        let connected = runtime.block_on(connect(address, pinning))?;
-
-        runtime.spawn(session(
-            connected,
+        // event a caller might not be listening for yet. A caller that
+        // cannot wait — the window thread — uses [`Connecting`] itself.
+        Connecting::start_impaired(
+            address,
             identity,
             display_name,
             cache,
-            event_tx,
-            command_rx,
+            pinning,
+            CONNECT_TIMEOUT,
             impairment,
-        ));
-
-        Ok(Self {
-            events,
-            commands,
-            runtime: Some(runtime),
-        })
+        )?
+        .wait()
     }
 
     /// Takes the next event, or `None` if none is waiting.
@@ -874,6 +875,257 @@ impl Connection {
             // for a task that is blocked, and a client quitting must quit.
             runtime.shutdown_timeout(std::time::Duration::from_secs(2));
         }
+    }
+}
+
+/// A connection being opened, off the thread that asked for it.
+///
+/// # Why this exists beside [`Connection::open`]
+///
+/// `open` blocks its caller for as long as the handshake takes — up to
+/// [`CONNECT_TIMEOUT`] — and its caller is the window thread. Clicking a LAN
+/// world whose host had gone froze the whole interface for ten seconds with
+/// nothing to cancel (perf audit N1): the entry stays listed for
+/// [`tiamat_core::discover::STALE_MS`] after the last beacon, and a QUIC
+/// client told nothing is listening keeps trying until its deadline. This
+/// starts the same connect on the same runtime and returns at once; the
+/// caller polls it from its loop, draws "connecting…" meanwhile, and can give
+/// up. `open` is this, waited on.
+///
+/// # One answer
+///
+/// [`Connecting::poll`] answers once. After it has, the runtime belongs to
+/// the [`Connection`] it handed over — or was shut down with the failure —
+/// and there is nothing left here but a value to drop.
+pub struct Connecting {
+    /// The runtime the attempt runs on, and the session after it. Taken by
+    /// the answer, whichever way it went.
+    runtime: Option<tokio::runtime::Runtime>,
+    /// The attempt's answer.
+    outcome: tokio::sync::oneshot::Receiver<Result<Connected, NetError>>,
+    /// The attempt, to abort when the caller gives up.
+    attempt: tokio::task::AbortHandle,
+    /// What the session needs once the transport is up.
+    waiting: Option<Waiting>,
+    /// Where, for the error when the attempt vanishes without a word.
+    address: String,
+}
+
+/// What a session is started with, held while its transport is on the way.
+struct Waiting {
+    identity: Identity,
+    display_name: String,
+    cache: ContentCache,
+    impairment: tiamat_server::transport::Impairment,
+}
+
+/// [`Pinning`] without the borrow, for an attempt that outlives the call.
+enum Pin {
+    Remembered(std::path::PathBuf),
+    OwnServer,
+}
+
+impl From<Pinning<'_>> for Pin {
+    fn from(pinning: Pinning<'_>) -> Self {
+        match pinning {
+            Pinning::Remembered(path) => Self::Remembered(path.to_path_buf()),
+            Pinning::OwnServer => Self::OwnServer,
+        }
+    }
+}
+
+impl Pin {
+    fn borrow(&self) -> Pinning<'_> {
+        match self {
+            Self::Remembered(path) => Pinning::Remembered(path),
+            Self::OwnServer => Pinning::OwnServer,
+        }
+    }
+}
+
+impl Connecting {
+    /// Starts connecting and returns at once.
+    ///
+    /// `timeout` bounds the handshake: [`CONNECT_TIMEOUT`] for an address
+    /// somebody typed, [`LAN_CONNECT_TIMEOUT`] for one the network list
+    /// offered.
+    ///
+    /// # Errors
+    ///
+    /// [`NetError::Thread`] if the runtime could not be started. Everything
+    /// else — nothing listening, a changed fingerprint — is the answer
+    /// [`Connecting::poll`] gives.
+    pub fn start(
+        address: SocketAddr,
+        identity: Identity,
+        display_name: String,
+        cache: ContentCache,
+        pinning: Pinning<'_>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, NetError> {
+        Self::start_impaired(
+            address,
+            identity,
+            display_name,
+            cache,
+            pinning,
+            timeout,
+            tiamat_server::transport::Impairment::default(),
+        )
+    }
+
+    /// The same, over a deliberately bad network — see
+    /// [`Connection::open_impaired`] for what that is for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connecting::start`].
+    pub fn start_impaired(
+        address: SocketAddr,
+        identity: Identity,
+        display_name: String,
+        cache: ContentCache,
+        pinning: Pinning<'_>,
+        timeout: std::time::Duration,
+        impairment: tiamat_server::transport::Impairment,
+    ) -> Result<Self, NetError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("tiamat-client-net")
+            .build()
+            .map_err(NetError::Thread)?;
+        let (answer, outcome) = tokio::sync::oneshot::channel();
+        let pin = Pin::from(pinning);
+        let attempt = runtime
+            .spawn(async move {
+                // A receiver that has gone is a caller that gave up; there
+                // is nobody to tell.
+                let _ = answer.send(connect(address, pin.borrow(), timeout).await);
+            })
+            .abort_handle();
+        Ok(Self {
+            runtime: Some(runtime),
+            outcome,
+            attempt,
+            waiting: Some(Waiting {
+                identity,
+                display_name,
+                cache,
+                impairment,
+            }),
+            address: address.to_string(),
+        })
+    }
+
+    /// Where this is connecting to.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The outcome, once there is one.
+    ///
+    /// Non-blocking: for a loop that draws between calls. Answers exactly
+    /// once — see the type's note.
+    pub fn poll(&mut self) -> Option<Result<Connection, NetError>> {
+        use tokio::sync::oneshot::error::TryRecvError;
+        self.runtime.as_ref()?;
+        let outcome = match self.outcome.try_recv() {
+            Ok(outcome) => outcome,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Closed) => Err(self.vanished()),
+        };
+        Some(self.settle(outcome))
+    }
+
+    /// Blocks until the attempt answers. What [`Connection::open`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`NetError::Connect`] if the transport fails,
+    /// [`NetError::FingerprintChanged`] if the server presented a certificate
+    /// other than the one pinned for its address.
+    pub fn wait(mut self) -> Result<Connection, NetError> {
+        let outcome = match &self.runtime {
+            Some(runtime) => runtime
+                .block_on(&mut self.outcome)
+                .unwrap_or_else(|_| Err(self.vanished())),
+            None => return Err(self.vanished()),
+        };
+        self.settle(outcome)
+    }
+
+    /// Gives up. Returns at once: the attempt is aborted and its runtime
+    /// shut down without waiting for it.
+    pub fn cancel(mut self) {
+        self.abandon();
+    }
+
+    fn abandon(&mut self) {
+        self.attempt.abort();
+        if let Some(runtime) = self.runtime.take() {
+            // Without waiting: the only task is the one just aborted, and a
+            // cancel from the window thread must not stall it.
+            runtime.shutdown_background();
+        }
+    }
+
+    fn vanished(&self) -> NetError {
+        NetError::Connect {
+            address: self.address.clone(),
+            reason: "the connection attempt stopped without an answer".to_owned(),
+        }
+    }
+
+    /// Turns the attempt's answer into the caller's: a session on the
+    /// runtime, or the runtime shut down with the error.
+    fn settle(&mut self, outcome: Result<Connected, NetError>) -> Result<Connection, NetError> {
+        let (Some(runtime), Some(waiting)) = (self.runtime.take(), self.waiting.take()) else {
+            return Err(self.vanished());
+        };
+        match outcome {
+            Ok(connected) => {
+                let (event_tx, events) = mpsc::unbounded_channel();
+                let (commands, command_rx) = mpsc::unbounded_channel();
+                runtime.spawn(session(
+                    connected,
+                    waiting.identity,
+                    waiting.display_name,
+                    waiting.cache,
+                    event_tx,
+                    command_rx,
+                    waiting.impairment,
+                ));
+                Ok(Connection {
+                    events,
+                    commands,
+                    runtime: Some(runtime),
+                })
+            }
+            Err(err) => {
+                // The attempt has answered and nothing else ever ran here.
+                runtime.shutdown_background();
+                Err(err)
+            }
+        }
+    }
+}
+
+impl Drop for Connecting {
+    /// An attempt dropped mid-way is abandoned, without waiting.
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
+impl std::fmt::Debug for Connecting {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Connecting")
+            .field("address", &self.address)
+            .field("pending", &self.runtime.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -917,8 +1169,13 @@ struct Connected {
     first_use: bool,
 }
 
-/// Establishes the QUIC connection and settles the trust question.
-async fn connect(address: SocketAddr, pinning: Pinning<'_>) -> Result<Connected, NetError> {
+/// Establishes the QUIC connection and settles the trust question, or gives
+/// up after `timeout`.
+async fn connect(
+    address: SocketAddr,
+    pinning: Pinning<'_>,
+    timeout: std::time::Duration,
+) -> Result<Connected, NetError> {
     let label = address.to_string();
     let mut store = match pinning {
         Pinning::Remembered(path) => Some(TrustStore::load(path)),
@@ -960,13 +1217,13 @@ async fn connect(address: SocketAddr, pinning: Pinning<'_>) -> Result<Connected,
         .connect(address, "tiamat-server")
         .map_err(|err| fail(err.to_string()))?;
 
-    let connection = tokio::time::timeout(CONNECT_TIMEOUT, attempt)
+    let connection = tokio::time::timeout(timeout, attempt)
         .await
         .map_err(|_| {
             fail(format!(
-                "no answer within {} seconds. Check the address and port, and that the server is \
+                "no answer within {}. Check the address and port, and that the server is \
                  running.",
-                CONNECT_TIMEOUT.as_secs()
+                plain_duration(timeout)
             ))
         })?
         .map_err(|err| {
@@ -1033,6 +1290,16 @@ async fn connect(address: SocketAddr, pinning: Pinning<'_>) -> Result<Connected,
         fingerprint,
         first_use,
     })
+}
+
+/// `10 seconds`, `3 seconds`, `300 ms`: a deadline as a player reads it.
+fn plain_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds > 0 && duration.subsec_millis() == 0 {
+        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
+    } else {
+        format!("{} ms", duration.as_millis())
+    }
 }
 
 /// State the join flow accumulates before the world.
@@ -2729,6 +2996,109 @@ mod tests {
         let mut pending = Pending::default();
         pending.requested.insert(hash);
         pending
+    }
+
+    /// Port 1 on loopback: reserved, and never listening.
+    fn nowhere() -> SocketAddr {
+        "127.0.0.1:1".parse().expect("an address")
+    }
+
+    /// Starts connecting to [`nowhere`] with `timeout`, from a fresh home.
+    fn connecting_nowhere(name: &str, timeout: std::time::Duration) -> Connecting {
+        let trust = std::env::temp_dir()
+            .join("tiamat-net-tests")
+            .join(format!("{name}-known-hosts"));
+        let _ = std::fs::remove_file(&trust);
+        Connecting::start(
+            nowhere(),
+            Identity::generate().expect("an identity"),
+            "Viewer".to_owned(),
+            cache(name),
+            Pinning::Remembered(&trust),
+            timeout,
+        )
+        .expect("a runtime")
+    }
+
+    #[test]
+    fn connecting_to_nothing_returns_at_once_and_fails_at_its_own_deadline() {
+        // Perf audit N1: the window thread clicked a LAN entry whose host had
+        // gone and froze for ten seconds. Starting must not block, and the
+        // answer must come at the deadline the caller chose — a LAN join's
+        // three seconds, or this test's third of one — not the typed-address
+        // ten.
+        let started = std::time::Instant::now();
+        let mut connecting = connecting_nowhere("nowhere", std::time::Duration::from_millis(300));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "starting took {:?}; it must not wait for the handshake",
+            started.elapsed()
+        );
+        assert_eq!(connecting.address(), "127.0.0.1:1");
+
+        let outcome = loop {
+            if let Some(outcome) = connecting.poll() {
+                break outcome;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(8),
+                "no answer in {:?}: the deadline was 300 ms",
+                started.elapsed()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let err = outcome.expect_err("nothing listens on port 1");
+        assert!(
+            err.to_string().contains("127.0.0.1:1") && err.to_string().contains("300 ms"),
+            "the error names the address and the deadline: {err}"
+        );
+        assert!(
+            connecting.poll().is_none(),
+            "answered once; there is nothing more to say"
+        );
+    }
+
+    #[test]
+    fn a_connect_can_be_abandoned_while_it_is_still_trying() {
+        // The Cancel button: a player who clicked the wrong world must not
+        // wait out the deadline to click the right one.
+        let connecting = connecting_nowhere("abandoned", CONNECT_TIMEOUT);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let cancelled = std::time::Instant::now();
+        connecting.cancel();
+        assert!(
+            cancelled.elapsed() < std::time::Duration::from_secs(2),
+            "cancel waited {:?} for a handshake that was never coming",
+            cancelled.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_connect_dropped_midway_does_not_hold_its_dropper() {
+        // The window closing, or the front screen replaced: whatever held the
+        // attempt lets go, and letting go is instant.
+        let connecting = connecting_nowhere("dropped", CONNECT_TIMEOUT);
+        let dropped = std::time::Instant::now();
+        drop(connecting);
+        assert!(
+            dropped.elapsed() < std::time::Duration::from_secs(2),
+            "dropping waited {:?}",
+            dropped.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_deadline_reads_as_a_player_would_say_it() {
+        assert_eq!(plain_duration(CONNECT_TIMEOUT), "10 seconds");
+        assert_eq!(plain_duration(LAN_CONNECT_TIMEOUT), "3 seconds");
+        assert_eq!(
+            plain_duration(std::time::Duration::from_secs(1)),
+            "1 second"
+        );
+        assert_eq!(
+            plain_duration(std::time::Duration::from_millis(1500)),
+            "1500 ms"
+        );
     }
 
     #[test]
