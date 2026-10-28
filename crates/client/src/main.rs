@@ -49,6 +49,30 @@ fn own_address(listening: std::net::SocketAddr) -> std::net::SocketAddr {
     }
 }
 
+/// The account this machine's identity holds, or nothing to present.
+///
+/// A missing file is the ordinary first run. A file that will not load is a
+/// warning and an uncertified join: the player can still play, and once the
+/// client can claim and renew (accounts N4) the store rewrites it. Neither is
+/// a reason to refuse the connection.
+fn account_beside(data: &std::path::Path, identity: &Identity) -> client::account::Presented {
+    let account =
+        match client::account::Account::load(&data.join(client::account::ACCOUNT_FILE), identity) {
+            Ok(account) => account,
+            Err(err) => {
+                tracing::warn!("{err}");
+                return client::account::Presented::empty();
+            }
+        };
+    match account.present() {
+        Ok(presented) => presented,
+        Err(err) => {
+            tracing::warn!("the stored name certificate will not be sent: {err}");
+            client::account::Presented::empty()
+        }
+    }
+}
+
 /// This machine's address on the local network, if it has one.
 ///
 /// **Asked of the routing table rather than of a name server.** A UDP socket
@@ -308,7 +332,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let hosts = data.join("known-hosts");
-        let connection = Connection::open(
+        let presented = account_beside(&data, &identity);
+        let connection = Connection::open_with_account(
             address,
             identity,
             config.display_name.clone(),
@@ -319,6 +344,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 client::net::Pinning::Remembered(&hosts)
             },
+            presented,
         )?;
         // A skin of the player's own, read now so a bad path is a line in
         // the log at the start rather than nothing at the join (Life ask 23).
@@ -1552,7 +1578,11 @@ impl Client {
         let cache = ContentCache::open(&self.data.join("content"))
             .map_err(|err| format!("the content cache could not be opened: {err}"))?;
         let hosts = self.data.join("known-hosts");
-        let connection = Connection::open(
+        // Read per connection, like the identity above: a claim or renewal may
+        // have rewritten it since the last world, and a stale certificate is a
+        // join the registry would not recognise.
+        let presented = account_beside(&self.data, &identity);
+        let connection = Connection::open_with_account(
             address,
             identity,
             self.config.display_name.clone(),
@@ -1565,6 +1595,7 @@ impl Client {
             } else {
                 client::net::Pinning::Remembered(&hosts)
             },
+            presented,
         )
         .map_err(|err| {
             // The server this failed to reach is stopped again, or a second

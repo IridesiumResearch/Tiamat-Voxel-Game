@@ -35,6 +35,7 @@
     clippy::many_single_char_names
 )]
 
+pub mod account;
 pub mod app;
 pub mod audio;
 pub mod cache;

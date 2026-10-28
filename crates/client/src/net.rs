@@ -45,6 +45,7 @@ use tiamat_core::proto::{
 use tiamat_core::{BlockPos, Chunk, ChunkPos};
 use tokio::sync::mpsc;
 
+use crate::account::Presented;
 use crate::cache::ContentCache;
 use crate::texture::{Image, decode_or_missing};
 use crate::trust::{TrustStore, to_hex};
@@ -793,13 +794,42 @@ impl Connection {
         cache: ContentCache,
         pinning: Pinning<'_>,
     ) -> Result<Self, NetError> {
-        Self::open_impaired(
+        Self::open_with_account(
+            address,
+            identity,
+            display_name,
+            cache,
+            pinning,
+            Presented::empty(),
+        )
+    }
+
+    /// Connects carrying the account this identity holds.
+    ///
+    /// `account` is the certificate and rotation records [`Connection`] presents
+    /// on its challenge answer (`crate::account`). [`Presented::empty`] is the
+    /// ordinary join of a player who has not claimed a name; it is what
+    /// [`Self::open`] passes.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::open`].
+    pub fn open_with_account(
+        address: SocketAddr,
+        identity: Identity,
+        display_name: String,
+        cache: ContentCache,
+        pinning: Pinning<'_>,
+        account: Presented,
+    ) -> Result<Self, NetError> {
+        Self::open_full(
             address,
             identity,
             display_name,
             cache,
             pinning,
             tiamat_server::transport::Impairment::default(),
+            account,
         )
     }
 
@@ -821,6 +851,26 @@ impl Connection {
         cache: ContentCache,
         pinning: Pinning<'_>,
         impairment: tiamat_server::transport::Impairment,
+    ) -> Result<Self, NetError> {
+        Self::open_full(
+            address,
+            identity,
+            display_name,
+            cache,
+            pinning,
+            impairment,
+            Presented::empty(),
+        )
+    }
+
+    fn open_full(
+        address: SocketAddr,
+        identity: Identity,
+        display_name: String,
+        cache: ContentCache,
+        pinning: Pinning<'_>,
+        impairment: tiamat_server::transport::Impairment,
+        account: Presented,
     ) -> Result<Self, NetError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -845,6 +895,7 @@ impl Connection {
             event_tx,
             command_rx,
             impairment,
+            account,
         ));
 
         Ok(Self {
@@ -1057,6 +1108,12 @@ struct Pending {
               ORDER — which is the security property, see `session` in core — harder to read \
               rather than easier"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a piece of the one connection this task owns; bundling them into \
+              a struct would only move the same list one line up. The two optional pieces — the \
+              account presented and the injected impairment — are the ones this increment added"
+)]
 async fn session(
     connected: Connected,
     identity: Identity,
@@ -1065,6 +1122,7 @@ async fn session(
     events: mpsc::UnboundedSender<Event>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     impairment: tiamat_server::transport::Impairment,
+    account: Presented,
 ) {
     let Connected {
         endpoint,
@@ -1327,14 +1385,17 @@ async fn session(
             ServerMessage::AuthChallenge { nonce } => {
                 let signature =
                     identity.sign(&challenge_payload(&nonce, &fingerprint, PROTOCOL_VERSION));
+                // **The account rides on the answer, not the greeting.** `Hello`
+                // is the version gate and its shape is pinned; the certificate
+                // and the rotation records that let a server pinned before a
+                // rotation trust it belong here, where both peers have already
+                // agreed on a version. Empty for a player who has not claimed a
+                // name, which is every first run.
                 if let Err(err) = send
                     .write(&ClientMessage::AuthResponse {
                         signature: WireSignature(signature.to_bytes()),
-                        // The client claims no name yet (accounts N4 brings the
-                        // certificate store and its renewal, and with it the
-                        // registry's rotation records to carry here).
-                        name_certificate: None,
-                        registry_rotations: Vec::new(),
+                        name_certificate: account.certificate().map(<[u8]>::to_vec),
+                        registry_rotations: account.rotations().to_vec(),
                     })
                     .await
                 {
