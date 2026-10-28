@@ -153,6 +153,26 @@ async fn wait_until_offline(server: &ServerHandle, uuid: tiamat_core::identity::
     }
 }
 
+/// Waits until the simulation has had `ticks` ticks to notice a departure.
+///
+/// The roster entry goes the moment the connection task ends; the simulation
+/// that fires `on_player_join` learns the player left from the next tick's
+/// presence diff. A reconnect between the two is a player who never left as
+/// far as the hooks are concerned — which is the race this test does not mean
+/// to measure. Two ticks is one to see the absence and one to be safely past
+/// it.
+async fn wait_ticks(server: &ServerHandle, ticks: u64) {
+    let start = server.control().tick();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while server.control().tick() < start.saturating_add(ticks) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server's tick did not advance for ten seconds"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[test]
 fn a_certified_name_wins_and_the_displaced_holder_is_told_why() {
     let (registry, trust) = registry();
@@ -349,8 +369,10 @@ fn the_join_hook_and_the_game_api_agree_and_follow_a_rejoin() {
         assert!(told.contains("lookup=true"), "got {told}");
         certified.disconnect().await;
         // The departing session's slot is released asynchronously; a rejoin in
-        // the same breath is the quick-reconnect race, not the mod API.
+        // the same breath is the quick-reconnect race, not the mod API. Give
+        // the simulation two ticks to see them gone as well as the roster.
         wait_until_offline(&server, uuid).await;
+        wait_ticks(&server, 2).await;
 
         // Same identity, no certificate: the answer is read live, so the mark
         // does not linger from the last join.
