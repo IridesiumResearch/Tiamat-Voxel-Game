@@ -33,9 +33,10 @@
 //!   — so a client looping on renew cannot mint serials, and a recovery's
 //!   revocation of "every certificate the old identity holds" stays small.
 //! - **A claim names an identity, not just a key.** `verify_claim` has already
-//!   shown the signing key to be the identity's own — the root, or a device a
-//!   signed key-set chain reaches from it — so this layer takes the UUID as
-//!   given and keeps no key store.
+//!   shown the signing key to be the identity's own — the root, or a key a
+//!   signed key-set chain reaches from it — and the handler has passed it
+//!   through the memory of retired keys (`crate::retired`), so this layer
+//!   takes the UUID as given and keeps no key store.
 //! - **Nothing commits past the request's deadline.** Every write path ends in
 //!   [`crate::deadline::commit`], so a client told "timed out" was told the
 //!   truth: the work rolled back (review B11).
@@ -286,6 +287,17 @@ pub fn claim(
         &format!("claim {canonical}"),
         now,
         "claim",
+        Some(client),
+    )?;
+    // What the claim's proof showed about the identity's keys: for a first
+    // claim this is the first row the registry keeps of it, and the memory of
+    // retired keys starts here (`crate::retired`, "When it is written").
+    crate::retired::record(
+        &transaction,
+        &claimed.uuid,
+        &claimed.lineage,
+        claimed.timestamp,
+        now,
         Some(client),
     )?;
     let certificate = keys.issue(&claimed.name, claimed.uuid, now, serial);
@@ -887,7 +899,7 @@ mod tests {
     use crate::db::Db;
     use crate::keys::RegistryKeys;
     use ed25519_dalek::SigningKey;
-    use tiamat_core::identity::registry::{Name, verify_certificate};
+    use tiamat_core::identity::registry::{KeyLineage, Name, verify_certificate};
 
     const NOW: i64 = 1_800_000_000;
 
@@ -918,6 +930,7 @@ mod tests {
                 uuid: PlayerUuid::from_root_key(&identity.verifying_key()),
                 public_key: identity.verifying_key(),
                 timestamp: now,
+                lineage: KeyLineage::of_root(identity.verifying_key()),
             };
             let ip: IpAddr = ip.parse().expect("ip");
             self.db
@@ -941,6 +954,7 @@ mod tests {
                 uuid: PlayerUuid::from_root_key(&identity.verifying_key()),
                 public_key: identity.verifying_key(),
                 timestamp: now,
+                lineage: KeyLineage::of_root(identity.verifying_key()),
             };
             self.db
                 .with(|connection| renew(connection, &self.keys, &verified, now, &Deadline::none()))
@@ -953,6 +967,8 @@ mod tests {
                 name: canonical.to_owned(),
                 uuid: PlayerUuid::from_root_key(&identity.verifying_key()),
                 public_key: identity.verifying_key(),
+                timestamp: now,
+                lineage: KeyLineage::of_root(identity.verifying_key()),
             };
             self.db
                 .with(|connection| release(connection, &verified, now, &Deadline::none()))
@@ -1460,6 +1476,7 @@ mod tests {
             uuid: PlayerUuid::from_root_key(&identity.verifying_key()),
             public_key: identity.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(identity.verifying_key()),
         };
         let ip: IpAddr = "203.0.113.1".parse().expect("ip");
         let outcome = fixture
@@ -1494,6 +1511,8 @@ mod tests {
                         name: "alice".to_owned(),
                         uuid: verified.uuid,
                         public_key: verified.public_key,
+                        timestamp: NOW + 1,
+                        lineage: verified.lineage.clone(),
                     },
                     NOW + 1,
                     &late,

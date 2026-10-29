@@ -225,7 +225,15 @@ gate. Line numbers below are from the branch as reviewed and will have moved.
 - Also f4a39311: the macOS red on 13eede23 was a real server race — a quick
   reconnect of the same identity was stripped by the old connection's late
   slot release. Slots now carry a generation and release only what they own.
-- **1 (A3)** is in progress as its own batch, with the two items above.
+- **1 (A3)** and the two leftovers above: 52bc9877 — a `rotate-key` link in
+  the key-set proof, the registry's persisted memory of retired keys and first
+  root commitments, the email proof of work in core's `EmailRequest` and the
+  per-address daily mail cap. This record's "a stolen device key alone still
+  cannot claim" was the misleading sentence: the registry accepted the old root
+  by hash for ever and a proof that never mentioned the rotation. It does not
+  now. Not retroactive: a rotation protects nothing until a request presents
+  it, so a player who suspects a theft should claim, renew or release promptly.
+  The batch is on `feat/accounts-rotation` and awaits the gate.
 
 ## Open, for the implementer
 

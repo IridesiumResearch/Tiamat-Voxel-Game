@@ -20,7 +20,13 @@
 //! | a recovery address whose identity holds no name | thirty days | [`NAMELESS_ADDRESS_GRACE`] |
 //! | a certificate serial | while the certificate can verify | [`crate::names::CERTIFICATE_LIVE_SECONDS`] |
 //! | a limit counter | a week after its window | [`crate::limits::LIMIT_RETENTION`] |
+//! | a retired key, a root's commitment | while the identity has any other row here | `crate::retired::sweep` |
 //!
+//! The last row is the exception to "measured from the row's own time": the
+//! memory of an identity's retired keys is what stops a stolen key acting for
+//! it, so it lasts exactly as long as there is something of the identity's
+//! here to act on — a name, an address, a link, a recovery, a revocation, a
+//! live certificate — and goes in the sweep that removes the last of them.
 //! The audit row itself is kept, as §8 says, without its address. Everything
 //! is measured from the row's own time, so a sweep that runs late deletes more
 //! and one that runs early deletes nothing it should keep.
@@ -74,6 +80,11 @@ pub struct Swept {
     pub revocations: usize,
     /// Spent limit counters deleted.
     pub limits: usize,
+    /// Retired keys of identities the registry keeps nothing else of, deleted.
+    pub retired_keys: usize,
+    /// Root commitments of identities the registry keeps nothing else of,
+    /// deleted.
+    pub root_commitments: usize,
 }
 
 /// Runs every retention rule at `now`, in one transaction.
@@ -138,6 +149,8 @@ pub fn sweep(connection: &mut Connection, now: i64) -> rusqlite::Result<Swept> {
     )?;
 
     swept.limits = crate::limits::sweep(&transaction, now)?;
+    // Last, so "the identity's last row" is judged after everything above.
+    (swept.retired_keys, swept.root_commitments) = crate::retired::sweep(&transaction)?;
     transaction.commit()?;
     Ok(swept)
 }
@@ -319,6 +332,58 @@ mod tests {
         .expect("seed");
         assert_eq!(sweep_at(&db, NOW).emails, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM emails"), 2);
+    }
+
+    #[test]
+    fn an_identity_s_memory_of_keys_goes_in_the_sweep_that_takes_its_last_row() {
+        let db = Db::in_memory().expect("db");
+        let released = NOW - HOLD_AFTER_RELEASE - RELEASED_RETENTION;
+        db.with(|connection| {
+            // Identity 1 released its only name long enough ago that this sweep
+            // deletes the row; identity 2 still holds one.
+            for (canonical, uuid, at) in [("gone", 1u8, Some(released)), ("held", 2, None)] {
+                connection.execute(
+                    "INSERT INTO names
+                         (canonical, display, uuid, claimed, renewed, released, hold_until, renewals)
+                     VALUES (?1, ?1, ?2, ?3, ?3, ?4, ?5, 0)",
+                    params![
+                        canonical,
+                        vec![uuid; 32],
+                        NOW - DAY,
+                        at,
+                        at.map(|at| at + HOLD_AFTER_RELEASE)
+                    ],
+                )?;
+            }
+            for uuid in [1u8, 2] {
+                connection.execute(
+                    "INSERT INTO retired_keys (uuid, key, successor, retired_at, learned_at)
+                     VALUES (?1, X'0A', X'0B', 1, 1)",
+                    [vec![uuid; 32]],
+                )?;
+                connection.execute(
+                    "INSERT INTO root_commitments (uuid, commitment, learned_at)
+                     VALUES (?1, X'0C', 1)",
+                    [vec![uuid; 32]],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed");
+        let swept = sweep_at(&db, NOW);
+        assert_eq!(swept.names, 1);
+        assert_eq!((swept.retired_keys, swept.root_commitments), (1, 1));
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM retired_keys WHERE uuid = X'0202020202020202020202020202020202020202020202020202020202020202'"
+            ),
+            1,
+            "the memory of an identity that still holds a name was swept"
+        );
+        // A second sweep has nothing left to do.
+        let again = sweep_at(&db, NOW);
+        assert_eq!((again.retired_keys, again.root_commitments), (0, 0));
     }
 
     #[test]

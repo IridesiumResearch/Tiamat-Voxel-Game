@@ -712,6 +712,7 @@ mod tests {
             uuid: PlayerUuid::from_root_key(&squatter.verifying_key()),
             public_key: squatter.verifying_key(),
             timestamp: NOW + 10,
+            lineage: tiamat_core::identity::registry::KeyLineage::of_root(squatter.verifying_key()),
         };
         let ip: IpAddr = "198.51.100.9".parse().expect("ip");
         let outcome = admin

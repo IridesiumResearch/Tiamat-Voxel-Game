@@ -48,7 +48,7 @@ use std::time::Instant;
 use tiny_http::Request;
 
 use crate::deadline::Deadline;
-use crate::http::{Reply, client_ip, dispatch, read_body, work_header};
+use crate::http::{Reply, client_ip, dispatch, read_body};
 use crate::service::Service;
 
 /// A request as the listener hands it over: untouched, with the moment it left
@@ -140,7 +140,6 @@ fn serve(job: Job, service: &Arc<Service>) {
     let method = job.request.method().as_str().to_owned();
     let url = job.request.url().to_owned();
     let client: Option<IpAddr> = client_ip(&job.request, service.config().trust_forwarded_for);
-    let work_nonce = work_header(&job.request);
 
     // The helper receives the request through `give` only once it exists, so a
     // failure to start it still leaves the request here to be answered.
@@ -169,9 +168,7 @@ fn serve(job: Job, service: &Arc<Service>) {
                 // The worker stopped waiting for this body.
                 return respond(request, Reply::slow_body());
             }
-            let reply = dispatch(
-                &service, &method, &url, client, work_nonce, &body, &deadline,
-            );
+            let reply = dispatch(&service, &method, &url, client, &body, &deadline);
             // The worker may have answered already (a `504`); then this goes
             // nowhere, which is the point.
             let _ = answer.send(reply);

@@ -19,7 +19,14 @@
 //! - **every row is inside its retention** (`retention`'s table): nothing kept
 //!   past its promise by more than the sweep's own hour of slack;
 //! - **nothing personal in the wrong place**: no raw address in a quota key,
-//!   no IP in an audit row's free text.
+//!   no IP in an audit row's free text;
+//! - **a retired key is never honoured** (review A3): some identities rotate
+//!   their root to its committed successor and carry the rotation from then
+//!   on, while a thief keeps signing with the old root; once the registry has
+//!   recorded the rotation, no request signed by or chained through the old
+//!   key is accepted, every one is refused `retired_key`, and the successor's
+//!   requests are answered as the root's were. The memory itself is inside its
+//!   retention: it goes with the identity's last row.
 //!
 //! The renewal-only and recovery-only loops then check the other half of
 //! "bounded": run the same loop at two request rates over the same months and
@@ -35,11 +42,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use tiamat_core::identity::Identity;
+use tiamat_core::identity::keyset::{commit_to, root_commitment_payload, rotate_key_payload};
 use tiamat_core::identity::registry::{
-    CancelRecoveryRequest, ClaimRequest, EMAIL_VERSION, EmailRequest, Name, RECOVERY_VERSION,
-    RecoveryRequest, ReleaseRequest, Signature64,
+    CancelRecoveryRequest, ClaimRequest, EmailRequest, KEY_SET_PROOF_VERSION, KeyAuthorisation,
+    KeySetProof, LinkKind, Name, RecoveryRequest, ReleaseRequest, Signature64,
 };
+use tiamat_core::identity::{Identity, PlayerUuid};
 
 use crate::clock::Clock;
 use crate::config::Config;
@@ -68,6 +76,12 @@ const CROWDED_MAIL_PER_HOUR: i64 = 2;
 /// The mail ceiling the loops run under: above the one address's allowance,
 /// so the address's cap is the one that binds.
 const LOOP_MAIL_PER_HOUR: i64 = 20;
+
+/// One identity in this many is a rotator in the mixed scenario.
+const ROTATOR_EVERY: usize = 6;
+
+/// Where the successors' seeds start, clear of every other identity's.
+const SUCCESSOR_SEEDS: u64 = 50_000_000;
 
 /// A clock the scenario moves.
 #[derive(Debug)]
@@ -101,11 +115,69 @@ impl Rng {
     }
 }
 
+/// Who signs a request: an identity's root alone, or the successor its root
+/// rotated to, carrying the declaration and the rotation from then on.
+struct Signer<'a> {
+    uuid: PlayerUuid,
+    key: &'a Identity,
+    proof: Option<KeySetProof>,
+}
+
+impl<'a> Signer<'a> {
+    /// The root, by hash: no proof.
+    fn root(identity: &'a Identity) -> Self {
+        Self {
+            uuid: identity.uuid_as_root(),
+            key: identity,
+            proof: None,
+        }
+    }
+
+    /// `successor`, which `root` committed to and rotated to.
+    fn successor(root: &Identity, successor: &'a Identity) -> Self {
+        let uuid = root.uuid_as_root();
+        let commitment = commit_to(&successor.public_key());
+        let proof = KeySetProof {
+            version: KEY_SET_PROOF_VERSION,
+            root: root.public_key().to_bytes(),
+            chain: vec![
+                KeyAuthorisation {
+                    kind: LinkKind::RootCommitment,
+                    key: root.public_key().to_bytes(),
+                    next_key_hash: Some(commitment),
+                    added_by: root.public_key().to_bytes(),
+                    signature: Signature64(
+                        root.sign(&root_commitment_payload(&uuid, &commitment))
+                            .to_bytes(),
+                    ),
+                },
+                KeyAuthorisation {
+                    kind: LinkKind::Rotation,
+                    key: successor.public_key().to_bytes(),
+                    next_key_hash: None,
+                    added_by: root.public_key().to_bytes(),
+                    signature: Signature64(
+                        root.sign(&rotate_key_payload(&uuid, &successor.public_key(), None))
+                            .to_bytes(),
+                    ),
+                },
+            ],
+        };
+        Self {
+            uuid,
+            key: successor,
+            proof: Some(proof),
+        }
+    }
+}
+
 /// A service, its clock and its mail sink.
 struct Rig {
     service: Service,
     clock: Arc<Moving>,
     mailer: Arc<SinkMailer>,
+    /// The body of the last reply, for a check that needs its reason.
+    last: RefCell<String>,
     /// The identities that held a name row at the last retention check.
     ///
     /// An address goes with its identity's last name, and a name row can stop
@@ -115,6 +187,10 @@ struct Rig {
     /// the check excuses an identity that still had a name at the previous
     /// check and catches it at the next one if the sweep missed it.
     named_before: RefCell<BTreeSet<Vec<u8>>>,
+    /// The identities the registry kept any row of at the last check, for
+    /// the same reason: their memory of retired keys is due at the next sweep
+    /// after their last row goes, not at a time of its own.
+    kept_before: RefCell<BTreeSet<Vec<u8>>>,
 }
 
 impl Rig {
@@ -143,7 +219,9 @@ impl Rig {
             service,
             clock,
             mailer,
+            last: RefCell::new(String::new()),
             named_before: RefCell::new(BTreeSet::new()),
+            kept_before: RefCell::new(BTreeSet::new()),
         }
     }
 
@@ -162,15 +240,31 @@ impl Rig {
             .expect("count")
     }
 
+    /// Keeps a reply's body for [`Rig::last_said`] and gives its status.
+    fn answer(&self, reply: &crate::http::Reply) -> u16 {
+        *self.last.borrow_mut() = reply.text();
+        reply.status()
+    }
+
+    /// Whether the last reply's body contains `text`.
+    fn last_said(&self, text: &str) -> bool {
+        self.last.borrow().contains(text)
+    }
+
     /// A claim, re-mined at the difficulty the service asks for if the first
     /// attempt is told the network is busy. Returns the status.
-    fn claim(&self, who: &Identity, canonical: &str, display: &str, ip: IpAddr) -> u16 {
+    fn claim(&self, who: &Signer<'_>, canonical: &str, display: &str, ip: IpAddr) -> u16 {
         let name = Name::from_parts(canonical, display).expect("a form-valid name");
         let mut bits = self.service.config().work_bits;
         loop {
-            let mut request = ClaimRequest::new(who, &name, self.now());
+            let mut request = match &who.proof {
+                Some(proof) => {
+                    ClaimRequest::for_device(who.key, &who.uuid, proof.clone(), &name, self.now())
+                }
+                None => ClaimRequest::new(who.key, &name, self.now()),
+            };
             request.solve_work(bits).expect("a nonce");
-            request.sign(who);
+            request.sign(who.key);
             let body = postcard::to_allocvec(&request).expect("encode");
             let reply = crate::api::claim(&self.service, &body, Some(ip), &Deadline::none());
             if let Some(required) = required_bits(&reply)
@@ -179,77 +273,110 @@ impl Rig {
                 bits = required;
                 continue;
             }
-            return reply.status();
+            return self.answer(&reply);
         }
     }
 
-    fn renew(&self, who: &Identity, canonical: &str, display: &str) -> u16 {
+    fn renew(&self, who: &Signer<'_>, canonical: &str, display: &str) -> u16 {
         let name = Name::from_parts(canonical, display).expect("a form-valid name");
-        let mut request = ClaimRequest::new(who, &name, self.now());
-        request.sign(who);
-        let body = postcard::to_allocvec(&request).expect("encode");
-        crate::api::claim(&self.service, &body, Some(local()), &Deadline::none()).status()
-    }
-
-    fn release(&self, who: &Identity, canonical: &str) -> u16 {
-        let mut request = ReleaseRequest::new(who, canonical, self.now());
-        request.sign(who);
-        let body = postcard::to_allocvec(&request).expect("encode");
-        crate::api::release(&self.service, &body, &Deadline::none()).status()
-    }
-
-    /// An address bind, with the proof of work an unnamed identity needs
-    /// (re-mined at the asked difficulty, as a client would).
-    fn email(&self, who: &Identity, address: &str, ip: IpAddr) -> u16 {
-        let mut request = EmailRequest {
-            version: EMAIL_VERSION,
-            uuid: *who.uuid_as_root().as_bytes(),
-            public_key: [0; 32],
-            address: Some(address.to_owned()),
-            timestamp: self.now(),
-            signature: Signature64([0; 64]),
+        let mut request = match &who.proof {
+            Some(proof) => {
+                ClaimRequest::for_device(who.key, &who.uuid, proof.clone(), &name, self.now())
+            }
+            None => ClaimRequest::new(who.key, &name, self.now()),
         };
-        request.sign(who);
+        request.sign(who.key);
         let body = postcard::to_allocvec(&request).expect("encode");
+        let reply = crate::api::claim(&self.service, &body, Some(local()), &Deadline::none());
+        self.answer(&reply)
+    }
+
+    fn release(&self, who: &Signer<'_>, canonical: &str) -> u16 {
+        let mut request = match &who.proof {
+            Some(proof) => {
+                ReleaseRequest::for_device(who.key, &who.uuid, proof.clone(), canonical, self.now())
+            }
+            None => ReleaseRequest::new(who.key, canonical, self.now()),
+        };
+        request.sign(who.key);
+        let body = postcard::to_allocvec(&request).expect("encode");
+        let reply = crate::api::release(&self.service, &body, Some(local()), &Deadline::none());
+        self.answer(&reply)
+    }
+
+    /// An address bind, with the proof of work an unnamed identity needs in
+    /// the request itself (re-mined at the asked difficulty, as a client would).
+    fn email(&self, who: &Signer<'_>, address: &str, ip: IpAddr) -> u16 {
+        let mut request = match &who.proof {
+            Some(proof) => EmailRequest::for_device(
+                who.key,
+                &who.uuid,
+                proof.clone(),
+                Some(address),
+                self.now(),
+            ),
+            None => EmailRequest::new(who.key, Some(address), self.now()),
+        };
+        request.sign(who.key);
         let mut bits = self.service.config().work_bits;
         loop {
-            let nonce = crate::work::solve_email_work(&request, bits).expect("a nonce");
-            let reply = crate::api::email(
-                &self.service,
-                &body,
-                Some(ip),
-                Some(nonce),
-                &Deadline::none(),
-            );
+            // The nonce is outside the signature: no re-signing per attempt.
+            request.solve_work(bits).expect("a nonce");
+            let body = postcard::to_allocvec(&request).expect("encode");
+            let reply = crate::api::email(&self.service, &body, Some(ip), &Deadline::none());
             if let Some(required) = required_bits(&reply)
                 && required > bits
             {
                 bits = required;
                 continue;
             }
-            return reply.status();
+            return self.answer(&reply);
         }
     }
 
-    fn recover(&self, who: &Identity, canonical: &str, ip: IpAddr) -> u16 {
-        let mut request = RecoveryRequest {
-            version: RECOVERY_VERSION,
-            name: canonical.to_owned(),
-            new_uuid: *who.uuid_as_root().as_bytes(),
-            public_key: [0; 32],
-            timestamp: self.now(),
-            signature: Signature64([0; 64]),
+    fn recover(&self, who: &Signer<'_>, canonical: &str, ip: IpAddr) -> u16 {
+        let mut request = match &who.proof {
+            Some(proof) => RecoveryRequest::for_device(
+                who.key,
+                &who.uuid,
+                proof.clone(),
+                canonical,
+                self.now(),
+            ),
+            None => RecoveryRequest::new(who.key, canonical, self.now()),
         };
-        request.sign(who);
+        request.sign(who.key);
         let body = postcard::to_allocvec(&request).expect("encode");
-        crate::api::recover_start(&self.service, &body, Some(ip), &Deadline::none()).status()
+        let reply = crate::api::recover_start(&self.service, &body, Some(ip), &Deadline::none());
+        self.answer(&reply)
     }
 
-    fn cancel(&self, who: &Identity, canonical: &str) -> u16 {
-        let mut request = CancelRecoveryRequest::new(who, canonical, self.now());
-        request.sign(who);
+    fn cancel(&self, who: &Signer<'_>, canonical: &str) -> u16 {
+        let mut request = match &who.proof {
+            Some(proof) => CancelRecoveryRequest::for_device(
+                who.key,
+                &who.uuid,
+                proof.clone(),
+                canonical,
+                self.now(),
+            ),
+            None => CancelRecoveryRequest::new(who.key, canonical, self.now()),
+        };
+        request.sign(who.key);
         let body = postcard::to_allocvec(&request).expect("encode");
-        crate::api::recover_cancel(&self.service, &body, &Deadline::none()).status()
+        let reply =
+            crate::api::recover_cancel(&self.service, &body, Some(local()), &Deadline::none());
+        self.answer(&reply)
+    }
+
+    /// Whether the registry has recorded `key` as retired from `uuid`.
+    fn is_retired(&self, uuid: &PlayerUuid, key: &Identity) -> bool {
+        self.service
+            .db()
+            .with(|connection| {
+                crate::retired::is_retired(connection, uuid, key.public_key().as_bytes())
+            })
+            .expect("memory")
     }
 
     /// Follows (presses the button of) every link mailed since the last call,
@@ -277,14 +404,11 @@ impl Rig {
     }
 
     /// The name an identity holds, from the database.
-    fn held_by(&self, who: &Identity) -> Option<String> {
+    fn held_by(&self, who: &PlayerUuid) -> Option<String> {
         self.service
             .db()
             .with(|connection| {
-                Ok(
-                    crate::names::active_binding(connection, &who.uuid_as_root())?
-                        .map(|binding| binding.canonical),
-                )
+                Ok(crate::names::active_binding(connection, who)?.map(|binding| binding.canonical))
             })
             .expect("binding")
     }
@@ -317,8 +441,10 @@ impl Rig {
             "names",
             "recoveries",
             "reserved",
+            "retired_keys",
             "revocations",
             "revoked_holders",
+            "root_commitments",
             "tokens",
         ]
         .into_iter()
@@ -379,6 +505,7 @@ impl Rig {
                 format!(
                     "SELECT COUNT(*) FROM limits WHERE window + CASE
                          WHEN scope LIKE 'ip:%' OR scope LIKE 'net:%' OR scope LIKE 'mailid:%'
+                           OR scope LIKE 'maild:%' OR scope LIKE 'retired:%'
                              THEN {DAY}
                          WHEN scope LIKE 'mail:%' OR scope LIKE 'mailnet:%' OR scope LIKE 'mailall:%'
                              THEN {HOUR}
@@ -425,6 +552,47 @@ impl Rig {
             now - START
         );
         *self.named_before.borrow_mut() = named;
+
+        // The memory of retired keys goes with the identity's last row: one
+        // still held for an identity the registry keeps nothing else of must
+        // be one that had a row at the last check.
+        let (orphaned, kept) = self
+            .service
+            .db()
+            .with(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT uuid FROM retired_keys UNION SELECT uuid FROM root_commitments",
+                )?;
+                let remembered: Vec<Vec<u8>> = statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let mut orphaned = Vec::new();
+                let mut kept = BTreeSet::new();
+                for uuid in remembered {
+                    let Ok(bytes) = <[u8; 32]>::try_from(uuid.as_slice()) else {
+                        continue;
+                    };
+                    let identity = PlayerUuid::from_bytes(bytes);
+                    if anything_else_of(connection, &identity)? {
+                        kept.insert(uuid);
+                    } else {
+                        orphaned.push(uuid);
+                    }
+                }
+                Ok((orphaned, kept))
+            })
+            .expect("memory");
+        let missed = orphaned
+            .iter()
+            .filter(|uuid| !self.kept_before.borrow().contains(*uuid))
+            .count();
+        assert_eq!(
+            missed,
+            0,
+            "a memory of retired keys outlived its identity's last row by a whole check, at t+{}s",
+            now - START
+        );
+        *self.kept_before.borrow_mut() = kept;
         let whys: Vec<String> = self
             .service
             .db()
@@ -441,6 +609,24 @@ impl Rig {
             );
         }
     }
+}
+
+/// Whether the registry keeps a row of `uuid`'s other than its memory of
+/// keys: what `retired::keeps_anything_of` asks, less the memory itself.
+fn anything_else_of(
+    connection: &rusqlite::Connection,
+    uuid: &PlayerUuid,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM names WHERE uuid = ?1)
+             OR EXISTS (SELECT 1 FROM emails WHERE uuid = ?1)
+             OR EXISTS (SELECT 1 FROM tokens WHERE uuid = ?1)
+             OR EXISTS (SELECT 1 FROM recoveries WHERE from_uuid = ?1 OR to_uuid = ?1)
+             OR EXISTS (SELECT 1 FROM revoked_holders WHERE uuid = ?1)
+             OR EXISTS (SELECT 1 FROM issued WHERE uuid = ?1)",
+        [uuid.as_bytes().as_slice()],
+        |row| row.get(0),
+    )
 }
 
 /// The difficulty a `work` refusal asks for.
@@ -473,6 +659,7 @@ struct Ledger {
     claims_identity: BTreeMap<(String, i64), i64>,
     mail_identity: BTreeMap<(String, i64), i64>,
     mail_address: BTreeMap<(String, i64), i64>,
+    mail_address_day: BTreeMap<(String, i64), i64>,
     mail_net: BTreeMap<(String, i64), i64>,
     mail_global: BTreeMap<i64, i64>,
     accepted: BTreeMap<&'static str, u64>,
@@ -496,16 +683,12 @@ impl Ledger {
     }
 
     /// A claim the service accepted: none of its quotas may now be over.
-    fn claimed(&mut self, who: &Identity, ip: IpAddr, now: i64) {
+    fn claimed(&mut self, who: &PlayerUuid, ip: IpAddr, now: i64) {
         let day = limits::window_start(now, DAY);
         let thirty = limits::window_start(now, THIRTY_DAYS);
         let at_ip = Self::bump(&mut self.claims_ip, ip.to_string(), day);
         let at_net = Self::bump(&mut self.claims_net, limits::subnet_scope(ip), day);
-        let mine = Self::bump(
-            &mut self.claims_identity,
-            who.uuid_as_root().to_hex(),
-            thirty,
-        );
+        let mine = Self::bump(&mut self.claims_identity, who.to_hex(), thirty);
         assert!(
             at_ip <= limits::CLAIMS_PER_IP,
             "{ip} claimed {at_ip} names in a day"
@@ -521,14 +704,19 @@ impl Ledger {
     }
 
     /// A mail the service accepted.
-    fn mailed(&mut self, asker: &Identity, address: &str, ip: IpAddr, now: i64) {
+    fn mailed(&mut self, asker: &PlayerUuid, address: &str, ip: IpAddr, now: i64) {
         let day = limits::window_start(now, DAY);
         let hour = limits::window_start(now, HOUR);
-        let mine = Self::bump(&mut self.mail_identity, asker.uuid_as_root().to_hex(), day);
+        let mine = Self::bump(&mut self.mail_identity, asker.to_hex(), day);
         let there = Self::bump(
             &mut self.mail_address,
             mailquota::fold_address(address),
             hour,
+        );
+        let there_today = Self::bump(
+            &mut self.mail_address_day,
+            mailquota::fold_address(address),
+            day,
         );
         let net = Self::bump(&mut self.mail_net, limits::subnet_scope(ip), hour);
         let all = self.mail_global.entry(hour).or_default();
@@ -542,6 +730,10 @@ impl Ledger {
             "{address} was mailed {there} times in an hour"
         );
         assert!(
+            there_today <= mailquota::MAILS_PER_ADDRESS_PER_DAY,
+            "{address} was mailed {there_today} times in a day"
+        );
+        assert!(
             net <= mailquota::MAILS_PER_SUBNET,
             "{ip}'s network asked for {net} mails in an hour"
         );
@@ -549,6 +741,28 @@ impl Ledger {
             *all <= self.ceiling,
             "the registry sent {all} mails in an hour"
         );
+    }
+
+    /// A request signed by a rotated identity's **old** root: if the registry
+    /// had recorded the rotation before it, it must have been refused, and
+    /// refused for the retired key.
+    fn thief(&mut self, recorded_before: bool, status: u16, said_retired: bool) {
+        let accepted = (200..300).contains(&status);
+        if recorded_before {
+            assert!(
+                !accepted,
+                "a request from a key the registry knew was retired was accepted ({status})"
+            );
+            assert!(
+                status == 403 && said_retired,
+                "a request from a retired key was refused for another reason ({status})"
+            );
+            self.outcome("thief", false);
+        } else {
+            // Before the registry has learned of the rotation the old root is
+            // still the identity's as far as it can know.
+            self.outcome("thief before", accepted);
+        }
     }
 }
 
@@ -562,6 +776,12 @@ struct Scale {
 }
 
 /// The mixed scenario: many identities, addresses and networks, months.
+///
+/// Every [`ROTATOR_EVERY`]th identity is a **rotator**: at some point it
+/// rotates its root to the successor it committed to and signs with that from
+/// then on, carrying the rotation. After that, now and then, a **thief** who
+/// kept the old root makes a request of any kind with it, by hash alone; the
+/// ledger holds that none is accepted once the registry knows of the rotation.
 fn mixed(scale: &Scale) -> BTreeMap<&'static str, i64> {
     let rig = Rig::new(CROWDED_MAIL_PER_HOUR);
     let mut rng = Rng(0x7EA5_E1A5_0000_0001);
@@ -570,6 +790,11 @@ fn mixed(scale: &Scale) -> BTreeMap<&'static str, i64> {
         ..Ledger::default()
     };
     let people: Vec<Identity> = (0..scale.identities).map(identity).collect();
+    // Each one's committed successor; only a rotator's is ever used.
+    let successors: Vec<Identity> = (0..scale.identities)
+        .map(|index| identity(index + SUCCESSOR_SEEDS))
+        .collect();
+    let mut rotated: BTreeSet<usize> = BTreeSet::new();
     // A pool of names twice the crowd, so claims collide and names change hands.
     let names: Vec<String> = (0..scale.identities * 2)
         .map(|n| format!("player{n}"))
@@ -600,65 +825,91 @@ fn mixed(scale: &Scale) -> BTreeMap<&'static str, i64> {
     for hour in 0..hours {
         rig.set(START + hour * HOUR + (rng.below(3000) as i64));
         for _ in 0..scale.ops_per_hour {
-            let who = &people[rng.below(people.len())];
+            let index = rng.below(people.len());
+            let rotator = index.is_multiple_of(ROTATOR_EVERY);
+            if rotator && !rotated.contains(&index) && rng.chance(5) {
+                rotated.insert(index);
+            }
+            // The thief, with the rotated identity's old root, by hash.
+            let thief = rotated.contains(&index) && rng.chance(30);
+            let who = if rotated.contains(&index) && !thief {
+                Signer::successor(&people[index], &successors[index])
+            } else {
+                Signer::root(&people[index])
+            };
+            let recorded_before = thief && rig.is_retired(&who.uuid, &people[index]);
             let from = ip(&mut rng);
-            match rng.below(100) {
+            let status = match rng.below(100) {
                 0..=34 => {
                     let name = &names[rng.below(names.len())];
-                    let accepted = rig.claim(who, name, name, from) == 200;
-                    if accepted {
-                        ledger.claimed(who, from, rig.now());
+                    let status = rig.claim(&who, name, name, from);
+                    if status == 200 {
+                        ledger.claimed(&who.uuid, from, rig.now());
                     }
-                    ledger.outcome("claim", accepted);
+                    ledger.outcome("claim", status == 200);
+                    Some(status)
                 }
-                35..=59 => {
-                    if let Some(name) = rig.held_by(who) {
-                        // Mostly the same casing; sometimes a new one.
-                        let display = if rng.chance(30) {
-                            name.to_ascii_uppercase()
-                        } else {
-                            name.clone()
-                        };
-                        let accepted = rig.renew(who, &name, &display) == 200;
-                        ledger.outcome("renew", accepted);
-                    }
-                }
-                60..=69 => {
-                    if let Some(name) = rig.held_by(who) {
-                        let accepted = rig.release(who, &name) == 200;
-                        ledger.outcome("release", accepted);
-                    }
-                }
+                35..=59 => rig.held_by(&who.uuid).map(|name| {
+                    // Mostly the same casing; sometimes a new one.
+                    let display = if rng.chance(30) {
+                        name.to_ascii_uppercase()
+                    } else {
+                        name.clone()
+                    };
+                    let status = rig.renew(&who, &name, &display);
+                    ledger.outcome("renew", status == 200);
+                    status
+                }),
+                60..=69 => rig.held_by(&who.uuid).map(|name| {
+                    let status = rig.release(&who, &name);
+                    ledger.outcome("release", status == 200);
+                    status
+                }),
                 70..=81 => {
                     let address = &addresses[rng.below(addresses.len())];
-                    let accepted = rig.email(who, address, from) == 202;
-                    if accepted {
-                        ledger.mailed(who, address, from, rig.now());
+                    let status = rig.email(&who, address, from);
+                    if status == 202 {
+                        ledger.mailed(&who.uuid, address, from, rig.now());
                     }
-                    ledger.outcome("email", accepted);
+                    ledger.outcome("email", status == 202);
+                    Some(status)
                 }
                 82..=95 => {
-                    // A stranger, often a fresh key, asks for somebody's name.
-                    let asker = if rng.chance(70) {
+                    // A stranger, often a fresh key, asks for somebody's name;
+                    // the thief asks for one onto the identity it stole from.
+                    let stranger;
+                    let stranger_signer;
+                    let asker = if thief {
+                        &who
+                    } else if rng.chance(70) {
                         fresh += 1;
-                        identity(fresh)
+                        stranger = identity(fresh);
+                        stranger_signer = Signer::root(&stranger);
+                        &stranger_signer
                     } else {
-                        identity(rng.below(people.len()) as u64)
+                        &who
                     };
                     let name = &names[rng.below(names.len())];
                     let behind = rig.address_behind(name);
-                    let accepted = rig.recover(&asker, name, from) == 202;
-                    if accepted {
+                    let status = rig.recover(asker, name, from);
+                    if status == 202 {
                         let address = behind.expect("a recovery mail goes to a bound address");
-                        ledger.mailed(&asker, &address, from, rig.now());
+                        ledger.mailed(&asker.uuid, &address, from, rig.now());
                     }
-                    ledger.outcome("recover", accepted);
+                    ledger.outcome("recover", status == 202);
+                    Some(status)
                 }
-                _ => {
-                    if let Some(name) = rig.held_by(who) {
-                        let accepted = rig.cancel(who, &name) == 200;
-                        ledger.outcome("cancel", accepted);
-                    }
+                _ => rig.held_by(&who.uuid).map(|name| {
+                    let status = rig.cancel(&who, &name);
+                    ledger.outcome("cancel", status == 200);
+                    status
+                }),
+            };
+            if let Some(status) = status {
+                if thief {
+                    ledger.thief(recorded_before, status, rig.last_said("retired_key"));
+                } else if rotated.contains(&index) {
+                    ledger.outcome("rotated", (200..300).contains(&status));
                 }
             }
         }
@@ -679,13 +930,13 @@ fn mixed(scale: &Scale) -> BTreeMap<&'static str, i64> {
         scale.days, ledger.accepted, ledger.refused
     );
     // The scenario must have exercised what it claims to.
-    for what in ["claim", "renew", "release", "email", "recover"] {
+    for what in ["claim", "renew", "release", "email", "recover", "rotated"] {
         assert!(
             ledger.accepted.get(what).copied().unwrap_or(0) > 0,
             "no {what} was accepted"
         );
     }
-    for what in ["claim", "email", "recover"] {
+    for what in ["claim", "email", "recover", "thief"] {
         assert!(
             ledger.refused.get(what).copied().unwrap_or(0) > 0,
             "no {what} was refused"
@@ -703,6 +954,10 @@ fn mixed(scale: &Scale) -> BTreeMap<&'static str, i64> {
         addressed <= recent_requests,
         "{addressed} audit rows keep an address"
     );
+    // A rotator retires one key and declares one commitment, at most.
+    let rotators = i64::try_from(scale.identities.div_ceil(ROTATOR_EVERY as u64)).unwrap_or(0);
+    assert!(sizes["retired_keys"] <= rotators, "{sizes:?}");
+    assert!(sizes["root_commitments"] <= rotators, "{sizes:?}");
     sizes
 }
 
@@ -733,6 +988,7 @@ fn stress_mixed_full() {
 fn renewal_loop(days: i64, every: i64) -> BTreeMap<&'static str, i64> {
     let rig = Rig::new(LOOP_MAIL_PER_HOUR);
     let holder = identity(1);
+    let holder = Signer::root(&holder);
     assert_eq!(rig.claim(&holder, "looper", "looper", local()), 200);
     let mut flip = false;
     let mut at = START;
@@ -789,6 +1045,7 @@ fn stress_renewal_only_loop_full() {
 fn recovery_loop(days: i64, every: i64) -> (BTreeMap<&'static str, i64>, i64) {
     let rig = Rig::new(LOOP_MAIL_PER_HOUR);
     let holder = identity(1);
+    let holder = Signer::root(&holder);
     assert_eq!(rig.claim(&holder, "target", "target", local()), 200);
     assert_eq!(rig.email(&holder, "holder@example.com", local()), 202);
     let mut rng = Rng(42);
@@ -815,8 +1072,8 @@ fn recovery_loop(days: i64, every: i64) -> (BTreeMap<&'static str, i64>, i64) {
         let from: IpAddr = format!("10.{}.{}.1", stranger % 200, (stranger / 200) % 200)
             .parse()
             .expect("ip");
-        if rig.recover(&asker, "target", from) == 202 {
-            ledger.mailed(&asker, "holder@example.com", from, rig.now());
+        if rig.recover(&Signer::root(&asker), "target", from) == 202 {
+            ledger.mailed(&asker.uuid_as_root(), "holder@example.com", from, rig.now());
             accepted += 1;
         }
         // Nobody follows the links: they expire, and must be swept.
@@ -838,17 +1095,21 @@ fn assert_recovery_loop_bounded(days: i64) {
     let (often, accepted_often) = recovery_loop(days, 5 * 60);
     let (rarely, accepted_rarely) = recovery_loop(days, 20 * 60);
     eprintln!("stress recovery loop over {days} days: {often:?}, {accepted_often} mails accepted");
-    // Both rates meet the holder's address cap every hour: the same mails go
+    // Both rates meet the holder's address cap every day: the same mails go
     // out, and the same rows are left, however hard the loop pushes.
     assert_eq!(accepted_often, accepted_rarely);
     assert_eq!(
         often, rarely,
         "four times the requests left different tables"
     );
+    // The loop runs from 09:00 on the first day (`START` is 08:00) to 09:00
+    // on the last, so it touches `days + 1` calendar days, every one of them
+    // long enough to spend the daily allowance; the first day's is one short,
+    // spent on the holder's own bind.
     assert_eq!(
         accepted_often,
-        days * 24 * mailquota::MAILS_PER_ADDRESS,
-        "the holder's address is mailed exactly its hourly allowance"
+        (days + 1) * mailquota::MAILS_PER_ADDRESS_PER_DAY - 1,
+        "the holder's address is mailed exactly its daily allowance, not seventy-two a day"
     );
     // Links live a day; nothing else of a refused or an unfollowed request is
     // kept but its audit row, one per accepted mail (the claim, the bind and
@@ -893,7 +1154,7 @@ fn the_ledger_s_checks_fire() {
             } else {
                 "SAME@example.com"
             };
-            ledger.mailed(&identity(n), address, ip, START);
+            ledger.mailed(&identity(n).uuid_as_root(), address, ip, START);
         }
     });
     assert!(

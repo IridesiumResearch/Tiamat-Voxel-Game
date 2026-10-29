@@ -29,9 +29,10 @@
 //!   request. It is a library function with a thin binary on top so the bot
 //!   tests (N6) can start the real service in-process with a mail sink in place
 //!   of SMTP.
-//! - [`healthcheck`] is the probe the container runs against itself, and
-//!   [`work`] the proof of work an email request carries when its identity
-//!   holds no name.
+//! - [`healthcheck`] is the probe the container runs against itself.
+//! - The registry keeps no key store, but it does remember every key a
+//!   presented rotation retired, per identity, and refuses anything signed by
+//!   or chained through one (`retired`, review A3).
 //!
 //! # Hostile input
 //!
@@ -56,7 +57,6 @@ pub mod keys;
 pub mod mail;
 pub mod service;
 pub mod wire;
-pub mod work;
 
 mod api;
 mod confusable;
@@ -67,6 +67,7 @@ mod mailquota;
 mod names;
 mod recover;
 mod retention;
+mod retired;
 mod tokens;
 mod workers;
 

@@ -25,9 +25,16 @@
 //! pin at the first record's retiring key (`RegistryTrust::advanced_by`, the
 //! server's join path), a revocation list
 //! checked against its own signer, a key-set proof walked from its own root to
-//! its own last key, and every request verified at **its own timestamp** — so
+//! its own last key — as parsed, and again with its links relabelled as each
+//! kind (add-key, rotation, root commitment), so the rotation rules are reached
+//! on any bytes — and every request verified at **its own timestamp** — so
 //! the clock check passes and the signature, ownership and proof checks behind
 //! it are reached, rather than every run stopping at a stale timestamp.
+//!
+//! What a verified proof says about the keys (`KeyLineage`) is held to the
+//! promises the registry's memory of retired keys builds on: it is rooted at
+//! the UUID and ends at the signing key, and no key a rotation in the chain
+//! retired is ever counted as one with authority.
 //!
 //! Run: `cargo +nightly fuzz run name_certificate_decode`
 
@@ -36,12 +43,13 @@
 use libfuzzer_sys::fuzz_target;
 use tiamat_core::identity::keyset::commit_to;
 use tiamat_core::identity::registry::{
-    CancelRecoveryRequest, ClaimRequest, EmailRequest, KeySetProof, MAX_CARRIED_ROTATIONS,
-    MAX_CERTIFICATE_BYTES, MAX_CERTIFICATE_LIFETIME_SECONDS, MAX_EMAIL_BYTES, MAX_KEY_SET_LINKS,
-    MAX_KEY_SET_PROOF_BYTES, MAX_NAME_CHARS, MAX_PROVEN_REQUEST_BYTES, MAX_REQUEST_BYTES,
-    MAX_REVOCATIONS, MIN_NAME_CHARS, Name, NameCertificate, REVOCATION_VERSION, RecoveryRequest,
-    RegistryError, RegistryTrust, ReleaseRequest, RevocationList, RotationRecord, Signature64,
-    check_canonical, check_email_address, verify_certificate, verify_key_set_proof,
+    CancelRecoveryRequest, ClaimRequest, EmailRequest, KeyLineage, KeySetProof, LinkKind,
+    MAX_CARRIED_ROTATIONS, MAX_CERTIFICATE_BYTES, MAX_CERTIFICATE_LIFETIME_SECONDS,
+    MAX_EMAIL_BYTES, MAX_KEY_SET_LINKS, MAX_KEY_SET_PROOF_BYTES, MAX_NAME_CHARS,
+    MAX_PROVEN_REQUEST_BYTES, MAX_REVOCATIONS, MIN_NAME_CHARS, Name, NameCertificate,
+    REVOCATION_VERSION, RecoveryRequest, RegistryError, RegistryTrust, ReleaseRequest,
+    RevocationList, RotationRecord, Signature64, check_canonical, check_email_address,
+    verify_certificate, verify_key_set_proof,
 };
 use tiamat_core::identity::{PlayerUuid, public_key_from_bytes};
 
@@ -247,7 +255,9 @@ fn rotation_chain(data: &[u8]) {
 }
 
 /// The key-set proof parser, then the proof walked from its own root to its
-/// own last key.
+/// own last key: as parsed, and relabelled so every link is each kind in turn,
+/// and alternating — the rotation and root-commitment rules check commitments
+/// and placement before any signature, so they are reached on any bytes.
 fn key_set_proof(data: &[u8]) {
     let Ok(proof) = KeySetProof::from_bytes(data) else {
         return;
@@ -264,6 +274,14 @@ fn key_set_proof(data: &[u8]) {
         data.len() <= MAX_KEY_SET_PROOF_BYTES,
         "a key-set proof over the size cap parsed"
     );
+    // The link's kind rides in the commitment's tag; the mapping is exact, so
+    // what parsed is what it encodes to.
+    let encoded = proof.to_bytes().expect("a parsed proof encodes");
+    assert_eq!(
+        KeySetProof::from_bytes(&encoded).as_ref(),
+        Ok(&proof),
+        "a proof did not survive its own encoding"
+    );
     let Ok(root) = public_key_from_bytes(&proof.root) else {
         return;
     };
@@ -274,7 +292,82 @@ fn key_set_proof(data: &[u8]) {
     else {
         return;
     };
-    let _ = verify_key_set_proof(&proof, &PlayerUuid::from_root_key(&root), &last);
+    let uuid = PlayerUuid::from_root_key(&root);
+    let kinds = [
+        LinkKind::AddKey,
+        LinkKind::Rotation,
+        LinkKind::RootCommitment,
+    ];
+    let mut variants = vec![proof.clone()];
+    for kind in kinds {
+        let mut relabelled = proof.clone();
+        for link in &mut relabelled.chain {
+            link.kind = kind;
+        }
+        variants.push(relabelled);
+    }
+    let mut alternating = proof.clone();
+    for (index, link) in alternating.chain.iter_mut().enumerate() {
+        link.kind = kinds[index % kinds.len()];
+    }
+    variants.push(alternating);
+    for variant in &variants {
+        if let Ok(lineage) = verify_key_set_proof(variant, &uuid, &last) {
+            lineage_holds(&lineage, &uuid, &last.to_bytes(), Some(variant));
+        }
+    }
+}
+
+/// What every verified lineage promises the registry's memory of keys.
+///
+/// `signing_key` is raw bytes so this target names no type outside core.
+fn lineage_holds(
+    lineage: &KeyLineage,
+    uuid: &PlayerUuid,
+    signing_key: &[u8; 32],
+    proof: Option<&KeySetProof>,
+) {
+    assert_eq!(&lineage.uuid(), uuid, "a lineage rooted elsewhere verified");
+    assert_eq!(
+        &lineage.signing_key().to_bytes(),
+        signing_key,
+        "a lineage that does not end at the signing key verified"
+    );
+    assert_eq!(
+        lineage
+            .authorities()
+            .last()
+            .map(|key| key.to_bytes())
+            .as_ref(),
+        Some(signing_key),
+        "the signing key is not the last authority"
+    );
+    for retired in lineage.retired() {
+        assert!(
+            !lineage.authorities().contains(&retired.key),
+            "a key a rotation retired was counted as an authority"
+        );
+        assert_ne!(retired.key, retired.successor);
+    }
+    match proof {
+        Some(proof) => {
+            assert!(
+                lineage.retired().len() < proof.chain.len() + 1,
+                "more keys retired than links"
+            );
+            if lineage.root_commitment().is_some() {
+                assert_eq!(
+                    proof.chain.first().map(|link| link.kind),
+                    Some(LinkKind::RootCommitment),
+                    "a root commitment from anywhere but the first link"
+                );
+            }
+        }
+        None => {
+            let root = public_key_from_bytes(signing_key).expect("a verified key parses");
+            assert_eq!(lineage, &KeyLineage::of_root(root));
+        }
+    }
 }
 
 /// The claim parser, then both verifiers at the claim's own time and the
@@ -292,6 +385,12 @@ fn claim(data: &[u8]) {
     let _ = claim.work_bits();
     if let Ok(verified) = claim.verify_claim(claim.timestamp, 0) {
         assert_eq!(verified.uuid.as_bytes(), &claim.uuid);
+        lineage_holds(
+            &verified.lineage,
+            &verified.uuid,
+            &verified.public_key.to_bytes(),
+            claim.key_set.as_ref(),
+        );
     }
     let _ = claim.verify_renewal(claim.timestamp);
     for now in EXTREMES {
@@ -311,16 +410,23 @@ fn release(data: &[u8]) {
     for now in [release.timestamp, EXTREMES[0], EXTREMES[1]] {
         if let Ok(verified) = release.verify(now) {
             assert_eq!(verified.uuid.as_bytes(), &release.uuid);
+            lineage_holds(
+                &verified.lineage,
+                &verified.uuid,
+                &verified.public_key.to_bytes(),
+                release.key_set.as_ref(),
+            );
         }
     }
 }
 
-/// The email-request parser, then its verifier.
+/// The email-request parser — the current shape with its work and proof, and
+/// the first shape without — then its work and its verifier.
 fn email(data: &[u8]) {
     let Ok(request) = EmailRequest::from_bytes(data) else {
         return;
     };
-    assert!(data.len() <= MAX_REQUEST_BYTES);
+    assert!(data.len() <= MAX_PROVEN_REQUEST_BYTES);
     if let Some(address) = &request.address {
         assert!(
             check_email_address(address).is_ok(),
@@ -328,13 +434,24 @@ fn email(data: &[u8]) {
         );
     }
     let _ = request.signing_payload();
+    // The work is a hash of the signed payload and the nonce: any nonce, no
+    // panic, and none without one.
+    assert_eq!(request.work_bits().is_some(), request.work.is_some());
     for now in [request.timestamp, EXTREMES[0], EXTREMES[1]] {
         if let Ok(verified) = request.verify(now) {
-            // No proof is carried, so only the root can have signed it.
-            assert_eq!(
-                PlayerUuid::from_root_key(&verified.public_key),
-                verified.uuid,
-                "an email request verified for a key that is not the root"
+            if request.key_set.is_none() {
+                // No proof is carried, so only the root can have signed it.
+                assert_eq!(
+                    PlayerUuid::from_root_key(&verified.public_key),
+                    verified.uuid,
+                    "an email request verified for a key that is not the root"
+                );
+            }
+            lineage_holds(
+                &verified.lineage,
+                &verified.uuid,
+                &verified.public_key.to_bytes(),
+                request.key_set.as_ref(),
             );
         }
     }
@@ -345,15 +462,23 @@ fn recovery(data: &[u8]) {
     let Ok(request) = RecoveryRequest::from_bytes(data) else {
         return;
     };
-    assert!(data.len() <= MAX_REQUEST_BYTES);
+    assert!(data.len() <= MAX_PROVEN_REQUEST_BYTES);
     assert!(check_canonical(&request.name).is_ok());
     let _ = request.signing_payload();
     for now in [request.timestamp, EXTREMES[0], EXTREMES[1]] {
         if let Ok(verified) = request.verify(now) {
-            assert_eq!(
-                PlayerUuid::from_root_key(&verified.public_key),
-                verified.new_uuid,
-                "a recovery verified for a key that is not the new identity's root"
+            if request.key_set.is_none() {
+                assert_eq!(
+                    PlayerUuid::from_root_key(&verified.public_key),
+                    verified.new_uuid,
+                    "a recovery verified for a key that is not the new identity's root"
+                );
+            }
+            lineage_holds(
+                &verified.lineage,
+                &verified.new_uuid,
+                &verified.public_key.to_bytes(),
+                request.key_set.as_ref(),
             );
         }
     }
@@ -370,6 +495,12 @@ fn cancellation(data: &[u8]) {
     for now in [request.timestamp, EXTREMES[0], EXTREMES[1]] {
         if let Ok(verified) = request.verify(now) {
             assert_eq!(verified.uuid.as_bytes(), &request.uuid);
+            lineage_holds(
+                &verified.lineage,
+                &verified.uuid,
+                &verified.public_key.to_bytes(),
+                request.key_set.as_ref(),
+            );
         }
     }
 }

@@ -17,8 +17,8 @@ use common::{KEY_SEED, NEXT_HASH, body_text, config, request, start_with};
 use tiamat_core::identity::Identity;
 use tiamat_core::identity::keyset::add_key_payload;
 use tiamat_core::identity::registry::{
-    ClaimRequest, KEY_SET_PROOF_VERSION, KeyAuthorisation, KeySetProof, Name, RegistryTrust,
-    ReleaseRequest, Signature64, verify_certificate,
+    ClaimRequest, KEY_SET_PROOF_VERSION, KeyAuthorisation, KeySetProof, LinkKind, Name,
+    RegistryTrust, ReleaseRequest, Signature64, verify_certificate,
 };
 use tiamat_registry::Clock;
 use tiamat_registry::wire::ClaimResponse;
@@ -426,6 +426,7 @@ fn proof_for(root: &Identity, device: &Identity) -> KeySetProof {
         version: KEY_SET_PROOF_VERSION,
         root: root.public_key().to_bytes(),
         chain: vec![KeyAuthorisation {
+            kind: LinkKind::AddKey,
             key: device.public_key().to_bytes(),
             next_key_hash: None,
             added_by: root.public_key().to_bytes(),
