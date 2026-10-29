@@ -16,9 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::{body_text, config, open, read_response, request, start, start_with, test_dir};
 use tiamat_core::identity::Identity;
-use tiamat_core::identity::registry::{
-    ClaimRequest, EMAIL_VERSION, EmailRequest, Name, Signature64,
-};
+use tiamat_core::identity::registry::{ClaimRequest, EmailRequest, Name};
 use tiamat_registry::mail::{Mail, MailError, Mailer};
 use tiamat_registry::{Clock, serve_with};
 
@@ -184,14 +182,7 @@ fn work_that_committed_is_answered_with_its_result_however_late() {
     let (status, answer) = request(addr, "POST", "/v1/claim", &claim_body(&alice, "alice"));
     assert_eq!(status, 200, "{}", body_text(&answer));
 
-    let mut email = EmailRequest {
-        version: EMAIL_VERSION,
-        uuid: *alice.uuid_as_root().as_bytes(),
-        public_key: [0; 32],
-        address: Some("alice@example.com".to_owned()),
-        timestamp: NOW,
-        signature: Signature64([0; 64]),
-    };
+    let mut email = EmailRequest::new(&alice, Some("alice@example.com"), NOW);
     email.sign(&alice);
     let started = Instant::now();
     let (status, answer) = request(

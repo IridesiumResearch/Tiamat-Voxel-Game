@@ -153,6 +153,33 @@ pub fn rotate_key_payload(
     payload
 }
 
+/// What a root key signs to declare its own successor commitment.
+///
+/// Every other key's commitment travels inside the payload that introduced it
+/// — an add-key or a rotate-key payload, signed by the key before it — so a
+/// chain of signatures from the root anchors it. The root has no key before
+/// it, and its UUID is `BLAKE3` of the key alone (charter rule 13), so nothing
+/// else fixes what it committed to. This payload is how a root says so in a
+/// record a verifier with no key store can carry: the first link of a
+/// registry key-set proof (`registry::LinkKind::RootCommitment`). What makes
+/// it worth anything against a thief who holds the root is that the registry
+/// keeps the first one it sees for an identity and refuses any other, so a
+/// client that declares early has fixed its successor before any theft.
+///
+/// Domain-separated from the add and rotate payloads and from the join
+/// challenge, so the declaration can never be replayed as an authorisation.
+#[must_use]
+pub fn root_commitment_payload(
+    uuid: &PlayerUuid,
+    next_key_hash: &[u8; COMMITMENT_BYTES],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(96);
+    payload.extend_from_slice(b"tiamat:root-commitment:v1");
+    payload.extend_from_slice(uuid.as_bytes());
+    payload.extend_from_slice(next_key_hash);
+    payload
+}
+
 /// The commitment a key makes to its successor.
 #[must_use]
 pub fn commit_to(successor: &VerifyingKey) -> [u8; COMMITMENT_BYTES] {
@@ -840,11 +867,15 @@ mod tests {
         let add = add_key_payload(&uuid, &key, None);
         let rotate = rotate_key_payload(&uuid, &key, None);
         assert_ne!(add, rotate);
+        let declare = root_commitment_payload(&uuid, &commit_to(&key));
+        assert!(!declare.starts_with(b"tiamat:add-key"));
+        assert!(!declare.starts_with(b"tiamat:rotate-key"));
 
         let nonce = crate::identity::generate_nonce().expect("nonce");
         let challenge = crate::identity::challenge_payload(&nonce, b"fp", 1);
         assert_ne!(add, challenge);
         assert_ne!(rotate, challenge);
+        assert_ne!(declare, challenge);
     }
 
     #[test]

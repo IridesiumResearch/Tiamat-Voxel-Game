@@ -48,7 +48,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use super::keyset::{COMMITMENT_BYTES, commit_to};
+use super::keyset::{
+    COMMITMENT_BYTES, add_key_payload, commit_to, root_commitment_payload, rotate_key_payload,
+};
 use super::{Identity, PlayerUuid, public_key_from_bytes};
 
 /// Shortest canonical name, in characters.
@@ -106,19 +108,20 @@ pub const MAX_CARRIED_ROTATIONS: usize = 4;
 /// Largest player request read at all, in bytes, before any key-set proof.
 ///
 /// An 18-character claim with every field at its limit is under two hundred
-/// bytes; this is the cap for a request that cannot carry a proof (an email or
-/// a recovery request) and the base of [`MAX_PROVEN_REQUEST_BYTES`] for one
-/// that can.
+/// bytes, and an email request with a 254-byte address under four hundred;
+/// this is the base of [`MAX_PROVEN_REQUEST_BYTES`], the cap every request is
+/// read under now that every one can carry a proof.
 pub const MAX_REQUEST_BYTES: usize = 512;
 
 /// Largest request read at all when it may carry a [`KeySetProof`], in bytes.
 ///
-/// A claim, a release and a recovery cancellation can be signed by a second
-/// device, and then carry the chain of authorisations from the root: up to
-/// [`MAX_KEY_SET_PROOF_BYTES`] on top of the request itself. Capping them at
-/// [`MAX_REQUEST_BYTES`] alone would refuse a proof of two committed links
-/// while [`MAX_KEY_SET_LINKS`] promises eight, so the cap is the sum. The
-/// service's HTTP body cap (32 KiB) is far above it.
+/// Every request can be signed by a key other than the identity's root — a
+/// second device, or the successor a rotation handed over to — and then
+/// carries the chain from the root: up to [`MAX_KEY_SET_PROOF_BYTES`] on top
+/// of the request itself. Capping them at [`MAX_REQUEST_BYTES`] alone would
+/// refuse a proof of two committed links while [`MAX_KEY_SET_LINKS`] promises
+/// eight, so the cap is the sum. The service's HTTP body cap (32 KiB) is far
+/// above it.
 pub const MAX_PROVEN_REQUEST_BYTES: usize = MAX_REQUEST_BYTES + MAX_KEY_SET_PROOF_BYTES;
 
 /// Largest revocation list read at all, in bytes.
@@ -373,6 +376,35 @@ pub enum RegistryError {
         links: usize,
     },
 
+    /// A rotation link retiring a key that made no commitment: the root with no
+    /// [`LinkKind::RootCommitment`] before it, or a key introduced with no
+    /// `next_key_hash`. As [`super::keyset::KeySetError::NoCommitment`]: an
+    /// uncommitted key cannot be rotated at all, because letting it rotate
+    /// anywhere is exactly what a thief would do with it.
+    #[error("a key-set proof rotates a key that never committed to a successor")]
+    ProofRotationUncommitted,
+
+    /// A rotation link whose successor does not hash to the retiring key's
+    /// commitment.
+    #[error(
+        "a key-set proof rotates a key to a successor it never committed to. A stolen key \
+         cannot rotate an identity away from its owner — this is that protection working."
+    )]
+    ProofSuccessorMismatch,
+
+    /// A key that appears twice in one chain: authorised again, or used after a
+    /// rotation retired it.
+    #[error("a key-set proof uses a key twice, or again after a rotation retired it")]
+    ProofKeyReused,
+
+    /// A root commitment that is not the chain's first link, is not the root's
+    /// own, or names no successor.
+    #[error(
+        "a key-set proof's root commitment must be its first link, made by the root about \
+         itself, and name a successor"
+    )]
+    ProofMisplacedCommitment,
+
     /// More entries than [`MAX_REVOCATIONS`].
     #[error("the revocation list holds {found} entries, over the limit of {MAX_REVOCATIONS}")]
     TooManyRevocations {
@@ -603,6 +635,55 @@ fn push_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
+/// The domain tag of a claim's proof of work.
+const CLAIM_WORK_DOMAIN: &[u8] = b"tiamat:name-work:v1";
+
+/// The domain tag of an email request's proof of work.
+///
+/// Its own tag, so a nonce mined for one record is never valid for the other
+/// even if two payloads ever coincided.
+const EMAIL_WORK_DOMAIN: &[u8] = b"tiamat:email-work:v1";
+
+/// The proof of work `nonce` gives a signed payload: the leading zero bits of
+/// `BLAKE3(domain ‖ payload ‖ nonce as u64 LE)`.
+///
+/// **The one construction every request's work uses**, so the client (N4)
+/// mines a claim and an email request with the same code and the same cost
+/// model, and needs nothing from the registry crate to do it. The payload is
+/// the request's own signing layout, which names the identity, the key and the
+/// timestamp, so work cannot be lifted onto another request and goes stale
+/// with its request after five minutes.
+///
+/// A claim's payload ends with its nonce (the nonce is signed); its work is
+/// this function over the payload before those eight bytes, which is the same
+/// hash its first format defined.
+fn proof_of_work_bits(domain: &[u8], payload: &[u8], nonce: u64) -> u32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(payload);
+    hasher.update(&nonce.to_le_bytes());
+    leading_zero_bits(hasher.finalize().as_bytes())
+}
+
+/// Mines the first nonce whose [`proof_of_work_bits`] reaches `bits`.
+///
+/// `None` when `bits` exceeds [`MAX_WORK_BITS`] — a caller's bug, since `2^40`
+/// hashes is days of one core — or when every nonce was tried, which at any
+/// bit count read this way cannot happen.
+fn solve_proof_of_work(domain: &[u8], payload: &[u8], bits: u32) -> Option<u64> {
+    if bits > MAX_WORK_BITS {
+        return None;
+    }
+    let mut prefix = blake3::Hasher::new();
+    prefix.update(domain);
+    prefix.update(payload);
+    (0..=u64::MAX).find(|nonce| {
+        let mut hasher = prefix.clone();
+        hasher.update(&nonce.to_le_bytes());
+        leading_zero_bits(hasher.finalize().as_bytes()) >= bits
+    })
+}
+
 /// The leading zero bits of a hash.
 fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
     let mut bits = 0;
@@ -661,6 +742,35 @@ fn decode<'de, T: serde::Deserialize<'de>>(
         });
     }
     Ok(value)
+}
+
+/// Decodes a record that gained fields after its first format shipped: the
+/// current shape, or failing that the first shape, whose appended fields are
+/// then absent.
+///
+/// postcard is not self-describing, so a record that ends where its first
+/// format ended cannot be told "the rest is missing" by the decoder; it is a
+/// second, exact decode instead. The two shapes cannot both fit one input —
+/// they share every byte up to the first format's end, and the current shape
+/// needs more after it while [`decode`] refuses trailing bytes — so which one
+/// parsed is never a guess. A failure reports the current shape's error, which
+/// is the one a client that is up to date needs.
+fn decode_appended<'de, T, First>(
+    what: &'static str,
+    bytes: &'de [u8],
+    limit: usize,
+) -> Result<T, RegistryError>
+where
+    T: serde::Deserialize<'de>,
+    First: serde::Deserialize<'de> + Into<T>,
+{
+    match decode::<T>(what, bytes, limit) {
+        Ok(value) => Ok(value),
+        Err(error @ RegistryError::TooLarge { .. }) => Err(error),
+        Err(error) => decode::<First>(what, bytes, limit)
+            .map(Into::into)
+            .map_err(|_| error),
+    }
 }
 
 /// A name bound to a UUID by the registry, for ninety days.
@@ -1350,15 +1460,25 @@ pub struct VerifiedClaim {
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
+    /// How the key was shown to be the identity's: what the service checks
+    /// against the keys it knows a rotation retired, and records.
+    pub lineage: KeyLineage,
 }
 
 /// Format version of a key-set proof.
+///
+/// Still 1: the rotation and root-commitment links widened a tag the first
+/// format already had (see [`LinkKind`]), so every proof the first format could
+/// write is read unchanged.
 pub const KEY_SET_PROOF_VERSION: u8 = 1;
 
 /// The most links a key-set proof may carry.
 ///
 /// Root, a phone, a laptop and one replacement is four; eight is far past any
-/// honest identity and bounds what a hostile chain can make a verifier do.
+/// honest identity and bounds what a hostile chain can make a verifier do. It
+/// also bounds an identity's whole line of root rotations: every proof starts
+/// at the root, so each rotation of the controlling key lengthens every later
+/// proof by one link, and an identity can rotate it at most seven times.
 pub const MAX_KEY_SET_LINKS: usize = 8;
 
 /// The largest key-set proof read at all, in bytes.
@@ -1367,35 +1487,167 @@ pub const MAX_KEY_SET_LINKS: usize = 8;
 /// room over; checked before the bytes are decoded.
 pub const MAX_KEY_SET_PROOF_BYTES: usize = 2_048;
 
-/// One link in a key-set proof: a key authorised by a key already in the set.
+/// What a link in a [`KeySetProof`] does.
 ///
-/// The signature is over [`super::keyset::add_key_payload`] — the same payload
-/// a client signed when the device was added — so a proof is a replay of
-/// authorisations the identity already made, not a new signature to collect.
+/// # On the wire
+///
+/// A link is the first format's four fields — key, commitment, authoriser,
+/// signature — and its kind rides in the commitment's tag: the first format
+/// wrote `next_key_hash` as an `Option`, a byte `0` (none) or `1` (and 32
+/// bytes), and the tag is now `2 × kind + committed`. So `0` and `1` are an
+/// add-key link exactly as the first format wrote it, every proof an older
+/// client made decodes to the same proof, and an add-key-only proof encodes to
+/// the same bytes it always did. `2`/`3` are a rotation and `4`/`5` the root's
+/// commitment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkKind {
+    /// `added_by` authorised `key` as one more key of the identity. The
+    /// signature is over [`super::keyset::add_key_payload`], the payload a
+    /// client signs when it adds a device.
+    #[default]
+    AddKey,
+    /// `added_by` handed the identity over to `key`, its pre-committed
+    /// successor, and is retired from that point of the chain on. Checked as
+    /// [`super::keyset::KeySet::rotate_key`] checks a rotation: `key` must hash
+    /// to the commitment `added_by` made — carried by the link that introduced
+    /// it, or for the root by the chain's [`LinkKind::RootCommitment`] — and the
+    /// signature is `added_by`'s over [`super::keyset::rotate_key_payload`].
+    Rotation,
+    /// The root declares its own successor commitment, `next_key_hash`, signed
+    /// over [`super::keyset::root_commitment_payload`]. Only ever the first
+    /// link, with `key` and `added_by` both the root.
+    ///
+    /// The root's commitment is not part of its UUID and no earlier signature
+    /// carries it, so this is the only place a verifier with no key store can
+    /// learn it. On its own it vouches for nothing against a thief who holds
+    /// the root (they can declare anything); the registry keeps the first one
+    /// it sees for an identity and refuses any other, which is what lets a
+    /// client that declares before a theft keep a thief from rotating its root.
+    RootCommitment,
+}
+
+/// One link in a key-set proof: what one key of the identity did about the
+/// next.
+///
+/// The signature is over the payload the client signed when it did it — an
+/// add-key, a rotate-key or a root-commitment payload, per [`LinkKind`] — so a
+/// proof is a replay of acts the identity already performed, not a new
+/// signature to collect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "LinkWire", into = "LinkWire")]
 pub struct KeyAuthorisation {
-    /// The key being authorised, raw bytes.
+    /// What the link does: authorise a key, rotate to a successor, or declare
+    /// the root's commitment.
+    pub kind: LinkKind,
+    /// The key being authorised, or the successor a rotation hands over to;
+    /// the root itself for a root commitment.
     pub key: [u8; 32],
     /// The commitment that key made to its own successor, if any.
     pub next_key_hash: Option<[u8; COMMITMENT_BYTES]>,
     /// The key that authorised it: the root for the first link, then the
-    /// previous link's key.
+    /// previous link's key. For a rotation, the key being retired.
     pub added_by: [u8; 32],
-    /// `added_by`'s signature over the add-key payload.
+    /// `added_by`'s signature over the link's payload.
     pub signature: Signature64,
+}
+
+/// A link as it travels: [`KeyAuthorisation`] with the kind folded into the
+/// commitment's tag ([`LinkKind`]'s wire notes).
+#[derive(Serialize, Deserialize)]
+struct LinkWire {
+    key: [u8; 32],
+    head: LinkHead,
+    added_by: [u8; 32],
+    signature: Signature64,
+}
+
+/// The tag-and-commitment of a link on the wire. postcard writes a variant as
+/// its index, so the first two are byte for byte the `Option` the first format
+/// wrote here.
+#[derive(Serialize, Deserialize)]
+enum LinkHead {
+    /// Add-key, no commitment: the first format's `None`.
+    AddKey,
+    /// Add-key with a commitment: the first format's `Some`.
+    AddKeyCommitted([u8; COMMITMENT_BYTES]),
+    /// Rotation to a successor that commits to nothing.
+    Rotation,
+    /// Rotation to a successor that commits to its own.
+    RotationCommitted([u8; COMMITMENT_BYTES]),
+    /// A root commitment naming nothing, which verification refuses.
+    RootCommitment,
+    /// A root commitment.
+    RootCommitmentCommitted([u8; COMMITMENT_BYTES]),
+}
+
+impl From<LinkWire> for KeyAuthorisation {
+    fn from(wire: LinkWire) -> Self {
+        let (kind, next_key_hash) = match wire.head {
+            LinkHead::AddKey => (LinkKind::AddKey, None),
+            LinkHead::AddKeyCommitted(hash) => (LinkKind::AddKey, Some(hash)),
+            LinkHead::Rotation => (LinkKind::Rotation, None),
+            LinkHead::RotationCommitted(hash) => (LinkKind::Rotation, Some(hash)),
+            LinkHead::RootCommitment => (LinkKind::RootCommitment, None),
+            LinkHead::RootCommitmentCommitted(hash) => (LinkKind::RootCommitment, Some(hash)),
+        };
+        Self {
+            kind,
+            key: wire.key,
+            next_key_hash,
+            added_by: wire.added_by,
+            signature: wire.signature,
+        }
+    }
+}
+
+impl From<KeyAuthorisation> for LinkWire {
+    fn from(link: KeyAuthorisation) -> Self {
+        let head = match (link.kind, link.next_key_hash) {
+            (LinkKind::AddKey, None) => LinkHead::AddKey,
+            (LinkKind::AddKey, Some(hash)) => LinkHead::AddKeyCommitted(hash),
+            (LinkKind::Rotation, None) => LinkHead::Rotation,
+            (LinkKind::Rotation, Some(hash)) => LinkHead::RotationCommitted(hash),
+            (LinkKind::RootCommitment, None) => LinkHead::RootCommitment,
+            (LinkKind::RootCommitment, Some(hash)) => LinkHead::RootCommitmentCommitted(hash),
+        };
+        Self {
+            key: link.key,
+            head,
+            added_by: link.added_by,
+            signature: link.signature,
+        }
+    }
 }
 
 /// A chain of authorisations from an identity's root key to a signing key.
 ///
-/// This is the registry's answer to "the player is on a second device": the
-/// UUID is `BLAKE3` of the **root** key (`PlayerUuid`), and a key added later is
-/// only that identity's if a chain of signatures reaches it from the root.
-/// Every link is one the client already made when it added the device, so the
-/// proof is a record rather than a fresh authorisation.
+/// This is the registry's answer to "the player is on a second device" and to
+/// "the player rotated a key": the UUID is `BLAKE3` of the **root** key
+/// (`PlayerUuid`), and any other key is only that identity's if a chain of
+/// signatures reaches it from the root. Every link is one the client already
+/// made — adding the device, rotating the key, declaring the root's commitment
+/// — so the proof is a record rather than a fresh authorisation.
 ///
 /// Verified by [`verify_key_set_proof`], which also re-derives the UUID from
 /// the root: a proof cannot be moved to another identity, because the payloads
 /// the links signed name the UUID.
+///
+/// # A rotation retires a key, and what that key authorised
+///
+/// The chain is a single path from the root. A rotation link retires the key
+/// before it, and no later link may use a key the chain has already passed,
+/// so a retired key authorises nothing after its rotation. **A device that a
+/// since-retired key added does not survive the rotation on that
+/// authorisation:** its proof must go through the rotation to the successor,
+/// and the successor must authorise it afresh (`root → rotation → successor →
+/// add-key → device`). An add-key payload carries no time, so a verifier with
+/// no key store — the registry — cannot tell a device the owner added before a
+/// theft from one the thief added after it with the same stolen key; making
+/// the new controlling key re-authorise the devices it keeps is the KERI
+/// answer, and it is also the only way a stolen device key is ever cut off at
+/// the registry. The game server keeps devices across a rotation because it
+/// stored each one when it was added (`KeySet`); the registry has no such
+/// store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeySetProof {
     /// [`KEY_SET_PROOF_VERSION`].
@@ -1417,6 +1669,22 @@ impl KeySetProof {
         let proof: Self = decode("key-set proof", bytes, MAX_KEY_SET_PROOF_BYTES)?;
         proof.check()?;
         Ok(proof)
+    }
+
+    /// The wire form, as [`KeySetProof::from_bytes`] reads it.
+    ///
+    /// A proof of add-key links only is written exactly as the first format
+    /// wrote it ([`LinkKind`]'s wire notes), so a client may send it to a
+    /// registry of either age.
+    ///
+    /// # Errors
+    ///
+    /// `Malformed` if the encoder fails, which for this record cannot happen.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RegistryError> {
+        postcard::to_allocvec(self).map_err(|err| RegistryError::Malformed {
+            what: "key-set proof",
+            detail: err.to_string(),
+        })
     }
 
     /// Every rule the proof's shape must hold.
@@ -1445,47 +1713,221 @@ impl KeySetProof {
     }
 }
 
-/// Verifies that `signing_key` is `uuid`'s, through `proof`.
+/// A key a rotation link retired, and the successor it handed over to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetiredKey {
+    /// The key retired.
+    pub key: VerifyingKey,
+    /// The pre-committed successor it rotated to.
+    pub successor: VerifyingKey,
+    /// Whether the retired key **controlled** the identity: the root, or a key
+    /// the root's own line of rotations reached, rather than a device some
+    /// controlling key added.
+    ///
+    /// The difference matters to a store of retired keys: an identity can
+    /// retire at most `MAX_KEY_SET_LINKS - 1` controlling keys in its life
+    /// (each lengthens every later proof by a link), while devices can be added
+    /// and rotated without end, so only the latter need a cap.
+    pub controlling: bool,
+}
+
+/// How a request's signing key was shown to be its identity's own.
+///
+/// [`verify_key_set_proof`] and every request's `verify` return this beside the
+/// signing key, so a service that remembers rotations (the registry) can do
+/// what no single proof can: refuse a key that **another** request already
+/// showed to be retired, and refuse a second, different rotation of a key it
+/// knows. The fields are read-only and only verification makes one with a
+/// chain in it, so a value of this type always describes a chain that
+/// verified; [`KeyLineage::of_root`] is the one other constructor, for a
+/// request the root signed alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyLineage {
+    root: VerifyingKey,
+    signing_key: VerifyingKey,
+    authorities: Vec<VerifyingKey>,
+    retired: Vec<RetiredKey>,
+    root_commitment: Option<[u8; COMMITMENT_BYTES]>,
+}
+
+impl KeyLineage {
+    /// The lineage of a request signed by `root` with no proof: the root-by-hash
+    /// case, in which the root is the one key that had authority.
+    #[must_use]
+    pub fn of_root(root: VerifyingKey) -> Self {
+        Self {
+            root,
+            signing_key: root,
+            authorities: vec![root],
+            retired: Vec::new(),
+            root_commitment: None,
+        }
+    }
+
+    /// The identity's root key, whose hash is its UUID.
+    #[must_use]
+    pub const fn root(&self) -> &VerifyingKey {
+        &self.root
+    }
+
+    /// The identity the lineage belongs to.
+    #[must_use]
+    pub fn uuid(&self) -> PlayerUuid {
+        PlayerUuid::from_root_key(&self.root)
+    }
+
+    /// The key that signed the request: where the chain ends.
+    #[must_use]
+    pub const fn signing_key(&self) -> &VerifyingKey {
+        &self.signing_key
+    }
+
+    /// Every key whose signature gave this request authority, oldest first:
+    /// each key that authorised an add-key link, and the signing key last.
+    ///
+    /// A key that only signed its own rotation or the root's commitment is not
+    /// here — those links are history the request re-presents, not authority
+    /// it uses — and no key a rotation in this chain retired ever is. A store
+    /// that knows a key here was retired by **another** rotation refuses the
+    /// request: that is the older proof, or the stolen key, the registry must
+    /// not honour.
+    #[must_use]
+    pub fn authorities(&self) -> &[VerifyingKey] {
+        &self.authorities
+    }
+
+    /// The keys the chain's rotation links retired, oldest first, each with
+    /// its successor: what a store of retired keys records.
+    #[must_use]
+    pub fn retired(&self) -> &[RetiredKey] {
+        &self.retired
+    }
+
+    /// The commitment the root declared to its successor, when the chain's
+    /// first link was a [`LinkKind::RootCommitment`].
+    #[must_use]
+    pub const fn root_commitment(&self) -> Option<[u8; COMMITMENT_BYTES]> {
+        self.root_commitment
+    }
+}
+
+/// Verifies that `signing_key` is `uuid`'s, through `proof`, and says how.
+///
+/// Walks the chain from the root: every link must be made by the key before
+/// it; an add-key link is checked as [`super::keyset::KeySet::add_key`] checks
+/// one; a rotation as [`super::keyset::KeySet::rotate_key`] does — the
+/// successor against the retiring key's commitment **before** the signature,
+/// so a thief's chain fails on the commitment it cannot meet; a root
+/// commitment only as the first link. No key may appear twice, so a key a
+/// rotation retired is never used again further down. The chain must end at
+/// `signing_key`.
 ///
 /// # Errors
 ///
 /// [`RegistryError::ProofNotThisIdentity`] when the root does not hash to the
-/// UUID, [`RegistryError::ProofBrokenChain`] when a link is not authorised by
-/// the key before it, [`RegistryError::SignatureInvalid`] when a link's
-/// signature does not verify, [`RegistryError::BadPublicKey`] for a malformed
-/// key in the chain, and [`RegistryError::ProofNotForThisKey`] when the chain
-/// does not end at the key that signed the request.
+/// UUID, [`RegistryError::ProofBrokenChain`] when a link is not made by the key
+/// before it, [`RegistryError::ProofMisplacedCommitment`],
+/// [`RegistryError::ProofKeyReused`], [`RegistryError::ProofRotationUncommitted`]
+/// and [`RegistryError::ProofSuccessorMismatch`] for the rotation rules,
+/// [`RegistryError::SignatureInvalid`] when a link's signature does not verify,
+/// [`RegistryError::BadPublicKey`] for a malformed key in the chain, and
+/// [`RegistryError::ProofNotForThisKey`] when the chain does not end at the key
+/// that signed the request.
 pub fn verify_key_set_proof(
     proof: &KeySetProof,
     uuid: &PlayerUuid,
     signing_key: &VerifyingKey,
-) -> Result<(), RegistryError> {
+) -> Result<KeyLineage, RegistryError> {
     proof.check()?;
     let root = public_key_from_bytes(&proof.root).map_err(|_| RegistryError::BadPublicKey)?;
     if PlayerUuid::from_root_key(&root) != *uuid {
         return Err(RegistryError::ProofNotThisIdentity);
     }
+    let mut lineage = KeyLineage {
+        root,
+        signing_key: *signing_key,
+        authorities: Vec::new(),
+        retired: Vec::new(),
+        root_commitment: None,
+    };
+    // The key the next link must be made by, the commitment it made to its
+    // successor, and whether it controls the identity (the root's line).
     let mut parent = root;
-    for link in &proof.chain {
+    let mut commitment: Option<[u8; COMMITMENT_BYTES]> = None;
+    let mut controlling = true;
+    let mut seen = vec![root];
+    for (index, link) in proof.chain.iter().enumerate() {
         let key = public_key_from_bytes(&link.key).map_err(|_| RegistryError::BadPublicKey)?;
         let added_by =
             public_key_from_bytes(&link.added_by).map_err(|_| RegistryError::BadPublicKey)?;
         if added_by != parent {
             return Err(RegistryError::ProofBrokenChain);
         }
-        let payload = super::keyset::add_key_payload(uuid, &key, link.next_key_hash.as_ref());
-        parent
-            .verify_strict(&payload, &Signature::from_bytes(&link.signature.0))
-            .map_err(|_| RegistryError::SignatureInvalid)?;
-        parent = key;
+        let signature = Signature::from_bytes(&link.signature.0);
+        match link.kind {
+            LinkKind::RootCommitment => {
+                if index != 0 || key != root {
+                    return Err(RegistryError::ProofMisplacedCommitment);
+                }
+                let Some(declared) = link.next_key_hash else {
+                    return Err(RegistryError::ProofMisplacedCommitment);
+                };
+                root.verify_strict(&root_commitment_payload(uuid, &declared), &signature)
+                    .map_err(|_| RegistryError::SignatureInvalid)?;
+                lineage.root_commitment = Some(declared);
+                commitment = Some(declared);
+            }
+            LinkKind::AddKey => {
+                if seen.contains(&key) {
+                    return Err(RegistryError::ProofKeyReused);
+                }
+                let payload = add_key_payload(uuid, &key, link.next_key_hash.as_ref());
+                parent
+                    .verify_strict(&payload, &signature)
+                    .map_err(|_| RegistryError::SignatureInvalid)?;
+                lineage.authorities.push(parent);
+                seen.push(key);
+                parent = key;
+                commitment = link.next_key_hash;
+                controlling = false;
+            }
+            LinkKind::Rotation => {
+                if seen.contains(&key) {
+                    return Err(RegistryError::ProofKeyReused);
+                }
+                // The commitment before the signature, as `KeySet::rotate_key`:
+                // a thief holding the retiring key can always sign, and what
+                // stops them is the key they cannot match.
+                let Some(committed) = commitment else {
+                    return Err(RegistryError::ProofRotationUncommitted);
+                };
+                if commit_to(&key) != committed {
+                    return Err(RegistryError::ProofSuccessorMismatch);
+                }
+                let payload = rotate_key_payload(uuid, &key, link.next_key_hash.as_ref());
+                parent
+                    .verify_strict(&payload, &signature)
+                    .map_err(|_| RegistryError::SignatureInvalid)?;
+                lineage.retired.push(RetiredKey {
+                    key: parent,
+                    successor: key,
+                    controlling,
+                });
+                seen.push(key);
+                parent = key;
+                commitment = link.next_key_hash;
+            }
+        }
     }
     if parent != *signing_key {
         return Err(RegistryError::ProofNotForThisKey);
     }
-    Ok(())
+    lineage.authorities.push(*signing_key);
+    Ok(lineage)
 }
 
-/// Shows that `public_key` signed `payload` **and** that it is `uuid`'s own key.
+/// Shows that `public_key` signed `payload` **and** that it is `uuid`'s own key,
+/// and says how.
 ///
 /// Every player request goes through this, so a `Verified*` value always means
 /// the same thing: the key that signed it is either the identity's root (whose
@@ -1494,8 +1936,7 @@ pub fn verify_key_set_proof(
 /// anyone could sign a request naming somebody else's UUID — read off the
 /// public name page — and have it treated as theirs.
 ///
-/// Requests that cannot carry a proof pass `None`, which makes the root the
-/// only key accepted.
+/// A request without a proof is accepted only from the root.
 ///
 /// # Errors
 ///
@@ -1509,15 +1950,14 @@ fn verify_holder(
     payload: &[u8],
     signature: &Signature64,
     key_set: Option<&KeySetProof>,
-) -> Result<VerifyingKey, RegistryError> {
+) -> Result<KeyLineage, RegistryError> {
     let key = public_key_from_bytes(public_key).map_err(|_| RegistryError::BadPublicKey)?;
     verify_signature(&key, payload, signature)?;
     match key_set {
-        Some(proof) => verify_key_set_proof(proof, uuid, &key)?,
-        None if PlayerUuid::from_root_key(&key) == *uuid => {}
-        None => return Err(RegistryError::RootKeyRequired),
+        Some(proof) => verify_key_set_proof(proof, uuid, &key),
+        None if PlayerUuid::from_root_key(&key) == *uuid => Ok(KeyLineage::of_root(key)),
+        None => Err(RegistryError::RootKeyRequired),
     }
-    Ok(key)
 }
 
 /// A claim, or a renewal of one, signed by the player's own identity.
@@ -1666,7 +2106,23 @@ impl ClaimRequest {
     /// `None` for a renewal, which carries none.
     #[must_use]
     pub fn work_bits(&self) -> Option<u32> {
-        self.work.map(|_| work_bits(&self.signing_payload()))
+        let nonce = self.work?;
+        Some(proof_of_work_bits(
+            CLAIM_WORK_DOMAIN,
+            &self.work_payload(),
+            nonce,
+        ))
+    }
+
+    /// The signed payload up to its nonce: what the claim's work is mined
+    /// over. The payload ends with the nonce's eight bytes (the present flag
+    /// is before them), so this is everything the nonce is not.
+    fn work_payload(&self) -> Vec<u8> {
+        let mut payload = self.signing_payload();
+        if self.work.is_some() {
+            payload.truncate(payload.len().saturating_sub(8));
+        }
+        payload
     }
 
     /// Mines a nonce whose proof of work reaches `bits`, and stores it.
@@ -1686,20 +2142,9 @@ impl ClaimRequest {
             return None;
         }
         self.work = Some(0);
-        let mut buffer = Vec::with_capacity(160);
-        buffer.extend_from_slice(b"tiamat:name-work:v1");
-        buffer.extend_from_slice(&self.signing_payload());
-        // The payload ends with the work's eight bytes (the present flag is
-        // before them), so only those change as the nonce is searched.
-        let start = buffer.len().saturating_sub(8);
-        for nonce in 0..=u64::MAX {
-            buffer[start..].copy_from_slice(&nonce.to_le_bytes());
-            if leading_zero_bits(blake3::hash(&buffer).as_bytes()) >= bits {
-                self.work = Some(nonce);
-                return Some(nonce);
-            }
-        }
-        None
+        let nonce = solve_proof_of_work(CLAIM_WORK_DOMAIN, &self.work_payload(), bits)?;
+        self.work = Some(nonce);
+        Some(nonce)
     }
 
     /// Verifies a **claim**: the name may be taken, the work is enough, the
@@ -1719,23 +2164,16 @@ impl ClaimRequest {
     ) -> Result<VerifiedClaim, RegistryError> {
         let name = Name::claim(&self.name, &self.display)?;
         self.check_clock(now)?;
-        if self.work.is_none() {
+        let Some(found) = self.work_bits() else {
             return Err(RegistryError::MissingWork);
-        }
-        let found = work_bits(&self.signing_payload());
+        };
         if found < required_bits {
             return Err(RegistryError::InsufficientWork {
                 found,
                 required: required_bits,
             });
         }
-        let key = self.verified_key()?;
-        Ok(VerifiedClaim {
-            name,
-            uuid: PlayerUuid::from_bytes(self.uuid),
-            public_key: key,
-            timestamp: self.timestamp,
-        })
+        self.verified(name)
     }
 
     /// Verifies a **renewal**: the same request, without the work.
@@ -1752,39 +2190,32 @@ impl ClaimRequest {
     pub fn verify_renewal(&self, now: i64) -> Result<VerifiedClaim, RegistryError> {
         let name = Name::from_parts(&self.name, &self.display)?;
         self.check_clock(now)?;
-        let key = self.verified_key()?;
-        Ok(VerifiedClaim {
-            name,
-            uuid: PlayerUuid::from_bytes(self.uuid),
-            public_key: key,
-            timestamp: self.timestamp,
-        })
+        self.verified(name)
     }
 
     /// The signing key, parsed; the signature checked; and the key shown to be
     /// the identity's own — the root, or a key a proof reaches from it.
-    fn verified_key(&self) -> Result<VerifyingKey, RegistryError> {
-        verify_holder(
+    fn verified(&self, name: Name) -> Result<VerifiedClaim, RegistryError> {
+        let lineage = verify_holder(
             &PlayerUuid::from_bytes(self.uuid),
             &self.public_key,
             &self.signing_payload(),
             &self.signature,
             self.key_set.as_ref(),
-        )
+        )?;
+        Ok(VerifiedClaim {
+            name,
+            uuid: PlayerUuid::from_bytes(self.uuid),
+            public_key: *lineage.signing_key(),
+            timestamp: self.timestamp,
+            lineage,
+        })
     }
 
     /// Refuses a timestamp outside the skew, in either direction.
     fn check_clock(&self, now: i64) -> Result<(), RegistryError> {
         check_timestamp(self.timestamp, now)
     }
-}
-
-/// The leading zero bits of a claim's proof of work over its signing payload.
-fn work_bits(payload: &[u8]) -> u32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tiamat:name-work:v1");
-    hasher.update(payload);
-    leading_zero_bits(hasher.finalize().as_bytes())
 }
 
 /// A release that verified.
@@ -1801,6 +2232,11 @@ pub struct VerifiedRelease {
     /// that takes something away from its subject, so this is what stops a
     /// stranger releasing a name by naming its holder's UUID.
     pub public_key: VerifyingKey,
+    /// The request's timestamp, already inside the skew.
+    pub timestamp: i64,
+    /// How the key was shown to be the identity's, for the service's memory of
+    /// retired keys.
+    pub lineage: KeyLineage,
 }
 
 /// A signed statement that an identity is giving up a name.
@@ -1919,7 +2355,7 @@ impl ReleaseRequest {
     pub fn verify(&self, now: i64) -> Result<VerifiedRelease, RegistryError> {
         check_canonical(&self.name)?;
         check_timestamp(self.timestamp, now)?;
-        let key = verify_holder(
+        let lineage = verify_holder(
             &PlayerUuid::from_bytes(self.uuid),
             &self.public_key,
             &self.signing_payload(),
@@ -1929,7 +2365,9 @@ impl ReleaseRequest {
         Ok(VerifiedRelease {
             name: self.name.clone(),
             uuid: PlayerUuid::from_bytes(self.uuid),
-            public_key: key,
+            public_key: *lineage.signing_key(),
+            timestamp: self.timestamp,
+            lineage,
         })
     }
 }
@@ -1943,9 +2381,15 @@ impl ReleaseRequest {
 pub const MAX_EMAIL_BYTES: usize = 254;
 
 /// Email-request format this build reads.
+///
+/// Still 1: `work` and `key_set` were appended after the signature, and a
+/// request that ends where the first format ended still decodes, with both
+/// absent ([`EmailRequest::from_bytes`]).
 pub const EMAIL_VERSION: u8 = 1;
 
 /// Recovery-request format this build reads.
+///
+/// Still 1, for the reason [`EMAIL_VERSION`] gives: `key_set` was appended.
 pub const RECOVERY_VERSION: u8 = 1;
 
 /// Recovery-cancellation format this build reads.
@@ -2008,17 +2452,104 @@ pub struct EmailRequest {
     pub timestamp: i64,
     /// The player key's signature over [`Self::signing_payload`].
     pub signature: Signature64,
+    /// The proof-of-work nonce an identity that holds no name pays for its
+    /// mail with ([`EmailRequest::solve_work`]); `None` from one that holds a
+    /// name, which has paid already.
+    ///
+    /// **Outside the signature**: the work is mined over the signed payload, so
+    /// it is bound to this request without being part of it, a client may sign
+    /// before or after mining, and a request without work signs exactly what
+    /// the first format signed. Appended after `signature`; a first-format
+    /// request decodes with none.
+    pub work: Option<u64>,
+    /// A chain from the identity's root key to `public_key`, when that key is
+    /// not the root: a second device, or the successor a rotation handed the
+    /// identity to. `None` means the key is the root.
+    ///
+    /// Outside the signature for the reasons [`ClaimRequest::key_set`] gives,
+    /// and appended after `work`.
+    pub key_set: Option<KeySetProof>,
+}
+
+/// An email request as the first format wrote it, before `work` and `key_set`.
+#[derive(Deserialize)]
+struct EmailRequestFirst {
+    version: u8,
+    uuid: [u8; 32],
+    public_key: [u8; 32],
+    address: Option<String>,
+    timestamp: i64,
+    signature: Signature64,
+}
+
+impl From<EmailRequestFirst> for EmailRequest {
+    fn from(first: EmailRequestFirst) -> Self {
+        Self {
+            version: first.version,
+            uuid: first.uuid,
+            public_key: first.public_key,
+            address: first.address,
+            timestamp: first.timestamp,
+            signature: first.signature,
+            work: None,
+            key_set: None,
+        }
+    }
 }
 
 impl EmailRequest {
+    /// Builds a request by `identity`, as its root key, to bind `address` (or
+    /// with `None`, to remove the bound one).
+    #[must_use]
+    pub fn new(identity: &Identity, address: Option<&str>, timestamp: i64) -> Self {
+        Self {
+            version: EMAIL_VERSION,
+            uuid: *identity.uuid_as_root().as_bytes(),
+            public_key: identity.public_key().to_bytes(),
+            address: address.map(str::to_owned),
+            timestamp,
+            signature: Signature64([0; 64]),
+            work: None,
+            key_set: None,
+        }
+    }
+
+    /// Builds a request by a key other than the root — a device, or a
+    /// rotation's successor — for the identity `uuid`, carrying the proof that
+    /// reaches it from the root.
+    ///
+    /// The UUID is in place before any mining, as [`ClaimRequest::for_device`]
+    /// explains: the work hashes the signed payload that names it.
+    #[must_use]
+    pub fn for_device(
+        device: &Identity,
+        uuid: &PlayerUuid,
+        key_set: KeySetProof,
+        address: Option<&str>,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            uuid: *uuid.as_bytes(),
+            key_set: Some(key_set),
+            ..Self::new(device, address, timestamp)
+        }
+    }
+
     /// Reads a request under the cap, checking its version and its address.
+    ///
+    /// A request in the first format, which ends at its signature, reads with
+    /// no work and no proof.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
-    /// [`RegistryError::EmailAddress`].
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`],
+    /// [`RegistryError::EmailAddress`], and the proof's own shape rules.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
-        let request: Self = decode("email request", bytes, MAX_REQUEST_BYTES)?;
+        let request: Self = decode_appended::<Self, EmailRequestFirst>(
+            "email request",
+            bytes,
+            MAX_PROVEN_REQUEST_BYTES,
+        )?;
         if request.version != EMAIL_VERSION {
             return Err(RegistryError::Version {
                 what: "email request",
@@ -2029,10 +2560,15 @@ impl EmailRequest {
         if let Some(address) = &request.address {
             check_email_address(address)?;
         }
+        if let Some(proof) = &request.key_set {
+            proof.check()?;
+        }
         Ok(request)
     }
 
     /// The bytes the player's key signs.
+    ///
+    /// Unchanged by `work` and `key_set`, which are outside the signature.
     #[must_use]
     pub fn signing_payload(&self) -> Vec<u8> {
         let mut payload = Vec::with_capacity(96);
@@ -2057,18 +2593,50 @@ impl EmailRequest {
         self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
     }
 
-    /// Verifies the signature, the clock, and that the signing key is the
-    /// UUID's **root** key.
+    /// The proof of work this request carries, in leading zero bits: `None`
+    /// without a nonce.
     ///
-    /// An email request carries no key-set proof (design §4), so only the root
-    /// is accepted. The address is the door a recovery goes through; a stranger
-    /// who could bind one to somebody else's UUID would own that door.
+    /// The claim's construction under the email's own domain tag:
+    /// `BLAKE3("tiamat:email-work:v1" ‖ signing payload ‖ nonce as u64 LE)`.
+    /// The service decides whether any is needed (an identity that holds a
+    /// name needs none) and how much; this only measures it.
+    #[must_use]
+    pub fn work_bits(&self) -> Option<u32> {
+        let nonce = self.work?;
+        Some(proof_of_work_bits(
+            EMAIL_WORK_DOMAIN,
+            &self.signing_payload(),
+            nonce,
+        ))
+    }
+
+    /// Mines a nonce whose proof of work reaches `bits`, and stores it.
+    ///
+    /// The fields the signing payload covers must be final first; the
+    /// signature is not hashed, so signing may come before or after.
+    ///
+    /// Returns `None` only when `bits` exceeds [`MAX_WORK_BITS`], as
+    /// [`ClaimRequest::solve_work`].
+    pub fn solve_work(&mut self, bits: u32) -> Option<u64> {
+        let nonce = solve_proof_of_work(EMAIL_WORK_DOMAIN, &self.signing_payload(), bits)?;
+        self.work = Some(nonce);
+        Some(nonce)
+    }
+
+    /// Verifies the signature, the clock, and that the signing key is the
+    /// UUID's own: the root, or a key the proof reaches from it.
+    ///
+    /// The address is the door a recovery goes through; a stranger who could
+    /// bind one to somebody else's UUID would own that door, which is why the
+    /// key must be shown to be the identity's. The work is not checked here —
+    /// whether it is needed depends on what the service holds.
     ///
     /// # Errors
     ///
     /// [`RegistryError::Version`], [`RegistryError::EmailAddress`],
     /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`],
-    /// [`RegistryError::SignatureInvalid`] or [`RegistryError::RootKeyRequired`].
+    /// [`RegistryError::SignatureInvalid`], [`RegistryError::RootKeyRequired`],
+    /// or a key-set proof's refusal.
     pub fn verify(&self, now: i64) -> Result<VerifiedEmail, RegistryError> {
         if self.version != EMAIL_VERSION {
             return Err(RegistryError::Version {
@@ -2081,18 +2649,19 @@ impl EmailRequest {
             check_email_address(address)?;
         }
         check_timestamp(self.timestamp, now)?;
-        let key = verify_holder(
+        let lineage = verify_holder(
             &PlayerUuid::from_bytes(self.uuid),
             &self.public_key,
             &self.signing_payload(),
             &self.signature,
-            None,
+            self.key_set.as_ref(),
         )?;
         Ok(VerifiedEmail {
             uuid: PlayerUuid::from_bytes(self.uuid),
             address: self.address.clone(),
-            public_key: key,
+            public_key: *lineage.signing_key(),
             timestamp: self.timestamp,
+            lineage,
         })
     }
 }
@@ -2104,18 +2673,22 @@ pub struct VerifiedEmail {
     pub uuid: PlayerUuid,
     /// The address to bind, or `None` to remove the bound one.
     pub address: Option<String>,
-    /// The key that signed the request: already shown to be the UUID's root.
+    /// The key that signed the request: already shown to be the UUID's own,
+    /// the root or a key a [`KeySetProof`] reaches from it.
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
+    /// How the key was shown to be the identity's, for the service's memory of
+    /// retired keys.
+    pub lineage: KeyLineage,
 }
 
 /// A signed request from a **new** identity to recover a name.
 ///
-/// Signed by the new key, not the old one: this is the player who has lost the
-/// phrase and the device and wants the name moved to what they hold now. The
-/// registry mails the bound address, and the notice that follows is what the
-/// current holder can cancel (§4).
+/// Signed by the new identity, not the old one: this is the player who has
+/// lost the phrase and the device and wants the name moved to what they hold
+/// now. The registry mails the bound address, and the notice that follows is
+/// what the current holder can cancel (§4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryRequest {
     /// [`RECOVERY_VERSION`].
@@ -2130,17 +2703,89 @@ pub struct RecoveryRequest {
     pub timestamp: i64,
     /// The new key's signature over [`Self::signing_payload`].
     pub signature: Signature64,
+    /// A chain from the new identity's root to `public_key`, when that key is
+    /// not the root (the new identity has since rotated it, or asks from a
+    /// second device). `None` means the key is the root, as it is for the
+    /// fresh identity a recovery is usually asked from.
+    ///
+    /// Outside the signature for the reasons [`ClaimRequest::key_set`] gives.
+    /// Appended after `signature`; a first-format request decodes with none.
+    pub key_set: Option<KeySetProof>,
+}
+
+/// A recovery request as the first format wrote it, before `key_set`.
+#[derive(Deserialize)]
+struct RecoveryRequestFirst {
+    version: u8,
+    name: String,
+    new_uuid: [u8; 32],
+    public_key: [u8; 32],
+    timestamp: i64,
+    signature: Signature64,
+}
+
+impl From<RecoveryRequestFirst> for RecoveryRequest {
+    fn from(first: RecoveryRequestFirst) -> Self {
+        Self {
+            version: first.version,
+            name: first.name,
+            new_uuid: first.new_uuid,
+            public_key: first.public_key,
+            timestamp: first.timestamp,
+            signature: first.signature,
+            key_set: None,
+        }
+    }
 }
 
 impl RecoveryRequest {
+    /// Builds a request by `identity`, as its root key, to recover `canonical`
+    /// onto itself.
+    #[must_use]
+    pub fn new(identity: &Identity, canonical: &str, timestamp: i64) -> Self {
+        Self {
+            version: RECOVERY_VERSION,
+            name: canonical.to_owned(),
+            new_uuid: *identity.uuid_as_root().as_bytes(),
+            public_key: identity.public_key().to_bytes(),
+            timestamp,
+            signature: Signature64([0; 64]),
+            key_set: None,
+        }
+    }
+
+    /// Builds a request by a key of `new_uuid` other than its root, carrying
+    /// the proof that reaches it from the root.
+    #[must_use]
+    pub fn for_device(
+        device: &Identity,
+        new_uuid: &PlayerUuid,
+        key_set: KeySetProof,
+        canonical: &str,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            new_uuid: *new_uuid.as_bytes(),
+            key_set: Some(key_set),
+            ..Self::new(device, canonical, timestamp)
+        }
+    }
+
     /// Reads a request under the cap.
+    ///
+    /// A request in the first format, which ends at its signature, reads with
+    /// no proof.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`], or
-    /// the canonical-name rules.
+    /// [`RegistryError::TooLarge`], `Malformed`, [`RegistryError::Version`],
+    /// the canonical-name rules, and the proof's own shape rules.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
-        let request: Self = decode("recovery request", bytes, MAX_REQUEST_BYTES)?;
+        let request: Self = decode_appended::<Self, RecoveryRequestFirst>(
+            "recovery request",
+            bytes,
+            MAX_PROVEN_REQUEST_BYTES,
+        )?;
         if request.version != RECOVERY_VERSION {
             return Err(RegistryError::Version {
                 what: "recovery request",
@@ -2149,6 +2794,9 @@ impl RecoveryRequest {
             });
         }
         check_canonical(&request.name)?;
+        if let Some(proof) = &request.key_set {
+            proof.check()?;
+        }
         Ok(request)
     }
 
@@ -2171,19 +2819,18 @@ impl RecoveryRequest {
         self.signature = Signature64(identity.sign(&self.signing_payload()).to_bytes());
     }
 
-    /// Verifies the signature, the clock, and that the signing key is the
-    /// **root** of `new_uuid`.
+    /// Verifies the signature, the clock, and that the signing key is
+    /// `new_uuid`'s own: its root, or a key the proof reaches from it.
     ///
-    /// The new identity is a fresh one — the player has lost everything else —
-    /// so its root is the only key it has, and no proof is carried. Holding the
-    /// line here means the identity a name would move to is one whose key
-    /// actually asked for it.
+    /// Holding the line here means the identity a name would move to is one
+    /// whose key actually asked for it.
     ///
     /// # Errors
     ///
     /// [`RegistryError::Version`], the canonical-name rules,
     /// [`RegistryError::StaleRequest`], [`RegistryError::BadPublicKey`],
-    /// [`RegistryError::SignatureInvalid`] or [`RegistryError::RootKeyRequired`].
+    /// [`RegistryError::SignatureInvalid`], [`RegistryError::RootKeyRequired`],
+    /// or a key-set proof's refusal.
     pub fn verify(&self, now: i64) -> Result<VerifiedRecovery, RegistryError> {
         if self.version != RECOVERY_VERSION {
             return Err(RegistryError::Version {
@@ -2194,18 +2841,19 @@ impl RecoveryRequest {
         }
         check_canonical(&self.name)?;
         check_timestamp(self.timestamp, now)?;
-        let key = verify_holder(
+        let lineage = verify_holder(
             &PlayerUuid::from_bytes(self.new_uuid),
             &self.public_key,
             &self.signing_payload(),
             &self.signature,
-            None,
+            self.key_set.as_ref(),
         )?;
         Ok(VerifiedRecovery {
             name: self.name.clone(),
             new_uuid: PlayerUuid::from_bytes(self.new_uuid),
-            public_key: key,
+            public_key: *lineage.signing_key(),
             timestamp: self.timestamp,
+            lineage,
         })
     }
 }
@@ -2217,10 +2865,14 @@ pub struct VerifiedRecovery {
     pub name: String,
     /// The identity it would move to.
     pub new_uuid: PlayerUuid,
-    /// The new identity's key: already shown to be `new_uuid`'s root.
+    /// The new identity's key: already shown to be `new_uuid`'s own, its root
+    /// or a key a [`KeySetProof`] reaches from it.
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
+    /// How the key was shown to be the new identity's, for the service's
+    /// memory of retired keys.
+    pub lineage: KeyLineage,
 }
 
 /// A signed request from the **current** holder to stop a recovery.
@@ -2348,7 +3000,7 @@ impl CancelRecoveryRequest {
         }
         check_canonical(&self.name)?;
         check_timestamp(self.timestamp, now)?;
-        let key = verify_holder(
+        let lineage = verify_holder(
             &PlayerUuid::from_bytes(self.uuid),
             &self.public_key,
             &self.signing_payload(),
@@ -2358,8 +3010,9 @@ impl CancelRecoveryRequest {
         Ok(VerifiedCancellation {
             name: self.name.clone(),
             uuid: PlayerUuid::from_bytes(self.uuid),
-            public_key: key,
+            public_key: *lineage.signing_key(),
             timestamp: self.timestamp,
+            lineage,
         })
     }
 }
@@ -2376,6 +3029,9 @@ pub struct VerifiedCancellation {
     pub public_key: VerifyingKey,
     /// The request's timestamp, already inside the skew.
     pub timestamp: i64,
+    /// How the key was shown to be the holder's, for the service's memory of
+    /// retired keys.
+    pub lineage: KeyLineage,
 }
 
 #[cfg(test)]
@@ -3182,6 +3838,8 @@ mod tests {
             address: Some("alice@example.com".to_owned()),
             timestamp: NOW,
             signature: Signature64([0; 64]),
+            work: None,
+            key_set: None,
         };
         request.sign(&alice);
         let wire = postcard::to_allocvec(&request).expect("encode");
@@ -3206,6 +3864,8 @@ mod tests {
             address: Some("not an address".to_owned()),
             timestamp: NOW,
             signature: Signature64([0; 64]),
+            work: None,
+            key_set: None,
         };
         bad.sign(&alice);
         assert!(matches!(
@@ -3237,6 +3897,7 @@ mod tests {
             public_key: [0; 32],
             timestamp: NOW,
             signature: Signature64([0; 64]),
+            key_set: None,
         };
         recovery.sign(&new_device);
         let parsed =
@@ -3272,6 +3933,7 @@ mod tests {
                 crate::identity::keyset::add_key_payload(uuid, &device.public_key(), None);
             let signature = parent.sign(&payload);
             chain.push(KeyAuthorisation {
+                kind: LinkKind::AddKey,
                 key: device.public_key().to_bytes(),
                 next_key_hash: None,
                 added_by: parent.public_key().to_bytes(),
@@ -3753,6 +4415,7 @@ mod tests {
             let payload =
                 crate::identity::keyset::add_key_payload(uuid, &device.public_key(), Some(&next));
             chain.push(KeyAuthorisation {
+                kind: LinkKind::AddKey,
                 key: device.public_key().to_bytes(),
                 next_key_hash: Some(next),
                 added_by: parent.public_key().to_bytes(),
@@ -3940,6 +4603,8 @@ mod tests {
             address: Some("mallory@example.com".to_owned()),
             timestamp: NOW,
             signature: Signature64([0; 64]),
+            work: None,
+            key_set: None,
         };
         request.sign(&mallory);
         let parsed = EmailRequest::from_bytes(&postcard::to_allocvec(&request).expect("encode"))
@@ -3959,11 +4624,640 @@ mod tests {
             public_key: [0; 32],
             timestamp: NOW,
             signature: Signature64([0; 64]),
+            key_set: None,
         };
         recovery.sign(&mallory);
         let parsed =
             RecoveryRequest::from_bytes(&postcard::to_allocvec(&recovery).expect("encode"))
                 .expect("well formed");
         assert_eq!(parsed.verify(NOW), Err(RegistryError::RootKeyRequired));
+    }
+
+    /// The root's declaration of its successor commitment: a proof's first link.
+    fn declare(root: &Identity, uuid: &PlayerUuid, successor: &Identity) -> KeyAuthorisation {
+        let commitment = commit_to(&successor.public_key());
+        KeyAuthorisation {
+            kind: LinkKind::RootCommitment,
+            key: root.public_key().to_bytes(),
+            next_key_hash: Some(commitment),
+            added_by: root.public_key().to_bytes(),
+            signature: Signature64(
+                root.sign(&root_commitment_payload(uuid, &commitment))
+                    .to_bytes(),
+            ),
+        }
+    }
+
+    /// `from` adds `key`, which commits to `next`.
+    fn add_link(
+        from: &Identity,
+        key: &Identity,
+        next: Option<&Identity>,
+        uuid: &PlayerUuid,
+    ) -> KeyAuthorisation {
+        let next = next.map(|next| commit_to(&next.public_key()));
+        KeyAuthorisation {
+            kind: LinkKind::AddKey,
+            key: key.public_key().to_bytes(),
+            next_key_hash: next,
+            added_by: from.public_key().to_bytes(),
+            signature: Signature64(
+                from.sign(&add_key_payload(uuid, &key.public_key(), next.as_ref()))
+                    .to_bytes(),
+            ),
+        }
+    }
+
+    /// `from` rotates to `to`, which commits to `next`.
+    fn rotation_link(
+        from: &Identity,
+        to: &Identity,
+        next: Option<&Identity>,
+        uuid: &PlayerUuid,
+    ) -> KeyAuthorisation {
+        let next = next.map(|next| commit_to(&next.public_key()));
+        KeyAuthorisation {
+            kind: LinkKind::Rotation,
+            key: to.public_key().to_bytes(),
+            next_key_hash: next,
+            added_by: from.public_key().to_bytes(),
+            signature: Signature64(
+                from.sign(&rotate_key_payload(uuid, &to.public_key(), next.as_ref()))
+                    .to_bytes(),
+            ),
+        }
+    }
+
+    fn chain_from(root: &Identity, chain: Vec<KeyAuthorisation>) -> KeySetProof {
+        KeySetProof {
+            version: KEY_SET_PROOF_VERSION,
+            root: root.public_key().to_bytes(),
+            chain,
+        }
+    }
+
+    #[test]
+    fn a_rotation_link_hands_the_identity_to_its_committed_successor() {
+        let root = player(1);
+        let successor = player(2);
+        let third = player(3);
+        let uuid = root.uuid_as_root();
+
+        // The root declared its successor; the rotation names it and the root
+        // signed the rotate-key payload.
+        let proof = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&root, &successor, Some(&third), &uuid),
+            ],
+        );
+        let lineage =
+            verify_key_set_proof(&proof, &uuid, &successor.public_key()).expect("a rotation");
+        assert_eq!(lineage.root(), &root.public_key());
+        assert_eq!(lineage.uuid(), uuid);
+        assert_eq!(lineage.signing_key(), &successor.public_key());
+        assert_eq!(
+            lineage.root_commitment(),
+            Some(commit_to(&successor.public_key()))
+        );
+        assert_eq!(
+            lineage.retired(),
+            &[RetiredKey {
+                key: root.public_key(),
+                successor: successor.public_key(),
+                controlling: true,
+            }]
+        );
+        // The retired root signed only its rotation: it lent no authority.
+        assert_eq!(lineage.authorities(), &[successor.public_key()]);
+
+        // The same signature is what the game server's key set accepts for the
+        // same rotation: one rule, checked in two places.
+        let mut set = crate::identity::keyset::KeySet::new(
+            root.public_key(),
+            Some(commit_to(&successor.public_key())),
+            1,
+        );
+        let link = &proof.chain[1];
+        set.rotate_key(
+            &root.public_key(),
+            successor.public_key(),
+            link.next_key_hash,
+            &Signature::from_bytes(&link.signature.0),
+            2,
+        )
+        .expect("the key set accepts the link's signature");
+
+        // Rotations chain: the successor's own commitment carries the next.
+        let chained = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&root, &successor, Some(&third), &uuid),
+                rotation_link(&successor, &third, None, &uuid),
+            ],
+        );
+        let lineage = verify_key_set_proof(&chained, &uuid, &third.public_key()).expect("chain");
+        assert_eq!(lineage.retired().len(), 2);
+        assert!(lineage.retired().iter().all(|retired| retired.controlling));
+
+        // A device's own rotation, its commitment carried by the add-key link
+        // the root signed: not a controlling key.
+        let device = player(4);
+        let device_next = player(5);
+        let rotated_device = chain_from(
+            &root,
+            vec![
+                add_link(&root, &device, Some(&device_next), &uuid),
+                rotation_link(&device, &device_next, None, &uuid),
+            ],
+        );
+        let lineage = verify_key_set_proof(&rotated_device, &uuid, &device_next.public_key())
+            .expect("a device rotation");
+        assert_eq!(
+            lineage.retired(),
+            &[RetiredKey {
+                key: device.public_key(),
+                successor: device_next.public_key(),
+                controlling: false,
+            }]
+        );
+        assert_eq!(
+            lineage.authorities(),
+            &[root.public_key(), device_next.public_key()]
+        );
+
+        // The successor re-authorises a device: the device's proof runs through
+        // the rotation, and the retired root lends it nothing.
+        let laptop = player(6);
+        let reauthorised = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&root, &successor, None, &uuid),
+                add_link(&successor, &laptop, None, &uuid),
+            ],
+        );
+        let lineage =
+            verify_key_set_proof(&reauthorised, &uuid, &laptop.public_key()).expect("re-added");
+        assert_eq!(
+            lineage.authorities(),
+            &[successor.public_key(), laptop.public_key()]
+        );
+
+        // A root that signs alone with only its declaration: nothing retired,
+        // the root the one authority, the commitment carried.
+        let declared = chain_from(&root, vec![declare(&root, &uuid, &successor)]);
+        let lineage = verify_key_set_proof(&declared, &uuid, &root.public_key()).expect("declared");
+        assert!(lineage.retired().is_empty());
+        assert_eq!(lineage.authorities(), &[root.public_key()]);
+        assert!(lineage.root_commitment().is_some());
+    }
+
+    /// The root's declaration and rotation to `successor`.
+    fn rotated_to(root: &Identity, successor: &Identity, uuid: &PlayerUuid) -> KeySetProof {
+        chain_from(
+            root,
+            vec![
+                declare(root, uuid, successor),
+                rotation_link(root, successor, None, uuid),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_rotation_link_is_refused_for_the_wrong_signer_or_successor() {
+        let root = player(1);
+        let successor = player(2);
+        let mallory = player(3);
+        let uuid = root.uuid_as_root();
+        let good = rotated_to(&root, &successor, &uuid);
+        let verify = |proof: &KeySetProof, key: &Identity| {
+            verify_key_set_proof(proof, &uuid, &key.public_key())
+        };
+
+        // The wrong signer: a stranger's signature on the root's rotation.
+        let mut forged = good.clone();
+        forged.chain[1].signature = Signature64(
+            mallory
+                .sign(&rotate_key_payload(&uuid, &successor.public_key(), None))
+                .to_bytes(),
+        );
+        assert_eq!(
+            verify(&forged, &successor),
+            Err(RegistryError::SignatureInvalid)
+        );
+        // Or a stranger naming themselves as the retiring key.
+        let mut usurped = good;
+        usurped.chain[1] = rotation_link(&mallory, &successor, None, &uuid);
+        assert_eq!(
+            verify(&usurped, &successor),
+            Err(RegistryError::ProofBrokenChain)
+        );
+
+        // A thief holding the root rotates to a key of their own: the root's
+        // signature is genuine, the commitment is not met.
+        let theft = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&root, &mallory, None, &uuid),
+            ],
+        );
+        assert_eq!(
+            verify(&theft, &mallory),
+            Err(RegistryError::ProofSuccessorMismatch)
+        );
+
+        // A root that never declared a commitment cannot rotate at all, nor can
+        // a device added without one.
+        let undeclared = chain_from(&root, vec![rotation_link(&root, &successor, None, &uuid)]);
+        assert_eq!(
+            verify(&undeclared, &successor),
+            Err(RegistryError::ProofRotationUncommitted)
+        );
+        let device = player(4);
+        let uncommitted_device = chain_from(
+            &root,
+            vec![
+                add_link(&root, &device, None, &uuid),
+                rotation_link(&device, &successor, None, &uuid),
+            ],
+        );
+        assert_eq!(
+            verify(&uncommitted_device, &successor),
+            Err(RegistryError::ProofRotationUncommitted)
+        );
+    }
+
+    #[test]
+    fn a_retired_key_is_never_used_again_and_rotations_keep_their_order() {
+        let root = player(1);
+        let successor = player(2);
+        let uuid = root.uuid_as_root();
+        let good = rotated_to(&root, &successor, &uuid);
+        let verify = |proof: &KeySetProof, key: &Identity| {
+            verify_key_set_proof(proof, &uuid, &key.public_key())
+        };
+
+        // A retired key reused after its rotation: brought back by its
+        // successor, or simply signing the request itself.
+        let mut revived = good.clone();
+        revived.chain.push(add_link(&successor, &root, None, &uuid));
+        assert_eq!(verify(&revived, &root), Err(RegistryError::ProofKeyReused));
+        assert_eq!(verify(&good, &root), Err(RegistryError::ProofNotForThisKey));
+        let device = player(4);
+        let device_next = player(5);
+        let device_revived = chain_from(
+            &root,
+            vec![
+                add_link(&root, &device, Some(&device_next), &uuid),
+                rotation_link(&device, &device_next, None, &uuid),
+                add_link(&device_next, &device, None, &uuid),
+            ],
+        );
+        assert_eq!(
+            verify(&device_revived, &device),
+            Err(RegistryError::ProofKeyReused)
+        );
+
+        // Rotations out of order: the second rotation before the first.
+        let third = player(6);
+        let out_of_order = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&successor, &third, None, &uuid),
+                rotation_link(&root, &successor, Some(&third), &uuid),
+            ],
+        );
+        assert_eq!(
+            verify(&out_of_order, &successor),
+            Err(RegistryError::ProofBrokenChain)
+        );
+    }
+
+    #[test]
+    fn a_root_commitment_is_first_and_signed_and_a_chain_of_rotations_is_capped() {
+        let root = player(1);
+        let successor = player(2);
+        let device = player(4);
+        let uuid = root.uuid_as_root();
+        let good = rotated_to(&root, &successor, &uuid);
+        let verify = |proof: &KeySetProof, key: &Identity| {
+            verify_key_set_proof(proof, &uuid, &key.public_key())
+        };
+
+        // The root's commitment only as the first link, by the root, naming a
+        // successor, and signed.
+        let mut late_declaration = chain_from(&root, vec![add_link(&root, &device, None, &uuid)]);
+        late_declaration.chain.push(KeyAuthorisation {
+            kind: LinkKind::RootCommitment,
+            key: device.public_key().to_bytes(),
+            next_key_hash: Some(commit_to(&successor.public_key())),
+            added_by: device.public_key().to_bytes(),
+            signature: Signature64([0; 64]),
+        });
+        assert_eq!(
+            verify(&late_declaration, &device),
+            Err(RegistryError::ProofMisplacedCommitment)
+        );
+        let mut empty_declaration = good.clone();
+        empty_declaration.chain[0].next_key_hash = None;
+        assert_eq!(
+            verify(&empty_declaration, &successor),
+            Err(RegistryError::ProofMisplacedCommitment)
+        );
+        let mut forged_declaration = good;
+        forged_declaration.chain[0].signature.0[0] ^= 1;
+        assert_eq!(
+            verify(&forged_declaration, &successor),
+            Err(RegistryError::SignatureInvalid)
+        );
+
+        // Over the cap: a declaration and eight rotations is nine links.
+        let keys: Vec<Identity> = (10..=17).map(player).collect();
+        let mut chain = vec![declare(&root, &uuid, &keys[0])];
+        let mut from = &root;
+        for (index, key) in keys.iter().enumerate() {
+            chain.push(rotation_link(from, key, keys.get(index + 1), &uuid));
+            from = key;
+        }
+        let long = chain_from(&root, chain);
+        assert_eq!(
+            verify(&long, &keys[7]),
+            Err(RegistryError::ProofTooLong {
+                links: MAX_KEY_SET_LINKS + 1
+            })
+        );
+        // The longest legal one — the declaration and seven rotations, every
+        // successor committed — verifies and fits its byte cap.
+        let mut longest = long;
+        longest.chain.truncate(MAX_KEY_SET_LINKS);
+        let lineage = verify(&longest, &keys[6]).expect("the longest line of rotations");
+        assert_eq!(lineage.retired().len(), MAX_KEY_SET_LINKS - 1);
+        let bytes = longest.to_bytes().expect("encode");
+        assert!(
+            bytes.len() <= MAX_KEY_SET_PROOF_BYTES,
+            "{} bytes",
+            bytes.len()
+        );
+        assert_eq!(KeySetProof::from_bytes(&bytes).expect("parse"), longest);
+    }
+
+    /// A link exactly as the first format declared it.
+    #[derive(Serialize)]
+    struct FirstLink {
+        key: [u8; 32],
+        next_key_hash: Option<[u8; COMMITMENT_BYTES]>,
+        added_by: [u8; 32],
+        signature: Signature64,
+    }
+
+    /// A proof exactly as the first format declared it.
+    #[derive(Serialize)]
+    struct FirstProof {
+        version: u8,
+        root: [u8; 32],
+        chain: Vec<FirstLink>,
+    }
+
+    #[test]
+    fn a_first_format_proof_decodes_as_add_key_links_byte_for_byte() {
+        let root = player(1);
+        let uuid = root.uuid_as_root();
+        let devices: Vec<Identity> = (2..5).map(player).collect();
+        for proof in [
+            proof_for(&root, &[&devices[0], &devices[1]], &uuid),
+            committed_proof_for(&root, &devices, &uuid),
+        ] {
+            let first = FirstProof {
+                version: proof.version,
+                root: proof.root,
+                chain: proof
+                    .chain
+                    .iter()
+                    .map(|link| FirstLink {
+                        key: link.key,
+                        next_key_hash: link.next_key_hash,
+                        added_by: link.added_by,
+                        signature: link.signature,
+                    })
+                    .collect(),
+            };
+            let old = postcard::to_allocvec(&first).expect("encode the first format");
+            // What an older client sent reads as the same proof...
+            let parsed = KeySetProof::from_bytes(&old).expect("an old proof still decodes");
+            assert_eq!(parsed, proof);
+            assert!(
+                parsed
+                    .chain
+                    .iter()
+                    .all(|link| link.kind == LinkKind::AddKey)
+            );
+            // ...and an add-key proof is still written as it always was.
+            assert_eq!(postcard::to_allocvec(&proof).expect("encode"), old);
+            let last = parsed.chain.last().map(|link| link.key).expect("a link");
+            verify_key_set_proof(&parsed, &uuid, &public_key_from_bytes(&last).expect("key"))
+                .expect("verifies");
+        }
+
+        // The new kinds are new tags in the same byte: 2/3 for a rotation and
+        // 5 for a root commitment, right after the 32-byte key.
+        let successor = player(9);
+        let proof = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&root, &successor, None, &uuid),
+            ],
+        );
+        let bytes = postcard::to_allocvec(&proof).expect("encode");
+        // version, root, the chain's length, then the first link's key.
+        let first_tag = 1 + 32 + 1 + 32;
+        assert_eq!(bytes[first_tag], 5);
+        let second_tag = first_tag + 1 + 32 + 32 + 1 + 64 + 32;
+        assert_eq!(bytes[second_tag], 2);
+        assert_eq!(KeySetProof::from_bytes(&bytes).expect("parse"), proof);
+        // A tag past the last kind is not a link.
+        let mut unknown = bytes;
+        unknown[second_tag] = 6;
+        assert!(matches!(
+            KeySetProof::from_bytes(&unknown),
+            Err(RegistryError::Malformed { .. })
+        ));
+    }
+
+    /// An email request exactly as the first format declared it.
+    #[derive(Serialize)]
+    struct FirstEmail {
+        version: u8,
+        uuid: [u8; 32],
+        public_key: [u8; 32],
+        address: Option<String>,
+        timestamp: i64,
+        signature: Signature64,
+    }
+
+    /// A recovery request exactly as the first format declared it.
+    #[derive(Serialize)]
+    struct FirstRecovery {
+        version: u8,
+        name: String,
+        new_uuid: [u8; 32],
+        public_key: [u8; 32],
+        timestamp: i64,
+        signature: Signature64,
+    }
+
+    #[test]
+    fn an_email_request_carries_its_work_and_a_first_format_one_still_decodes() {
+        let alice = player(1);
+        let mut request = EmailRequest::new(&alice, Some("alice@example.com"), NOW);
+        let unsigned_payload = request.signing_payload();
+        assert_eq!(request.work_bits(), None);
+        let nonce = request.solve_work(8).expect("eight bits");
+        // The work is outside the signature: the payload did not change.
+        assert_eq!(request.signing_payload(), unsigned_payload);
+        request.sign(&alice);
+        let parsed = EmailRequest::from_bytes(&postcard::to_allocvec(&request).expect("encode"))
+            .expect("parse");
+        assert_eq!(parsed.work, Some(nonce));
+        assert!(parsed.work_bits().is_some_and(|bits| bits >= 8));
+        parsed.verify(NOW).expect("verify");
+
+        // The construction the registry's header carried before it moved here:
+        // a nonce mined then is the same proof now.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tiamat:email-work:v1");
+        hasher.update(&parsed.signing_payload());
+        hasher.update(&nonce.to_le_bytes());
+        assert_eq!(
+            parsed.work_bits(),
+            Some(leading_zero_bits(hasher.finalize().as_bytes()))
+        );
+        // And the claim's work is the hash its first format defined.
+        let name = Name::from_parts("alice", "alice").expect("name");
+        let mut claim = ClaimRequest::new(&alice, &name, NOW);
+        claim.solve_work(6).expect("mine");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tiamat:name-work:v1");
+        hasher.update(&claim.signing_payload());
+        let expected = leading_zero_bits(hasher.finalize().as_bytes());
+        assert_eq!(claim.work_bits(), Some(expected));
+        assert!(expected >= 6);
+        assert_eq!(request.solve_work(MAX_WORK_BITS + 1), None);
+
+        // A first-format request — the header era, and every client before it
+        // — decodes with no work and no proof, and verifies.
+        let first = FirstEmail {
+            version: EMAIL_VERSION,
+            uuid: request.uuid,
+            public_key: request.public_key,
+            address: request.address.clone(),
+            timestamp: request.timestamp,
+            signature: request.signature,
+        };
+        let old = EmailRequest::from_bytes(&postcard::to_allocvec(&first).expect("encode"))
+            .expect("a first-format request decodes");
+        assert_eq!(old.work, None);
+        assert_eq!(old.key_set, None);
+        old.verify(NOW).expect("and verifies");
+        // Trailing garbage after the first format is still refused.
+        let mut padded = postcard::to_allocvec(&first).expect("encode");
+        padded.push(7);
+        assert!(EmailRequest::from_bytes(&padded).is_err());
+
+        let mut recovery = RecoveryRequest::new(&alice, "bob", NOW);
+        recovery.sign(&alice);
+        let first = FirstRecovery {
+            version: RECOVERY_VERSION,
+            name: recovery.name.clone(),
+            new_uuid: recovery.new_uuid,
+            public_key: recovery.public_key,
+            timestamp: recovery.timestamp,
+            signature: recovery.signature,
+        };
+        let old = RecoveryRequest::from_bytes(&postcard::to_allocvec(&first).expect("encode"))
+            .expect("a first-format recovery decodes");
+        assert_eq!(old, recovery);
+        old.verify(NOW).expect("and verifies");
+    }
+
+    #[test]
+    fn every_request_carries_a_rotation_and_says_what_it_retired() {
+        let root = player(1);
+        let successor = player(2);
+        let uuid = root.uuid_as_root();
+        let proof = chain_from(
+            &root,
+            vec![
+                declare(&root, &uuid, &successor),
+                rotation_link(&root, &successor, None, &uuid),
+            ],
+        );
+        let retired = [RetiredKey {
+            key: root.public_key(),
+            successor: successor.public_key(),
+            controlling: true,
+        }];
+
+        let name = Name::from_parts("alice", "alice").expect("name");
+        let mut claim = ClaimRequest::for_device(&successor, &uuid, proof.clone(), &name, NOW);
+        claim.solve_work(2).expect("mine");
+        claim.sign(&successor);
+        let claim = ClaimRequest::from_bytes(&postcard::to_allocvec(&claim).expect("encode"))
+            .expect("parse")
+            .verify_claim(NOW, 2)
+            .expect("claim");
+        assert_eq!(claim.lineage.retired(), &retired);
+        assert_eq!(claim.public_key, successor.public_key());
+
+        let mut release =
+            ReleaseRequest::for_device(&successor, &uuid, proof.clone(), "alice", NOW);
+        release.sign(&successor);
+        let release = release.verify(NOW).expect("release");
+        assert_eq!(release.lineage.retired(), &retired);
+        assert_eq!(release.timestamp, NOW);
+
+        let mut email = EmailRequest::for_device(
+            &successor,
+            &uuid,
+            proof.clone(),
+            Some("alice@example.com"),
+            NOW,
+        );
+        email.solve_work(2).expect("mine");
+        email.sign(&successor);
+        let email = EmailRequest::from_bytes(&postcard::to_allocvec(&email).expect("encode"))
+            .expect("parse")
+            .verify(NOW)
+            .expect("email");
+        assert_eq!(email.lineage.retired(), &retired);
+        assert_eq!(email.uuid, uuid);
+
+        let mut recovery =
+            RecoveryRequest::for_device(&successor, &uuid, proof.clone(), "bob", NOW);
+        recovery.sign(&successor);
+        let recovery =
+            RecoveryRequest::from_bytes(&postcard::to_allocvec(&recovery).expect("encode"))
+                .expect("parse")
+                .verify(NOW)
+                .expect("recovery");
+        assert_eq!(recovery.lineage.retired(), &retired);
+        assert_eq!(recovery.new_uuid, uuid);
+
+        let mut cancel = CancelRecoveryRequest::for_device(&successor, &uuid, proof, "alice", NOW);
+        cancel.sign(&successor);
+        let cancel = cancel.verify(NOW).expect("cancel");
+        assert_eq!(cancel.lineage.retired(), &retired);
+
+        // The root alone, with no proof: the root-by-hash lineage.
+        let mut bare = EmailRequest::new(&root, None, NOW);
+        bare.sign(&root);
+        let bare = bare.verify(NOW).expect("root");
+        assert_eq!(bare.lineage, KeyLineage::of_root(root.public_key()));
+        assert_eq!(bare.lineage.authorities(), &[root.public_key()]);
     }
 }

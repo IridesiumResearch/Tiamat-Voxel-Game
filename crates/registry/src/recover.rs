@@ -40,11 +40,19 @@
 //!
 //! # Who may make the registry mail
 //!
-//! Every mail is counted against the asking identity, the (folded) address,
-//! the asker's network and the registry's hourly ceiling ([`crate::mailquota`]),
-//! inside the transaction that issues its link. Binding an address from an
-//! identity that holds no name also needs a proof of work ([`crate::work`]),
-//! at the difficulty a claim from the same network would pay.
+//! Every mail is counted against the asking identity, the (folded) address —
+//! by the hour and by the day — the asker's network and the registry's hourly
+//! ceiling ([`crate::mailquota`]), inside the transaction that issues its link.
+//! Binding an address from an identity that holds no name also needs a proof
+//! of work, carried in the request itself (`EmailRequest::work`), at the
+//! difficulty a claim from the same network would pay.
+//!
+//! # The memory of retired keys
+//!
+//! Both flows that a signed request starts — the bind and the recovery start —
+//! record what the request's key-set proof showed ([`crate::retired::record`])
+//! inside the transaction that issues the link, because that link may be the
+//! first row the registry keeps of the identity.
 
 use std::net::IpAddr;
 
@@ -122,8 +130,9 @@ pub enum EmailOutcome {
     Sent,
     /// The bound address was removed (or there was none to remove).
     Removed,
-    /// The signing key is not the UUID's root key.
-    NotRoot,
+    /// The signing key is not shown to be the UUID's own (a hand-built value;
+    /// `EmailRequest::verify` never makes one).
+    NotOwnKey,
     /// The identity holds no name and the request's proof of work is short.
     Work {
         /// The leading zero bits the request carried (zero with no work).
@@ -144,8 +153,9 @@ pub enum EmailOutcome {
 pub enum StartOutcome {
     /// A link is on its way to the bound address.
     Sent,
-    /// The signing key is not the new UUID's root key.
-    NotRoot,
+    /// The signing key is not shown to be the new UUID's own (a hand-built
+    /// value; `RecoveryRequest::verify` never makes one).
+    NotOwnKey,
     /// No name by that canonical form is held.
     UnknownName,
     /// The name has no verified recovery address.
@@ -214,10 +224,11 @@ pub enum CancelOutcome {
 /// Binds, changes or removes a recovery address.
 ///
 /// A bind or change from an identity that **holds no name** must carry a proof
-/// of work: `work_bits` is what the request's nonce gave (`None` without one),
-/// checked against the difficulty a claim from the same network would pay. The
-/// mail is sent after the database lock is released (see the module
-/// documentation), and its token discarded under a fresh lock if it fails.
+/// of work: `work_bits` is what the request's nonce gave
+/// (`EmailRequest::work_bits`, `None` without one), checked against the
+/// difficulty a claim from the same network would pay. The mail is sent after
+/// the database lock is released (see the module documentation), and its
+/// token discarded under a fresh lock if it fails.
 ///
 /// A removal sends nothing and needs nothing, and writes (and audits) only
 /// when there was an address to remove, so a loop of removals is a loop of
@@ -236,10 +247,11 @@ pub fn bind_email(
     now: i64,
     deadline: &Deadline,
 ) -> Result<EmailOutcome, FlowError> {
-    // Defence in depth: `EmailRequest::verify` already refused any key but the
-    // root, and this keeps the rule true for a caller that built the value.
-    if PlayerUuid::from_root_key(&verified.public_key) != verified.uuid {
-        return Ok(EmailOutcome::NotRoot);
+    // Defence in depth: `EmailRequest::verify` already showed the key to be the
+    // identity's own, and this keeps the rule true for a caller that built the
+    // value — the only lineage one can build is the root's.
+    if !shown_own(&verified.lineage, &verified.uuid, &verified.public_key) {
+        return Ok(EmailOutcome::NotOwnKey);
     }
 
     let Some(address) = verified.address.clone() else {
@@ -298,6 +310,16 @@ pub fn bind_email(
             None,
             Some(&address),
             now,
+        )?;
+        // The link is a row the registry keeps of this identity, so from here
+        // its memory of retired keys holds what this request showed.
+        crate::retired::record(
+            &transaction,
+            &verified.uuid,
+            &verified.lineage,
+            verified.timestamp,
+            now,
+            Some(flow.client),
         )?;
         names::audit(
             &transaction,
@@ -412,9 +434,9 @@ pub fn start_recovery(
     deadline: &Deadline,
 ) -> Result<StartOutcome, FlowError> {
     // Defence in depth, as in `bind_email`: `RecoveryRequest::verify` already
-    // refused a key that is not the new identity's root.
-    if PlayerUuid::from_root_key(&verified.public_key) != verified.new_uuid {
-        return Ok(StartOutcome::NotRoot);
+    // showed the key to be the new identity's own.
+    if !shown_own(&verified.lineage, &verified.new_uuid, &verified.public_key) {
+        return Ok(StartOutcome::NotOwnKey);
     }
 
     let started = db.try_with(|connection| -> Result<Started, FlowError> {
@@ -451,6 +473,14 @@ pub fn start_recovery(
             Some(&verified.name),
             None,
             now,
+        )?;
+        crate::retired::record(
+            &transaction,
+            &verified.new_uuid,
+            &verified.lineage,
+            verified.timestamp,
+            now,
+            Some(flow.client),
         )?;
         names::audit(
             &transaction,
@@ -499,6 +529,16 @@ pub fn start_recovery(
             Ok(StartOutcome::Mail(other))
         }
     }
+}
+
+/// Whether a verified value's key is shown to be `uuid`'s: its lineage is
+/// rooted at the UUID and ends at that key.
+fn shown_own(
+    lineage: &tiamat_core::identity::registry::KeyLineage,
+    uuid: &PlayerUuid,
+    key: &ed25519_dalek::VerifyingKey,
+) -> bool {
+    lineage.uuid() == *uuid && lineage.signing_key() == key
 }
 
 /// Deletes a link whose mail could not be sent, under a lock of its own.
@@ -786,6 +826,7 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::mail::SinkMailer;
+    use tiamat_core::identity::registry::KeyLineage;
 
     const NOW: i64 = 1_800_000_000;
 
@@ -812,6 +853,7 @@ mod tests {
             address: Some("alice@example.com".to_owned()),
             public_key: identity.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(identity.verifying_key()),
         };
         let outcome = bind_email(
             &db,
@@ -902,6 +944,7 @@ mod tests {
             new_uuid,
             public_key: new.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(new.verifying_key()),
         };
         let outcome =
             start_recovery(&db, flow(&mailer), &recovery, NOW, &Deadline::none()).expect("start");
@@ -1000,6 +1043,7 @@ mod tests {
             new_uuid: PlayerUuid::from_root_key(&key.verifying_key()),
             public_key: key.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(key.verifying_key()),
         }
     }
 
@@ -1018,6 +1062,7 @@ mod tests {
             address: Some("alice@example.com".to_owned()),
             public_key: identity.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(identity.verifying_key()),
         };
         assert_eq!(
             bind_email(&db, flow(&probe), &email, None, 0, NOW, &Deadline::none()).expect("bind"),
@@ -1112,6 +1157,7 @@ mod tests {
             uuid: holder,
             public_key: key.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(key.verifying_key()),
         };
         // One second before the end it is still the holder's to stop.
         let running = db
@@ -1183,6 +1229,7 @@ mod tests {
             address: None,
             public_key: identity.verifying_key(),
             timestamp: NOW,
+            lineage: KeyLineage::of_root(identity.verifying_key()),
         };
         // A loop of removals is a loop of no-ops, not of audit rows.
         for _ in 0..50 {

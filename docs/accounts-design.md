@@ -131,16 +131,34 @@ and the limits; it writes the binding and answers with the certificate. The
 client stores it beside `identity.key`.
 
 **The key-set record is a chain from the root.** `KeySetProof` in
-`core::identity::registry`: the root public key, then one link per added key,
-each link carrying the `add-key` payload the client signed when that device was
-added — its key, the successor it committed to, the key that authorised it, and
-that key's signature. The last link's key is the one that signed the request.
-The registry verifies every link and re-derives the UUID from the root, so a
-proof cannot be moved to another identity, and a stolen device key alone still
-cannot claim. Claims, renewals, releases and recovery cancellations carry one; the email
-and recovery requests do not yet, and so still want the root key (§7's
-limitation). No request is accepted on its signature alone: the key must be
-the UUID's root or reached from it.
+`core::identity::registry`: the root public key, then one link per key event —
+the root's own successor commitment, an `add-key` for a device, or a
+`rotate-key` handover. An add link carries the payload the client signed when
+that device was added — its key, the successor it committed to, the key that
+authorised it, and that key's signature. A rotation link is the `rotate-key`
+payload: the current controlling key names its pre-committed successor and
+signs the handover, and the successor's own commitment is carried forward. The
+last link's key is the one that signed the request. The registry verifies
+every link, that each commitment is the hash of the key it hands over to, and
+re-derives the UUID from the root, so a proof cannot be moved to another
+identity. A root with no commitment cannot be rotated; the registry records
+the first commitment it is shown for an identity and refuses any other, which
+is what stops a thief holding the root rotating it to a key of their own.
+
+**The registry remembers what it has seen rotate.** Per identity it persists
+the keys a presented rotation retired (and the successor each went to) and the
+first successor commitment the root declared. From then on it refuses a request
+signed by a retired key, or whose proof chains through one — the root-by-hash
+shortcut included; a rotation of a retired key to any other successor; and a
+root declaring a second commitment. A device a retired key authorised is
+refused until the successor re-authorises it. **A rotation protects nothing
+until it is presented**, because the registry only learns of it from a request
+that carries it: the old key still acts there until the first claim, renewal,
+release, email change or recovery request presents the handover. A player who
+suspects a theft should therefore do one of those promptly, not only rotate at
+the game server. Claims, renewals, releases, email changes, recovery starts and
+recovery cancellations all carry a proof when the signing key is not the root;
+email and recovery used to be root-only and are not any more.
 
 **Renew.** The same request with the same name, without the work; answered with a fresh certificate while the binding stands once the
 current one has fewer than 30 days left; before that, with the current
@@ -155,11 +173,15 @@ identity is the UUID the certificate names: the client renews on first
 contact and the name is there. Nothing to design.
 
 **A recovery email, optional.** A player may bind one address to their
-identity: the client sends `{ uuid, address, timestamp }` signed by the key;
-the registry mails the address a link; the address is stored only once the
-link is followed, and until then nothing is kept but a hashed token that
-dies in a day. Changing or removing the address is the same signed request.
-Nothing else ever goes to that address: no news, no notices of joins.
+identity: the client sends `{ uuid, address, timestamp, work }` signed by the
+key, with the key-set proof beside it when the key is not the root; `work` is
+the proof-of-work nonce an identity that holds no name pays for its mail (the
+claim's shape and difficulty), carried outside the signature as every
+proof-of-work nonce is. The registry mails the address a link; the address is
+stored only once the link is followed, and until then nothing is kept but a
+hashed token that dies in a day. Changing or removing the address is the same
+signed request. Nothing else ever goes to that address: no news, no notices of
+joins.
 
 **Everything lost — no phrase, no device — with an email bound.** On a new
 identity the player asks to recover the name: the new key signs `{ name,

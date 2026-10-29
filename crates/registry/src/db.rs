@@ -28,7 +28,7 @@ use std::time::Duration;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 /// The schema this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// One migration's work.
 enum Step {
@@ -49,6 +49,7 @@ const MIGRATIONS: &[(i64, Step)] = &[
     (2, Step::Sql(SCHEMA_V2)),
     (3, Step::Sql(SCHEMA_V3)),
     (4, Step::Code(schema_v4)),
+    (5, Step::Sql(SCHEMA_V5)),
 ];
 
 /// The schema, in one statement batch.
@@ -275,6 +276,41 @@ fn schema_v4(connection: &Connection) -> rusqlite::Result<()> {
     }
     Ok(())
 }
+
+/// Schema 5: what the registry knows about an identity's keys (review A3).
+///
+/// The registry keeps no key store — a request proves its key from the root —
+/// so without a memory a root key its owner rotated away from would keep its
+/// authority for ever. `crate::retired` is the module that reads and writes
+/// these, and says why each is shaped as it is.
+///
+/// - `retired_keys`: every key a presented rotation retired, per identity,
+///   with the successor it handed over to (a second, different rotation of the
+///   same key is refused), `retired_at` the signed time of the first request
+///   that carried the rotation, and `learned_at` this service's clock then.
+/// - `root_commitments`: the first successor commitment an identity's root
+///   declared; another is refused, which is what keeps a thief who holds the
+///   root from rotating it to a key of their own.
+///
+/// Kept as long as the identity has any other row the service keeps, and
+/// swept with its last (`retention`). Tables, so `IF NOT EXISTS` makes the
+/// migration idempotent.
+const SCHEMA_V5: &str = r"
+CREATE TABLE IF NOT EXISTS retired_keys (
+    uuid       BLOB NOT NULL,
+    key        BLOB NOT NULL,
+    successor  BLOB NOT NULL,
+    retired_at INTEGER NOT NULL,
+    learned_at INTEGER NOT NULL,
+    PRIMARY KEY (uuid, key)
+);
+
+CREATE TABLE IF NOT EXISTS root_commitments (
+    uuid       BLOB PRIMARY KEY,
+    commitment BLOB NOT NULL,
+    learned_at INTEGER NOT NULL
+);
+";
 
 /// Adds a column unless the table already has it.
 ///
@@ -544,7 +580,9 @@ mod tests {
             "recoveries",
             "reserved",
             "revocations",
+            "retired_keys",
             "revoked_holders",
+            "root_commitments",
             "rotations",
             "tokens",
         ] {
@@ -791,6 +829,65 @@ mod tests {
         let once = snapshot(&db);
         db.with(|connection| schema_v4(connection)).expect("again");
         assert_eq!(snapshot(&db), once);
+    }
+
+    #[test]
+    fn a_schema_four_database_gains_the_memory_of_retired_keys_and_keeps_its_rows() {
+        let dir = test_dir("migrate-4-to-5");
+        let path = dir.join("registry.sqlite");
+        {
+            let connection = Connection::open(&path).expect("raw open");
+            connection
+                .execute_batch(&format!("{SCHEMA_V1}{SCHEMA_V2}{SCHEMA_V3}"))
+                .expect("schema 3");
+            schema_v4(&connection).expect("schema 4");
+            connection
+                .pragma_update(None, "user_version", 4)
+                .expect("stamp");
+            connection
+                .execute(
+                    "INSERT INTO names (canonical, display, uuid, claimed, renewed)
+                     VALUES ('alice', 'Alice', X'01', 1, 1)",
+                    [],
+                )
+                .expect("a schema-4 row");
+        }
+        let db = Db::open(&path).expect("migrate forward");
+        assert_eq!(version(&db), SCHEMA_VERSION);
+        let (tables, names): (i64, i64) = db
+            .with(|connection| {
+                let tables = connection.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+                     AND name IN ('retired_keys', 'root_commitments')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let names =
+                    connection.query_row("SELECT COUNT(*) FROM names", [], |row| row.get(0))?;
+                Ok((tables, names))
+            })
+            .expect("tables");
+        assert_eq!(tables, 2);
+        assert_eq!(names, 1, "the migration lost a row");
+
+        // Run twice, it changes nothing: the rows written after the first run
+        // are still there and no table is recreated.
+        db.with(|connection| {
+            connection.execute(
+                "INSERT INTO retired_keys (uuid, key, successor, retired_at, learned_at)
+                 VALUES (X'01', X'02', X'03', 10, 11)",
+                [],
+            )?;
+            connection.execute_batch(SCHEMA_V5)?;
+            Ok(())
+        })
+        .expect("again");
+        let kept: i64 = db
+            .with(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM retired_keys", [], |row| row.get(0))
+            })
+            .expect("count");
+        assert_eq!(kept, 1);
     }
 
     #[test]

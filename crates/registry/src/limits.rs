@@ -224,9 +224,10 @@ pub fn required_work_bits(
 ///
 /// The window's end is its start plus the length of its scope's window, known
 /// from the scope's prefix — the scopes are this crate's own strings: `ip:`,
-/// `net:` and `mailid:` (in `mailquota`) count by the day; `mail:`, `mailnet:`
-/// and `mailall:` by the hour; and the claim, rename and casing allowances by
-/// thirty days. So a thirty-day
+/// `net:`, `mailid:` and `maild:` (in `mailquota`) and `retired:` (the refusal
+/// audits in `retired`) count by the day; `mail:`, `mailnet:` and `mailall:` by
+/// the hour; and the claim, rename and casing allowances by thirty days. So a
+/// thirty-day
 /// allowance lives as long as it counts, and a day's address count is gone a
 /// week after its day. An unknown prefix is given the **longest** window: a
 /// sweep that keeps a row too long costs a few bytes, and one that deletes a
@@ -240,7 +241,8 @@ pub fn sweep(connection: &Connection, now: i64) -> rusqlite::Result<usize> {
     // loop; the `ELSE` is the unknown-prefix default.
     connection.execute(
         "DELETE FROM limits WHERE window + CASE
-             WHEN scope LIKE 'ip:%' OR scope LIKE 'net:%' OR scope LIKE 'mailid:%' THEN ?2
+             WHEN scope LIKE 'ip:%' OR scope LIKE 'net:%' OR scope LIKE 'mailid:%'
+                  OR scope LIKE 'maild:%' OR scope LIKE 'retired:%' THEN ?2
              WHEN scope LIKE 'mail:%' OR scope LIKE 'mailnet:%' OR scope LIKE 'mailall:%' THEN ?3
              ELSE ?4
          END < ?1",
@@ -376,15 +378,22 @@ mod tests {
             Ok(())
         })
         .expect("sweep");
-        // An identity's daily mail count is a day's window: kept through its
-        // day and the week after, not swept as an hour.
+        // An identity's daily mail count, an address's daily count and the
+        // refusal-audit throttle are a day's window: kept through their day and
+        // the week after, not swept as an hour.
         db.with(|connection| {
             let day = window_start(NOW, DAY);
-            take(connection, "mailid:abcd", day, 3)?;
+            for scope in ["mailid:abcd", "maild:abcd", "retired:abcd"] {
+                take(connection, scope, day, 3)?;
+            }
             sweep(connection, day + HOUR + LIMIT_RETENTION + 1)?;
-            assert_eq!(used(connection, "mailid:abcd", day)?, 1);
+            for scope in ["mailid:abcd", "maild:abcd", "retired:abcd"] {
+                assert_eq!(used(connection, scope, day)?, 1, "{scope}");
+            }
             sweep(connection, day + DAY + LIMIT_RETENTION + 1)?;
-            assert_eq!(used(connection, "mailid:abcd", day)?, 0);
+            for scope in ["mailid:abcd", "maild:abcd", "retired:abcd"] {
+                assert_eq!(used(connection, scope, day)?, 0, "{scope}");
+            }
             Ok(())
         })
         .expect("sweep");

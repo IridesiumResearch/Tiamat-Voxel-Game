@@ -307,15 +307,14 @@ const NAME_PREFIX: &str = "/v1/name/";
 
 /// Routes a request to a handler, or to the status line that says why not.
 ///
-/// `work` is the email request's proof-of-work nonce from its header
-/// ([`crate::work::WORK_HEADER`]), and `deadline` is what every handler that
-/// writes checks before it commits.
+/// `client` is the address a request's limits and audit rows are kept
+/// against, and `deadline` is what every handler that writes checks before it
+/// commits.
 pub(crate) fn dispatch(
     service: &Service,
     method: &str,
     url: &str,
     client: Option<IpAddr>,
-    work: Option<u64>,
     body: &[u8],
     deadline: &Deadline,
 ) -> Reply {
@@ -325,8 +324,8 @@ pub(crate) fn dispatch(
         ("GET", "/v1/keys") => api::keys(service),
         ("GET", "/v1/revocations") => api::revocations(service),
         ("POST", "/v1/claim") => api::claim(service, body, client, deadline),
-        ("POST", "/v1/release") => api::release(service, body, deadline),
-        ("POST", "/v1/email") => api::email(service, body, client, work, deadline),
+        ("POST", "/v1/release") => api::release(service, body, client, deadline),
+        ("POST", "/v1/email") => api::email(service, body, client, deadline),
         // A link in a mail is a page; only its button's POST changes anything,
         // so a mail scanner that follows every link changes nothing.
         ("GET", "/v1/email/verify") => api::email_verify_page(query),
@@ -334,7 +333,7 @@ pub(crate) fn dispatch(
         ("POST", "/v1/recover") => api::recover_start(service, body, client, deadline),
         ("GET", "/v1/recover/confirm") => api::recover_confirm_page(query),
         ("POST", "/v1/recover/confirm") => api::recover_confirm(service, query, body, deadline),
-        ("POST", "/v1/recover/cancel") => api::recover_cancel(service, body, deadline),
+        ("POST", "/v1/recover/cancel") => api::recover_cancel(service, body, client, deadline),
         ("GET", path) if path.starts_with(NAME_PREFIX) => {
             api::name_page(service, &path[NAME_PREFIX.len()..])
         }
@@ -409,14 +408,6 @@ pub(crate) fn read_body(request: &mut Request, deadline: &Deadline) -> Result<Ve
         }
     }
     Ok(body)
-}
-
-/// The email request's proof-of-work nonce, from its header, if it parses.
-///
-/// A header that is not a decimal `u64` is no work at all, and the request is
-/// refused for that with the difficulty it needs, as one with none would be.
-pub(crate) fn work_header(request: &Request) -> Option<u64> {
-    header(request, crate::work::WORK_HEADER).and_then(|value| value.trim().parse().ok())
 }
 
 /// The address to rate-limit a request against.

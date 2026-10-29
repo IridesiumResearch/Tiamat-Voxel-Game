@@ -7,15 +7,22 @@
 //! who can make it send them cannot phish anyone — but every mail spends the
 //! sending domain's reputation, and a registry that can be made to mail any
 //! address on demand is a registry whose mail ends up in spam (review B13).
-//! So every mail is counted four ways, inside the same transaction that issues
+//! So every mail is counted five ways, inside the same transaction that issues
 //! its link, and the first count that is spent refuses it:
 //!
 //! | scope | window | allowance |
 //! |---|---|---|
 //! | the identity that asked (`mailid:`) | a day | [`MAILS_PER_IDENTITY`] |
 //! | the address mailed (`mail:`) | an hour | [`MAILS_PER_ADDRESS`] |
+//! | the address mailed (`maild:`) | a day | [`MAILS_PER_ADDRESS_PER_DAY`] |
 //! | the asker's `/24` or `/48` (`mailnet:`) | an hour | [`MAILS_PER_SUBNET`] |
 //! | the whole registry (`mailall:`) | an hour | `REGISTRY_MAIL_PER_HOUR` ([`DEFAULT_MAILS_PER_HOUR`]) |
+//!
+//! The address has a day's allowance as well as an hour's because the people
+//! asking need not be the same: a recovery is asked for by a fresh identity,
+//! free to mint, so the per-identity cap does not bound how often a holder's
+//! bound address is mailed, and three an hour alone would let a crowd of fresh
+//! keys mail one holder seventy-two times a day.
 //!
 //! # The address is folded, then hashed
 //!
@@ -37,6 +44,14 @@ use crate::limits::{self, DAY, HOUR};
 
 /// Mails to one (folded) address per hour.
 pub const MAILS_PER_ADDRESS: i64 = 3;
+
+/// Mails to one (folded) address per day.
+///
+/// Six: two hours' worth of the hourly allowance, which is more than a player
+/// binding their own address ever needs (a typo and its correction, twice) and
+/// a twelfth of what the hourly allowance alone allowed a holder's address to
+/// be sent by strangers asking to recover its name.
+pub const MAILS_PER_ADDRESS_PER_DAY: i64 = 6;
 
 /// Mails asked for from one neighbourhood per hour.
 pub const MAILS_PER_SUBNET: i64 = 10;
@@ -69,6 +84,8 @@ pub enum MailLimit {
     Identity,
     /// The address was mailed three times this hour.
     Address,
+    /// The address was mailed six times today.
+    AddressDaily,
     /// The neighbourhood asked for ten mails this hour.
     Subnet,
     /// The registry sent its hourly ceiling.
@@ -82,6 +99,9 @@ impl MailLimit {
         match self {
             Self::Identity => "this identity has asked for three mails today; try again tomorrow",
             Self::Address => "that address has been mailed three times this hour; try again later",
+            Self::AddressDaily => {
+                "that address has been mailed six times today; try again tomorrow"
+            }
             Self::Subnet => "this network has asked for ten mails this hour; try again later",
             Self::Global => {
                 "the registry has sent all the mail it sends in an hour; try again later"
@@ -115,6 +135,15 @@ pub fn address_scope(address: &str) -> String {
     hasher.update(ADDRESS_DOMAIN);
     hasher.update(fold_address(address).as_bytes());
     format!("mail:{}", crate::hex::encode(hasher.finalize().as_bytes()))
+}
+
+/// The per-address daily scope: the same hash as [`address_scope`], under its
+/// own prefix, because a counter row is keyed by scope and window start and an
+/// hour's window and a day's start at the same second every midnight.
+#[must_use]
+pub fn address_day_scope(address: &str) -> String {
+    let hourly = address_scope(address);
+    format!("maild:{}", hourly.trim_start_matches("mail:"))
 }
 
 /// The per-identity scope.
@@ -162,6 +191,12 @@ pub fn take(
             hour,
             MAILS_PER_ADDRESS,
             MailLimit::Address,
+        ),
+        (
+            address_day_scope(address),
+            day,
+            MAILS_PER_ADDRESS_PER_DAY,
+            MailLimit::AddressDaily,
         ),
         (
             subnet_scope(client),
@@ -294,6 +329,57 @@ mod tests {
             Ok(())
         })
         .expect("limits");
+    }
+
+    #[test]
+    fn an_address_is_mailed_six_times_a_day_however_the_hours_fall() {
+        let db = Db::in_memory().expect("db");
+        let day = limits::window_start(NOW, DAY);
+        db.with(|connection| {
+            // Fresh identities from fresh networks, three an hour: the hourly
+            // allowance never binds, the daily one does after six.
+            let mut asker = 0u8;
+            let mut accepted = 0;
+            for hour in 0..24 {
+                for _ in 0..MAILS_PER_ADDRESS {
+                    asker = asker.wrapping_add(1);
+                    let client: IpAddr = format!("10.{asker}.0.1").parse().expect("ip");
+                    let outcome = take(
+                        connection,
+                        "holder+recover@example.com",
+                        &uuid(asker),
+                        client,
+                        day + hour * HOUR,
+                        1000,
+                    )?;
+                    match outcome {
+                        None => accepted += 1,
+                        Some(limit) => assert_eq!(limit, MailLimit::AddressDaily, "hour {hour}"),
+                    }
+                }
+            }
+            assert_eq!(accepted, MAILS_PER_ADDRESS_PER_DAY);
+            // The next day the address has its allowance back.
+            assert_eq!(
+                take(
+                    connection,
+                    "HOLDER@example.com",
+                    &uuid(250),
+                    "192.0.2.1".parse().expect("ip"),
+                    day + DAY,
+                    1000
+                )?,
+                None
+            );
+            Ok(())
+        })
+        .expect("limits");
+        assert_ne!(
+            address_day_scope("a@example.com"),
+            address_scope("a@example.com")
+        );
+        assert!(address_day_scope("a@example.com").starts_with("maild:"));
+        assert!(!address_day_scope("a@example.com").contains('@'));
     }
 
     #[test]
