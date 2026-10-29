@@ -1176,6 +1176,12 @@ pub struct App {
     /// atlas itself — several megabytes for a large mod set — is dropped once
     /// it is on the GPU.
     tiles: crate::texture::TileMap,
+    /// The atlas being packed off the frame thread, if one is.
+    ///
+    /// A material table arrives mid-session and its textures can be several
+    /// megabytes to pack and mip. The worker does that while the previous atlas
+    /// keeps drawing; [`Self::poll_atlas`] installs the result.
+    atlas_build: Option<crate::atlaswork::AtlasBuild>,
     /// Whether the atlas texture changed and egui has not been told.
     atlas_changed: bool,
     /// When the hands last started a swing.
@@ -1550,6 +1556,7 @@ impl App {
             menu_open: false,
             quit_requested: false,
             tiles: crate::texture::TileMap::default(),
+            atlas_build: None,
             atlas_changed: false,
             swung_at: None,
             rebinding: None,
@@ -3896,11 +3903,30 @@ impl App {
     /// that is several megabytes for a large mod set.
     fn adopt_atlas(
         &mut self,
-        table: &[tiamat_core::proto::MaterialDef],
-        images: &BTreeMap<u16, Image>,
+        table: Vec<tiamat_core::proto::MaterialDef>,
+        images: BTreeMap<u16, Image>,
     ) {
-        self.adopt_materials(table);
-        let atlas = build_atlas(table, images);
+        self.adopt_materials(&table);
+        // The tints are a small table and do not need the atlas: writing them
+        // now means the atlas install later only has to swap the texture.
+        self.renderer.set_tints(&table);
+        // **Packed off the frame thread.** The previous atlas keeps drawing
+        // until `poll_atlas` installs the new one; a join with no previous
+        // atlas draws the chequer for the frame or two the worker needs.
+        self.atlas_build = Some(crate::atlaswork::AtlasBuild::start(table, images));
+    }
+
+    /// Installs an atlas the worker finished, and remeshes what drew the old
+    /// one.
+    fn poll_atlas(&mut self) {
+        let Some(built) = self
+            .atlas_build
+            .as_mut()
+            .and_then(crate::atlaswork::AtlasBuild::poll)
+        else {
+            return;
+        };
+        self.atlas_build = None;
         // **Set here, and it was not.** The field existed, the accessor existed
         // and the overlay drew it, and nothing ever wrote it — so the line read
         // "0 textured" on a working atlas as readily as on a broken one, and
@@ -3908,38 +3934,29 @@ impl App {
         // arrived" from "they arrived and the shader is not sampling them" said
         // the same thing either way. Counted from the atlas rather than from
         // `images`, because a slot is what a mesh actually samples.
-        self.textured = atlas.filled();
+        self.textured = built.atlas.filled();
         // **The one line that says whether the world will draw.** A texture
         // that never arrived and a texture that arrived and would not decode
         // both end as the missing-texture chequer, and both are silent from the
         // console — the decode failure reaches a warning only the debug overlay
         // shows. Reported from the window as "everything is pink and black",
         // with nothing anywhere to say which half had gone wrong.
-        let wanted = table.iter().filter(|entry| entry.texture.is_some()).count();
-        if images.len() < wanted {
+        if built.textures < built.wanted {
             tracing::warn!(
-                wanted,
-                got = images.len(),
+                wanted = built.wanted,
+                got = built.textures,
                 "textures are missing and those materials will draw as the missing-texture \
                  chequer — the server offered more than arrived or decoded"
             );
         } else {
-            tracing::info!(
-                materials = table.len(),
-                textures = images.len(),
-                "atlas built"
-            );
+            tracing::info!(textures = built.textures, "atlas built");
         }
-        self.tiles = atlas.tiles_only();
+        self.tiles = built.tiles;
         self.atlas_changed = true;
-        self.renderer.set_atlas(&atlas);
-        // **After the atlas**, which rebuilds the bind group from the view it
-        // just uploaded: this rebuilds it again from the table, and the second
-        // one has to be the one that survives.
-        self.renderer.set_tints(table);
-        // Every mesh drawn before this sampled the placeholder atlas. In
-        // practice the table arrives before any chunk, but "in practice" is not
-        // a guarantee the renderer should rely on.
+        self.renderer.set_atlas_with_mips(&built.atlas, &built.mips);
+        // Every mesh drawn before this sampled the old atlas. In practice the
+        // table arrives before any chunk, but "in practice" is not a guarantee
+        // the renderer should rely on.
         self.store.mark_all_dirty();
     }
 
@@ -4985,7 +5002,7 @@ impl App {
                 first_use,
             } => self.connected_to(&address, &fingerprint, first_use),
 
-            Event::Materials { table, images } => self.adopt_atlas(&table, &images),
+            Event::Materials { table, images } => self.adopt_atlas(table, images),
             Event::Picture { .. }
             | Event::Font { .. }
             | Event::Model { .. }
@@ -5354,6 +5371,8 @@ impl App {
             return 0;
         }
         let started = std::time::Instant::now();
+        // One allocation for the whole batch rather than one per summary.
+        let fluids = self.store.fluid_material_ids();
         let mut built = 0;
         for (index, pos) in due.iter().enumerate() {
             if let Some(summary) = self.store.summary(*pos) {
@@ -5375,7 +5394,6 @@ impl App {
                     self.renderer.remove_chunk(&self.drawn_at(*pos));
                     self.horizon.beyond.insert(*pos);
                 } else {
-                    let fluids = self.store.fluid_material_ids();
                     let width = summary.width() as usize;
                     let over = ChunkPos::new(pos.x, pos.y + 1, pos.z);
                     let above_summary = self.store.summary(over);
@@ -5477,6 +5495,8 @@ impl App {
 
     /// Moves the camera and records the frame time.
     pub fn advance(&mut self, mut input: Input, dt: f32) {
+        // Before anything draws this frame, take an atlas the worker finished.
+        self.poll_atlas();
         // **Whether the server allows it, not whether a key is down.** The
         // client predicts what the server will do; predicting flight it is
         // about to refuse would be a correction every tick.
@@ -6223,6 +6243,13 @@ impl App {
         /// makes it look like light arriving from more than one direction,
         /// which is what an ambient shadow is.
         const RADIUS: f32 = 0.8;
+        /// Past this distance from the camera a blob is not built.
+        ///
+        /// **The probe is the cost, not the quad.** Every body asks 25 columns
+        /// and walks up to 13 cells each, and a body behind the player or a
+        /// hill was doing it for a disc nobody can see. Sixty-four blocks is
+        /// well past the distance at which a 0.8-block disc is a pixel.
+        const DRAW_BLOCKS: f32 = 64.0;
 
         let Some(predictor) = self.predictor.as_ref() else {
             self.renderer.set_blobs(&[]);
@@ -6242,6 +6269,22 @@ impl App {
             let Some(pose) = entity.pose(now) else {
                 continue;
             };
+            // The shadow is a ground decal; past the draw distance it is
+            // smaller than a pixel, and probing for it is wasted work.
+            let world = [
+                f64::from(pose.chunk.x) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[0]) / f64::from(cells),
+                f64::from(pose.chunk.y) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[1]) / f64::from(cells),
+                f64::from(pose.chunk.z) * f64::from(tiamat_core::CHUNK_BLOCKS)
+                    + f64::from(pose.local[2]) / f64::from(cells),
+            ];
+            let offset = self.camera.position.offset_to(world);
+            if offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]
+                > DRAW_BLOCKS * DRAW_BLOCKS
+            {
+                continue;
+            }
             // Into the predictor's chunk frame, which is what `Voxels` indexes.
             let span = tiamat_core::CHUNK_SUBNODES as i32;
             let shift = |axis: usize, chunk: i32| {
@@ -7155,6 +7198,16 @@ impl App {
     /// Faults come back here and become warnings, which is the only place the
     /// player sees them.
     pub fn run_hud_scripts(&mut self) {
+        // A server with no pushed HUD is the ordinary case. Building the whole
+        // state — carried stacks, the looking-at raycast, the HUD values map —
+        // only to find the VM has no scripts was a per-frame cost for nothing.
+        if self
+            .hud_vm
+            .as_ref()
+            .is_none_or(|vm| vm.loaded().next().is_none())
+        {
+            return;
+        }
         let Some(state) = self.hud_state() else {
             return;
         };

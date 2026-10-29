@@ -140,3 +140,16 @@ Thumbs.db
 /game/*
 !/game/README.md
 !/game/core_*/
+
+# **Agent scratch is not repository content.** The performance rounds ran from
+# worktrees under `.worktrees/`, the review gate from `.claude/`, and the plans
+# the agents worked from sat at the root. None of it is part of a build or a
+# release, and leaving it untracked made every `git status` a list of other
+# people's working state. The audit those plans came from IS tracked, as
+# `docs/performance-audit-2026-10-26.md`.
+/.claude/
+/.worktrees/
+/PERF_PLAN_*.md
+# A one-off probe kept to debug the scripting VM; not an example the workspace
+# builds or a reader should copy (it has no SPDX header and unwraps).
+/crates/server/examples/exprobe.rs

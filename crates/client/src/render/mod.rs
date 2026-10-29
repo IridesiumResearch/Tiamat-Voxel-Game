@@ -1153,6 +1153,8 @@ pub struct Renderer {
     quad_indices: QuadIndices,
     instances: wgpu::Buffer,
     instance_capacity: usize,
+    /// CPU-side instance list, reused every frame instead of reallocated.
+    instance_scratch: Vec<Instance>,
     depth: wgpu::TextureView,
     depth_size: (u32, u32),
     mode: RenderMode,
@@ -1349,6 +1351,11 @@ impl Renderer {
     ///
     /// Currently infallible; the signature leaves room for shader compilation
     /// to be reported rather than panicked on.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the field list is the renderer's constructor; splitting it would hide which \
+                  defaults are chosen for which target"
+    )]
     pub fn new(gpu: Gpu, mode: RenderMode, width: u32, height: u32) -> Result<Self, RenderError> {
         let shader = gpu
             .device
@@ -1423,6 +1430,7 @@ impl Renderer {
             selection_capacity: SELECTION_CAPACITY,
             instances,
             instance_capacity: 64,
+            instance_scratch: Vec::new(),
             depth_size: (width, height),
             mode,
             // Classic until told otherwise: a client with no config gets the
@@ -2067,6 +2075,21 @@ impl Renderer {
     /// the bind group because the texture view it referenced is gone.
     pub fn set_atlas(&mut self, atlas: &Atlas) {
         let (views, grid, side) = upload_atlas(&self.gpu, atlas);
+        self.install_atlas(views, grid, side);
+    }
+
+    /// Replaces the atlas with mips already computed off the frame thread.
+    ///
+    /// [`AtlasBuild`](crate::atlaswork::AtlasBuild) computes exactly these
+    /// levels; letting [`Self::set_atlas`] recompute them here would put the
+    /// expensive half back on the frame.
+    pub fn set_atlas_with_mips(&mut self, atlas: &Atlas, mips: &[crate::texture::Image]) {
+        let (views, grid, side) = upload_atlas_mips(&self.gpu, atlas, mips);
+        self.install_atlas(views, grid, side);
+    }
+
+    /// The half both atlas installs share: the bind group and the hands.
+    fn install_atlas(&mut self, views: AtlasViews, grid: u32, side: u32) {
         self.atlas_grid = grid;
         self.atlas_side = side;
         self.bind_group = make_bind_group(
@@ -2456,14 +2479,16 @@ impl Renderer {
         // list is four vertices a quad, drawn through a prefix of the shared
         // pattern, so the one thing to see to is that the pattern is long
         // enough for the largest of them.
-        let vertices = mesh.to_buffers();
-        let glass_vertices = (!mesh.has_no_glass()).then(|| mesh.glass_buffers());
-        let cutout_vertices = (!mesh.has_no_cutout()).then(|| mesh.cutout_buffers());
+        // Borrowed when the worker already expanded this mesh: no per-chunk
+        // copy on the frame thread (perf audit C5).
+        let vertices = mesh.opaque_vertices();
+        let glass_vertices = (!mesh.has_no_glass()).then(|| mesh.glass_vertices());
+        let cutout_vertices = (!mesh.has_no_cutout()).then(|| mesh.cutout_vertices());
         let longest = [
             vertices.len(),
             mesh.fluid_vertices.len(),
-            glass_vertices.as_ref().map_or(0, Vec::len),
-            cutout_vertices.as_ref().map_or(0, Vec::len),
+            glass_vertices.as_ref().map_or(0, |glass| glass.len()),
+            cutout_vertices.as_ref().map_or(0, |cutout| cutout.len()),
         ]
         .into_iter()
         .max()
@@ -2478,7 +2503,7 @@ impl Renderer {
             buffer
         };
 
-        let vertex_buffer = upload(&mut self.pool, bytemuck::cast_slice(&vertices));
+        let vertex_buffer = upload(&mut self.pool, bytemuck::cast_slice(vertices.as_ref()));
 
         // The fluid half, when there is one. Its own buffer from the same
         // pool: a chunk with no milk in it allocates nothing here and the
@@ -2494,14 +2519,14 @@ impl Renderer {
         // `Option` says so rather than a zero-length buffer the draw loop would
         // skip every frame.
         let glass = glass_vertices.map(|glass| GlassMesh {
-            vertices: upload(&mut self.pool, bytemuck::cast_slice(&glass)),
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(glass.as_ref())),
             index_count: index_count_of(glass.len()),
         });
 
         // And the foliage, on the same pattern again. Its buffer is the
         // world's own vertex, like glass — only the pipeline differs.
         let cutout = cutout_vertices.map(|cutout| GlassMesh {
-            vertices: upload(&mut self.pool, bytemuck::cast_slice(&cutout)),
+            vertices: upload(&mut self.pool, bytemuck::cast_slice(cutout.as_ref())),
             index_count: index_count_of(cutout.len()),
         });
 
@@ -3011,13 +3036,27 @@ impl Renderer {
 #[derive(Debug, Default)]
 struct Culled {
     /// Chunks the world pass draws, with their instance index.
+    ///
+    /// Kept in streaming order for the blended glass and fluid passes; the
+    /// opaque world pass uses [`Self::opaque`], which is the same set sorted
+    /// near-to-far so early-Z rejects what is behind something already drawn.
     visible: Vec<(ChunkPos, u32)>,
-    /// Chunks the cascades draw, with their instance index.
+    /// The visible chunks, sorted near-to-far for the opaque world pass.
+    ///
+    /// **Not `visible` itself**: glass and fluid composite in whatever order
+    /// they are drawn, and changing that from the historical streaming order
+    /// would change their look. This list is for the opaque pass only.
+    opaque: Vec<(ChunkPos, u32)>,
+    /// Chunks each cascade draws, with their instance index.
     ///
     /// Tested against each cascade's own matrix — the same `Frustum` the camera
     /// uses, against the light's box rather than the eye's — so anything that
     /// can cast into the shadow map is in it whether or not it is on screen.
-    casters: Vec<(ChunkPos, u32)>,
+    ///
+    /// **Per cascade, not one union.** A chunk in the far cascade cannot reach
+    /// the first two maps, and drawing it into all three was most of the
+    /// shadow pass's vertex work.
+    casters: [Vec<(ChunkPos, u32)>; shadow::CASCADES],
     /// The visible chunks near enough for their sprites to be drawn.
     sprites: Vec<(ChunkPos, u32)>,
     /// The visible chunks near enough for their cutout foliage to be drawn
@@ -3042,6 +3081,28 @@ impl Culled {
     /// passes whether or not it was on screen — most of a crowd is behind the
     /// camera. With no frustum (a renderer that has not culled yet) every
     /// figure is kept, which is what every figure was.
+    /// Records a chunk the camera can see in every list it belongs to.
+    fn push_visible(&mut self, pos: ChunkPos, instance: u32, distance2: f32) {
+        self.visible.push((pos, instance));
+        self.opaque.push((pos, instance));
+        if distance2 < SPRITE_DRAW_BLOCKS * SPRITE_DRAW_BLOCKS {
+            self.sprites.push((pos, instance));
+        }
+        if distance2 < CUTOUT_DRAW_BLOCKS * CUTOUT_DRAW_BLOCKS {
+            self.cutout.push((pos, instance));
+        } else {
+            self.cutout_far.push((pos, instance));
+        }
+    }
+
+    /// Sorts the opaque lists near-to-far for early-Z.
+    fn sort_lists(&mut self, camera: &Camera) {
+        sort_near_to_far(camera, &mut self.opaque);
+        sort_near_to_far(camera, &mut self.sprites);
+        sort_near_to_far(camera, &mut self.cutout);
+        sort_near_to_far(camera, &mut self.cutout_far);
+    }
+
     fn shows_figure(&self, at: [f32; 3], radius: f32) -> bool {
         let reach = glam::Vec3::splat(radius);
         let at = glam::Vec3::from(at);
@@ -3053,6 +3114,22 @@ impl Culled {
                 .iter()
                 .any(|cascade| cascade.intersects_box(min, max))
     }
+}
+
+/// Sorts a draw list nearest-first, with a coordinate tie-break.
+///
+/// Presentation only: the order of two chunks at the same distance does not
+/// affect the picture, but a stable tie-break keeps a frame-to-frame flicker
+/// out of a debug trace.
+fn sort_near_to_far(camera: &Camera, list: &mut [(ChunkPos, u32)]) {
+    list.sort_by(|(a, _), (b, _)| {
+        let da = camera.position.chunk_offset(*a).length_squared();
+        let db = camera.position.chunk_offset(*b).length_squared();
+        da.total_cmp(&db)
+            .then(a.x.cmp(&b.x))
+            .then(a.y.cmp(&b.y))
+            .then(a.z.cmp(&b.z))
+    });
 }
 
 /// How far, in blocks from the camera to a chunk's centre, sprites (grass,
@@ -3103,14 +3180,34 @@ impl Renderer {
             .unwrap_or_default();
 
         let mut culled = Culled::default();
-        let mut instances = Vec::with_capacity(self.chunks.len());
+        // Take the scratch list out and put it back at the end: a fresh
+        // `Vec::with_capacity(self.chunks.len())` every frame was a ~200 KB
+        // heap block for a default view, before one instance was written.
+        let mut instances = std::mem::take(&mut self.instance_scratch);
+        instances.clear();
+        if instances.capacity() < self.chunks.len() {
+            instances.reserve(self.chunks.len() - instances.capacity());
+        }
+        // A chunk whose centre is outside this radius cannot intersect any
+        // cascade, so the three frustum tests below cannot be true for it.
+        // The half-diagonal covers a chunk whose centre is just outside while
+        // a corner is inside.
+        let half_diagonal = tiamat_core::CHUNK_BLOCKS as f32 * 0.866_025_4;
+        let shadow_reach = shadow::CASTER_REACH + half_diagonal;
         for (pos, mesh) in &self.chunks {
             let offset = camera.position.chunk_offset(*pos);
             let seen = frustum.contains_chunk(offset);
-            let casts = cascades
-                .iter()
-                .any(|cascade| cascade.contains_chunk(offset));
-            if !seen && !casts {
+            let mut casts = [false; shadow::CASCADES];
+            if !cascades.is_empty() {
+                let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
+                if centre.length_squared() <= shadow_reach * shadow_reach {
+                    for (index, cascade) in cascades.iter().enumerate() {
+                        casts[index] = cascade.contains_chunk(offset);
+                    }
+                }
+            }
+            let casts_any = casts.iter().any(|cast| *cast);
+            if !seen && !casts_any {
                 continue;
             }
             // **One instance array, two index lists.** Both passes read the
@@ -3124,20 +3221,13 @@ impl Renderer {
             // costs is one `BTreeMap` probe per drawn chunk per frame.
             let instance = instances.len() as u32;
             if seen {
-                culled.visible.push((*pos, instance));
                 let centre = offset + glam::Vec3::splat(tiamat_core::CHUNK_BLOCKS as f32 * 0.5);
-                let distance2 = centre.length_squared();
-                if distance2 < SPRITE_DRAW_BLOCKS * SPRITE_DRAW_BLOCKS {
-                    culled.sprites.push((*pos, instance));
-                }
-                if distance2 < CUTOUT_DRAW_BLOCKS * CUTOUT_DRAW_BLOCKS {
-                    culled.cutout.push((*pos, instance));
-                } else {
-                    culled.cutout_far.push((*pos, instance));
-                }
+                culled.push_visible(*pos, instance, centre.length_squared());
             }
-            if casts {
-                culled.casters.push((*pos, instance));
+            for (index, cast) in casts.iter().enumerate() {
+                if *cast {
+                    culled.casters[index].push((*pos, instance));
+                }
             }
             let side = tiamat_core::CHUNK_BLOCKS as i32;
             // **Cached per column, not looked up per frame.** A corner is the
@@ -3167,7 +3257,12 @@ impl Renderer {
             });
         }
         self.drawn = culled.visible.len();
-        self.cast = culled.casters.len();
+        self.cast = culled.casters.iter().map(Vec::len).sum::<usize>();
+
+        // Opaque draws go near-to-far so the depth test can reject what is
+        // behind something already drawn. The blended lists keep their
+        // historical order — see `Culled::opaque`.
+        culled.sort_lists(camera);
 
         // The body rides at the end of the same array, so drawing it is one
         // more instance index rather than a second buffer and a second binding.
@@ -3197,6 +3292,9 @@ impl Renderer {
         culled.body = instances.len().saturating_sub(1) as u32;
         culled.frustum = Some(frustum);
         culled.cascades = cascades;
+        // Back into the renderer for the next frame; the GPU copy above is the
+        // only thing this frame needs.
+        self.instance_scratch = instances;
 
         culled
     }
@@ -3664,7 +3762,10 @@ impl Renderer {
         // there is no second `render` call to get the load op wrong in.
         shadows.render(encoder, |pass, cascade| {
             self.bind_chunk_buffers(pass);
-            for (pos, instance) in &culled.casters {
+            // This cascade's own list. The union used to be drawn into every
+            // cascade, so a chunk 150 blocks away was submitted to a map that
+            // covers 13 — three times the caster work for one shadow.
+            for (pos, instance) in &culled.casters[cascade] {
                 let Some(mesh) = self.chunks.get(pos) else {
                     continue;
                 };
@@ -3850,7 +3951,7 @@ impl Renderer {
             }
             self.bind_chunk_buffers(&mut pass);
 
-            for (pos, instance) in &culled.visible {
+            for (pos, instance) in &culled.opaque {
                 let Some(mesh) = self.chunks.get(pos) else {
                     continue;
                 };
@@ -5655,14 +5756,22 @@ struct AtlasViews {
 const INTERFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
-    let levels = atlas.mips();
+    upload_atlas_mips(gpu, atlas, &atlas.mips())
+}
+
+/// Uploads an atlas and the mip chain already computed for it.
+fn upload_atlas_mips(
+    gpu: &Gpu,
+    atlas: &Atlas,
+    levels: &[crate::texture::Image],
+) -> (AtlasViews, u32, u32) {
     // Declared up front or the second view is refused: a texture may only be
     // viewed in the formats it was created to allow.
     let interface_format = gpu.view_formats.then_some(INTERFACE_FORMAT);
     let texture = atlas_texture(
         gpu,
         atlas.side(),
-        &levels,
+        levels,
         COLOUR_FORMAT,
         interface_format.as_slice(),
     );
@@ -5680,7 +5789,7 @@ fn upload_atlas(gpu: &Gpu, atlas: &Atlas) -> (AtlasViews, u32, u32) {
         // for everybody on GL. The atlas costs its memory twice there and
         // nowhere else; a slot and the wall built from it still show one
         // image, uploaded from one `Atlas`.
-        atlas_texture(gpu, atlas.side(), &levels, INTERFACE_FORMAT, &[]).create_view(
+        atlas_texture(gpu, atlas.side(), levels, INTERFACE_FORMAT, &[]).create_view(
             &wgpu::TextureViewDescriptor {
                 label: Some("atlas-interface"),
                 ..Default::default()

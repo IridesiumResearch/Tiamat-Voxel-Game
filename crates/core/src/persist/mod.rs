@@ -79,6 +79,61 @@ const MAP_ZSTD_LEVEL: i32 = codec::ZSTD_LEVEL;
 const FORGET_SUMMARIES: &str =
     "DELETE FROM chunk_summaries WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4";
 
+/// Reads one chunk's blob: the streamer's read, once for every chunk that
+/// arrives from disk.
+///
+/// **The hot reads are prepared once per connection, not once per call.**
+/// Preparing parses and plans the SQL, which measured 5–20 µs a statement,
+/// and a chunk arriving runs this, the fluid read and the entity read —
+/// several preparations per chunk at twenty or more chunks a tick, for text
+/// that never changes (perf audit S9). The writes already took theirs from
+/// the connection's statement cache; these reads do too. The text is a
+/// constant because the text is the cache's key: one string, one statement,
+/// and a test can ask the cache for it and see how often it has run.
+const LOAD_CHUNK: &str =
+    "SELECT data FROM chunks WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4";
+
+/// Reads one chunk's fluid row. Cached, for the reason [`LOAD_CHUNK`] gives.
+const LOAD_FLUID: &str =
+    "SELECT data FROM chunk_fluid WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4";
+
+/// Reads one chunk's entities, in the order they were frozen in. Cached, for
+/// the reason [`LOAD_CHUNK`] gives.
+const LOAD_ENTITIES: &str = "SELECT version, data FROM entities
+     WHERE domain = ?1 AND chunk_x = ?2 AND chunk_y = ?3 AND chunk_z = ?4
+     ORDER BY id";
+
+/// Reads one level of one chunk's summary: what serving the horizon from the
+/// cache costs. Cached, for the reason [`LOAD_CHUNK`] gives.
+const LOAD_SUMMARY: &str = "SELECT data FROM chunk_summaries
+     WHERE domain = ?1 AND level = ?2 AND x = ?3 AND y = ?4 AND z = ?5";
+
+/// Adds one level of a summary chain, and does nothing if that level is
+/// already stored.
+///
+/// **Its change count is the kept count's**: one for a row added, none for a
+/// row already there, where an upsert reports one either way. A level it
+/// declined is then rewritten by [`REPLACE_SUMMARY`]. See
+/// [`WorldDb::save_summaries_batch`].
+const INSERT_SUMMARY: &str = "INSERT INTO chunk_summaries (domain, level, x, y, z, data)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT(domain, level, x, y, z) DO NOTHING";
+
+/// Rewrites one level of a summary chain that [`INSERT_SUMMARY`] found
+/// already stored. The same parameters in the same order, so one row of
+/// bindings serves both.
+const REPLACE_SUMMARY: &str = "UPDATE chunk_summaries SET data = ?6
+     WHERE domain = ?1 AND level = ?2 AND x = ?3 AND y = ?4 AND z = ?5";
+
+/// How many prepared statements a world's connection keeps.
+///
+/// `rusqlite`'s default is sixteen, and the cache is least-recently-used: a
+/// seventeenth statement in the tick's rotation would evict one each call and
+/// every "cached" statement would be prepared again, silently. About a dozen
+/// are cached — the batch writes, the four reads above and the two summary
+/// writes — so this leaves room to add more without anyone having to count.
+const STATEMENT_CACHE: usize = 32;
+
 use crate::chunk::Chunk;
 use crate::coords::ChunkPos;
 use crate::fluid::FluidLayer;
@@ -454,6 +509,7 @@ impl WorldDb {
     ) -> Result<Self, WorldError> {
         schema::apply_pragmas(&conn)?;
         schema::create(&conn)?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
 
         // Reject a world from a different schema generation rather than
         // half-reading it. Blob formats migrate; table layouts do not, yet.
@@ -541,11 +597,8 @@ impl WorldDb {
     pub fn load_chunk_in(&self, domain: &str, pos: ChunkPos) -> Result<Option<Chunk>, WorldError> {
         let blob: Option<Vec<u8>> = self
             .conn
-            .query_row(
-                "SELECT data FROM chunks WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-                params![domain, pos.x, pos.y, pos.z],
-                |row| row.get(0),
-            )
+            .prepare_cached(LOAD_CHUNK)?
+            .query_row(params![domain, pos.x, pos.y, pos.z], |row| row.get(0))
             .optional()?;
 
         let Some(blob) = blob else {
@@ -773,11 +826,8 @@ impl WorldDb {
     ) -> Result<Option<FluidLayer>, WorldError> {
         let blob: Option<Vec<u8>> = self
             .conn
-            .query_row(
-                "SELECT data FROM chunk_fluid WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-                params![domain, pos.x, pos.y, pos.z],
-                |row| row.get(0),
-            )
+            .prepare_cached(LOAD_FLUID)?
+            .query_row(params![domain, pos.x, pos.y, pos.z], |row| row.get(0))
             .optional()?;
 
         let Some(blob) = blob else {
@@ -1013,11 +1063,7 @@ impl WorldDb {
         domain: &str,
         pos: ChunkPos,
     ) -> Result<Vec<crate::ent::Entity>, WorldError> {
-        let mut statement = self.conn.prepare(
-            "SELECT version, data FROM entities
-             WHERE domain = ?1 AND chunk_x = ?2 AND chunk_y = ?3 AND chunk_z = ?4
-             ORDER BY id",
-        )?;
+        let mut statement = self.conn.prepare_cached(LOAD_ENTITIES)?;
         let rows = statement.query_map(params![domain, pos.x, pos.y, pos.z], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
@@ -2296,9 +2342,8 @@ impl WorldDb {
     ) -> Result<Option<Vec<u8>>, WorldError> {
         Ok(self
             .conn
+            .prepare_cached(LOAD_SUMMARY)?
             .query_row(
-                "SELECT data FROM chunk_summaries
-                 WHERE domain = ?1 AND level = ?2 AND x = ?3 AND y = ?4 AND z = ?5",
                 params![domain, i64::from(level), pos.x, pos.y, pos.z],
                 |row| row.get(0),
             )
@@ -2312,6 +2357,9 @@ impl WorldDb {
     /// them one at a time would leave a window where some levels are the new
     /// terrain and some are the old.
     ///
+    /// A batch of one: [`Self::save_summaries_batch`] is the same write for
+    /// every chain a tick produced, in one commit.
+    ///
     /// # Errors
     ///
     /// Any SQL failure. One transaction, so a failure changes nothing.
@@ -2321,43 +2369,60 @@ impl WorldDb {
         pos: ChunkPos,
         levels: &[(u8, Vec<u8>)],
     ) -> Result<(), WorldError> {
-        // **Rows added, not rows touched.** An upsert reports one change
-        // whether it inserted or replaced, so what this adds to the kept count
-        // is read off the position before and after: two lookups on
-        // `chunk_summaries_by_pos` beside a chain of five writes.
-        let at_position = |transaction: &rusqlite::Transaction<'_>| {
-            transaction.query_row(
-                "SELECT COUNT(*) FROM chunk_summaries
-                 WHERE domain = ?1 AND x = ?2 AND y = ?3 AND z = ?4",
-                params![domain, pos.x, pos.y, pos.z],
-                |row| row.get::<_, i64>(0),
-            )
-        };
+        self.save_summaries_batch([(domain, pos, levels)])
+            .map(|_| ())
+    }
+
+    /// Stores many chunks' summary chains in one transaction, each replacing
+    /// whatever its position held. Returns how many chains were written.
+    ///
+    /// **One commit for all of them rather than one per chain**, for the
+    /// reason [`Self::save_chunks_batch`] gives: a commit costs its WAL
+    /// bookkeeping whatever it holds, and the horizon stores several chains a
+    /// tick. Each chain still lands whole with the others or not at all, so no
+    /// reader sees some levels of a column new and some old.
+    ///
+    /// The domain is per chain rather than per call because a tick's chains
+    /// come from whichever domains its players are looking at.
+    ///
+    /// # Errors
+    ///
+    /// Any SQL failure. The transaction rolls back, so a failed batch changes
+    /// nothing, the kept count included.
+    pub fn save_summaries_batch<'a>(
+        &self,
+        chains: impl IntoIterator<Item = (&'a str, ChunkPos, &'a [(u8, Vec<u8>)])>,
+    ) -> Result<usize, WorldError> {
+        // **Rows added, not rows touched**, for the kept count. An upsert
+        // reports one change whether it inserted or replaced, so this used to
+        // count the position before and after — two `COUNT(*)` a chain beside
+        // its five writes. An insert that does nothing on a conflict reports
+        // the difference itself, and only a level it declined is rewritten. A
+        // new position, which is what the horizon stores nearly every time, is
+        // one statement a level, as the upsert was.
+        let mut added: u64 = 0;
+        let mut written = 0;
         let transaction = self.conn.unchecked_transaction()?;
-        let before = at_position(&transaction)?;
         {
-            let mut write = transaction.prepare(
-                "INSERT INTO chunk_summaries (domain, level, x, y, z, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(domain, level, x, y, z) DO UPDATE SET data = excluded.data",
-            )?;
-            for (level, data) in levels {
-                write.execute(params![
-                    domain,
-                    i64::from(*level),
-                    pos.x,
-                    pos.y,
-                    pos.z,
-                    data
-                ])?;
+            let mut insert = transaction.prepare_cached(INSERT_SUMMARY)?;
+            let mut replace = transaction.prepare_cached(REPLACE_SUMMARY)?;
+            for (domain, pos, levels) in chains {
+                for (level, data) in levels {
+                    let row = params![domain, i64::from(*level), pos.x, pos.y, pos.z, data];
+                    if insert.execute(row)? == 0 {
+                        replace.execute(row)?;
+                    } else {
+                        added = added.saturating_add(1);
+                    }
+                }
+                written += 1;
             }
         }
-        let after = at_position(&transaction)?;
         transaction.commit()?;
-        let added = u64::try_from(after.saturating_sub(before)).unwrap_or(0);
+        // Applied once the commit lands: a batch that rolled back added nothing.
         self.summary_rows
             .set(self.summary_rows.get().saturating_add(added));
-        Ok(())
+        Ok(written)
     }
 
     /// Forgets every level of one chunk's summary.
@@ -2869,5 +2934,209 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// How many times the connection's cached statement for `sql` has run.
+    ///
+    /// The cache is keyed by the text, so asking it for the same text hands
+    /// back the very statement a read used, with its run count. A read that
+    /// prepared a statement of its own would leave this at zero.
+    fn runs(db: &WorldDb, sql: &str) -> i32 {
+        db.conn
+            .prepare_cached(sql)
+            .expect("prepare")
+            .get_status(rusqlite::StatementStatus::Run)
+    }
+
+    #[test]
+    fn the_hot_reads_answer_from_the_statement_cache_with_what_was_written() {
+        // Perf audit S9: the four reads a chunk arriving or a horizon served
+        // runs were prepared from scratch on every call. They now come from
+        // the connection's cache, and a cached statement still has to give
+        // each position its own answer — another position's, another
+        // domain's, or a miss's — which is what this reads back. The run
+        // counts are the proof that the cache is what answered.
+        use crate::coords::LocalBlock;
+        use crate::ent::{Entity, Transform};
+        use crate::fluid::{Fluid, FluidId, MAX_VOLUME};
+
+        let mut registry = Registry::new();
+        let stone = registry.register("core:stone").expect("register");
+        let db = WorldDb::open_in_memory(&mut registry).expect("open");
+        let solid = ChunkPos::new(1, 2, 3);
+        let hollow = ChunkPos::new(-4, 0, 7);
+        let never = ChunkPos::new(9, 9, 9);
+
+        db.save_chunk(solid, &Chunk::new(solid, stone))
+            .expect("save");
+        db.save_chunk_in("ship", hollow, &Chunk::air(hollow))
+            .expect("save");
+        for _ in 0..2 {
+            assert_eq!(
+                db.load_chunk(solid).expect("load"),
+                Some(Chunk::new(solid, stone))
+            );
+            assert_eq!(
+                db.load_chunk_in("ship", hollow).expect("load"),
+                Some(Chunk::air(hollow))
+            );
+            assert_eq!(
+                db.load_chunk_in("ship", solid).expect("load"),
+                None,
+                "a chunk came back from a domain it was not saved in"
+            );
+        }
+        assert!(db.load_chunk(never).expect("load").is_none());
+        assert_eq!(runs(&db, LOAD_CHUNK), 7, "a chunk read was not cached");
+
+        let mut pond = FluidLayer::empty();
+        pond.set(LocalBlock::new(3, 0, 3), Fluid::new(FluidId(1), MAX_VOLUME));
+        pond.set(LocalBlock::new(4, 0, 3), Fluid::new(FluidId(1), 13));
+        let mut puddle = FluidLayer::empty();
+        puddle.set(LocalBlock::new(0, 15, 0), Fluid::new(FluidId(1), 2));
+        db.save_chunk_fluid(solid, &pond).expect("save");
+        db.save_chunk_fluid_in("ship", hollow, &puddle)
+            .expect("save");
+        for _ in 0..2 {
+            assert_eq!(
+                db.load_chunk_fluid(solid).expect("load"),
+                Some(pond.clone())
+            );
+            assert_eq!(
+                db.load_chunk_fluid_in("ship", hollow).expect("load"),
+                Some(puddle.clone())
+            );
+        }
+        assert!(db.load_chunk_fluid(never).expect("load").is_none());
+        assert_eq!(runs(&db, LOAD_FLUID), 5, "a fluid read was not cached");
+
+        let here = vec![
+            Entity::at(Transform::at(solid, [1.5, 2.5, 3.5]), "test:first"),
+            Entity::at(Transform::at(solid, [4.0, 5.0, 6.0]), "test:second"),
+        ];
+        let there = vec![Entity::at(
+            Transform::at(hollow, [0.5, 0.5, 0.5]),
+            "test:aboard",
+        )];
+        db.save_chunk_entities(solid, &here).expect("save");
+        db.save_chunk_entities_in("ship", hollow, &there)
+            .expect("save");
+        for _ in 0..2 {
+            assert_eq!(db.load_chunk_entities(solid).expect("load"), here);
+            assert_eq!(
+                db.load_chunk_entities_in("ship", hollow).expect("load"),
+                there
+            );
+        }
+        assert!(db.load_chunk_entities(never).expect("load").is_empty());
+        assert_eq!(runs(&db, LOAD_ENTITIES), 5, "an entity read was not cached");
+
+        let chain: Vec<(u8, Vec<u8>)> = (1..=3).map(|level| (level, vec![level; 4])).collect();
+        db.save_summaries(DEFAULT_DOMAIN, solid, &chain)
+            .expect("save");
+        for _ in 0..2 {
+            for (level, bytes) in &chain {
+                assert_eq!(
+                    db.load_summary(DEFAULT_DOMAIN, *level, solid)
+                        .expect("load")
+                        .as_ref(),
+                    Some(bytes)
+                );
+            }
+        }
+        assert!(
+            db.load_summary(DEFAULT_DOMAIN, 4, solid)
+                .expect("load")
+                .is_none(),
+            "a level nobody stored came back as something"
+        );
+        assert!(
+            db.load_summary("ship", 1, solid).expect("load").is_none(),
+            "a summary came back from a domain it was not saved in"
+        );
+        assert_eq!(runs(&db, LOAD_SUMMARY), 8, "a summary read was not cached");
+    }
+
+    #[test]
+    fn summary_chains_saved_in_one_batch_read_back_and_a_rewrite_replaces_them() {
+        // `save_summaries_batch` is a tick's chains in one commit, and
+        // `save_summaries` a batch of one. Both now add a level with an insert
+        // that declines a conflict and rewrite a declined level in place,
+        // rather than upserting between two counts — so this checks that a
+        // rewrite really does replace the bytes, and that the kept count still
+        // agrees with a real COUNT when a batch mixes new levels and old.
+        let counted = |db: &WorldDb| -> u64 {
+            let rows: i64 = db
+                .conn
+                .query_row("SELECT COUNT(*) FROM chunk_summaries", [], |row| row.get(0))
+                .expect("count");
+            u64::try_from(rows).expect("a count is not negative")
+        };
+        let chain = |levels: std::ops::RangeInclusive<u8>, fill: u8| -> Vec<(u8, Vec<u8>)> {
+            levels.map(|level| (level, vec![fill, level])).collect()
+        };
+        let read =
+            |db: &WorldDb, domain: &str, pos: ChunkPos, levels: std::ops::RangeInclusive<u8>| {
+                levels
+                    .map(|level| db.load_summary(domain, level, pos).expect("load"))
+                    .collect::<Vec<_>>()
+            };
+        let stored = |chain: &[(u8, Vec<u8>)]| -> Vec<Option<Vec<u8>>> {
+            chain.iter().map(|(_, bytes)| Some(bytes.clone())).collect()
+        };
+
+        let mut registry = Registry::new();
+        let db = WorldDb::open_in_memory(&mut registry).expect("open");
+        let (a, b) = (ChunkPos::new(0, 0, 0), ChunkPos::new(5, -1, 2));
+
+        let first = chain(1..=5, 0xA0);
+        let second = chain(1..=5, 0xB0);
+        let aboard = chain(1..=3, 0xC0);
+        let written = db
+            .save_summaries_batch([
+                (DEFAULT_DOMAIN, a, first.as_slice()),
+                (DEFAULT_DOMAIN, b, second.as_slice()),
+                ("ship", a, aboard.as_slice()),
+            ])
+            .expect("batch");
+        assert_eq!(written, 3);
+        assert_eq!(read(&db, DEFAULT_DOMAIN, a, 1..=5), stored(&first));
+        assert_eq!(read(&db, DEFAULT_DOMAIN, b, 1..=5), stored(&second));
+        assert_eq!(read(&db, "ship", a, 1..=3), stored(&aboard));
+        assert_eq!((db.summary_rows_held(), counted(&db)), (13, 13));
+
+        // A rewrite of a stored position replaces every level's bytes and
+        // adds no rows.
+        let rebuilt = chain(1..=5, 0xA1);
+        db.save_summaries(DEFAULT_DOMAIN, a, &rebuilt)
+            .expect("rewrite");
+        assert_eq!(read(&db, DEFAULT_DOMAIN, a, 1..=5), stored(&rebuilt));
+        assert_eq!(
+            read(&db, "ship", a, 1..=3),
+            stored(&aboard),
+            "rewriting one domain's chain touched another's"
+        );
+        assert_eq!((db.summary_rows_held(), counted(&db)), (13, 13));
+
+        // A batch that rewrites one chain, grows another and adds a third
+        // counts exactly the rows it added.
+        let regrown = chain(1..=6, 0xB1);
+        let fresh = chain(1..=5, 0xD0);
+        let refitted = chain(1..=3, 0xC1);
+        let elsewhere = ChunkPos::new(-7, 3, 11);
+        db.save_summaries_batch([
+            (DEFAULT_DOMAIN, b, regrown.as_slice()),
+            (DEFAULT_DOMAIN, elsewhere, fresh.as_slice()),
+            ("ship", a, refitted.as_slice()),
+        ])
+        .expect("batch");
+        assert_eq!(read(&db, DEFAULT_DOMAIN, b, 1..=6), stored(&regrown));
+        assert_eq!(read(&db, DEFAULT_DOMAIN, elsewhere, 1..=5), stored(&fresh));
+        assert_eq!(read(&db, "ship", a, 1..=3), stored(&refitted));
+        assert_eq!((db.summary_rows_held(), counted(&db)), (19, 19));
+
+        // An empty batch writes nothing and moves nothing.
+        assert_eq!(db.save_summaries_batch([]).expect("empty batch"), 0);
+        assert_eq!((db.summary_rows_held(), counted(&db)), (19, 19));
     }
 }

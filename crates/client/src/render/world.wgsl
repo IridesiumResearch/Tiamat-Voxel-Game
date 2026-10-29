@@ -1246,21 +1246,12 @@ fn shadow_factor(input: VertexOut) -> f32 {
     return mix(band, shadowed, cascade_fade(input.distance));
 }
 
-// One fragment, given how much sun reaches it.
+// The atlas sample for a fragment, with the derivative taken from the
+// UNWRAPPED coordinate — see the header.
 //
-// Shared by both entry points so the atlas lookup, the lighting and the fog
-// exist once. The only difference between a shadowed frame and an unshadowed
-// one is the number that arrives here.
-fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
-    if (globals.render_mode == 1u) {
-        // Flat: directional shading and occlusion, no propagated light.
-        // **Mode 1 must keep Task 08's cost profile exactly**, and that
-        // includes ignoring light rather than sampling it and discarding it —
-        // but occlusion is geometry, and a flat mode without it is unreadable
-        // in exactly the way flat lighting is.
-        return vec4<f32>(vec3<f32>(input.shade * input.occlusion), 1.0);
-    }
-
+// Split out of `surface` so the alpha-tested entry point can take the sample,
+// discard on its alpha, and still shade the survivors without sampling twice.
+fn atlas_sample(input: VertexOut) -> vec4<f32> {
     let side = f32(globals.atlas_side);
     let column = f32(input.slot % globals.atlas_grid);
     let row = f32(input.slot / globals.atlas_grid);
@@ -1269,12 +1260,24 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     let origin = (vec2<f32>(column, row) * pitch + f32(globals.padding)) / side;
     let extent = f32(globals.tile) / side;
 
-    // The derivative is taken from the UNWRAPPED coordinate — see the header.
     let ddx = dpdx(input.tile_uv) * extent;
     let ddy = dpdy(input.tile_uv) * extent;
     let uv = origin + fract(input.tile_uv) * extent;
 
-    let texel = textureSampleGrad(atlas, atlas_sampler, uv, ddx, ddy);
+    return textureSampleGrad(atlas, atlas_sampler, uv, ddx, ddy);
+}
+
+// The rest of `surface`, with the atlas texel already in hand.
+//
+// A separate function rather than an optional argument because WGSL has no
+// optionals: the cutout entry point samples once, tests the alpha, and only
+// shades the fragments that survive it.
+fn surface_with_texel(
+    input: VertexOut,
+    shadow: f32,
+    variation: f32,
+    texel: vec4<f32>,
+) -> vec4<f32> {
     // **Under the light, not over it.** The tint is what colour the surface IS,
     // so it multiplies the albedo and then the lighting acts on the result. Over
     // the top it would tint the sunlight as well, and a lamp would come out the
@@ -1314,6 +1317,24 @@ fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
     let haze = fog_amount(input.world);
     let fog = fog_colour(input.sky, fog_reach(input.world));
     return vec4<f32>(mix(misted, fog, haze), texel.a);
+}
+
+// One fragment, given how much sun reaches it.
+//
+// Shared by both entry points so the atlas lookup, the lighting and the fog
+// exist once. The only difference between a shadowed frame and an unshadowed
+// one is the number that arrives here.
+fn surface(input: VertexOut, shadow: f32, variation: f32) -> vec4<f32> {
+    if (globals.render_mode == 1u) {
+        // Flat: directional shading and occlusion, no propagated light.
+        // **Mode 1 must keep Task 08's cost profile exactly**, and that
+        // includes ignoring light rather than sampling it and discarding it —
+        // but occlusion is geometry, and a flat mode without it is unreadable
+        // in exactly the way flat lighting is.
+        return vec4<f32>(vec3<f32>(input.shade * input.occlusion), 1.0);
+    }
+
+    return surface_with_texel(input, shadow, variation, atlas_sample(input));
 }
 
 // Mode 2's shadows, which are not shadows.
@@ -1715,16 +1736,24 @@ fn fragment_cutout_shadowed(input: VertexOut) -> @location(0) vec4<f32> {
 
 /// The cutout surface, shaded by whichever shadow term the mode has.
 fn cut_out(input: VertexOut, shadow: f32) -> vec4<f32> {
-    let colour = surface(
-        input,
-        shadow,
-        cell_variation(input.anchored, input.normal),
-    );
+    let variation = cell_variation(input.anchored, input.normal);
+    // Flat mode samples no texture (see `surface`), so it has no alpha to test
+    // and must keep its old behaviour: every cutout cell is drawn solid.
+    if (globals.render_mode == 1u) {
+        return marked(vec4<f32>(surface(input, shadow, variation).rgb, 1.0), input.sky);
+    }
+
+    // **Test before shading, not after.** The old order ran the atlas sample,
+    // the propagated-light lookup, the fog and (in mode 3) nine comparison
+    // taps for every fragment that was about to be discarded. The alpha is in
+    // the sample; take it first and only shade what survives.
+    let texel = atlas_sample(input);
     // Half, and a constant rather than a per-material number for §8.1's
     // reason: the texture already carries the alpha and a second threshold
     // beside it would be two sources of truth for one appearance.
-    if (colour.a < 0.5) {
+    if (texel.a < 0.5) {
         discard;
     }
+    let colour = surface_with_texel(input, shadow, variation, texel);
     return marked(vec4<f32>(colour.rgb, 1.0), input.sky);
 }

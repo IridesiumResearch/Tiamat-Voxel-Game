@@ -91,44 +91,110 @@ pub struct Occupant {
 #[must_use]
 pub fn separate(occupants: &[Occupant]) -> Vec<[f32; 3]> {
     let mut push = vec![[0.0f32; 3]; occupants.len()];
-    // Every unordered pair once, in index order, so the accumulation below is
-    // in a fixed sequence whatever the caller's collection is.
-    for i in 0..occupants.len() {
-        for j in (i + 1)..occupants.len() {
-            let (a, b) = (occupants[i], occupants[j]);
-            if !a.movable && !b.movable {
-                continue;
+    let max_width = occupants
+        .iter()
+        .map(|occupant| occupant.width)
+        .fold(0.0f32, f32::max);
+
+    // **The grid only helps a spread crowd.** A body interacts only within one
+    // chunk's width, so bucket by chunk and pair a body with the nine chunks
+    // around it. If the crowd is dense (a camp all in one chunk) the bucket
+    // walk is more pair candidates than the plain loop, and if any body is
+    // wider than a chunk the nine-cell neighbourhood is not enough; both fall
+    // back to the all-pairs loop, and the result is the same either way.
+    let use_grid =
+        occupants.len() > 64 && max_width <= CHUNK_SUBNODES as f32 && bucket_is_sparse(occupants);
+
+    if use_grid {
+        use std::collections::BTreeMap;
+        let mut buckets: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        for (index, occupant) in occupants.iter().enumerate() {
+            buckets
+                .entry((occupant.origin.x, occupant.origin.z))
+                .or_default()
+                .push(index);
+        }
+        // **Pairs in (i, j) order**, the same sequence the all-pairs loop
+        // visits. The float accumulation is order-dependent, and this is what
+        // keeps the bucketed answer bit-identical rather than merely similar.
+        let mut candidates: Vec<usize> = Vec::new();
+        for i in 0..occupants.len() {
+            let (x, z) = (occupants[i].origin.x, occupants[i].origin.z);
+            candidates.clear();
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(bucket) = buckets.get(&(x + dx, z + dz)) else {
+                        continue;
+                    };
+                    candidates.extend(bucket.iter().copied().filter(|j| *j > i));
+                }
             }
-            let spacing = spacing(a, b);
-            let Some((dx, dz, distance)) = offset(a, b, spacing) else {
-                continue;
-            };
-            if distance >= spacing || !overlaps_vertically(a, b) {
-                continue;
+            candidates.sort_unstable();
+            candidates.dedup();
+            for &j in &candidates {
+                apply_pair(occupants, i, j, &mut push);
             }
-            // Proportional to how far inside each other they are, so touching
-            // does nothing and standing in the same place does the most.
-            let overlap = (spacing - distance) / spacing;
-            let strength = (overlap * MAX_PUSH).min(MAX_PUSH);
-            // **Each is pushed the full amount, not half each.** Two players
-            // in one spot should each step aside, which is what a player
-            // expects from having walked into somebody; halving it makes a
-            // pair separate at half the rate a player-and-a-post does, for no
-            // reason a player could name.
-            if a.movable {
-                push[i][0] -= dx * strength;
-                push[i][2] -= dz * strength;
-            }
-            if b.movable {
-                push[j][0] += dx * strength;
-                push[j][2] += dz * strength;
+        }
+    } else {
+        // Every unordered pair once, in index order, so the accumulation below
+        // is in a fixed sequence whatever the caller's collection is.
+        for i in 0..occupants.len() {
+            for j in (i + 1)..occupants.len() {
+                apply_pair(occupants, i, j, &mut push);
             }
         }
     }
+
     for nudge in &mut push {
         clamp_horizontal(nudge, MAX_TOTAL);
     }
     push
+}
+
+/// Whether a crowd's chunks are sparse enough for the grid to beat all-pairs.
+///
+/// One body per chunk is the ideal; a camp of a hundred in one chunk is the
+/// case the grid cannot help and the plain loop handles with no bookkeeping.
+fn bucket_is_sparse(occupants: &[Occupant]) -> bool {
+    use std::collections::BTreeSet;
+    let chunks: BTreeSet<(i32, i32)> = occupants
+        .iter()
+        .map(|occupant| (occupant.origin.x, occupant.origin.z))
+        .collect();
+    // The average is a proxy for the worst bucket; a single dense camp is what
+    // it is guarding against, and the number is far below the all-pairs price.
+    !chunks.is_empty() && occupants.len() / chunks.len() <= 64
+}
+
+/// The nudge for one unordered pair, in the all-pairs order.
+fn apply_pair(occupants: &[Occupant], i: usize, j: usize, push: &mut [[f32; 3]]) {
+    let (a, b) = (occupants[i], occupants[j]);
+    if !a.movable && !b.movable {
+        return;
+    }
+    let spacing = spacing(a, b);
+    let Some((dx, dz, distance)) = offset(a, b, spacing) else {
+        return;
+    };
+    if distance >= spacing || !overlaps_vertically(a, b) {
+        return;
+    }
+    // Proportional to how far inside each other they are, so touching does
+    // nothing and standing in the same place does the most.
+    let overlap = (spacing - distance) / spacing;
+    let strength = (overlap * MAX_PUSH).min(MAX_PUSH);
+    // **Each is pushed the full amount, not half each.** Two players in one
+    // spot should each step aside, which is what a player expects from having
+    // walked into somebody; halving it makes a pair separate at half the rate
+    // a player-and-a-post does, for no reason a player could name.
+    if a.movable {
+        push[i][0] -= dx * strength;
+        push[i][2] -= dz * strength;
+    }
+    if b.movable {
+        push[j][0] += dx * strength;
+        push[j][2] += dz * strength;
+    }
 }
 
 /// The unit horizontal direction from `a` to `b`, and how far apart they are.
@@ -314,6 +380,39 @@ mod tests {
             pushes[0][0] < 0.0 && pushes[1][0] > 0.0,
             "a pair across a chunk boundary did not push apart: {pushes:?}"
         );
+    }
+
+    #[test]
+    fn a_spread_crowd_is_paired_by_the_grid_exactly_as_by_all_pairs() {
+        // The grid changes which pairs are *visited*, not which are applied;
+        // the accumulation order is the all-pairs (i, j) sequence. This is the
+        // test that says the two answers are bit-identical.
+        let mut crowd = Vec::new();
+        for cx in 0..10 {
+            for cz in 0..8 {
+                for n in 0..3u8 {
+                    let x = f32::from(n) * 17.0 + 3.0;
+                    let z = f32::from(n) * 11.0 + 5.0;
+                    crowd.push(Occupant {
+                        origin: ChunkPos::new(cx, 0, cz),
+                        position: [x, f32::from(n) * 3.0, z],
+                        height: 10.0 + f32::from(n),
+                        width: 1.0 + f32::from(n) * 0.25,
+                        movable: true,
+                    });
+                }
+            }
+        }
+        let mut expected = vec![[0.0f32; 3]; crowd.len()];
+        for i in 0..crowd.len() {
+            for j in (i + 1)..crowd.len() {
+                apply_pair(&crowd, i, j, &mut expected);
+            }
+        }
+        for nudge in &mut expected {
+            clamp_horizontal(nudge, MAX_TOTAL);
+        }
+        assert_eq!(separate(&crowd), expected);
     }
 
     #[test]

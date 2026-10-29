@@ -1032,6 +1032,23 @@ mod tests {
             .expect("chunk");
     }
 
+    /// The 3×3×3 neighbourhood the light worker snapshots for one event.
+    fn neighbourhood(pos: ChunkPos) -> BTreeSet<ChunkPos> {
+        let mut around = BTreeSet::new();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    around.insert(ChunkPos::new(
+                        pos.x.saturating_add(dx),
+                        pos.y.saturating_add(dy),
+                        pos.z.saturating_add(dz),
+                    ));
+                }
+            }
+        }
+        around
+    }
+
     #[test]
     fn an_air_chunk_under_open_sky_is_fully_lit() {
         let mut world = world();
@@ -1317,6 +1334,17 @@ mod tests {
         assert_eq!(through_snapshot.at(BlockPos::new(8, 8, 8)).red(), MAX_LEVEL);
         same(&through_world, &through_snapshot, "an arrival");
 
+        // The light worker does not take the whole space: it takes the event's
+        // 3×3×3 neighbourhood. The same blocks must give the same light.
+        let close = world.snapshot_of(tiamat_core::domain::OVERWORLD, &neighbourhood(pos));
+        let mut through_close = lighting();
+        through_close.chunk_loaded_in(Snapshot(&close), pos, &Dry);
+        same(
+            &through_world,
+            &through_close,
+            "an arrival through the event neighbourhood",
+        );
+
         // Put the lamp out. The world's copy is written through the shared
         // pointer, so the old snapshot keeps the lamp and a fresh one does
         // not — which is what lets a tick edit while the thread reads.
@@ -1342,6 +1370,19 @@ mod tests {
         through_snapshot.edited_in(Snapshot(&fresh), lamp, &Dry);
         assert_eq!(through_snapshot.at(lamp).red(), 0, "the lamp is out");
         same(&through_world, &through_snapshot, "an edit");
+
+        let close = world.snapshot_of(tiamat_core::domain::OVERWORLD, &neighbourhood(lamp.chunk()));
+        through_close.edited_in(Snapshot(&close), lamp, &Dry);
+        assert_eq!(
+            through_close.at(lamp).red(),
+            0,
+            "the lamp is out in the event neighbourhood"
+        );
+        same(
+            &through_world,
+            &through_close,
+            "an edit through the event neighbourhood",
+        );
     }
 
     #[test]

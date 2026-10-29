@@ -175,6 +175,12 @@ pub fn quantise_pitch(radians: f32) -> i8 {
 #[derive(Debug, Default, Clone)]
 pub struct Tracker {
     known: BTreeMap<EntityId, Sent>,
+    /// The generation of the current pass, stamped onto every entity seen.
+    ///
+    /// A fresh `BTreeMap` per viewer per tick was one node allocate/free per
+    /// visible entity, every tick. Stamping the pass and retaining afterwards
+    /// keeps the map in place; only an actually new entity allocates.
+    epoch: u32,
 }
 
 /// The last thing a viewer was told about one entity.
@@ -192,6 +198,8 @@ struct Sent {
     /// The colour shown this tick (Life ask 21): a flash fading on a
     /// creature standing still is a change, and is sent as one.
     tint: [u8; 3],
+    /// Which pass last saw this entity. See [`Tracker::epoch`].
+    epoch: u32,
 }
 
 impl Sent {
@@ -202,9 +210,10 @@ impl Sent {
             yaw: quantise_yaw(entity.transform.yaw),
             pitch: quantise_pitch(entity.transform.pitch),
             anim: entity.anim,
-            hands: entity.hands.clone().clone(),
+            hands: entity.hands.clone(),
             look: entity.look_serial,
             tint: entity.shown_tint(),
+            epoch: 0,
         }
     }
 
@@ -326,7 +335,8 @@ impl Tracker {
         shares_space: &dyn Fn(EntityId) -> bool,
     ) -> Update {
         let mut update = Update::default();
-        let mut still_visible = BTreeMap::new();
+        self.epoch = self.epoch.wrapping_add(1);
+        let epoch = self.epoch;
 
         // Slot order, so two servers given the same world send the same
         // messages in the same order — which is what makes a replication test
@@ -335,9 +345,13 @@ impl Tracker {
             if Some(id) == exclude || !shares_space(id) || !contains(centre, view, entity.chunk()) {
                 continue;
             }
-            let now = Sent::of(entity);
-            match self.known.get(&id) {
-                None => update.spawned.push(spawn_of(id, entity)),
+            let mut now = Sent::of(entity);
+            now.epoch = epoch;
+            match self.known.get_mut(&id) {
+                None => {
+                    update.spawned.push(spawn_of(id, entity));
+                    self.known.insert(id, now);
+                }
                 Some(before) => {
                     if now.differs_from(before) {
                         update.moved.push(delta_of(id, entity));
@@ -350,7 +364,7 @@ impl Tracker {
                     if now.hands != before.hands {
                         update.rearmed.push(Armed {
                             id,
-                            hands: entity.hands.clone().clone(),
+                            hands: entity.hands.clone(),
                         });
                     }
                     if now.look != before.look {
@@ -360,9 +374,10 @@ impl Tracker {
                             skin: entity.skin,
                         });
                     }
+                    // Update in place: no node allocated, no map swapped.
+                    *before = now;
                 }
             }
-            still_visible.insert(id, now);
         }
 
         // Anything the viewer knew and this pass did not see: it left the
@@ -370,13 +385,13 @@ impl Tracker {
         // deliberately — a client cannot do anything different about them, and
         // distinguishing them would mean tracking which entities died as
         // opposed to merely walked away.
-        for id in self.known.keys() {
-            if !still_visible.contains_key(id) {
-                update.despawned.push(*id);
-            }
-        }
-
-        self.known = still_visible;
+        update.despawned.extend(
+            self.known
+                .iter()
+                .filter(|(_, sent)| sent.epoch != epoch)
+                .map(|(id, _)| *id),
+        );
+        self.known.retain(|_, sent| sent.epoch == epoch);
         update
     }
 }
@@ -389,8 +404,8 @@ fn spawn_of(id: EntityId, entity: &Entity) -> Spawn {
         model: entity.model.clone(),
         skin: entity.skin,
         collider: entity.collider,
-        item: entity.item.clone().clone(),
-        hands: entity.hands.clone().clone(),
+        item: entity.item.clone(),
+        hands: entity.hands.clone(),
         anim: entity.anim,
         nametag: entity.nametag.clone(),
         tint: entity.shown_tint(),

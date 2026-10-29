@@ -343,6 +343,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         parked: None,
         present_mode: "",
         connection,
+        pending_connect: None,
         embedded,
         beacon: None,
         window: None,
@@ -372,6 +373,16 @@ enum Stage {
     Front(Box<client::front::Front>),
     /// In a world.
     Playing(Box<App>),
+}
+
+/// A connect that is still being attempted off the window thread.
+struct PendingConnect {
+    /// The attempt; polling it never blocks.
+    connecting: client::net::Connecting,
+    /// What the world will be, once it answers.
+    entry: client::launcher::Entry,
+    /// Whether this was a local world opened to the LAN.
+    lan: bool,
 }
 
 /// The window, the surface, and everything drawn into it.
@@ -649,6 +660,8 @@ struct Client {
     present_mode: &'static str,
     /// Taken when the window is created.
     connection: Option<Connection>,
+    /// The connect the front screen is waiting on, if one is.
+    pending_connect: Option<PendingConnect>,
     /// Kept alive for as long as the client runs. Dropping it stops the world.
     embedded: Option<tiamat_server::ServerHandle>,
     /// Which world is open, by name, while one is.
@@ -1311,6 +1324,20 @@ impl Client {
     /// "unless there is no world" through every one of those would put the
     /// menu's existence into code that has nothing to do with it.
     fn front_frame(&mut self) -> bool {
+        // An attempt that landed becomes the world before this frame's menu is
+        // drawn; the next frame draws that world.
+        self.poll_pending_connect();
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|surface| matches!(surface.stage, Stage::Playing(_)))
+        {
+            return true;
+        }
+        let connecting = self
+            .pending_connect
+            .as_ref()
+            .map(|pending| pending.entry.name.clone());
         let Some(surface) = self.window.as_mut() else {
             return false;
         };
@@ -1346,7 +1373,8 @@ impl Client {
         // world — and with no world there is nothing in it, so the menu would
         // be drawn over whatever the last frame left behind.
         clear(&surface.gpu, &view);
-        let (action, ticked, answered) = draw_front(surface, &mut self.config, &view);
+        let (action, ticked, answered, cancel) =
+            draw_front(surface, &mut self.config, &view, connecting.as_deref());
         // UI ask 20: a setting answered on the Mods tab belongs to that
         // world's row, exactly as an in-game answer does; stored and saved
         // here so it survives leaving the screen without opening the world.
@@ -1386,6 +1414,10 @@ impl Client {
         };
         frame.present();
         client::handover::report_started();
+
+        if cancel {
+            self.cancel_pending_connect();
+        }
 
         match action {
             client::front::Action::None => true,
@@ -1496,6 +1528,11 @@ impl Client {
         // existing one, which keeps its own — see `Settings::world_options`.
         world_options: Vec<(String, String)>,
     ) -> Result<(), String> {
+        // A second click while the first attempt is still going abandons it,
+        // and the world it may have started, rather than leaking both.
+        if self.pending_connect.is_some() {
+            self.cancel_pending_connect();
+        }
         let identity = Identity::load_or_create(&self.identity_path)
             .map_err(|err| format!("this machine's identity could not be read: {err}"))?;
         let address = match &entry.kind {
@@ -1552,7 +1589,16 @@ impl Client {
         let cache = ContentCache::open(&self.data.join("content"))
             .map_err(|err| format!("the content cache could not be opened: {err}"))?;
         let hosts = self.data.join("known-hosts");
-        let connection = Connection::open(
+        // **Not on the window thread.** A LAN world whose host has gone is
+        // still listed for `STALE_MS`; blocking here froze the front screen
+        // for the whole handshake (audit N1). The caller polls this from the
+        // frame loop and can cancel it.
+        let timeout = if lan || address.port() == LAN_PORT {
+            client::net::LAN_CONNECT_TIMEOUT
+        } else {
+            client::net::CONNECT_TIMEOUT
+        };
+        let connecting = client::net::Connecting::start(
             address,
             identity,
             self.config.display_name.clone(),
@@ -1565,34 +1611,88 @@ impl Client {
             } else {
                 client::net::Pinning::Remembered(&hosts)
             },
+            timeout,
         )
         .map_err(|err| {
             // The server this failed to reach is stopped again, or a second
             // attempt would find the world already locked by the first.
-            if let Some(beacon) = self.beacon.take() {
-                beacon.stop();
-            }
-            if let Some(handle) = self.embedded.take() {
-                handle.stop();
-            }
+            self.stop_pending_world();
             err.to_string()
         })?;
+        self.pending_connect = Some(PendingConnect {
+            connecting,
+            entry: entry.clone(),
+            lan,
+        });
+        Ok(())
+    }
+
+    /// Polls the front screen's attempt, installing the world when it lands.
+    fn poll_pending_connect(&mut self) {
+        let Some(pending) = self.pending_connect.as_mut() else {
+            return;
+        };
+        match pending.connecting.poll() {
+            None => {}
+            Some(Ok(connection)) => {
+                let pending = self
+                    .pending_connect
+                    .take()
+                    .expect("the attempt was just polled");
+                self.enter_world(connection, pending);
+            }
+            Some(Err(err)) => {
+                let _ = self.pending_connect.take();
+                self.stop_pending_world();
+                if let Some(surface) = self.window.as_mut()
+                    && let Stage::Front(front) = &mut surface.stage
+                {
+                    front.notice = Some(format!("could not connect: {err}"));
+                }
+            }
+        }
+    }
+
+    /// Stops whatever a pending attempt started, without touching the window.
+    fn stop_pending_world(&mut self) {
+        if let Some(beacon) = self.beacon.take() {
+            beacon.stop();
+        }
+        if let Some(handle) = self.embedded.take() {
+            handle.stop();
+        }
+    }
+
+    /// Cancels a connect the player gave up on.
+    fn cancel_pending_connect(&mut self) {
+        if let Some(pending) = self.pending_connect.take() {
+            pending.connecting.cancel();
+            self.stop_pending_world();
+            if let Some(surface) = self.window.as_mut()
+                && let Stage::Front(front) = &mut surface.stage
+            {
+                front.notice = Some("connection cancelled".to_owned());
+            }
+        }
+    }
+
+    /// Hands the window the world a completed attempt connected to.
+    fn enter_world(&mut self, connection: Connection, pending: PendingConnect) {
         // A skin of the player's own, offered to a host who takes one (Life
         // ask 23).
         if let Some(bytes) = self.config.skin_bytes() {
             connection.send(client::net::Command::OfferSkin(bytes));
         }
-
-        self.playing = Some(entry.name.clone());
+        self.playing = Some(pending.entry.name.clone());
         let mut app = self.start_app(connection);
         // **The world's own answers, before the declarations arrive.** They are
         // sent the moment the server says what it offers, so seeding them after
         // that would send the previous world's — or none, which is a silent
         // reset of every preference the player has for this place.
-        app.adopt_setting_values(entry.settings.clone());
+        app.adopt_setting_values(pending.entry.settings.clone());
         // **Only when it was actually opened**, and only for a world this
         // machine runs: joining somebody else's server is not hosting one.
-        if lan && matches!(entry.kind, client::launcher::Kind::Local { .. }) {
+        if pending.lan && matches!(pending.entry.kind, client::launcher::Kind::Local { .. }) {
             app.set_hosting(lan_address(LAN_PORT));
         }
         if let Some(surface) = self.window.as_mut() {
@@ -1604,7 +1704,6 @@ impl Client {
             self.grabbed = grab(&surface.window, true);
             self.released_for_dialog = false;
         }
-        Ok(())
     }
 
     /// Writes the world list, complaining to the log if it cannot.
@@ -1919,13 +2018,14 @@ fn draw_entering(ctx: &egui::Context, domain: &str) {
 /// care of the width. Points rather than physical pixels, because egui works in
 /// points and DPI is its problem, not the script's.
 fn draw_hud_scripts(app: &mut App, ctx: &egui::Context, icons: client::icons::Icons<'_>) {
-    app.run_hud_scripts();
-
     // **Off means off, crosshair included** — but never chat, which is drawn
     // elsewhere and is not the HUD's to hide (see `core::hud::Builtin`).
+    // Checked before running the scripts: a hidden HUD must not build a state
+    // or run an immediate-mode script nobody can see.
     if !app.hud_visible() {
         return;
     }
+    app.run_hud_scripts();
 
     // `content_rect`, not `viewport_rect`: a HUD anchored to the bottom edge
     // must not sit under an OS status bar or a display notch. A crosshair in
@@ -2648,10 +2748,12 @@ fn draw_front(
     surface: &mut Surface,
     config: &mut Config,
     view: &wgpu::TextureView,
+    connecting: Option<&str>,
 ) -> (
     client::front::Action,
     Option<client::launcher::Catalogue>,
     Option<AnsweredSettings>,
+    bool,
 ) {
     // **Before the input is taken, not inside the frame.** `egui_winit` turns
     // a click into points using the zoom factor as it stands when the input is
@@ -2665,6 +2767,7 @@ fn draw_front(
     let mut dirty = false;
     let mut catalogue = None;
     let mut answered = None;
+    let mut cancel = false;
     let output = surface.egui.run_ui(raw, |root| {
         if let Stage::Front(front) = &mut surface.stage {
             let context = root.ctx().clone();
@@ -2674,6 +2777,18 @@ fn draw_front(
                 catalogue = Some(front.catalogue.clone());
             }
             answered = front.take_answered_settings();
+            if let Some(name) = connecting {
+                egui::Window::new("Connecting")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(&context, |ui| {
+                        ui.label(format!("Connecting to {name}…"));
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+            }
         }
     });
     // **Written when it changes, not when the screen closes.** There is no
@@ -2687,7 +2802,7 @@ fn draw_front(
         .egui_state
         .handle_platform_output(&surface.window, output.platform_output);
     paint_egui(surface, output.shapes, output.textures_delta, view);
-    (action, catalogue, answered)
+    (action, catalogue, answered, cancel)
 }
 
 /// Draws the HUD over the frame that has just been rendered.

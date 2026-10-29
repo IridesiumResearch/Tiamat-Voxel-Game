@@ -25,7 +25,10 @@
 //! Re-hashing costs a few microseconds against a disk read that costs
 //! milliseconds. There is no version of this worth optimising away.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tiamat_core::proto::ContentHash;
 
@@ -63,10 +66,55 @@ pub enum CacheError {
     },
 }
 
+/// What a verified file looked like on disk when it was verified.
+///
+/// Size and modification time are what a `stat` gives for free; a file that
+/// has been replaced or rewritten since shows a different pair, and the memo
+/// entry carrying the old one is no longer trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl Stamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
 /// A directory of content-addressed files.
+///
+/// **Verified once, remembered after.** Reading an item re-hashes it against
+/// its name, and that is the security gate for anything the disk holds: a
+/// file that does not match is discarded, never served. The gate is passed
+/// once per item per run; after that `contains` and `missing` answer from a
+/// memo of the hashes already verified rather than reading and hashing the
+/// file again, which is what turned a 128 MB mod pack into 256–384 MB of
+/// reads before a join could proceed. `get` still reads the file, because the
+/// caller wants its bytes — but only once per use, not once more per question
+/// asked about it. The memo is shared between clones, since the cache is
+/// cloned into the network task and the one that opened it.
+///
+/// **What the memo vouches for, honestly.** It remembers the file's size and
+/// modification time as verified, and `contains` trusts it only while a
+/// `stat` still shows both; a file replaced or rewritten since is read and
+/// hashed again. A rewrite that keeps the size and lands inside the clock's
+/// resolution would pass that check, so `contains` and `missing` decide only
+/// what to ask the server for, and the bytes anything decodes come through
+/// `get`, which hashes them every time.
 #[derive(Debug, Clone)]
 pub struct ContentCache {
     root: PathBuf,
+    /// Hashes whose file was read and matched its name since the cache was
+    /// opened, with the file's size and modification time as it was then.
+    /// Cleared for an item the moment a read finds it wrong.
+    verified: Arc<Mutex<HashMap<ContentHash, Stamp>>>,
+    /// Files read from disk, so a test can prove the memo is consulted.
+    reads: Arc<AtomicUsize>,
 }
 
 impl ContentCache {
@@ -82,6 +130,8 @@ impl ContentCache {
         })?;
         Ok(Self {
             root: root.to_path_buf(),
+            verified: Arc::new(Mutex::new(HashMap::new())),
+            reads: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -113,11 +163,17 @@ impl ContentCache {
         let metadata = std::fs::metadata(&path).ok()?;
         if metadata.len() > MAX_ITEM_BYTES {
             let _ = std::fs::remove_file(&path);
+            self.forget(hash);
             return None;
         }
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let bytes = std::fs::read(&path).ok()?;
 
         if tiamat_core::content::hash_bytes(&bytes) == *hash {
+            // The stamp from before the read: a file replaced between the
+            // read and now shows a different one, and the next `contains`
+            // reads again rather than trusting this verdict.
+            self.remember(hash, Stamp::of(&metadata));
             Some(bytes)
         } else {
             // Something wrote into the cache that was not this client storing a
@@ -128,14 +184,54 @@ impl ContentCache {
                 "a cached asset does not match its own hash and has been discarded"
             );
             let _ = std::fs::remove_file(&path);
+            self.forget(hash);
             None
         }
     }
 
     /// Whether an item is present and intact.
+    ///
+    /// An item verified earlier this run is answered from the memo and a
+    /// `stat` — the file must still be there, at the size and modification
+    /// time it was verified with — rather than read and hashed again. One
+    /// that is not, or whose file has changed since, is read once through
+    /// [`Self::get`], which remembers it or discards it. See the type's
+    /// documentation for what that does not cover.
     #[must_use]
     pub fn contains(&self, hash: &ContentHash) -> bool {
+        let remembered = self.verified().get(hash).copied();
+        if let Some(stamp) = remembered {
+            match std::fs::metadata(self.path_of(hash)) {
+                Ok(metadata) if Stamp::of(&metadata) == stamp => return true,
+                Ok(_) => {}
+                Err(_) => {
+                    self.forget(hash);
+                    return false;
+                }
+            }
+        }
         self.get(hash).is_some()
+    }
+
+    /// Files read from disk since the cache was opened.
+    #[cfg(test)]
+    pub(crate) fn disk_reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    fn verified(&self) -> MutexGuard<'_, HashMap<ContentHash, Stamp>> {
+        // The map holds nothing a panic could leave half-written.
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn remember(&self, hash: &ContentHash, stamp: Stamp) {
+        self.verified().insert(*hash, stamp);
+    }
+
+    fn forget(&self, hash: &ContentHash) {
+        self.verified().remove(hash);
     }
 
     /// Stores an item, refusing bytes that do not match the hash.
@@ -173,6 +269,12 @@ impl ContentCache {
                 source,
             }
         })?;
+        // Just hashed and just written: as verified as a read would find it,
+        // stamped as the file now is. If the stat fails the memo stays empty
+        // for it and the next question reads, which is the safe way round.
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            self.remember(hash, Stamp::of(&metadata));
+        }
         Ok(())
     }
 
@@ -293,6 +395,111 @@ mod tests {
 
         let missing = cache.missing(&[held_hash, wanted_hash, wanted_hash, held_hash]);
         assert_eq!(missing, vec![wanted_hash]);
+    }
+
+    #[test]
+    fn a_verified_item_is_not_read_and_hashed_again_for_every_question() {
+        let cache = cache("memo");
+        let bytes = b"a texture".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        cache.put(&hash, &bytes).expect("put");
+        assert_eq!(cache.disk_reads(), 0, "a put verifies what it writes");
+
+        assert!(cache.contains(&hash));
+        assert!(cache.missing(&[hash, hash]).is_empty());
+        assert_eq!(cache.disk_reads(), 0, "answered from the memo");
+
+        assert_eq!(
+            cache.get(&hash),
+            Some(bytes),
+            "the bytes are wanted: one read"
+        );
+        assert_eq!(cache.disk_reads(), 1);
+        assert!(cache.contains(&hash));
+        assert!(cache.missing(&[hash]).is_empty());
+        assert_eq!(
+            cache.disk_reads(),
+            1,
+            "and no more for the questions after it"
+        );
+    }
+
+    #[test]
+    fn a_cold_cache_passes_the_gate_once_and_remembers() {
+        // A fresh run over the same directory: the first question reads and
+        // hashes the file (the security gate), every later one does not.
+        let dir = scratch("cold");
+        let bytes = b"from a previous run".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        ContentCache::open(&dir)
+            .expect("cache")
+            .put(&hash, &bytes)
+            .expect("put");
+
+        let cache = ContentCache::open(&dir).expect("reopen");
+        assert!(cache.contains(&hash));
+        assert_eq!(cache.disk_reads(), 1, "the gate, once");
+        assert!(cache.contains(&hash));
+        assert!(cache.missing(&[hash]).is_empty());
+        assert_eq!(cache.disk_reads(), 1);
+        assert_eq!(cache.get(&hash), Some(bytes));
+        assert_eq!(cache.disk_reads(), 2, "a read for the bytes themselves");
+    }
+
+    #[test]
+    fn the_memo_does_not_outlive_a_tampered_or_deleted_file() {
+        let cache = cache("memo-tamper");
+        let bytes = b"intact".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        cache.put(&hash, &bytes).expect("put");
+        assert!(cache.contains(&hash));
+
+        // Tampered after it was verified: the next read finds it, discards it,
+        // and the memo forgets it — nothing is served on an old verdict.
+        std::fs::write(cache.path_of(&hash), b"not intact").expect("tamper");
+        assert_eq!(cache.get(&hash), None);
+        assert!(!cache.contains(&hash));
+        assert!(!cache.path_of(&hash).exists(), "discarded");
+
+        // Deleted after it was verified: `contains` still checks the file is
+        // there, so the join asks for it rather than assuming it.
+        cache.put(&hash, &bytes).expect("put again");
+        assert!(cache.contains(&hash));
+        std::fs::remove_file(cache.path_of(&hash)).expect("delete");
+        assert!(!cache.contains(&hash));
+        assert_eq!(cache.missing(&[hash]), vec![hash]);
+    }
+
+    #[test]
+    fn a_file_rewritten_in_place_is_read_again_rather_than_vouched_for() {
+        let cache = cache("memo-rewrite");
+        let bytes = b"the verified bytes".to_vec();
+        let hash = tiamat_core::content::hash_bytes(&bytes);
+        cache.put(&hash, &bytes).expect("put");
+        assert!(cache.contains(&hash));
+        assert_eq!(cache.disk_reads(), 0);
+
+        // Same size, a different time: the stat no longer matches, so the
+        // file is read and hashed, found wrong, and discarded.
+        let path = cache.path_of(&hash);
+        std::fs::write(&path, b"the tampered bytes").expect("rewrite");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(later)
+            .expect("touch");
+        assert!(!cache.contains(&hash), "not vouched for on an old stamp");
+        assert_eq!(cache.disk_reads(), 1, "read and hashed again");
+        assert!(!path.exists(), "and discarded");
+
+        // A different size needs no clock at all.
+        cache.put(&hash, &bytes).expect("put again");
+        assert!(cache.contains(&hash));
+        std::fs::write(&path, b"short").expect("rewrite");
+        assert!(!cache.contains(&hash));
+        assert_eq!(cache.disk_reads(), 2);
     }
 
     #[test]

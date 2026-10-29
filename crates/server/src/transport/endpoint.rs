@@ -469,6 +469,17 @@ pub struct Shared {
     /// hash — the one thing content addressing exists to make impossible.
     pub content: tiamat_core::content::ContentIndex,
 
+    /// The compressed-slice cache every connection shares.
+    ///
+    /// **Owned by the server, not by the process.** `Transfers::new()` takes the
+    /// process-wide cache, which is the same object only while some connection
+    /// happens to hold it; a server that closes every connection can otherwise
+    /// leave a cache behind for the next server in the same process (an
+    /// embedded world, a test). Holding the `Arc` here ties its lifetime to the
+    /// world the bytes were compressed for, and lets a test pass a counting
+    /// cache without touching a global.
+    pub slices: Arc<crate::content::SliceCache>,
+
     /// Where every player's body is, and what they have asked to do next.
     ///
     /// Written by the simulation thread and read by the connection tasks, the
@@ -1278,8 +1289,18 @@ pub struct Broadcast {
     /// tables sent at join, a player list. Anything about the world says which
     /// world.
     pub only: Option<String>,
-    /// What to send.
-    pub message: ServerMessage,
+    /// What to send, shared by every receiver.
+    ///
+    /// An `Arc` because `tokio::sync::broadcast` clones the value per
+    /// receiver; the message owns Vecs and Strings, so a deep clone per player
+    /// was the cost this avoids.
+    pub message: Arc<ServerMessage>,
+    /// The message already encoded, with no length prefix.
+    ///
+    /// Encoded once at the sender. Each connection writes these bytes; doing
+    /// `proto::encode` per connection was fifty serialisations of one entity
+    /// update or one block delta, every tick.
+    pub encoded: Arc<[u8]>,
 }
 
 /// A player asking to place material.
@@ -3264,9 +3285,18 @@ impl Shared {
     /// A block delta is handed over in the tick's runtime ids and leaves in
     /// world ids; see [`Shared::wire_edit`].
     pub fn broadcast(&self, message: ServerMessage) {
+        let message = self.to_wire(message);
+        let encoded = match tiamat_core::proto::encode(&message) {
+            Ok(bytes) => Arc::<[u8]>::from(bytes),
+            Err(err) => {
+                tracing::error!(%err, "could not encode a broadcast; it was dropped");
+                return;
+            }
+        };
         let _ = self.outbound.send(Broadcast {
             only: None,
-            message: self.to_wire(message),
+            message: Arc::new(message),
+            encoded,
         });
     }
 
@@ -3282,9 +3312,18 @@ impl Shared {
     /// where changes every tick and the sender would have to hold the body lock
     /// to find out.
     pub fn broadcast_in(&self, domain: &str, message: ServerMessage) {
+        let message = self.to_wire(message);
+        let encoded = match tiamat_core::proto::encode(&message) {
+            Ok(bytes) => Arc::<[u8]>::from(bytes),
+            Err(err) => {
+                tracing::error!(%err, "could not encode a domain broadcast; it was dropped");
+                return;
+            }
+        };
         let _ = self.outbound.send(Broadcast {
             only: Some(domain.to_owned()),
-            message: self.to_wire(message),
+            message: Arc::new(message),
+            encoded,
         });
     }
 
@@ -4047,7 +4086,7 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
     // which stalls does not come back to a pile of instantly-ready ticks.
     let mut beat = tokio::time::interval(tiamat_core::tick::TICK_DURATION);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut transfers = crate::content::Transfers::new();
+    let mut transfers = crate::content::Transfers::with_cache(shared.slices.clone());
     // Skins offered before the join, applied the moment the body exists.
     let mut offered: Vec<(Option<String>, Vec<u8>)> = Vec::new();
     // Chunk deliveries the simulation has answered, waiting to be written.
@@ -4288,7 +4327,8 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                             // the client drops what it cannot place) and the
                             // summary is dropped, which puts the chunk back on
                             // the next pass's list at whatever level it is due.
-                            if let ServerMessage::BlockDelta { edit, .. } = &outbound.message
+                            if let ServerMessage::BlockDelta { edit, .. } =
+                                outbound.message.as_ref()
                                 && let Some(streamer) = streamer.as_mut()
                             {
                                 let pos = chunk_of(edit);
@@ -4306,11 +4346,11 @@ async fn serve(connection: quinn::Connection, shared: &Shared) -> Result<(), fra
                                 // noise — so it waits and goes out right behind
                                 // the chunk. See `Streamer::held_edits`.
                                 if streamer.is_in_flight(pos) {
-                                    streamer.hold_edit(pos, outbound.message.clone());
+                                    streamer.hold_edit(pos, (*outbound.message).clone());
                                     continue;
                                 }
                             }
-                            frame::write(&mut send, &outbound.message).await?;
+                            frame::write_encoded(&mut send, &outbound.encoded).await?;
                         }
                         continue;
                     }
@@ -5201,6 +5241,7 @@ mod tests {
             name_policy: tiamat_core::session::NamePolicy::Off,
             registry_trust: None,
             uploads: std::sync::RwLock::new(tiamat_core::content::ContentIndex::new()),
+            slices: crate::content::SliceCache::shared(),
             theme: None,
             cloud_layer: None,
             hud_scripts: Vec::new(),
@@ -5318,12 +5359,12 @@ mod tests {
                 actor: None,
             },
         );
-        let delta = |heard: &mut tokio::sync::broadcast::Receiver<Broadcast>| match heard
+        let delta = |heard: &mut tokio::sync::broadcast::Receiver<Broadcast>| match &*heard
             .try_recv()
             .expect("a delta")
             .message
         {
-            ServerMessage::BlockDelta { edit, .. } => edit,
+            ServerMessage::BlockDelta { edit, .. } => edit.clone(),
             other => panic!("not a delta: {other:?}"),
         };
         assert_eq!(

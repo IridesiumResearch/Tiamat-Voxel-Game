@@ -16,6 +16,11 @@
 //! few dozen pointer clones, and the upload, which is a tenth of a
 //! millisecond.
 //!
+//! The quads are expanded to vertices on the worker too: `MeshJob::finish`
+//! fills `Mesh::expanded` wherever it runs, so what crosses back to the frame
+//! thread is ready to upload rather than a list to expand there (perf audit
+//! C5).
+//!
 //! # What stays on the frame thread
 //!
 //! **An edit's chunks.** A chunk drawn without the neighbour whose face its
@@ -124,7 +129,7 @@ impl MeshPool {
                         let Ok(job) = job else {
                             return;
                         };
-                        if done.send(work(job)).is_err() {
+                        if done.send(work_isolated(job)).is_err() {
                             return;
                         }
                     }
@@ -169,7 +174,7 @@ impl MeshPool {
     pub fn submit(&mut self, job: Job) {
         self.backlog += 1;
         if self.threads == 0 {
-            let done = work(job);
+            let done = work_isolated(job);
             self.backlog -= 1;
             self.inline.push(done);
             return;
@@ -200,8 +205,46 @@ impl Drop for MeshPool {
     }
 }
 
+/// Meshes one job, and always answers it.
+///
+/// A panic in the mesher (a chunk that trips an index bound, say) must not
+/// end the worker or go unanswered: the frame thread counts a slot in the
+/// backlog per submission and frees it only on a `Done`, so a missing answer
+/// leaks the slot until submissions stop altogether. The panic is caught,
+/// logged with the chunk position, and answered with an empty mesh at the
+/// job's generation; the chunk draws nothing until its next remesh.
+fn work_isolated(job: Job) -> Done {
+    let pos = job.pos;
+    let generation = job.generation;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(job))) {
+        Ok(done) => done,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            tracing::error!(
+                "meshing chunk {pos:?} panicked ({message}); it draws nothing until remeshed"
+            );
+            Done {
+                pos,
+                generation,
+                mesh: Mesh::default(),
+            }
+        }
+    }
+}
+
+/// A chunk position no store holds, which a test submits to make `work`
+/// panic without any global state.
+#[cfg(test)]
+const PANIC_POS: ChunkPos = ChunkPos::new(i32::MIN, 0, 0);
+
 /// Meshes one job.
 fn work(job: Job) -> Done {
+    #[cfg(test)]
+    assert!(job.pos != PANIC_POS, "injected mesh panic");
     let Job {
         pos,
         generation,
@@ -294,6 +337,10 @@ mod tests {
         assert_eq!(done.pos, ChunkPos::new(0, 0, 0));
         assert_eq!(done.generation, store.generation(done.pos));
         assert!(!done.mesh.quads.is_empty(), "a floor meshed to nothing");
+        assert!(
+            done.mesh.is_expanded(),
+            "the worker expands the vertices; the frame thread only uploads"
+        );
         assert_eq!(pool.backlog(), 0);
     }
 
@@ -327,5 +374,65 @@ mod tests {
         let on_worker = work(job(&store)).mesh;
         assert_eq!(on_frame.quads.len(), on_worker.quads.len());
         assert_eq!(on_frame.quads, on_worker.quads);
+    }
+
+    fn wait_for(pool: &mut MeshPool, count: usize) -> Vec<Done> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < count {
+            got.extend(pool.drain());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never answered"
+            );
+            std::thread::yield_now();
+        }
+        got
+    }
+
+    #[test]
+    fn a_panicking_job_still_answers_with_an_empty_mesh_and_frees_its_slot() {
+        let store = store_with_a_floor();
+        let mut bad = job(&store);
+        bad.pos = PANIC_POS;
+        bad.generation = 7;
+        let mut pool = MeshPool::new(1);
+        pool.submit(bad);
+        assert_eq!(pool.backlog(), 1);
+        let done = wait_for(&mut pool, 1);
+        assert_eq!(done[0].pos, PANIC_POS);
+        assert_eq!(done[0].generation, 7);
+        assert!(done[0].mesh.quads.is_empty());
+        assert_eq!(pool.backlog(), 0);
+    }
+
+    #[test]
+    fn a_worker_meshes_normally_after_a_panicking_job() {
+        let store = store_with_a_floor();
+        let mut bad = job(&store);
+        bad.pos = PANIC_POS;
+        let mut pool = MeshPool::new(1);
+        pool.submit(bad);
+        pool.submit(job(&store));
+        let done = wait_for(&mut pool, 2);
+        let good = done
+            .iter()
+            .find(|d| d.pos == ChunkPos::new(0, 0, 0))
+            .expect("the good job answered");
+        assert!(!good.mesh.quads.is_empty());
+        assert_eq!(pool.backlog(), 0);
+    }
+
+    #[test]
+    fn a_threadless_pool_survives_a_panicking_job_too() {
+        let store = store_with_a_floor();
+        let mut bad = job(&store);
+        bad.pos = PANIC_POS;
+        let mut pool = MeshPool::new(0);
+        pool.submit(bad);
+        let finished = pool.drain();
+        assert_eq!(finished.len(), 1);
+        assert!(finished[0].mesh.quads.is_empty());
+        assert_eq!(pool.backlog(), 0);
     }
 }

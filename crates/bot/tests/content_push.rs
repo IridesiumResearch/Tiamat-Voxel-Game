@@ -299,9 +299,12 @@ fn the_manifest_carries_a_content_fingerprint_per_mod() {
 }
 
 #[test]
-fn requesting_the_same_asset_twice_does_not_send_it_twice() {
-    // A client looping its request list would otherwise be an amplifier: cheap
-    // to send, expensive to serve.
+fn a_repeat_request_is_bounded_to_three_sends() {
+    // **The retry is for a client that dropped an asset, not an amplifier.**
+    // A client whose accept failed asks again; the server serves it up to
+    // `MAX_SENDS_PER_ITEM` times per session, then ignores further asks. A
+    // client looping its request list therefore gets three copies, not
+    // unlimited ones.
     let mods = scratch("repeat-mods");
     let asset = b"only once".to_vec();
     write_mod(&mods, "art", &[("a.png", &asset)]);
@@ -311,24 +314,24 @@ fn requesting_the_same_asset_twice_does_not_send_it_twice() {
         let mut bot = authenticate(&server, "Alice").await;
         let hash = hash_bytes(&asset);
 
-        for _ in 0..5 {
+        for _ in 0..3 {
             bot.request_content(vec![hash]).await.expect("request");
+            let copy = bot
+                .collect_content(1, Duration::from_secs(20))
+                .await
+                .expect("collect");
+            assert_eq!(copy.len(), 1, "each of the first three asks is served");
         }
 
-        let first = bot
-            .collect_content(1, Duration::from_secs(20))
-            .await
-            .expect("collect");
-        assert_eq!(first.len(), 1);
-
-        // Nothing more should arrive.
+        // The fourth ask is past the cap: nothing more arrives.
+        bot.request_content(vec![hash]).await.expect("request");
         let extra = bot
             .collect_content(1, Duration::from_millis(800))
             .await
             .expect("collect");
         assert!(
             extra.is_empty(),
-            "a repeated request must not re-send the asset"
+            "a request past the three-send cap re-sent the asset"
         );
 
         bot.disconnect().await;

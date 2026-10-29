@@ -33,7 +33,7 @@
 //! it, and it is what charter rule 6 means by "only modified **or generated**
 //! chunks persist".
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -638,6 +638,15 @@ struct Space {
 /// wrong one with nothing to notice it. Criterion A3 is that a player sees
 /// nothing of a domain they are not in, and the cheapest way to hold that is to
 /// make the compiler ask the question at every call.
+/// One summary chain, each level as the client receives it.
+type SummaryChain = Vec<(u8, Vec<u8>)>;
+
+/// A deferred chain and where it belongs.
+type PendingSummary = (String, ChunkPos, SummaryChain);
+
+/// A chain borrowed for the batch writer.
+type SummaryBatch<'a> = (&'a str, ChunkPos, &'a [(u8, Vec<u8>)]);
+
 pub struct World {
     db: WorldDb,
     /// The seed every generator is handed. Fixed for the world's lifetime.
@@ -681,6 +690,15 @@ pub struct World {
     /// The thread folding the write-ahead log back, off the tick; `None` for
     /// an in-memory world. See `tiamat_core::persist::checkpoint`.
     checkpointer: Option<tiamat_core::persist::checkpoint::Checkpointer>,
+    /// Summary chains a worker answered that have not been written yet.
+    ///
+    /// The horizon can finish several chains in one tick; writing each through
+    /// its own transaction pays the WAL commit several times for what is one
+    /// batch of rows. They are flushed together at the end of
+    /// [`serve_chunk_requests`](crate::handle::serve_chunk_requests), after a
+    /// final dirtiness check — an edit that landed between the worker and the
+    /// flush makes the chain stale.
+    pending_summaries: Vec<PendingSummary>,
 }
 
 impl World {
@@ -714,6 +732,7 @@ impl World {
             fluids: tiamat_core::fluid::Fluids::new(),
             sql: std::cell::RefCell::new(crate::sqlclock::Log::default()),
             checkpointer,
+            pending_summaries: Vec::new(),
         })
     }
 
@@ -1018,6 +1037,25 @@ impl World {
         out
     }
 
+    /// Every resident chunk's position, in no particular order.
+    ///
+    /// For a caller that filters the whole set through its own ordered
+    /// structure before anything observable happens — the unload sweep sorts
+    /// the candidates it keeps. The sorted variant above is for the random
+    /// tick, which samples a prefix and therefore needs the order.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the order is deliberately unordered; the unload sweep sorts its candidates, and \
+                  this is the one caller"
+    )]
+    #[must_use]
+    pub fn resident_positions_unsorted(&self, domain: &str) -> Vec<ChunkPos> {
+        self.domains
+            .get(domain)
+            .map(|space| space.cache.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// What one block is made of, without loading anything.
     ///
     /// `None` where the chunk is not resident, or the block is air or mixed —
@@ -1053,6 +1091,34 @@ impl World {
                 .map(|space| space.cache.clone())
                 .unwrap_or_default(),
         )
+    }
+
+    /// A snapshot of only the positions a batch can read.
+    ///
+    /// **The full map was the tick's cost, not the light thread's.** A relight
+    /// reads its own chunk, its six face neighbours for border seeds, and the
+    /// chunk below for the roof case; an edit can reach at most one chunk in
+    /// each direction because the light radius is smaller than a chunk. The
+    /// light worker asks for that neighbourhood and this clones only what is
+    /// present, so a tick with one edit no longer copies 5,000 `Arc`s.
+    ///
+    /// A position the world does not hold is skipped, exactly as it is absent
+    /// from the full snapshot: the light flood treats it as unloaded terrain.
+    #[must_use]
+    pub fn snapshot_of(
+        &self,
+        domain: &str,
+        positions: &BTreeSet<ChunkPos>,
+    ) -> Arc<HashMap<ChunkPos, Arc<Chunk>>> {
+        let mut map = HashMap::with_capacity(positions.len());
+        if let Some(space) = self.domains.get(domain) {
+            for pos in positions {
+                if let Some(chunk) = space.cache.get(pos) {
+                    map.insert(*pos, Arc::clone(chunk));
+                }
+            }
+        }
+        Arc::new(map)
     }
 
     /// Puts a chunk back on the arrival list.
@@ -1122,7 +1188,7 @@ impl World {
                 // streamer has the workers do this and hands the result to
                 // `adopt_generated`, which is the same thing from here.
                 let (generated, fluid) = source.generate_with_fluid(domain, pos, seed);
-                Self::adopt_into(db, sql, space, domain, pos, generated, &fluid);
+                Self::adopt_into(db, sql, space, domain, pos, generated, &fluid, true);
             }
         }
         Ok(Arc::make_mut(
@@ -1153,7 +1219,7 @@ impl World {
         pos: ChunkPos,
         chunk: Chunk,
         fluid: &tiamat_core::fluid::FluidLayer,
-    ) -> Result<(), WorldError> {
+    ) -> Result<Option<tiamat_core::fluid::FluidLayer>, WorldError> {
         if self.sparse.contains(domain) {
             return Err(WorldError::NoVoxels {
                 domain: domain.to_owned(),
@@ -1164,13 +1230,24 @@ impl World {
         } = self;
         let space = Self::space_of(domains, domain);
         if space.cache.contains_key(&pos) {
-            return Ok(());
+            // The live chunk wins over the worker's older copy; its fluid is
+            // already in the store and must not be replaced by this one.
+            return Ok(None);
         }
-        Self::adopt_into(db, sql, space, domain, pos, chunk, fluid);
-        Ok(())
+        Self::adopt_into(db, sql, space, domain, pos, chunk, fluid, false);
+        // **The fluid goes back to the caller rather than to the database.**
+        // `Fluidics` owns the live layer and the dirty queue; the handle puts
+        // it there before the chunk is served, so the client's layer travels
+        // with the chunk and no row is written and read back on the tick.
+        Ok((!fluid.is_empty()).then(|| fluid.clone()))
     }
 
     /// The one place a freshly generated chunk enters the world.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the world's own pieces threaded through the one adoption path, so the two \
+                  generators cannot drift"
+    )]
     fn adopt_into(
         db: &WorldDb,
         sql: &std::cell::RefCell<crate::sqlclock::Log>,
@@ -1179,6 +1256,7 @@ impl World {
         pos: ChunkPos,
         chunk: Chunk,
         fluid: &tiamat_core::fluid::FluidLayer,
+        store_fluid: bool,
     ) {
         // Mark it dirty so it is written — see the module docs on why a
         // generated chunk is stored rather than regenerated later.
@@ -1194,7 +1272,8 @@ impl World {
         //
         // Empty layers are skipped: almost every chunk has one, and a row
         // saying "no fluid" is a row to read back for nothing.
-        if !fluid.is_empty()
+        if store_fluid
+            && !fluid.is_empty()
             && let Err(err) = crate::sqlclock::Log::time(sql, "store generated fluid", || {
                 db.save_chunk_fluid_in(domain, pos, fluid)
             })
@@ -1393,6 +1472,74 @@ impl World {
         Ok(wanted)
     }
 
+    /// Keeps a worker's summary chain but writes it with the rest of the tick.
+    ///
+    /// Same rule as [`Self::adopt_summaries`] — a dirty chunk is not stored —
+    /// but no transaction per chain. The caller that answers the worker's
+    /// request already has the bytes it needs, so the disk write can wait for
+    /// [`Self::flush_summaries`] at the end of the service pass.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::NoSuchLevel`] if the chain has no entry at `level`.
+    pub fn adopt_summaries_deferred(
+        &mut self,
+        domain: &str,
+        level: u8,
+        pos: ChunkPos,
+        chain: &[(u8, Vec<u8>)],
+    ) -> Result<Vec<u8>, WorldError> {
+        self.computed += 1;
+        let wanted = chain
+            .iter()
+            .find(|(at, _)| *at == level)
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or(WorldError::NoSuchLevel { level })?;
+        if !self.is_dirty(domain, pos) {
+            self.pending_summaries
+                .push((domain.to_owned(), pos, chain.to_vec()));
+        }
+        Ok(wanted)
+    }
+
+    /// Writes the deferred summary chains in one transaction.
+    ///
+    /// Re-checks dirtiness at the flush: a chunk edited after its worker
+    /// answered has a chain that no longer describes it, and the row would be
+    /// deleted by that chunk's next save anyway. Returns how many chains were
+    /// written. A database error puts them back for the next flush rather than
+    /// dropping work a worker already did.
+    ///
+    /// # Errors
+    ///
+    /// A database error storing the batch.
+    pub fn flush_summaries(&mut self) -> Result<usize, WorldError> {
+        if self.pending_summaries.is_empty() {
+            return Ok(0);
+        }
+        let pending = std::mem::take(&mut self.pending_summaries);
+        let mut ready = Vec::with_capacity(pending.len());
+        for (domain, pos, chain) in pending {
+            if !self.is_dirty(&domain, pos) {
+                ready.push((domain, pos, chain));
+            }
+        }
+        if ready.is_empty() {
+            return Ok(0);
+        }
+        let refs: Vec<SummaryBatch<'_>> = ready
+            .iter()
+            .map(|(domain, pos, chain)| (domain.as_str(), *pos, chain.as_slice()))
+            .collect();
+        match self.timed("save summaries", |db| db.save_summaries_batch(refs)) {
+            Ok(written) => Ok(written),
+            Err(err) => {
+                self.pending_summaries = ready;
+                Err(err)
+            }
+        }
+    }
+
     /// Whether a chunk has edits the database has not seen.
     fn is_dirty(&self, domain: &str, pos: ChunkPos) -> bool {
         self.domains
@@ -1554,6 +1701,14 @@ impl World {
     ) -> Result<MaterialId, WorldError> {
         // Sub-node zero, which for a uniform block is the whole block. A caller
         // that needs the full contents asks for the chunk.
+        // A resident chunk is read without `chunk`'s `&mut`: the light thread's
+        // snapshot shares the `Arc`, and `chunk` would `make_mut` a whole copy
+        // just to answer one cell.
+        if let Some(chunk) = self.resident(domain, pos.chunk()) {
+            return Ok(chunk
+                .get_block(pos)
+                .map_or(MaterialId::AIR, |view| view.subnode(0)));
+        }
         Ok(self
             .chunk(domain, pos.chunk(), source)?
             .get_block(pos)
@@ -1577,6 +1732,13 @@ impl World {
         pos: BlockPos,
         source: &mut dyn ChunkSource,
     ) -> Result<Cells, WorldError> {
+        // The same resident short-circuit as `block_material`: a read must not
+        // copy-on-write a chunk just because a light snapshot shares it.
+        if let Some(chunk) = self.resident(domain, pos.chunk()) {
+            return Ok(chunk.get_block(pos).map_or(EMPTY_CELLS, |view| {
+                std::array::from_fn(|index| view.subnode(index))
+            }));
+        }
         Ok(self
             .chunk(domain, pos.chunk(), source)?
             .get_block(pos)
@@ -1596,6 +1758,9 @@ impl World {
         pos: SubNodePos,
         source: &mut dyn ChunkSource,
     ) -> Result<MaterialId, WorldError> {
+        if let Some(chunk) = self.resident(domain, pos.chunk()) {
+            return Ok(chunk.get_subnode(pos).unwrap_or(MaterialId::AIR));
+        }
         Ok(self
             .chunk(domain, pos.chunk(), source)?
             .get_subnode(pos)
@@ -1958,6 +2123,10 @@ impl World {
     /// keeping it would mean a destroyed ship still had terrain.
     pub fn forget_domain(&mut self, domain: &str) -> Result<(), WorldError> {
         self.domains.remove(domain);
+        // A worker's chain for the domain must not outlive the rows it
+        // describes; the domain is being removed from the file.
+        self.pending_summaries
+            .retain(|(pending, _, _)| pending != domain);
         self.timed("remove domain", |db| db.remove_domain(domain))
     }
 
@@ -1967,6 +2136,9 @@ impl World {
     ///
     /// [`WorldError`] if the final write fails.
     pub fn close(mut self) -> Result<(), WorldError> {
+        // Before the save: a chunk that is dirty now must not have its pending
+        // summary written after the save has made it clean.
+        self.flush_summaries()?;
         self.save_dirty()?;
         if let Some(checkpointer) = self.checkpointer.take() {
             checkpointer.stop();
@@ -2355,6 +2527,37 @@ mod tests {
                 Err(WorldError::NoSuchLevel { .. })
             ));
         }
+    }
+
+    #[test]
+    fn a_generated_chunks_fluid_is_handed_to_the_caller_and_not_written() {
+        use tiamat_core::fluid::{Fluid, FluidId, FluidLayer, MAX_VOLUME};
+
+        let (mut world, _) = world("generated-fluid-handoff");
+        let pos = ChunkPos::new(2, 0, 2);
+        let mut layer = FluidLayer::empty();
+        layer.set(
+            tiamat_core::coords::LocalBlock::new(3, 4, 5),
+            Fluid::new(FluidId(1), MAX_VOLUME),
+        );
+
+        let returned = world
+            .adopt_generated(
+                tiamat_core::domain::OVERWORLD,
+                pos,
+                Chunk::new(pos, MaterialId::AIR),
+                &layer,
+            )
+            .expect("adopt");
+        assert_eq!(returned, Some(layer), "the live layer was not handed back");
+        assert!(
+            world
+                .db()
+                .load_chunk_fluid_in(tiamat_core::domain::OVERWORLD, pos)
+                .expect("read")
+                .is_none(),
+            "the generated layer was written and read back instead of handed over"
+        );
     }
 
     #[test]

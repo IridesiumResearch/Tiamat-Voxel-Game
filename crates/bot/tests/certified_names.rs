@@ -105,20 +105,71 @@ async fn connect(server: &ServerHandle, identity: Identity) -> Bot {
 }
 
 /// Waits for a line of chat from the server itself (from nobody).
-async fn server_says(bot: &mut Bot, needle: &str) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+///
+/// **Thirty seconds, like the bot's own reads, not ten.** The deadline is here
+/// to end a hang, not to time anything: on a loaded macOS runner the join hook
+/// runs a tick or two after `JoinWorld` and a short deadline made this test
+/// flaky there. `stage` names which join went quiet when it does.
+async fn server_says(bot: &mut Bot, needle: &str, stage: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!left.is_zero(), "the server never said `{needle}`");
-        let message = tokio::time::timeout(left, bot.recv())
-            .await
-            .expect("the server went quiet")
-            .expect("a message, not an error");
+        assert!(
+            !left.is_zero(),
+            "the server never said `{needle}` ({stage})"
+        );
+        let message = match tokio::time::timeout(left, bot.recv()).await {
+            Ok(Ok(message)) => message,
+            Ok(Err(err)) => panic!("the bot failed waiting for `{needle}` ({stage}): {err}"),
+            Err(_) => panic!("the server went quiet waiting for `{needle}` ({stage})"),
+        };
         if let ServerMessage::Chat { from: None, text } = message
             && text.contains(needle)
         {
             return text;
         }
+    }
+}
+
+/// Waits until the server has let go of a departed session.
+///
+/// A reconnect in the same breath as a disconnect is the quick-reconnect race
+/// the server's slot generations address; it is not what the mod API test is
+/// about, and racing it made the test flaky on a slow runner. Waiting for the
+/// session to be gone tests the thing it names.
+async fn wait_until_offline(server: &ServerHandle, uuid: tiamat_core::identity::PlayerUuid) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while server
+        .shared()
+        .online_players()
+        .iter()
+        .any(|(who, _)| *who == uuid)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server kept a departed session in its roster for ten seconds"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits until the simulation has had `ticks` ticks to notice a departure.
+///
+/// The roster entry goes the moment the connection task ends; the simulation
+/// that fires `on_player_join` learns the player left from the next tick's
+/// presence diff. A reconnect between the two is a player who never left as
+/// far as the hooks are concerned — which is the race this test does not mean
+/// to measure. Two ticks is one to see the absence and one to be safely past
+/// it.
+async fn wait_ticks(server: &ServerHandle, ticks: u64) {
+    let start = server.control().tick();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while server.control().tick() < start.saturating_add(ticks) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server's tick did not advance for ten seconds"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -146,7 +197,12 @@ fn a_certified_name_wins_and_the_displaced_holder_is_told_why() {
 
         // The displaced player keeps playing and is told, in the server's own
         // voice, why the name moved.
-        let told = server_says(&mut alice, "registered to another identity").await;
+        let told = server_says(
+            &mut alice,
+            "registered to another identity",
+            "the displaced holder",
+        )
+        .await;
         assert!(
             told.contains("`Alice 2`"),
             "the notice should name the variant they now wear: {told}"
@@ -175,7 +231,12 @@ fn a_certified_name_wins_and_the_displaced_holder_is_told_why() {
         // later claimant gets the next free variant and is told why.
         let mut carol = connect(&server, Identity::generate().expect("identity")).await;
         carol.join("Alice").await.expect("join");
-        let told = server_says(&mut carol, "already somebody else's name").await;
+        let told = server_says(
+            &mut carol,
+            "already somebody else's name",
+            "the uncertified claimant",
+        )
+        .await;
         assert!(
             told.contains("`Alice 3`"),
             "an uncertified claimant must be moved off the certified name: {told}"
@@ -290,7 +351,7 @@ fn the_join_hook_and_the_game_api_agree_and_follow_a_rejoin() {
         // Uncertified: both say false.
         let mut first = connect(&server, Identity::generate().expect("identity")).await;
         first.join("Plain").await.expect("join");
-        let told = server_says(&mut first, "cert=false").await;
+        let told = server_says(&mut first, "cert=false", "the first uncertified join").await;
         assert!(told.contains("lookup=false"), "got {told}");
         first.disconnect().await;
 
@@ -304,15 +365,25 @@ fn the_join_hook_and_the_game_api_agree_and_follow_a_rejoin() {
             .join_with_certificate("Whatever", &certificate)
             .await
             .expect("join");
-        let told = server_says(&mut certified, "cert=true").await;
+        let told = server_says(&mut certified, "cert=true", "the certified join").await;
         assert!(told.contains("lookup=true"), "got {told}");
         certified.disconnect().await;
+        // The departing session's slot is released asynchronously; a rejoin in
+        // the same breath is the quick-reconnect race, not the mod API. Give
+        // the simulation two ticks to see them gone as well as the roster.
+        wait_until_offline(&server, uuid).await;
+        wait_ticks(&server, 2).await;
 
         // Same identity, no certificate: the answer is read live, so the mark
         // does not linger from the last join.
         let mut uncertified = connect(&server, Identity::from_seed(&seed)).await;
         uncertified.join("Plain again").await.expect("rejoin");
-        let told = server_says(&mut uncertified, "cert=false").await;
+        let told = server_says(
+            &mut uncertified,
+            "cert=false",
+            "the rejoin after a certified session",
+        )
+        .await;
         assert!(told.contains("lookup=false"), "got {told}");
         uncertified.disconnect().await;
 
